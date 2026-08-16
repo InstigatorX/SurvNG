@@ -2558,6 +2558,16 @@ function IncidentObjectBadges({ labels }) {
   ));
 }
 
+function IncidentSourceDot({ trigger, className = "", onClick = null, ariaLabel = "", title = "" }) {
+  const source = String(trigger || "Camera").toUpperCase() === "EMA" ? "EMA" : "Camera";
+  const classes = `incident-source-dot source-${source.toLowerCase()} ${className}`.trim();
+  const label = ariaLabel || `${source} trigger`;
+  if (onClick) {
+    return <button type="button" className={classes} onClick={onClick} aria-label={label} title={title || label}><span className="sr-only">{source}</span></button>;
+  }
+  return <span className={classes} role="img" aria-label={label} title={title || label} />;
+}
+
 function hasDetectedObjects(event) {
   if (typeof event.has_objects === "boolean") return event.has_objects;
   return eventObjects(event).some((object) => object.label && object.incident_eligible !== false) || incidentLabels(event).length > 0;
@@ -3070,32 +3080,30 @@ function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean
   );
 }
 
-function IncidentRailItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect }) {
+function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect, onOpenOverlay }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
+  const eventId = liveActivityEventId(incident);
   const time = incident.start_at || incident.created_at;
-  const semanticScore = Number(incident.semantic_search?.rank_score ?? incident.semantic_search?.score);
-  const accessibleLabels = labels.length ? labels.join(", ") : "motion only";
+  const activityLabel = labels.length ? labels.join(", ") : "Motion only";
   return (
-    <button
-      type="button"
-      className={`incident-rail-item${selected ? " selected" : ""}`}
-      onClick={() => onSelect(incident.id)}
-      aria-current={selected ? "true" : undefined}
-      aria-label={`${cameraName}, ${formatDateTime(time, timeZone)}, ${accessibleLabels}, ${trigger} trigger`}
-    >
-      <span className="incident-rail-thumb">
-        <SnapshotImage event={incident} alt="" className="incident-rail-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} />
-        <span className={`incident-trigger-source trigger-${trigger.toLowerCase()}`}>{trigger}</span>
-      </span>
-      <span className="incident-rail-copy">
-        <strong>{cameraName}</strong>
-        <time>{formatDateTime(time, timeZone)}</time>
-        <span className="pill-row compact"><IncidentObjectBadges labels={labels} />{!labels.length ? <span className="pill quiet">Motion only</span> : null}</span>
-        {Number.isFinite(semanticScore) ? <small>{Math.round(semanticScore * 100)}% visual match</small> : null}
-      </span>
-      {selected ? <Check size={16} className="incident-rail-selected-mark" aria-hidden="true" /> : null}
-    </button>
+    <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
+      <button type="button" className="live-activity-select" onClick={() => onSelect(incident.id)} aria-label={`Select ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
+        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
+        <span className="live-activity-copy">
+          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><span className="sr-only">{activityLabel}</span></span>
+          <b>{cameraName}</b>
+          <time>{formatDateTime(time, timeZone)}</time>
+        </span>
+      </button>
+      <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} />
+      {selected ? (
+        <div className="live-activity-actions">
+          <a href={appUrl(liveActivityIncidentHref(incident))}>Open incident <ChevronRight size={14} /></a>
+        </div>
+      ) : null}
+      {!eventId ? <span className="sr-only">No exact event link is available.</span> : null}
+    </article>
   );
 }
 
@@ -3367,10 +3375,10 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
                   aria-label={`Focus event at ${formatTimeOnly(event.created_at || incident.created_at, timeZone)}`}
                 >
                   <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail allowObjectFocus={false} showAnnotations showTracking={false}>
+                    <IncidentSourceDot trigger={eventTrigger} className="incident-mosaic-source" />
                     <div className="incident-mosaic-hud">
                       <time>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</time>
                       <div className="pill-row compact"><IncidentObjectBadges labels={eventLabels} /></div>
-                      <span className={`incident-trigger-source trigger-${eventTrigger.toLowerCase()}`}>{eventTrigger}</span>
                     </div>
                   </SnapshotImage>
                 </button>
@@ -3433,13 +3441,13 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
               onEnded={() => setInlineVideoActive(false)}
             />
             {desktopWorkspace
-              ? (!expanded ? <span className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} aria-label={`${triggerTitle}. ${countText}`} title={`${triggerTitle} · ${countText}`}>{triggerLabel}</span> : null)
-              : <button type="button" className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`}>{triggerLabel}</button>}
+              ? (!expanded ? <IncidentSourceDot trigger={triggerLabel} className="event-count" ariaLabel={`${triggerTitle}. ${countText}`} title={`${triggerTitle} · ${countText}`} /> : null)
+              : <IncidentSourceDot trigger={triggerLabel} className="event-count" onClick={openOverlay} ariaLabel={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`} />}
           </SnapshotImage>
         )}
         {!expanded ? <button type="button" className="incident-card-open" onClick={toggle} aria-label={`Open ${incident.camera_id} incident at ${timeText}`} /> : null}
         {expanded && activeWorkspaceView === "focus" && !inlineVideoActive && snapshotZoom.scale <= 1 ? (
-          <button type="button" className="incident-preview-play" onClick={openPreview} aria-label="Play selected event video"><Play size={25} aria-hidden="true" /></button>
+          <button type="button" className="incident-preview-media-action" onClick={openPreview} aria-label="Play selected event video" />
         ) : null}
         {canShowMosaic || canShowEvidence ? (
           <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout" onClick={(event) => event.stopPropagation()}>
@@ -5104,7 +5112,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentRailItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} onSelect={toggleIncident} />
+                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} onSelect={toggleIncident} onOpenOverlay={openIncidentOverlay} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No other incidents."}</div> : null}
               </div>
@@ -5238,33 +5246,6 @@ function LiveCommandBar({ cameraCount, totalCameraCount, density, densityPage, d
         <button type="button" className="live-fullscreen" onClick={onFullscreen} aria-label="View Live fullscreen" title="Fullscreen"><Maximize2 size={16} /></button>
       </div>
     </header>
-  );
-}
-
-function LiveActivityItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect, onOpenOverlay }) {
-  const labels = incidentLabels(incident);
-  const trigger = incidentTriggerLabel(incident);
-  const eventId = liveActivityEventId(incident);
-  const time = incident.start_at || incident.created_at;
-  const activityLabel = labels.length ? labels.join(", ") : "Motion only";
-  return (
-    <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
-      <button type="button" className="live-activity-select" onClick={() => onSelect(incident.id)} aria-label={`Select ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
-        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
-        <span className="live-activity-copy">
-          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><span className="sr-only">{activityLabel}</span></span>
-          <b>{cameraName}</b>
-          <time>{formatDateTime(time, timeZone)}</time>
-        </span>
-      </button>
-      <button type="button" className={`live-activity-trigger trigger-${trigger.toLowerCase()}`} onClick={() => onOpenOverlay(incident)} aria-label={`Preview exact ${trigger} event`} title={`${trigger} trigger`}><span className="sr-only">{trigger}</span></button>
-      {selected ? (
-        <div className="live-activity-actions">
-          <a href={appUrl(liveActivityIncidentHref(incident))}>Open incident <ChevronRight size={14} /></a>
-        </div>
-      ) : null}
-      {!eventId ? <span className="sr-only">No exact event link is available.</span> : null}
-    </article>
   );
 }
 
@@ -6013,7 +5994,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
           {!visibleIncidents.length && incidentLoadError ? <div className="empty-state live-activity-error"><span>{incidentLoadError}</span><button type="button" onClick={refreshIncidents}>Retry</button></div> : null}
           {visibleIncidents.length
             ? pagedIncidents.map((incident) => (
-              <LiveActivityItem
+              <IncidentListItem
                 key={incident.id}
                 incident={incident.id === focusedIncident?.id ? focusedIncident : incident}
                 cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id}
