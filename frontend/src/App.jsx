@@ -35,6 +35,8 @@ import {
   Monitor,
   Moon,
   Pause,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   Plus,
   Power,
@@ -1681,6 +1683,8 @@ function Shell({ page, theme, recordingContext, children }) {
   const workspaceHeadingRef = useRef(null);
   const mobileMoreButtonRef = useRef(null);
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const [railCollapsedValue, setRailCollapsedValue] = useStoredState("survng.workspaceRailCollapsed.v1", "false");
+  const railCollapsed = railCollapsedValue === "true";
   const workspaceLink = (id) => {
     const definition = workspaceDefinition(id);
     return [
@@ -1721,7 +1725,7 @@ function Shell({ page, theme, recordingContext, children }) {
     };
   }, []);
   return (
-    <div ref={shellRef} className={`app-shell page-${page}`}>
+    <div ref={shellRef} className={`app-shell page-${page}${railCollapsed ? " workspace-rail-collapsed" : ""}`}>
       <aside className="workspace-sidebar" aria-label="SurvNG navigation">
         <a className="workspace-brand" href={appUrl("/")} aria-label="SurvNG Live">
           <span className="brand-mark"><img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" /></span>
@@ -1730,6 +1734,9 @@ function Shell({ page, theme, recordingContext, children }) {
         <nav className="workspace-navigation" aria-label="Primary">
           {workspaceLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} title={label} href={href} key={id}><Icon size={19} /><span>{label}</span></a>)}
         </nav>
+        <button type="button" className="workspace-rail-toggle" onClick={() => setRailCollapsedValue(railCollapsed ? "false" : "true")} aria-label={railCollapsed ? "Expand navigation" : "Collapse navigation"} title={railCollapsed ? "Expand navigation" : "Collapse navigation"}>
+          {railCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}<span>{railCollapsed ? "Expand" : "Collapse"}</span>
+        </button>
       </aside>
       <header ref={topbarRef} className="topbar">
         <a className="brand-block mobile-brand-block" href={appUrl("/")} aria-label="SurvNG Live">
@@ -1740,6 +1747,7 @@ function Shell({ page, theme, recordingContext, children }) {
             <strong>SurvNG</strong>
           </div>
         </a>
+        <a className="workspace-search-entry" href={appUrl("/search")} aria-label="Open Smart Search"><Search size={16} /><span>Search incidents…</span><kbd>/</kbd></a>
         <div className="workspace-system-bar" aria-label="System status"><LiveHeaderStats /></div>
       </header>
       <div className="workspace-content"><h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>{children}</div>
