@@ -107,6 +107,7 @@ import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.
 import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContext } from "./assistantContext.mjs";
 import { safeMediaUrl } from "./mediaUrl.mjs";
 import { liveMediaShouldRun, liveSnapshotRefreshMs, logPayloadSignature } from "./pollingPolicy.mjs";
+import { useVisiblePolling } from "./visibilityPolling.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
@@ -1368,6 +1369,7 @@ function AssistantPanel({ pageContext, timeZone }) {
     let cancelled = false;
     const ids = activeExportIds.split(",").filter(Boolean);
     async function refreshExports() {
+      if (document.hidden) return;
       const updates = await Promise.all(ids.map(async (id) => {
         try {
           const response = await fetch(`/api/exports/${encodeURIComponent(id)}`);
@@ -1406,9 +1408,12 @@ function AssistantPanel({ pageContext, timeZone }) {
     }
     refreshExports();
     const timer = window.setInterval(refreshExports, 2000);
+    const onVisibility = () => { if (!document.hidden) void refreshExports(); };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [activeExportIds, open]);
 
@@ -1830,13 +1835,7 @@ function LiveHeaderStats() {
     }
   });
 
-  useEffect(() => {
-    void loadSystem();
-    const timer = window.setInterval(() => void loadSystem(), 60_000);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, []);
+  useVisiblePolling(loadSystem, 60_000);
 
   const detector = stats.detector || {};
   const runtime = detector.runtime || {};
@@ -1927,14 +1926,8 @@ function usePollingData() {
     }
   });
 
-  useEffect(() => {
-    load();
-    const timer = window.setInterval(load, 60_000);
-    return () => {
-      loadSequence.current += 1;
-      window.clearInterval(timer);
-    };
-  }, []);
+  useVisiblePolling(load, 60_000);
+  useEffect(() => () => { loadSequence.current += 1; }, []);
 
   return { cameras, appConfig, loading, refresh: load };
 }
@@ -4761,13 +4754,12 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
 
   useEffect(() => () => window.clearTimeout(incidentEventRefreshTimer.current), []);
 
-  useEffect(() => {
-    if (incidentDay !== today || incidentPage !== 0) return undefined;
-    const timer = window.setInterval(() => {
-      if (!document.hidden) setIncidentRefreshToken((value) => value + 1);
-    }, INCIDENT_REFRESH_FALLBACK_MS);
-    return () => window.clearInterval(timer);
-  }, [incidentDay, incidentPage, today]);
+  useVisiblePolling(
+    () => setIncidentRefreshToken((value) => value + 1),
+    INCIDENT_REFRESH_FALLBACK_MS,
+    incidentDay === today && incidentPage === 0,
+    { immediate: false },
+  );
 
   async function openFaceReview(face) {
     const observationId = Number(face?.observation_id);
@@ -5335,34 +5327,22 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     observer.observe(grid);
     return () => observer.disconnect();
   }, []);
-  useEffect(() => {
-    let cancelled = false;
-    async function syncLiveDefaults() {
-      try {
-        const response = await fetch("/api/system/status", { cache: "no-store" });
-        if (!response.ok) return;
-        const payload = await response.json();
-        const instanceId = String(payload.instance_id || "");
-        if (!instanceId || cancelled) return;
-        const reset = resetLiveDefaultsForServer(browserStorage(window), instanceId);
-        if (cancelled) return;
-        if (reset) setExpandedCamera(null);
-        setLiveDefaultsInstance(instanceId);
-      } catch {
-        // A reconnecting server is expected to be temporarily unavailable.
-      } finally {
-        if (!cancelled) setLiveDefaultsReady(true);
-      }
+  useVisiblePolling(async (signal) => {
+    try {
+      const response = await fetch("/api/system/status", { cache: "no-store", signal });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const instanceId = String(payload.instance_id || "");
+      if (!instanceId) return;
+      const reset = resetLiveDefaultsForServer(browserStorage(window), instanceId);
+      if (reset) setExpandedCamera(null);
+      setLiveDefaultsInstance(instanceId);
+    } catch {
+      // A reconnecting server is expected to be temporarily unavailable.
+    } finally {
+      setLiveDefaultsReady(true);
     }
-    void syncLiveDefaults();
-    const timer = window.setInterval(syncLiveDefaults, 15_000);
-    window.addEventListener("focus", syncLiveDefaults);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      window.removeEventListener("focus", syncLiveDefaults);
-    };
-  }, []);
+  }, 15_000);
   useEffect(() => {
     const linkedCameraId = linkedCameraIdRef.current;
     if (!linkedCameraId || !cameras.length) return;
@@ -5709,15 +5689,10 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     }, 1000);
   });
 
-  useEffect(() => {
-    if (incidentPage !== 0) return undefined;
-    const timer = window.setInterval(() => {
-      if (document.hidden) return;
-      incidentFeedCacheRef.current.clear();
-      setIncidentRefreshToken((value) => value + 1);
-    }, INCIDENT_REFRESH_FALLBACK_MS);
-    return () => window.clearInterval(timer);
-  }, [incidentPage]);
+  useVisiblePolling(() => {
+    incidentFeedCacheRef.current.clear();
+    setIncidentRefreshToken((value) => value + 1);
+  }, INCIDENT_REFRESH_FALLBACK_MS, incidentPage === 0, { immediate: false });
 
   useEffect(() => () => {
     incidentSelectionRequestRef.current += 1;
@@ -6540,6 +6515,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const pendingSeekModeRef = useRef(null);
   const playbackRetryRef = useRef({ attempts: 0, timer: null });
   const gridRefreshCursorRef = useRef(null);
+  const recordingUpdatesInFlightRef = useRef(false);
+  const gridUpdatesInFlightRef = useRef(false);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const queryDate = initialQuery.get("date") || (initialEpoch ? dateKeyForTimeZone(initialEpoch * 1000, timeZone) : today);
   const querySource = initialQuery.get("source");
@@ -6942,83 +6919,55 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     };
   }, [activeCameraId, isAllCameras, source, dayStart, dayEnd, recordingIndexRevision]);
 
-  useEffect(() => {
-    if (!activeCameraId || isAllCameras || date !== today) return undefined;
-    let stopped = false;
-    let inFlight = false;
-    const refresh = async () => {
-      if (stopped || inFlight) return;
-      inFlight = true;
-      try {
-        const afterEpoch = Number.isFinite(latestAvailabilityRef.current)
-          ? latestAvailabilityRef.current
-          : dayStart;
-        const response = await fetch(
-          recordingUpdatesUrl(activeCameraId, dayStart, dayEnd, afterEpoch, source),
-        );
-        if (!response.ok) throw new Error(`Recording update failed (${response.status})`);
-        const payload = await response.json();
-        if (stopped) return;
-        const additions = payload.availability || [];
-        if (additions.length) {
-          setRecordings((current) => mergeRecordingAvailability(current, additions));
-        }
-        const eventUpdates = payload.incidents || payload.events || [];
-        if (eventUpdates.length) {
-          setEvents((current) => mergeRecordingEvents(current, eventUpdates));
-        }
-      } catch {
-        // The next poll retries without disrupting active playback.
-      } finally {
-        inFlight = false;
-      }
-    };
-    const timer = window.setInterval(refresh, 10_000);
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [activeCameraId, isAllCameras, source, date, today, dayStart, dayEnd]);
+  useVisiblePolling(async (signal) => {
+    if (recordingUpdatesInFlightRef.current) return;
+    recordingUpdatesInFlightRef.current = true;
+    try {
+      const afterEpoch = Number.isFinite(latestAvailabilityRef.current)
+        ? latestAvailabilityRef.current
+        : dayStart;
+      const response = await fetch(recordingUpdatesUrl(activeCameraId, dayStart, dayEnd, afterEpoch, source), { signal });
+      if (!response.ok) throw new Error(`Recording update failed (${response.status})`);
+      const payload = await response.json();
+      const additions = payload.availability || [];
+      if (additions.length) setRecordings((current) => mergeRecordingAvailability(current, additions));
+      const eventUpdates = payload.incidents || payload.events || [];
+      if (eventUpdates.length) setEvents((current) => mergeRecordingEvents(current, eventUpdates));
+    } catch {
+      // The next poll retries without disrupting active playback.
+    } finally {
+      recordingUpdatesInFlightRef.current = false;
+    }
+  }, 10_000, Boolean(activeCameraId) && !isAllCameras && date === today, {
+    immediate: false,
+    restartKey: `${activeCameraId}\u0000${source}\u0000${dayStart}\u0000${dayEnd}`,
+  });
 
-  useEffect(() => {
-    if (!isAllCameras || date !== today) return undefined;
-    let stopped = false;
-    let inFlight = false;
-    const refresh = async () => {
-      if (stopped || inFlight) return;
-      inFlight = true;
-      try {
-        const requestStartedAt = Date.now() / 1000;
-        const afterEpoch = Number.isFinite(gridRefreshCursorRef.current)
-          ? gridRefreshCursorRef.current
-          : Math.max(dayStart, requestStartedAt - 120);
-        const response = await fetch(recordingGridUpdatesUrl(
-          dayStart, dayEnd, afterEpoch, source,
-        ));
-        if (!response.ok) return;
-        const payload = await response.json();
-        if (stopped) return;
-        const additions = payload.availability || payload.recordings || [];
-        if (additions.length) {
-          setRecordings((current) => mergeRecordingAvailability(current, additions));
-        }
-        const eventUpdates = payload.incidents || payload.events || [];
-        if (eventUpdates.length) {
-          setEvents((current) => mergeRecordingEvents(current, eventUpdates));
-        }
-        gridRefreshCursorRef.current = requestStartedAt;
-      } catch {
-        // The next refresh retries without interrupting synchronized playback.
-      } finally {
-        inFlight = false;
-      }
-    };
-    const timer = window.setInterval(refresh, 10_000);
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [date, dayEnd, dayStart, isAllCameras, source, today]);
+  useVisiblePolling(async (signal) => {
+    if (gridUpdatesInFlightRef.current) return;
+    gridUpdatesInFlightRef.current = true;
+    try {
+      const requestStartedAt = Date.now() / 1000;
+      const afterEpoch = Number.isFinite(gridRefreshCursorRef.current)
+        ? gridRefreshCursorRef.current
+        : Math.max(dayStart, requestStartedAt - 120);
+      const response = await fetch(recordingGridUpdatesUrl(dayStart, dayEnd, afterEpoch, source), { signal });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const additions = payload.availability || payload.recordings || [];
+      if (additions.length) setRecordings((current) => mergeRecordingAvailability(current, additions));
+      const eventUpdates = payload.incidents || payload.events || [];
+      if (eventUpdates.length) setEvents((current) => mergeRecordingEvents(current, eventUpdates));
+      gridRefreshCursorRef.current = requestStartedAt;
+    } catch {
+      // The next refresh retries without interrupting synchronized playback.
+    } finally {
+      gridUpdatesInFlightRef.current = false;
+    }
+  }, 10_000, isAllCameras && date === today, {
+    immediate: false,
+    restartKey: `${source}\u0000${dayStart}\u0000${dayEnd}`,
+  });
 
   useEffect(() => {
     if (!activeCameraId || isAllCameras || !playbackWindow) return undefined;
@@ -7585,10 +7534,12 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
     setSelectionMode(false);
   }, [cameraId, kind, protectedOnly, status]);
 
-  useEffect(() => {
-    const interval = window.setInterval(() => setRevision((current) => current + 1), activeCount ? 2_000 : 15_000);
-    return () => window.clearInterval(interval);
-  }, [activeCount]);
+  useVisiblePolling(
+    () => setRevision((current) => current + 1),
+    activeCount ? 2_000 : 15_000,
+    true,
+    { immediate: false },
+  );
 
   useEffect(() => {
     if (!selectedId || !filteredExports.some((item) => item.id === selectedId)) {
@@ -9079,18 +9030,16 @@ function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
     if (!selectedRunId) return;
     void loadCalibrationRun(selectedRunId).catch((loadError) => setError(loadError.message));
   }, [selectedRunId]);
-  useEffect(() => {
-    const activeRun = runs.some((run) => ["queued", "running", "cancelling"].includes(run.status));
-    const activeEvaluation = changeSets.some((item) => ["collecting", "reviewing"].includes(item.status));
-    if (!activeRun && !activeEvaluation) return undefined;
-    const timer = window.setInterval(() => {
-      void (async () => {
-        await loadCalibration();
-        if (selectedRunId) await loadCalibrationRun(selectedRunId);
-      })().catch((loadError) => setError(loadError.message || "Calibration status could not be refreshed"));
-    }, activeRun ? 2000 : 10000);
-    return () => window.clearInterval(timer);
-  }, [runs, changeSets, selectedRunId]);
+  const calibrationRunActive = runs.some((run) => ["queued", "running", "cancelling"].includes(run.status));
+  const calibrationEvaluationActive = changeSets.some((item) => ["collecting", "reviewing"].includes(item.status));
+  useVisiblePolling(async () => {
+    try {
+      await loadCalibration();
+      if (selectedRunId) await loadCalibrationRun(selectedRunId);
+    } catch (loadError) {
+      setError(loadError.message || "Calibration status could not be refreshed");
+    }
+  }, calibrationRunActive ? 2000 : 10000, calibrationRunActive || calibrationEvaluationActive, { immediate: false, restartKey: selectedRunId || "" });
   useEffect(() => {
     const ids = new Set(cameras.map((camera) => camera.id));
     setSelectedCameras((current) => current.filter((id) => ids.has(id)));
@@ -9302,9 +9251,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [probe, setProbe] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const logSignatureRef = useRef("");
+  const logRequestRef = useRef({ generation: 0, controller: null });
   const [logFilter, setLogFilter] = useStoredState("survng.logFilter.v1", "");
   const [logLevel, setLogLevel] = useStoredState("survng.logLevel.v1", "INFO");
   const [logOrder, setLogOrder] = useStoredState("survng.logOrder.v1", "newest");
+  const [debouncedLogQuery, setDebouncedLogQuery] = useState(() => ({ level: logLevel, filter: logFilter }));
   const [auditItems, setAuditItems] = useState([]);
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(0);
@@ -9535,40 +9486,32 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     }
   }
 
-  useEffect(() => {
-    if (settingsTab !== "general" || generalSection !== "storage") return undefined;
-    void loadRetention();
-    const timer = window.setInterval(() => void loadRetention(), 5000);
-    return () => window.clearInterval(timer);
-  }, [settingsTab, generalSection]);
+  useVisiblePolling(loadRetention, 5000, settingsTab === "general" && generalSection === "storage");
 
-  useEffect(() => {
-    if (settingsTab !== "cameras") return undefined;
-    let active = true;
-    async function refreshCameraRuntime() {
-      try {
-        const response = await fetch("/api/cameras");
-        if (active && response.ok) setRuntimeStatus(await response.json());
-      } catch {
-        // Keep the last known runtime state and retry on the next interval.
-      }
+  async function refreshCameraRuntime() {
+    try {
+      const response = await fetch("/api/cameras");
+      if (response.ok) setRuntimeStatus(await response.json());
+    } catch {
+      // Keep the last known runtime state and retry on the next interval.
     }
-    refreshCameraRuntime();
-    const timer = window.setInterval(refreshCameraRuntime, 5000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [settingsTab]);
+  }
+
+  useVisiblePolling(refreshCameraRuntime, 5000, settingsTab === "cameras");
 
 
   async function loadLogs() {
     if (document.hidden) return;
+    const generation = logRequestRef.current.generation + 1;
+    logRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    logRequestRef.current = { generation, controller };
     try {
-      const params = new URLSearchParams({ limit: "500", level: logLevel, q: logFilter });
-      const response = await fetch(`/api/logs?${params.toString()}`);
-      if (response.ok) {
+      const params = new URLSearchParams({ limit: "500", level: debouncedLogQuery.level, q: debouncedLogQuery.filter });
+      const response = await fetch(`/api/logs?${params.toString()}`, { signal: controller.signal });
+      if (response.ok && logRequestRef.current.generation === generation) {
         const payload = await response.json();
+        if (logRequestRef.current.generation !== generation) return;
         const lines = payload.lines || [];
         const signature = logPayloadSignature(lines);
         if (signature !== logSignatureRef.current) {
@@ -9576,22 +9519,28 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           setLogLines(lines);
         }
       }
-    } catch {
+    } catch (error) {
+      if (error?.name === "AbortError") return;
       // Preserve the current log view; polling retries automatically.
     }
   }
 
   useEffect(() => {
-    if (settingsTab !== "logs") return undefined;
-    loadLogs();
-    const timer = window.setInterval(loadLogs, 2000);
-    const onVisibility = () => { if (!document.hidden) void loadLogs(); };
-    document.addEventListener("visibilitychange", onVisibility);
+    const timer = window.setTimeout(() => {
+      logSignatureRef.current = "";
+      setDebouncedLogQuery({ level: logLevel, filter: logFilter });
+    }, 250);
     return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.clearTimeout(timer);
     };
-  }, [settingsTab, logLevel, logFilter]);
+  }, [logLevel, logFilter]);
+  useEffect(() => () => logRequestRef.current.controller?.abort(), []);
+  useVisiblePolling(
+    loadLogs,
+    2000,
+    settingsTab === "logs",
+    { restartKey: `${debouncedLogQuery.level}\u0000${debouncedLogQuery.filter}` },
+  );
 
   async function loadMotionAudit(page = auditPage) {
     setAuditLoading(true);
@@ -9616,12 +9565,14 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     }
   }
 
+  useVisiblePolling(
+    () => loadMotionAudit(0),
+    10000,
+    settingsTab === "audit" && auditPage === 0,
+    { restartKey: `${auditCamera}\u0000${auditCategory}\u0000${auditOutcome}` },
+  );
   useEffect(() => {
-    if (settingsTab !== "audit") return undefined;
-    loadMotionAudit(auditPage);
-    if (auditPage !== 0) return undefined;
-    const timer = window.setInterval(() => loadMotionAudit(0), 10000);
-    return () => window.clearInterval(timer);
+    if (settingsTab === "audit" && auditPage !== 0) void loadMotionAudit(auditPage);
   }, [settingsTab, auditPage, auditCamera, auditCategory, auditOutcome]);
 
   async function loadTelemetry() {
@@ -9669,12 +9620,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     await loadTelemetry();
   }
 
-  useEffect(() => {
-    if (settingsTab !== "telemetry") return undefined;
-    void loadTelemetry();
-    const timer = window.setInterval(() => void loadTelemetry(), 10000);
-    return () => window.clearInterval(timer);
-  }, [settingsTab, telemetryCamera, telemetrySection]);
+  useVisiblePolling(
+    loadTelemetry,
+    10000,
+    settingsTab === "telemetry",
+    { restartKey: `${telemetrySection}\u0000${telemetryCamera}` },
+  );
 
   async function loadMaintenance() {
     try {
@@ -9720,12 +9671,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     }
   }
 
-  useEffect(() => {
-    if (settingsTab !== "maintenance") return undefined;
-    void loadMaintenance();
-    const timer = window.setInterval(() => void loadMaintenance(), ["running", "cancelling"].includes(maintenance?.status) ? 1000 : 5000);
-    return () => window.clearInterval(timer);
-  }, [settingsTab, maintenance?.status]);
+  useVisiblePolling(
+    loadMaintenance,
+    ["running", "cancelling"].includes(maintenance?.status) ? 1000 : 5000,
+    settingsTab === "maintenance",
+  );
 
   const cameras = config?.cameras || [];
   const selectedTelemetryCamera = cameras.some((camera) => camera.id === telemetryCamera)
@@ -11403,17 +11353,19 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
     void loadEvaluation(cameraId);
   }, [cameraId]);
 
-  useEffect(() => {
-    if (!cameraId || evaluation?.status !== "reviewing") return undefined;
-    const timer = window.setInterval(() => void loadEvaluation(cameraId, true), 2000);
-    return () => window.clearInterval(timer);
-  }, [cameraId, evaluation?.status]);
+  useVisiblePolling(
+    () => loadEvaluation(cameraId, true),
+    2000,
+    Boolean(cameraId) && evaluation?.status === "reviewing",
+    { immediate: false, restartKey: cameraId || "" },
+  );
 
-  useEffect(() => {
-    if (!cameraId || !["queued", "running"].includes(review?.status)) return undefined;
-    const timer = window.setInterval(() => void loadReview(cameraId, true), 2000);
-    return () => window.clearInterval(timer);
-  }, [cameraId, review?.status]);
+  useVisiblePolling(
+    () => loadReview(cameraId, true),
+    2000,
+    Boolean(cameraId) && ["queued", "running"].includes(review?.status),
+    { immediate: false, restartKey: cameraId || "" },
+  );
 
   async function startReview() {
     if (!cameraId || loading) return;
@@ -12646,22 +12598,18 @@ function MotionDebugViewer({ cameraId, timeZone }) {
     };
   }, [cameraId]);
 
-  useEffect(() => {
-    if (!status?.enabled) return undefined;
-    let inFlight = false;
-    let active = true;
-    const timer = window.setInterval(() => {
-      if (inFlight) return;
-      inFlight = true;
-      loadStatus(ownedRef.current && Number(status.expires_in_seconds || 0) < 70)
-        .catch((loadError) => { if (active) setError(loadError.message); })
-        .finally(() => { inFlight = false; });
-    }, 2000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [cameraId, status?.enabled, status?.expires_in_seconds]);
+  const motionDebugInFlightRef = useRef(false);
+  useVisiblePolling(async () => {
+    if (motionDebugInFlightRef.current) return;
+    motionDebugInFlightRef.current = true;
+    try {
+      await loadStatus(ownedRef.current && Number(status?.expires_in_seconds || 0) < 70);
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      motionDebugInFlightRef.current = false;
+    }
+  }, 2000, Boolean(status?.enabled), { immediate: false, restartKey: cameraId });
 
   async function setEnabled(enabled) {
     setBusy(true);
@@ -12730,28 +12678,18 @@ function MotionEffectiveness({ cameraId, mode }) {
   const [summary, setSummary] = useState(null);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      try {
-        const response = await fetch("/api/motion-effectiveness?days=7");
-        if (!response.ok) throw new Error("Effectiveness history unavailable");
-        const payload = await response.json();
-        if (active) {
-          setSummary(payload?.by_camera?.[cameraId]?.[mode] || null);
-          setError("");
-        }
-      } catch (loadError) {
-        if (active) setError(loadError.message || "Effectiveness history unavailable");
-      }
-    };
-    void load();
-    const timer = window.setInterval(load, 60000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [cameraId, mode]);
+  const load = async () => {
+    try {
+      const response = await fetch("/api/motion-effectiveness?days=7");
+      if (!response.ok) throw new Error("Effectiveness history unavailable");
+      const payload = await response.json();
+      setSummary(payload?.by_camera?.[cameraId]?.[mode] || null);
+      setError("");
+    } catch (loadError) {
+      setError(loadError.message || "Effectiveness history unavailable");
+    }
+  };
+  useVisiblePolling(load, 60000, true, { restartKey: `${cameraId}\u0000${mode}` });
 
   if (error) return <span className="motion-runtime-warning">{error}</span>;
   if (!summary) return <span>No durable motion decisions for this mode in the last 7 days.</span>;
