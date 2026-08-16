@@ -13,6 +13,27 @@ export function orderedLiveCamerasForFocus(cameras, focusedCameraId, mobile) {
   ];
 }
 
+export const LIVE_DENSITY_OPTIONS = Object.freeze(["fit", "4", "6", "9", "16", "25"]);
+
+export function normalizedLiveDensity(value) {
+  const normalized = String(value || "fit").toLowerCase();
+  return LIVE_DENSITY_OPTIONS.includes(normalized) ? normalized : "fit";
+}
+
+export function liveDensityPage(cameras, density, page = 0) {
+  const items = [...(cameras || [])];
+  const normalized = normalizedLiveDensity(density);
+  if (normalized === "fit") return { cameras: items, page: 0, pageCount: 1 };
+  const limit = Number(normalized);
+  const pageCount = Math.max(1, Math.ceil(items.length / limit));
+  const currentPage = Math.max(0, Math.min(pageCount - 1, Math.floor(Number(page) || 0)));
+  return {
+    cameras: items.slice(currentPage * limit, currentPage * limit + limit),
+    page: currentPage,
+    pageCount,
+  };
+}
+
 export function liveActivityEventId(incident) {
   const value = Number(
     incident?.representative_event_id

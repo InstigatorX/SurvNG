@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { focusedLiveCameraId, liveActivityEventId, liveActivityIncidentHref, orderedLiveCamerasForFocus } from "../src/liveWorkspace.mjs";
+import { focusedLiveCameraId, liveActivityEventId, liveActivityIncidentHref, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus } from "../src/liveWorkspace.mjs";
 
 const cameras = [{ id: "gate" }, { id: "front-door" }];
 assert.equal(focusedLiveCameraId(cameras, "front-door"), "front-door");
@@ -12,5 +12,13 @@ assert.equal(liveActivityEventId({ representative_event_id: 42, id: 9 }), 42);
 assert.equal(liveActivityEventId({ events: [{ id: 17 }], id: 9 }), 17);
 assert.equal(liveActivityIncidentHref({ representative_event_id: 42 }), "/incidents?event_ids=42");
 assert.equal(liveActivityIncidentHref({}), "/incidents");
+assert.equal(normalizedLiveDensity("6"), "6");
+assert.equal(normalizedLiveDensity("bogus"), "fit");
+assert.deepEqual(liveDensityPage([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }], "4", 1), {
+  cameras: [{ id: 5 }],
+  page: 1,
+  pageCount: 2,
+});
+assert.deepEqual(liveDensityPage(cameras, "fit", 9), { cameras, page: 0, pageCount: 1 });
 
 console.log("live workspace tests passed");

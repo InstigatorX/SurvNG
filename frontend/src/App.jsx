@@ -32,6 +32,7 @@ import {
   HardDrive,
   Search,
   ListTree,
+  Maximize2,
   Monitor,
   Moon,
   Pause,
@@ -116,7 +117,7 @@ import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incid
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
-import { focusedLiveCameraId, liveActivityEventId, liveActivityIncidentHref, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
+import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -5165,18 +5166,21 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   );
 }
 
-function LiveCommandBar({ cameraCount, layoutMode, customAvailable, onLayoutModeChange, onResetLayout }) {
+function LiveCommandBar({ cameraCount, totalCameraCount, density, densityPage, densityPageCount, layoutMode, customAvailable, onDensityChange, onDensityPageChange, onLayoutModeChange, onResetLayout, onFullscreen }) {
   return (
     <header className="live-command-bar">
       <div className="live-command-context">
-        <span className="live-command-scope"><Grid2X2 size={15} /><strong>All cameras</strong><small>{cameraCount} visible</small></span>
-        <span>Live monitoring and recent security activity</span>
+        <span className="live-command-scope"><Grid2X2 size={15} /><strong>All cameras</strong><small>{cameraCount} of {totalCameraCount}</small></span>
+      </div>
+      <div className="live-density-control" role="group" aria-label="Visible camera density">
+        {LIVE_DENSITY_OPTIONS.map((option) => <button type="button" key={option} className={density === option ? "active" : ""} aria-pressed={density === option} onClick={() => onDensityChange(option)}>{option === "fit" ? <Grid2X2 size={15} /> : option === "4" ? <><Grid2X2 size={13} /> 4</> : option}</button>)}
+        {densityPageCount > 1 ? <span className="live-density-pages"><button type="button" onClick={() => onDensityPageChange(densityPage - 1)} disabled={densityPage === 0} aria-label="Previous camera page"><ChevronLeft size={15} /></button><small>{densityPage + 1}/{densityPageCount}</small><button type="button" onClick={() => onDensityPageChange(densityPage + 1)} disabled={densityPage >= densityPageCount - 1} aria-label="Next camera page"><ChevronRight size={15} /></button></span> : null}
       </div>
       <div className="live-layout-control" role="group" aria-label="Live camera layout">
-        <span>Layout</span>
         <button type="button" className={layoutMode === "auto" ? "active" : ""} aria-pressed={layoutMode === "auto"} onClick={() => onLayoutModeChange("auto")}><Grid2X2 size={15} /> Automatic</button>
         <button type="button" className={layoutMode === "custom" ? "active" : ""} aria-pressed={layoutMode === "custom"} onClick={() => onLayoutModeChange("custom")} disabled={!customAvailable} title={customAvailable ? "Arrange and resize cameras" : "Custom layout is available on desktop"}><GripVertical size={15} /> Custom</button>
         {layoutMode === "custom" && customAvailable ? <button type="button" className="secondary live-layout-reset" onClick={onResetLayout}><RotateCcw size={14} /> Reset</button> : null}
+        <button type="button" className="live-fullscreen" onClick={onFullscreen} aria-label="View Live fullscreen" title="Fullscreen"><Maximize2 size={16} /></button>
       </div>
     </header>
   );
@@ -5218,6 +5222,8 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [incidentZoneFilter, setIncidentZoneFilter] = useState("all");
   const [cameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
   const [liveLayoutMode, setLiveLayoutMode] = useStoredState("survng.liveLayoutMode.v1", "auto");
+  const [liveDensityValue, setLiveDensityValue] = useStoredState("survng.liveDensity.v1", "fit");
+  const [liveDensityPageValue, setLiveDensityPageValue] = useState(0);
   const [customLayoutValue, setCustomLayoutValue] = useStoredState("survng.liveCustomLayout.v1", "{}");
   const [storedMobileFocus, setStoredMobileFocus] = useStoredState("survng.liveFocusedCamera.v1", "");
   const customLayoutAvailable = useViewportQuery("(min-width: 1051px)");
@@ -5227,6 +5233,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [layoutAnnouncement, setLayoutAnnouncement] = useState("");
   const [resizingCameraId, setResizingCameraId] = useState("");
   const customMoveCleanupRef = useRef(null);
+  const liveWorkspaceRef = useRef(null);
   const liveCameraGridRef = useRef(null);
   const [liveCameraGridSize, setLiveCameraGridSize] = useState({ width: 0, height: 0 });
   const [liveCameraAspects, setLiveCameraAspects] = useState({});
@@ -5285,10 +5292,17 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   }, [cameras, cameraOrder]);
   const normalizedLayoutMode = liveLayoutMode === "custom" ? "custom" : "auto";
   const effectiveLayoutMode = customLayoutAvailable ? normalizedLayoutMode : "auto";
+  const liveDensity = normalizedLiveDensity(liveDensityValue);
+  const effectiveLiveDensity = effectiveLayoutMode === "custom" || mobileLiveView ? "fit" : liveDensity;
+  const densitySelection = useMemo(
+    () => liveDensityPage(orderedCameras, effectiveLiveDensity, liveDensityPageValue),
+    [effectiveLiveDensity, liveDensityPageValue, orderedCameras],
+  );
+  const visibleLiveCameras = densitySelection.cameras;
   const mobileFocusedCameraId = focusedLiveCameraId(orderedCameras, storedMobileFocus);
   const renderedCameras = useMemo(
-    () => orderedLiveCamerasForFocus(orderedCameras, mobileFocusedCameraId, mobileLiveView),
-    [mobileFocusedCameraId, mobileLiveView, orderedCameras],
+    () => orderedLiveCamerasForFocus(visibleLiveCameras, mobileFocusedCameraId, mobileLiveView),
+    [mobileFocusedCameraId, mobileLiveView, visibleLiveCameras],
   );
   const liveCameraStartIndex = useMemo(() => new Map(orderedCameras.map((camera, index) => [camera.id, index])), [orderedCameras]);
   const customLayout = useMemo(
@@ -5298,7 +5312,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const displayedCustomLayout = keyboardLayoutPreview || customLayout;
   const liveCameraLayout = useMemo(
     () => recordingGridLayout(
-      orderedCameras,
+      visibleLiveCameras,
       "live",
       liveCameraGridSize.width,
       liveCameraGridSize.height,
@@ -5306,13 +5320,13 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
       liveCameraAspects,
       { portraitPriority: true, portraitRowSpan: 2 },
     ),
-    [liveCameraAspects, liveCameraGridSize.height, liveCameraGridSize.width, orderedCameras],
+    [liveCameraAspects, liveCameraGridSize.height, liveCameraGridSize.width, visibleLiveCameras],
   );
   const liveCameraLayoutById = useMemo(
     () => new Map(liveCameraLayout.map((item) => [item.camera.id, item])),
     [liveCameraLayout],
   );
-  const liveCameraLayoutReady = liveCameraLayout.length === orderedCameras.length && orderedCameras.length > 0;
+  const liveCameraLayoutReady = liveCameraLayout.length === visibleLiveCameras.length && visibleLiveCameras.length > 0;
   const customGridMetrics = useMemo(
     () => liveCustomGridMetrics(liveCameraGridSize.width, liveCameraGridSize.height),
     [liveCameraGridSize.height, liveCameraGridSize.width],
@@ -5442,6 +5456,17 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     setCustomLayoutValue("{}");
     setCustomSizePreview({});
     setKeyboardLayoutPreview(null);
+  }
+
+  function changeLiveDensity(nextDensity) {
+    setLiveDensityValue(normalizedLiveDensity(nextDensity));
+    setLiveDensityPageValue(0);
+  }
+
+  async function openLiveFullscreen() {
+    const workspace = liveWorkspaceRef.current;
+    if (!workspace?.requestFullscreen) return;
+    await workspace.requestFullscreen();
   }
 
   function handleCustomLayoutKey(event, cameraId, actionType) {
@@ -5820,8 +5845,8 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   }
 
   return (
-    <main className="bento-grid live-grid">
-      <LiveCommandBar cameraCount={orderedCameras.length} layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} />
+    <main ref={liveWorkspaceRef} className="bento-grid live-grid">
+      <LiveCommandBar cameraCount={visibleLiveCameras.length} totalCameraCount={orderedCameras.length} density={effectiveLiveDensity} densityPage={densitySelection.page} densityPageCount={densitySelection.pageCount} layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onDensityChange={changeLiveDensity} onDensityPageChange={setLiveDensityPageValue} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} onFullscreen={openLiveFullscreen} />
       <div className="sr-only" role="status" aria-live="polite">{layoutAnnouncement}</div>
       <section className="bento-card camera-zone live-camera-zone">
         <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
