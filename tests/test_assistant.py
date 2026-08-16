@@ -56,11 +56,13 @@ class AssistantModelsTest(unittest.TestCase):
                 "role": "user",
                 "content": "analyze this",
                 "context": {"page": "incidents", "incident_event_id": 42, "camera_id": "front-door"},
+                "evidence": [{"id": "incident:42", "kind": "incident", "title": "Front Door incident"}],
             }],
             "context": {"page": "exports", "export_id": " job-9 "},
         })
         self.assertEqual(contextual.history[0].context.incident_event_id, 42)
         self.assertEqual(contextual.history[0].context.camera_id, "front-door")
+        self.assertEqual(contextual.history[0].evidence[0].id, "incident:42")
         self.assertEqual(contextual.context.export_id, "job-9")
 
         with self.assertRaisesRegex(ValidationError, "safe size limit"):

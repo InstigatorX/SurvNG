@@ -118,10 +118,17 @@ class AssistantPageContext(BaseModel):
         }
 
 
+class AssistantHistoryEvidence(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    kind: str = Field(default="", max_length=128)
+    title: str = Field(default="", max_length=512)
+
+
 class AssistantHistoryMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=8_000)
     context: AssistantPageContext | None = None
+    evidence: list[AssistantHistoryEvidence] = Field(default_factory=list, max_length=12)
 
     @field_validator("content", mode="before")
     @classmethod

@@ -110,11 +110,11 @@ import { liveMediaShouldRun, liveSnapshotRefreshMs, logPayloadSignature } from "
 import { useVisiblePolling } from "./visibilityPolling.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
-import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
+import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, liveActivityEventId, liveActivityIncidentHref, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
@@ -1491,10 +1491,11 @@ function AssistantPanel({ pageContext, timeZone }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: content,
-          history: prior.map(({ role, content: historyContent, context: historyContext }) => ({
+          history: prior.map(({ role, content: historyContent, context: historyContext, evidence: historyEvidence }) => ({
             role,
             content: historyContent,
             ...(historyContext ? { context: snapshotAssistantContext(historyContext, historyContext.time_zone || timeZone) } : {}),
+            ...(historyEvidence?.length ? { evidence: historyEvidence.slice(0, 12).map((item) => ({ id: String(item.id || ""), kind: String(item.kind || ""), title: String(item.title || "") })).filter((item) => item.id) } : {}),
           })),
           context: submittedContext,
         }),
@@ -1850,7 +1851,7 @@ function LiveHeaderStats() {
   const memoryLabel = stats.resources ? formatBytes(stats.resources.application_memory_bytes) : "--";
   const cpuLabel = Number.isFinite(stats.resources?.cpu_load_percent) ? `${stats.resources.cpu_load_percent.toFixed(1)}%` : "--";
   const cameraLabel = stats.cameras ? `${stats.cameras.recording}/${stats.cameras.total} rec` : "--";
-  const { healthy: systemHealthy, label: healthLabel } = systemHealthState({
+  const { severity: healthSeverity, label: healthLabel } = systemHealthState({
     lifecycle: stats.lifecycle,
     storage: stats.storage,
     detector: stats.detector,
@@ -1859,7 +1860,7 @@ function LiveHeaderStats() {
 
   return (
     <div className="header-stats" aria-label="System summary">
-      <span className={`header-stat header-health ${systemHealthy ? "ok" : "warn"}`}><ShieldCheck size={15} /><small>System</small><strong>{healthLabel}</strong></span>
+      <span className={`header-stat header-health ${healthSeverity}`}><ShieldCheck size={15} /><small>System</small><strong>{healthLabel}</strong></span>
       <span className="header-stat"><HardDrive size={15} /><small>Storage</small><strong>{storageLabel}</strong></span>
       <span className="header-stat"><Monitor size={15} /><small>Memory</small><strong>{memoryLabel}</strong></span>
       <span className="header-stat"><Activity size={15} /><small>CPU</small><strong>{cpuLabel}</strong></span>
@@ -4595,6 +4596,13 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
       },
     });
   }, [eventFilter, focusedEvent?.id, focusedEvent?.representative_event_id, focusedIncident?.camera_id, incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter, onAssistantContextChange]);
+
+  useEffect(() => {
+    if (mobileView || !focusedEvent) return;
+    const eventId = Number(focusedEvent.representative_event_id || focusedEvent.id);
+    const nextHref = incidentSelectionHref(window.location.href, eventId);
+    if (nextHref && nextHref !== window.location.href) window.history.replaceState(window.history.state, "", nextHref);
+  }, [focusedEvent?.id, focusedEvent?.representative_event_id, mobileView]);
 
   useEffect(() => {
     const eventIds = new URLSearchParams(window.location.search).get("event_ids");
@@ -8121,15 +8129,10 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
 
   function handleExportKey(kind, event) {
     if (!exportRange || !onExportRangeChange) return;
-    const step = event.shiftKey ? 60 : 1;
-    let epoch = kind === "start" ? exportRange.start : exportRange.end;
-    if (event.key === "ArrowLeft" || event.key === "ArrowDown") epoch -= step;
-    else if (event.key === "ArrowRight" || event.key === "ArrowUp") epoch += step;
-    else if (event.key === "Home") epoch = kind === "start" ? startEpoch : exportRange.start + 1;
-    else if (event.key === "End") epoch = kind === "start" ? exportRange.end - 1 : endEpoch;
-    else return;
+    const next = adjustRecordingExportRange({ range: exportRange, kind, key: event.key, shiftKey: event.shiftKey, startEpoch, endEpoch });
+    if (!next) return;
     event.preventDefault();
-    updateExportHandle(kind, epoch);
+    onExportRangeChange(next);
   }
 
   function startExportDrag(kind, event) {

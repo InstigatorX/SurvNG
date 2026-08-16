@@ -47,6 +47,24 @@ try {
   assert.equal(await page.title(), "SurvNG · Timeline");
   assert.match(await page.locator(".workspace-content > h1").textContent(), /SurvNG — Timeline/);
   assert.equal(await page.locator("h1").count(), 1);
+
+  for (const [path, title] of [
+    ["incidents", "Incidents"],
+    ["search", "Search"],
+    ["people", "People"],
+    ["admin", "Admin"],
+  ]) {
+    await page.goto(`http://127.0.0.1:8088/survng/${path}`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    assert.match(await page.locator(".workspace-content > h1").textContent(), new RegExp(`SurvNG — ${title}`));
+    assert.equal(await page.locator("h1").count(), 1);
+  }
+
+  await page.setViewportSize({ width: 740, height: 844 });
+  await page.goto("http://127.0.0.1:8088/survng/", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await page.locator(".camera-tile").first().waitFor({ state: "visible" });
+  assert.equal(await page.locator(".workspace-sidebar").isVisible(), false);
+  assert.equal(await page.locator(".mobile-workspace-nav").isVisible(), true);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
 } finally {
   await browser.close();
 }

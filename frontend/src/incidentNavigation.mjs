@@ -3,6 +3,14 @@ function sameEventId(left, right) {
   return String(left) === String(right);
 }
 
+export function incidentSelectionHref(currentHref, eventId) {
+  const numericId = Number(eventId);
+  if (!Number.isInteger(numericId) || numericId <= 0) return String(currentHref || "");
+  const url = new URL(String(currentHref || "http://localhost/incidents"), "http://localhost");
+  url.searchParams.set("event_ids", String(numericId));
+  return url.href;
+}
+
 export function incidentDetectionFrameSize(event) {
   const detected = (Array.isArray(event?.objects) ? event.objects : []).find((object) => (
     Number(object?.detection_frame_width) > 0

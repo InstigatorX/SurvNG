@@ -261,7 +261,9 @@ p {
   white-space: nowrap;
 }
 
-.header-stat.warn svg {
+.header-stat.warn svg,
+.header-stat.starting svg,
+.header-stat.attention svg {
   color: var(--warn);
 }
 
@@ -269,7 +271,8 @@ p {
   color: var(--hot);
 }
 
-.header-stat.ok svg {
+.header-stat.ok svg,
+.header-stat.healthy svg {
   color: var(--ok-ink);
 }
 

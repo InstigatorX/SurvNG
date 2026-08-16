@@ -7,6 +7,21 @@ export function playbackRowsCoverEpoch(rows, epoch) {
   });
 }
 
+export function adjustRecordingExportRange({ range, kind, key, shiftKey = false, startEpoch, endEpoch, minimumGap = 1 }) {
+  if (!range || !["start", "end"].includes(kind)) return null;
+  const gap = Math.max(1, Number(minimumGap) || 1);
+  const step = shiftKey ? 60 : 1;
+  let epoch = kind === "start" ? Number(range.start) : Number(range.end);
+  if (key === "ArrowLeft" || key === "ArrowDown") epoch -= step;
+  else if (key === "ArrowRight" || key === "ArrowUp") epoch += step;
+  else if (key === "Home") epoch = kind === "start" ? startEpoch : Number(range.start) + gap;
+  else if (key === "End") epoch = kind === "start" ? Number(range.end) - gap : endEpoch;
+  else return null;
+  return kind === "start"
+    ? { ...range, start: Math.max(startEpoch, Math.min(Number(range.end) - gap, epoch)) }
+    : { ...range, end: Math.min(endEpoch, Math.max(Number(range.start) + gap, epoch)) };
+}
+
 export function playbackMediaTimeForEpoch(rows, epoch, boundaryTolerance = 0) {
   if (!Number.isFinite(epoch) || !Array.isArray(rows)) return null;
   const tolerance = Math.max(0, Number(boundaryTolerance) || 0);

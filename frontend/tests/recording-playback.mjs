@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  adjustRecordingExportRange,
   describePlaybackError,
   gridPlaybackNeedsSeek,
   isUnsupportedPlaybackError,
@@ -7,6 +8,13 @@ import {
   playbackMediaTimeForEpoch,
   playbackRowsCoverEpoch,
 } from "../src/recordingPlayback.mjs";
+
+const exportRange = { start: 100, end: 200 };
+assert.deepEqual(adjustRecordingExportRange({ range: exportRange, kind: "start", key: "ArrowRight", startEpoch: 0, endEpoch: 300 }), { start: 101, end: 200 });
+assert.deepEqual(adjustRecordingExportRange({ range: exportRange, kind: "end", key: "ArrowLeft", shiftKey: true, startEpoch: 0, endEpoch: 300 }), { start: 100, end: 140 });
+assert.deepEqual(adjustRecordingExportRange({ range: exportRange, kind: "start", key: "End", startEpoch: 0, endEpoch: 300 }), { start: 199, end: 200 });
+assert.deepEqual(adjustRecordingExportRange({ range: exportRange, kind: "end", key: "Home", startEpoch: 0, endEpoch: 300 }), { start: 100, end: 101 });
+assert.equal(adjustRecordingExportRange({ range: exportRange, kind: "start", key: "Enter", startEpoch: 0, endEpoch: 300 }), null);
 
 const rows = [
   { start_epoch: 100, end_epoch: 110 },

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -17,6 +17,9 @@ assert.equal(adjacentIncident(incidents, { id: 301 }, 1), incidents[0]);
 assert.equal(adjacentIncident([incidents[0]], incidents[0], 1), null);
 assert.equal(incidentArrowNavigationAllowed({ closest: () => null }), true);
 assert.equal(incidentArrowNavigationAllowed({ closest: () => ({ tagName: "VIDEO" }) }), false);
+assert.equal(incidentSelectionHref("https://example.test/survng/incidents?day=2026-08-16", 42), "https://example.test/survng/incidents?day=2026-08-16&event_ids=42");
+assert.equal(incidentSelectionHref("https://example.test/survng/incidents?event_ids=1", 42), "https://example.test/survng/incidents?event_ids=42");
+assert.equal(incidentSelectionHref("https://example.test/survng/incidents", "bad"), "https://example.test/survng/incidents");
 assert.equal(incidentDetailQuery(incidents[0]), "event_ids=101%2C102&gap_seconds=45");
 assert.equal(incidentDetailQuery({ events: [{ id: 101 }, { id: 101 }, { id: "bad" }] }), "event_ids=101&gap_seconds=45");
 assert.equal(incidentDetailQuery({ events: [] }), "");
