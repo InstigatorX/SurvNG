@@ -13461,13 +13461,13 @@ a:focus-visible {
 }
 
 .recordings-v2-investigation {
-  grid-template-columns: 292px minmax(0, 1fr);
+  grid-template-columns: 270px minmax(0, 1fr) var(--timeline-inspector-width);
 }
 
 .recordings-v2-selected-event {
-  grid-template-columns: 112px minmax(0, 1fr);
-  grid-template-rows: 1fr auto;
-  order: -1;
+  grid-template-columns: 118px minmax(0, 1fr);
+  grid-template-rows: 24px 1fr auto;
+  order: initial;
   gap: 8px 10px;
   border: 0;
   border-right: 1px solid var(--line);
@@ -13475,11 +13475,20 @@ a:focus-visible {
   padding: 10px;
 }
 
+.recordings-v2-selected-event > header {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
 .recordings-v2-selected-event-image {
   position: relative;
   display: grid;
-  grid-row: 1 / 3;
-  width: 112px;
+  grid-row: 2 / 4;
+  width: 118px;
   min-height: 92px;
   place-items: center;
   overflow: hidden;
@@ -13490,12 +13499,33 @@ a:focus-visible {
 }
 
 .recordings-v2-selected-event-image img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.recordings-v2-selected-event-image time { position: absolute; right: 3px; bottom: 3px; z-index: 2; border-radius: 2px; background: rgba(0,0,0,.8); color: #fff; padding: 1px 4px; }
 .recordings-v2-selected-event > div { align-content: center; gap: 2px; }
 .recordings-v2-selected-event span,
 .recordings-v2-selected-event small { font-size: 10px; font-weight: 520; }
 .recordings-v2-selected-event strong { font-size: 16px; font-weight: 620; }
 .recordings-v2-selected-event em { width: fit-content; margin-top: 5px; border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line)); border-radius: 3px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--active-ink); font-size: 10px; font-style: normal; padding: 2px 6px; }
+.recordings-v2-selected-event > div > span { color: var(--muted); }
 .recordings-v2-selected-event a { grid-column: 2; min-height: 32px; border-radius: 3px; font-size: 10px; }
+.recordings-v2-selected-event.empty { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 11px; }
+
+.recordings-related-events {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: 32px minmax(0, 1fr);
+  border-right: 1px solid var(--line);
+}
+
+.recordings-related-events > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
 
 .recordings-v2-events {
   gap: 10px;
@@ -13528,6 +13558,39 @@ a:focus-visible {
 .recordings-v2-event-caption b { color: var(--ink); font-size: 9px; font-weight: 560; }
 .recordings-v2-event-caption b { color: var(--muted); }
 
+.recordings-event-inspector {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: 34px minmax(0, 1fr) auto;
+  background: color-mix(in srgb, var(--panel-soft) 72%, transparent);
+  padding: 0 10px 10px;
+}
+
+.recordings-event-inspector-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-bottom: 1px solid var(--line);
+}
+
+.recordings-event-inspector-tabs button {
+  min-height: 34px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.recordings-event-inspector-tabs button.active { border-bottom-color: var(--accent); color: var(--active-ink); }
+.recordings-event-inspector dl { display: grid; align-content: start; gap: 5px; margin: 10px 0; }
+.recordings-event-inspector dl > div { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 6px; font-size: 10px; }
+.recordings-event-inspector dt { color: var(--muted); }
+.recordings-event-inspector dd { overflow: hidden; margin: 0; text-overflow: ellipsis; white-space: nowrap; }
+.recordings-event-inspector > a { min-height: 34px; border: 1px solid var(--line); border-radius: 3px; }
+.recordings-inspector-message { display: grid; align-content: start; gap: 7px; padding: 14px 4px; color: var(--muted); font-size: 10px; }
+.recordings-inspector-message strong { color: var(--ink); font-size: 12px; }
+
 @media (max-width: 1100px) and (min-width: 761px) {
   .recordings-v2-page { grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .recordings-commandbar {
@@ -13544,6 +13607,7 @@ a:focus-visible {
   }
   .recordings-commandbar-time { display: none; }
   .recordings-v2-investigation { grid-template-columns: 240px minmax(0, 1fr); }
+  .recordings-event-inspector { display: none; }
   .recordings-v2-selected-event { grid-template-columns: 88px minmax(0, 1fr); }
   .recordings-v2-selected-event-image { width: 88px; }
 }

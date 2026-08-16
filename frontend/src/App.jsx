@@ -6580,6 +6580,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [exportSubmitting, setExportSubmitting] = useState(false);
   const [gridPlaying, setGridPlaying] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState(null);
+  const [timelineInspectorTab, setTimelineInspectorTab] = useState("details");
   const [cameraQuery, setCameraQuery] = useState("");
   const [playbackRate, setPlaybackRate] = useState(1);
 
@@ -6651,6 +6652,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       .sort((left, right) => left.incident_epoch - right.incident_epoch)
   }, [filteredEvents, incidentRangeHours, playhead]);
   const selectedEvent = nearbyEvents.find((event) => event.id === selectedEventId)
+    || timelineEvents.find((event) => event.id === selectedEventId)
     || nearbyEvents.reduce((closest, event) => (
       !closest || Math.abs(event.incident_epoch - playhead) < Math.abs(closest.incident_epoch - playhead) ? event : closest
     ), null);
@@ -6658,6 +6660,13 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   useEffect(() => {
     if (selectedEvent?.id !== selectedEventId) setSelectedEventId(selectedEvent?.id ?? null);
   }, [selectedEvent?.id, selectedEventId]);
+  const selectedEventEnd = selectedEvent ? recordingIncidentEndEpoch(selectedEvent) : null;
+  const selectedEventDuration = selectedEvent && Number.isFinite(selectedEventEnd)
+    ? Math.max(0, selectedEventEnd - selectedEvent.incident_epoch)
+    : 0;
+  const selectedEventConfidence = selectedEvent
+    ? Math.max(0, ...(selectedEvent.objects || []).map((object) => Number(object.confidence) || 0), Number(selectedEvent.confidence) || 0)
+    : 0;
 
   useEffect(() => {
     if (!exportJob?.id || !["queued", "running", "cancelling"].includes(exportJob.status)) return undefined;
@@ -7455,7 +7464,24 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
         <div className="recordings-v2-incidents">
           <div className="recordings-v2-investigation">
-            <div className="recordings-v2-events" aria-label="Nearby incidents">
+            {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
+              <header>Selected incident</header>
+              <span className="recordings-v2-selected-event-image">
+                <Radar size={22} />
+                {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 360, 120)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
+                {selectedEventDuration > 0 ? <time>{formatDuration(selectedEventDuration)}</time> : null}
+              </span>
+              <div>
+                <strong>{formatTimeOnly(selectedEvent.incident_epoch, timeZone)}</strong>
+                <small>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</small>
+                <em>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion only"}</em>
+                {selectedEventConfidence > 0 ? <span>Confidence {Math.round(selectedEventConfidence * 100)}%</span> : null}
+              </div>
+              <a href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)}>View full incident <ArrowRight size={15} /></a>
+            </aside> : <aside className="recordings-v2-selected-event empty"><Radar size={20} /><span>Select an event to investigate</span></aside>}
+            <section className="recordings-related-events" aria-label="Related events">
+              <header><strong>Related events</strong><span>{nearbyEvents.length} in view</span></header>
+              <div className="recordings-v2-events">
             {nearbyEvents.length ? nearbyEvents.map((event) => (
               <button
                 key={event.id}
@@ -7476,20 +7502,25 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 </span>
               </button>
             )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter === "all" ? "events" : `${eventFilter} incidents`} {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
-            </div>
-            {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
-              <span className="recordings-v2-selected-event-image">
-                <Radar size={22} />
-                {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 360, 88)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
-              </span>
-              <div>
-                <span>{selectedEvent.has_objects ? "Selected incident" : "Selected motion"}</span>
-                <strong>{formatTimeOnly(selectedEvent.incident_epoch, timeZone)}</strong>
-                <small>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</small>
-                <em>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion only"}</em>
               </div>
-              <a href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)}>View full incident <ArrowRight size={15} /></a>
-            </aside> : null}
+            </section>
+            <aside className="recordings-event-inspector" aria-label="Event inspector">
+              <div className="recordings-event-inspector-tabs" role="tablist" aria-label="Incident information">
+                {[['details', 'Details'], ['ai', 'AI'], ['related', 'Related']].map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={timelineInspectorTab === id} className={timelineInspectorTab === id ? "active" : ""} onClick={() => setTimelineInspectorTab(id)}>{label}</button>)}
+              </div>
+              {selectedEvent && timelineInspectorTab === "details" ? <dl>
+                <div><dt>Type</dt><dd>{selectedEvent.labels?.join(", ") || "Motion only"}</dd></div>
+                <div><dt>Start</dt><dd>{formatTimeOnly(selectedEvent.incident_epoch, timeZone)}</dd></div>
+                <div><dt>End</dt><dd>{Number.isFinite(selectedEventEnd) ? formatTimeOnly(selectedEventEnd, timeZone) : "—"}</dd></div>
+                <div><dt>Duration</dt><dd>{selectedEventDuration > 0 ? formatDuration(selectedEventDuration) : "—"}</dd></div>
+                <div><dt>Camera</dt><dd>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</dd></div>
+                <div><dt>Event ID</dt><dd>{selectedEvent.id}</dd></div>
+              </dl> : null}
+              {selectedEvent && timelineInspectorTab === "ai" ? <div className="recordings-inspector-message"><Sparkles size={18} /><strong>Incident intelligence</strong><span>{selectedEvent.labels?.length ? `${selectedEvent.labels.join(", ")} detected${selectedEventConfidence ? ` at ${Math.round(selectedEventConfidence * 100)}% confidence` : ""}.` : "No eligible object was attached to this motion event."}</span></div> : null}
+              {selectedEvent && timelineInspectorTab === "related" ? <div className="recordings-inspector-message"><Images size={18} /><strong>{Math.max(0, nearbyEvents.length - 1)} related events</strong><span>Use the center rail to compare nearby evidence without leaving Timeline.</span></div> : null}
+              {!selectedEvent ? <div className="recordings-inspector-message"><Radar size={18} /><strong>No event selected</strong><span>Choose an event from the timeline or related rail.</span></div> : null}
+              {selectedEvent ? <a href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)}>View full incident <ArrowRight size={14} /></a> : null}
+            </aside>
           </div>
         </div>
       </section>
