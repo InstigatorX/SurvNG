@@ -4245,20 +4245,56 @@ button.status-pill.hud-toggle:disabled {
 .onvif-field-grid {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(90px, 1fr);
-  gap: 10px;
+  gap: 7px;
 }
 
 .stream-field-row {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.camera-connectivity-grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 1.15fr) minmax(360px, 0.85fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.camera-stream-url-fields {
+  grid-template-columns: 1fr;
+  align-content: start;
+}
+
+.camera-onvif-panel {
+  gap: 7px;
+  padding: 9px 10px;
+}
+
+.camera-onvif-heading {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.camera-onvif-heading h3 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.camera-onvif-heading .check-field {
+  width: auto;
+  min-height: 24px;
+  margin: 0;
+}
+
 .live-framing-editor {
   display: grid;
-  gap: 12px;
+  gap: 7px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: 7px;
   background: var(--control-muted);
-  padding: 12px;
+  padding: 8px 10px;
 }
 
 .live-framing-heading,
@@ -4274,23 +4310,38 @@ button.status-pill.hud-toggle:disabled {
   margin: 0;
 }
 
+.live-framing-heading > div:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.live-framing-heading h3 {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
 .live-framing-heading p {
-  max-width: 760px;
-  margin-top: 3px;
+  min-width: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .live-framing-source button {
-  min-width: 74px;
-  min-height: 40px;
+  min-width: 52px;
+  min-height: 32px;
+  padding: 0 8px;
 }
 
 .live-framing-workspace {
   display: grid;
-  grid-template-columns: minmax(300px, 1.4fr) minmax(280px, 1fr);
-  align-items: center;
-  gap: 14px;
+  grid-template-columns: 160px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
 }
 
 .live-framing-preview {
@@ -4315,26 +4366,29 @@ button.status-pill.hud-toggle:disabled {
 
 .live-framing-preview span {
   position: absolute;
-  top: 7px;
-  left: 7px;
-  border-radius: 4px;
+  top: 4px;
+  left: 4px;
+  border-radius: 3px;
   background: rgb(2 8 10 / 78%);
-  padding: 3px 6px;
+  padding: 2px 4px;
   color: #fff;
-  font-size: 10px;
+  font-size: 8px;
   font-weight: 700;
 }
 
 .live-framing-controls {
   display: grid;
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(90px, 1fr)) auto auto;
+  align-items: end;
+  gap: 6px 8px;
 }
 
 .live-framing-controls label {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: center;
-  gap: 5px 10px;
+  gap: 2px 6px;
+  font-size: 10px;
 }
 
 .live-framing-controls label select,
@@ -4344,23 +4398,62 @@ button.status-pill.hud-toggle:disabled {
 
 .live-framing-controls output {
   color: var(--accent);
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
 
 .live-framing-controls input[type="range"] {
-  min-height: 44px;
+  min-height: 28px;
   margin: 0;
-  padding-block: 10px;
+  padding-block: 4px;
 }
 
 .live-framing-actions {
-  justify-content: flex-start;
-  flex-wrap: wrap;
+  display: contents;
 }
 
-@media (max-width: 900px) {
+.live-framing-actions button {
+  align-self: end;
+  min-height: 32px;
+  padding: 0 8px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .camera-connectivity-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .camera-stream-url-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .live-framing-workspace {
+    grid-template-columns: 160px minmax(0, 1fr);
+  }
+
+  .live-framing-controls {
+    grid-template-columns: repeat(2, minmax(100px, 1fr));
+  }
+
+  .live-framing-actions {
+    display: flex;
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}
+
+@media (max-width: 700px) {
+  .camera-stream-url-fields,
   .live-framing-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .live-framing-preview {
+    width: min(160px, 100%);
   }
 }
 
@@ -4370,9 +4463,23 @@ button.status-pill.hud-toggle:disabled {
     flex-direction: column;
   }
 
+  .live-framing-heading > div:first-child {
+    display: block;
+  }
+
+  .live-framing-heading p {
+    margin-top: 2px;
+    white-space: normal;
+  }
+
   .live-framing-source button,
   .live-framing-actions button {
     min-height: 44px;
+  }
+
+  .live-framing-controls input[type="range"] {
+    min-height: 44px;
+    padding-block: 10px;
   }
 }
 
