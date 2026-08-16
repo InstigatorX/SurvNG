@@ -4101,10 +4101,13 @@ button.status-pill.hud-toggle:disabled {
   color: var(--accent);
 }
 
-.camera-identity-fields,
 .camera-info-fields,
 .camera-object-policy-fields {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.camera-identity-fields {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .config-form > .config-panels {
@@ -4264,9 +4267,20 @@ button.status-pill.hud-toggle:disabled {
   align-content: start;
 }
 
+.camera-stream-panel,
 .camera-onvif-panel {
   gap: 7px;
   padding: 9px 10px;
+}
+
+.camera-stream-panel > h3,
+.camera-onvif-heading h3 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.camera-onvif-panel {
+  align-content: start;
 }
 
 .camera-onvif-heading {
@@ -4275,11 +4289,6 @@ button.status-pill.hud-toggle:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-}
-
-.camera-onvif-heading h3 {
-  margin: 0;
-  font-size: 12px;
 }
 
 .camera-onvif-heading .check-field {

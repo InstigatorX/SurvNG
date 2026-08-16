@@ -10771,22 +10771,25 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
 
               {cameraSection === "settings" ? <>
               <div className="camera-connectivity-grid">
-                <div className="field-row stream-field-row camera-stream-url-fields">
-                  <div className="stream-field">
-                    <div className="stream-field-head">
-                      <label htmlFor={`main-stream-${selectedCamera.id}`}>Main Stream URL</label>
-                      <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record} onChange={(event) => updateCamera(selectedCamera.id, ["record"], event.target.checked)} /> Record</label>
+                <section className="sub-panel camera-stream-panel" aria-labelledby={`camera-stream-title-${selectedCamera.id}`}>
+                  <h3 id={`camera-stream-title-${selectedCamera.id}`}>Streams</h3>
+                  <div className="field-row stream-field-row camera-stream-url-fields">
+                    <div className="stream-field">
+                      <div className="stream-field-head">
+                        <label htmlFor={`main-stream-${selectedCamera.id}`}>Main Stream URL</label>
+                        <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record} onChange={(event) => updateCamera(selectedCamera.id, ["record"], event.target.checked)} /> Record</label>
+                      </div>
+                      <input id={`main-stream-${selectedCamera.id}`} value={selectedCamera.stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["stream_url"], event.target.value)} />
                     </div>
-                    <input id={`main-stream-${selectedCamera.id}`} value={selectedCamera.stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["stream_url"], event.target.value)} />
-                  </div>
-                  <div className="stream-field">
-                    <div className="stream-field-head">
-                      <label htmlFor={`sub-stream-${selectedCamera.id}`}>Live/Sub Stream URL</label>
-                      <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record_sub || false} onChange={(event) => updateCamera(selectedCamera.id, ["record_sub"], event.target.checked)} /> Record</label>
+                    <div className="stream-field">
+                      <div className="stream-field-head">
+                        <label htmlFor={`sub-stream-${selectedCamera.id}`}>Live/Sub Stream URL</label>
+                        <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record_sub || false} onChange={(event) => updateCamera(selectedCamera.id, ["record_sub"], event.target.checked)} /> Record</label>
+                      </div>
+                      <input id={`sub-stream-${selectedCamera.id}`} value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} />
                     </div>
-                    <input id={`sub-stream-${selectedCamera.id}`} value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} />
                   </div>
-                </div>
+                </section>
                 <CameraOnvifEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
               </div>
               <LiveViewFramingEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
