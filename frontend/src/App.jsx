@@ -2009,7 +2009,15 @@ function usePollingData() {
   useVisiblePolling(load, 60_000);
   useEffect(() => () => { loadSequence.current += 1; }, []);
 
-  return { cameras, appConfig, loading, refresh: load };
+  const camerasWithPresentation = useMemo(() => {
+    const configById = new Map((appConfig?.cameras || []).map((camera) => [camera.id, camera]));
+    return cameras.map((camera) => ({
+      ...camera,
+      live_view: configById.get(camera.id)?.live_view || camera.live_view,
+    }));
+  }, [appConfig, cameras]);
+
+  return { cameras: camerasWithPresentation, appConfig, loading, refresh: load };
 }
 
 function useIncidentDetails() {
@@ -2372,6 +2380,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
           <>
             <img
               className="camera-tile-poster"
+              style={liveFramingStyle(camera, posterSource)}
               src={imageUrl}
               alt={`${camera.name} ${sourceMode === "main" ? "main" : "sub"} live stream`}
               onLoad={(event) => rememberAspect(
@@ -2381,7 +2390,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
               )}
             />
             {shouldUseWebRtc ? (
-              <div className={`camera-live-layer${tileLiveReady ? " ready" : ""}`}>
+              <div className={`camera-live-layer${tileLiveReady ? " ready" : ""}`} style={liveFramingStyle(camera, deliveredSource)}>
                 <WebRtcLive
                   cameraId={camera.id}
                   source={sourceMode}
@@ -2536,7 +2545,7 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
             <X size={18} />
           </button>
         </div>
-        <div className="live-overlay-media">
+        <div className="live-overlay-media" style={liveFramingStyle(camera, deliveredSource)}>
           {!mediaReady ? (
             <div className="live-media-status" role="status" aria-live="polite">
               <RefreshCcw className="spin" size={20} />

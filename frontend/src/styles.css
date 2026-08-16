@@ -2638,6 +2638,17 @@ button.status-pill.hud-toggle:disabled {
   background: transparent;
 }
 
+.camera-tile-poster,
+.camera-live-layer .live-stack > video,
+.camera-live-layer .live-stack > img,
+.live-overlay-media .live-stack > video,
+.live-overlay-media .live-stack > img {
+  object-fit: var(--live-object-fit, cover);
+  object-position: var(--live-object-position, 50% 50%);
+  transform: scale(var(--live-view-zoom, 1));
+  transform-origin: var(--live-object-position, 50% 50%);
+}
+
 .zoomable-event-image {
   transform-origin: center center;
   transition: transform 90ms ease-out;
@@ -13717,7 +13728,10 @@ a:focus-visible {
 .live-camera-grid .camera-tile .video-frame { border-radius: 2px; }
 .live-camera-grid.viewport-layout .camera-tile-poster,
 .live-camera-grid.viewport-layout .camera-live-layer .live-stack > video,
-.live-camera-grid.viewport-layout .camera-live-layer .live-stack > img { object-fit: cover; object-position: center; }
+.live-camera-grid.viewport-layout .camera-live-layer .live-stack > img {
+  object-fit: var(--live-object-fit, cover);
+  object-position: var(--live-object-position, 50% 50%);
+}
 .events-zone .section-head { min-height: 58px; border-bottom: 1px solid var(--line); padding: 9px 10px; }
 .events-zone .section-head h2 { font-size: 16px; font-weight: 620; }
 .incident-head-actions { gap: 5px; }
