@@ -118,6 +118,7 @@ import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSee
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
+import { filteredTimelineCameras, normalizedTimelinePlaybackRate, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -6385,12 +6386,22 @@ function RecordingSectionSwitcher({ mode, cameraId = "" }) {
   );
 }
 
-function RecordingCameraRail({ subtitle, children }) {
+function RecordingCameraRail({ cameras, value, query, onCameraChange, onQueryChange, children }) {
   return (
     <aside className="recordings-v2-cameras" aria-label="Cameras">
       <header className="recordings-camera-header">
-        <strong>Cameras</strong>
-        <small>{subtitle}</small>
+        <label>
+          <span className="sr-only">Timeline camera</span>
+          <select value={value} onChange={(event) => onCameraChange(event.target.value)}>
+            <option value={ALL_RECORDING_CAMERAS_ID}>All cameras</option>
+            {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
+          </select>
+        </label>
+        <label className="recordings-camera-search">
+          <Search size={14} aria-hidden="true" />
+          <span className="sr-only">Search cameras</span>
+          <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search cameras" />
+        </label>
       </header>
       <div className="recordings-camera-list">{children}</div>
     </aside>
@@ -6614,6 +6625,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [exportSubmitting, setExportSubmitting] = useState(false);
   const [gridPlaying, setGridPlaying] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState(null);
+  const [cameraQuery, setCameraQuery] = useState("");
+  const [playbackRate, setPlaybackRate] = useState(1);
 
   const isAllCameras = cameraId === ALL_RECORDING_CAMERAS_ID;
   const activeCameraId = isAllCameras
@@ -6623,6 +6636,10 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const nextDate = addDaysToDateKey(date, 1);
   const dayEnd = useMemo(() => zonedDateSecondToEpoch(nextDate, 0, timeZone), [nextDate, timeZone]);
   const daySeconds = Math.max(1, dayEnd - dayStart);
+  const visibleRailCameras = useMemo(
+    () => filteredTimelineCameras(cameras, cameraQuery),
+    [cameraQuery, cameras],
+  );
 
   useEffect(() => {
     onAssistantContextChange?.({
@@ -6653,6 +6670,10 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
     return epochToPlaybackMediaTime(initialEpoch);
   }, [manifestUrl, playbackTimeline]);
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = normalizedTimelinePlaybackRate(playbackRate);
+  }, [playbackRate]);
 
   const filteredEvents = useMemo(() => events
     .filter((event) => eventFilter === "all" || (eventFilter === "object" ? Boolean(event.has_objects) : !event.has_objects))
@@ -6869,7 +6890,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       previous = now;
       setPlayhead((current) => {
         const base = Number.isFinite(current) ? current : timeline[0].start_epoch;
-        const requested = base + elapsed;
+        const requested = base + (elapsed * playbackRate);
         const containing = timeline.find((item) => item.start_epoch <= requested && requested < item.end_epoch);
         let next = containing ? requested : null;
         if (!Number.isFinite(next)) {
@@ -6885,7 +6906,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       });
     }, 500);
     return () => window.clearInterval(timer);
-  }, [dayEnd, gridPlaying, isAllCameras, timeline]);
+  }, [dayEnd, gridPlaying, isAllCameras, playbackRate, timeline]);
 
   useEffect(() => {
     if (!isAllCameras || !gridPlaying) return undefined;
@@ -7098,6 +7119,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   }, [activeCameraId, date, source, dayStart, dayEnd]);
 
   function handleRecordingReady(_player, video) {
+    video.playbackRate = normalizedTimelinePlaybackRate(playbackRate);
     if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
     playbackRetryRef.current = { attempts: 0, timer: null };
     const retained = Number.isFinite(pendingSeekEpochRef.current)
@@ -7286,7 +7308,6 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   return (
     <main className="recordings-v2-page">
       <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
-        <RecordingSectionSwitcher mode="history" cameraId={activeCameraId} />
         <div className="recordings-commandbar-scope">
           {isAllCameras ? <Grid2X2 size={15} /> : <Camera size={15} />}
           <strong>{isAllCameras ? "All cameras" : cameras.find((camera) => camera.id === activeCameraId)?.name || activeCameraId}</strong>
@@ -7302,17 +7323,32 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main <small>High</small></button>
           <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub <small>Medium</small></button>
         </div>
-        <span className="recordings-commandbar-time">{Number.isFinite(playhead) ? formatDateTime(playhead, timeZone) : "Choose a recording time"}</span>
+        <label className="recordings-playback-rate">
+          <span className="sr-only">Playback speed</span>
+          <select value={playbackRate} onChange={(event) => setPlaybackRate(normalizedTimelinePlaybackRate(event.target.value))}>
+            {TIMELINE_PLAYBACK_RATES.map((rate) => <option key={rate} value={rate}>{rate}x</option>)}
+          </select>
+        </label>
+        <div className="recordings-commandbar-export">
+          <button type="button" onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}>Export</button>
+          <a href={appUrl("/timeline/exports")} aria-label="Open Export Center"><ChevronRight size={15} /></a>
+        </div>
       </nav>
-      <RecordingCameraRail subtitle="Choose recording source">
-        <span className="recordings-camera-group">Overview</span>
+      <RecordingCameraRail
+        cameras={cameras}
+        value={isAllCameras ? ALL_RECORDING_CAMERAS_ID : activeCameraId}
+        query={cameraQuery}
+        onCameraChange={(nextCameraId) => { setCameraId(nextCameraId); if (nextCameraId === ALL_RECORDING_CAMERAS_ID) setSource("live"); }}
+        onQueryChange={setCameraQuery}
+      >
+        <span className="recordings-camera-group">Camera views</span>
         <button type="button" className={isAllCameras ? "active" : ""} onClick={() => { setCameraId(ALL_RECORDING_CAMERAS_ID); setSource("live"); }}>
           <Grid2X2 size={16} />
           <span>All Cameras</span>
           <i className={cameras.some((camera) => camera.recording || camera.sub_recording) ? "online" : ""} />
         </button>
-        <span className="recordings-camera-group">Individual cameras · {cameras.length}</span>
-        {cameras.map((camera) => (
+        <span className="recordings-camera-group">Cameras · {visibleRailCameras.length}</span>
+        {visibleRailCameras.map((camera) => (
           <button key={camera.id} type="button" className={camera.id === activeCameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
             <Camera size={16} />
             <span>{camera.name}</span>

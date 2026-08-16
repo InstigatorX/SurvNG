@@ -27,6 +27,7 @@
     "test:recordings-soak": "node tests/recordings-soak.mjs",
     "test:recording-playback": "node tests/recording-playback.mjs",
     "test:recording-grid": "node tests/recording-grid.mjs",
+    "test:timeline-workspace": "node tests/timeline-workspace.mjs",
     "test:object-tracks": "node tests/object-track-replay.mjs",
     "test:incident-navigation": "node tests/incident-navigation.mjs",
     "test:semantic-search": "node tests/semantic-search-state.mjs",
