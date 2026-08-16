@@ -12964,7 +12964,7 @@ a:focus-visible {
 }
 
 .app-shell {
-  grid-template-columns: 176px minmax(0, 1fr);
+  grid-template-columns: var(--workspace-rail-width) minmax(0, 1fr);
   grid-template-rows: 58px minmax(0, 1fr);
   background: var(--canvas);
 }

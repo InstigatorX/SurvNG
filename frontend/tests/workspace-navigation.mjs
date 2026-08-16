@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   canonicalWorkspacePath,
   canonicalWorkspaceUrl,
@@ -71,5 +72,9 @@ assert.deepEqual(
   systemHealthState({ lifecycle: "running", storage: { available: false }, detector: { enabled: false }, cameras: { enabled: 0, online: 0, recording_expected: 0, recording: 0 } }),
   { healthy: false, severity: "attention", label: "Needs attention" },
 );
+
+const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+assert.equal(stylesSource.includes("grid-template-columns: 176px minmax(0, 1fr)"), false);
+assert.match(stylesSource, /\.app-shell\.workspace-rail-collapsed\s*\{\s*--workspace-rail-width:\s*68px;/);
 
 console.log("workspace navigation contract tests passed");
