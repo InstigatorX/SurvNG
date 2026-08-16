@@ -13450,7 +13450,7 @@ a:focus-visible {
 }
 
 /* Admin and Detection Tune-Up */
-.settings-grid { grid-template-columns: 244px repeat(3, minmax(0, 1fr)); gap: 0; min-height: calc(100dvh - 58px); background: var(--canvas); padding: 0; }
+.settings-grid { grid-template-columns: 244px repeat(3, minmax(0, 1fr)); grid-template-rows: 54px minmax(0, 1fr); gap: 0; min-height: calc(100dvh - 58px); background: var(--canvas); padding: 0; }
 .settings-tabs { top: 58px; min-height: 54px; margin: 0; gap: 10px; background: var(--topbar); padding: 5px 10px; backdrop-filter: none; }
 .settings-context strong { font-size: 12px; font-weight: 620; }
 .settings-context small { font-size: 9px; }

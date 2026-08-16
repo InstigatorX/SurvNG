@@ -8,9 +8,12 @@ try {
   const page = await context.newPage();
   await page.goto("http://127.0.0.1:8088/survng/", { waitUntil: "domcontentloaded", timeout: 30_000 });
   await page.locator(".camera-tile").first().waitFor({ state: "visible" });
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   assert.equal(await page.title(), "SurvNG");
   assert.match(await page.locator(".workspace-content > h1").textContent(), /SurvNG — Live/);
   assert.equal(await page.locator("h1").count(), 1);
+  assert.equal(await page.locator(".live-command-scope").isVisible(), true);
+  assert.ok(Number.parseFloat(await page.locator(".live-command-bar").evaluate((node) => getComputedStyle(node).borderRadius)) <= 4);
 
   await page.evaluate(() => {
     window.__survngTileNodes = [...document.querySelectorAll(".camera-tile")];
@@ -47,6 +50,8 @@ try {
   assert.equal(await page.title(), "SurvNG · Timeline");
   assert.match(await page.locator(".workspace-content > h1").textContent(), /SurvNG — Timeline/);
   assert.equal(await page.locator("h1").count(), 1);
+  assert.equal(await page.getByRole("button", { name: "All events" }).getAttribute("aria-pressed"), "true");
+  assert.equal(await page.locator(".recordings-camera-group").first().isVisible(), true);
 
   for (const [path, title] of [
     ["incidents", "Incidents"],
@@ -65,6 +70,7 @@ try {
   assert.equal(await page.locator(".workspace-sidebar").isVisible(), false);
   assert.equal(await page.locator(".mobile-workspace-nav").isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+  assert.ok(await page.locator(".mobile-workspace-nav a").first().evaluate((node) => node.getBoundingClientRect().height >= 44));
 } finally {
   await browser.close();
 }

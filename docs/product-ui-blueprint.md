@@ -1,6 +1,6 @@
 # SurvNG product interface blueprint
 
-Status: implementation contract for the hybrid interface campaigns.
+Status: implemented product contract and release-certification reference.
 
 This document defines the operator workflows, navigation, shared interaction
 rules, compatibility requirements, and responsive behavior that must remain
@@ -14,6 +14,32 @@ The visual targets are:
 
 These mockups define hierarchy and interaction density, not literal sample
 camera names, dates, or generated imagery.
+
+## Visual system
+
+The mockups are the source of truth for visual hierarchy. SurvNG uses a compact,
+monitoring-oriented system rather than a collection of floating dashboard cards:
+
+- Dark is the fresh-install default. Existing explicit theme choices remain
+  respected, and the light theme uses the same hierarchy and density.
+- The canvas is near-black blue; application chrome and workspaces are separated
+  primarily by one-pixel dividers rather than shadows.
+- Teal identifies selection, the current time, and primary actions. Green,
+  amber, and red are reserved for operational state.
+- The type stack is `Inter`, `SF Pro Text`, `Segoe UI`, then the platform
+  sans-serif. Normal interface text is 13–14px; metadata is 9–11px; workspace
+  headings are 14–20px. Weight, not oversized text, establishes hierarchy.
+- Controls use four-pixel corners. Segmented controls share one outer boundary
+  and internal dividers. Pills are reserved for compact state and labels, not
+  general navigation.
+- Desktop workspaces are edge-to-edge within the shell. Rails are 226–306px,
+  inspectors are about 278px, and media/evidence receives the remaining width.
+- Mobile keeps the same terminology and order of operations while replacing
+  vertical rails with horizontal selectors and inspectors with sheets.
+
+The standard visual sequence is **scope → controls → primary evidence → nearby
+evidence → details/actions**. Live, Timeline, Incidents, Search, People, Admin,
+and operational views all follow this sequence where their workflow permits it.
 
 ## Product model
 
