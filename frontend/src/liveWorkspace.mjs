@@ -34,6 +34,21 @@ export function liveDensityPage(cameras, density, page = 0) {
   };
 }
 
+export function liveActivityQuickFilter(eventType, objectFilter) {
+  const type = String(eventType || "all");
+  const object = String(objectFilter || "all").toLowerCase();
+  if (type === "all" && object === "all") return "all";
+  if (type === "object" && object === "person") return "person";
+  if (type === "object" && ["car", "vehicle"].includes(object)) return "vehicle";
+  return "custom";
+}
+
+export function liveActivityQuickSelection(mode) {
+  if (mode === "person") return { eventType: "object", objectFilter: "person" };
+  if (mode === "vehicle") return { eventType: "object", objectFilter: "car" };
+  return { eventType: "all", objectFilter: "all" };
+}
+
 export function liveActivityEventId(incident) {
   const value = Number(
     incident?.representative_event_id

@@ -13464,9 +13464,11 @@ a:focus-visible {
 .incident-filter-toggle button { min-height: 36px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; font-size: 10px; font-weight: 550; }
 .incident-filter-toggle button:first-child { border-left: 0; }
 .incident-filter-toggle button.active { background: color-mix(in srgb, var(--accent) 19%, var(--control)); }
+.live-quick-filters { flex: 1; }
+.live-quick-filters button { flex: 1; min-width: 0; }
 .shown-bubble { border-radius: 4px; background: var(--panel-soft); font-size: 9px; font-weight: 560; padding: 6px 8px; }
 .live-activity-filters { background: var(--panel-solid); }
-.live-activity-filters > summary { min-height: 38px; line-height: 38px; font-weight: 560; text-transform: none; }
+.live-activity-filters > summary { display: flex; min-height: 38px; align-items: center; gap: 6px; line-height: 38px; font-weight: 560; text-transform: none; }
 .live-activity-list { gap: 0; padding: 0; }
 .live-activity-item { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
 .live-activity-item.selected { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }

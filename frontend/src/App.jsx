@@ -117,7 +117,7 @@ import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incid
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
-import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
+import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -4587,6 +4587,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
+  const activityQuickFilter = liveActivityQuickFilter(eventFilter, incidentObjectFilter);
 
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
@@ -5844,6 +5845,13 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     setIncidentPage(Math.max(0, nextPage));
   }
 
+  function selectActivityQuickFilter(mode) {
+    const selection = liveActivityQuickSelection(mode);
+    setEventFilter(selection.eventType);
+    setIncidentObjectFilter(selection.objectFilter);
+    setIncidentPage(0);
+  }
+
   return (
     <main ref={liveWorkspaceRef} className="bento-grid live-grid">
       <LiveCommandBar cameraCount={visibleLiveCameras.length} totalCameraCount={orderedCameras.length} density={effectiveLiveDensity} densityPage={densitySelection.page} densityPageCount={densitySelection.pageCount} layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onDensityChange={changeLiveDensity} onDensityPageChange={setLiveDensityPageValue} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} onFullscreen={openLiveFullscreen} />
@@ -5905,15 +5913,15 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
         <div className="section-head compact incident-head">
           <div><h2>Recent Activity</h2></div>
           <div className="incident-head-actions">
-            <div className="incident-filter-toggle compact" role="group" aria-label="Incident type filter">
-              <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Object</button>
-              <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => setEventFilter("motion")}>Motion only</button>
+            <div className="incident-filter-toggle compact live-quick-filters" role="group" aria-label="Recent activity filter">
+              <button className={activityQuickFilter === "all" ? "active" : ""} aria-pressed={activityQuickFilter === "all"} onClick={() => selectActivityQuickFilter("all")}>All</button>
+              <button className={activityQuickFilter === "person" ? "active" : ""} aria-pressed={activityQuickFilter === "person"} onClick={() => selectActivityQuickFilter("person")}>Person</button>
+              <button className={activityQuickFilter === "vehicle" ? "active" : ""} aria-pressed={activityQuickFilter === "vehicle"} onClick={() => selectActivityQuickFilter("vehicle")}>Vehicle</button>
             </div>
-            <span className="shown-bubble">{visibleIncidents.length} shown</span>
           </div>
         </div>
         <details className="live-activity-filters">
-          <summary>Filters{[incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length ? ` (${[incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length})` : ""}</summary>
+          <summary><SlidersHorizontal size={14} /> Advanced filters{[incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length ? ` (${[incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length})` : ""}</summary>
           <div className="event-filter incident-filter-panel" aria-label="Incident filters">
           <div className="incident-filter-selects">
             <label>
