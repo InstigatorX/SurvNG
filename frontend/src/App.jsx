@@ -2045,6 +2045,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
   const [cameraActionError, setCameraActionError] = useState("");
   const [controlMenuOpen, setControlMenuOpen] = useState(false);
   const [hoverPreview, setHoverPreview] = useState(false);
+  const [tileLiveReady, setTileLiveReady] = useState(false);
   const displayedTransport = hoverPreview ? "webrtc" : activeTransport;
   const shouldUseLiveMedia = liveMediaShouldRun({ running: camera.running, streamReady: hoverPreview || streamReady, mediaActive, transport: displayedTransport });
   const shouldUseWebRtc = shouldUseLiveMedia && displayedTransport === "webrtc";
@@ -2056,6 +2057,10 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
   }, [aspect, camera.id, onAspectChange]);
 
   useEffect(() => () => window.clearTimeout(hoverTimerRef.current), []);
+
+  useEffect(() => {
+    if (!shouldUseWebRtc) setTileLiveReady(false);
+  }, [shouldUseWebRtc]);
 
   useEffect(() => {
     if (!controlMenuOpen) return undefined;
@@ -2156,6 +2161,11 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
     );
     if (activate && !cameraSourceAspect(camera, normalizedSource)) setAspect(measuredAspect);
   }
+
+  const handleTileStageChange = React.useCallback((_stage, nextSource) => {
+    setTileLiveReady(false);
+    setDeliveredSource(normalizedLiveSource(nextSource));
+  }, []);
 
   useEffect(() => {
     setStreamReady(false);
@@ -2303,15 +2313,18 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
               )}
             />
             {shouldUseWebRtc ? (
-              <div className="camera-live-layer">
+              <div className={`camera-live-layer${tileLiveReady ? " ready" : ""}`}>
                 <WebRtcLive
                   cameraId={camera.id}
                   source={sourceMode}
                   timeZone={timeZone}
                   muted
                   showPoster={false}
-                  onStageChange={(_stage, nextSource) => setDeliveredSource(normalizedLiveSource(nextSource))}
-                  onReady={(media, _stage, readySource) => rememberAspect(media, readySource || deliveredSource)}
+                  onStageChange={handleTileStageChange}
+                  onReady={(media, _stage, readySource) => {
+                    rememberAspect(media, readySource || deliveredSource);
+                    setTileLiveReady(true);
+                  }}
                 />
               </div>
             ) : null}

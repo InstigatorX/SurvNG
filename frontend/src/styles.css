@@ -2737,8 +2737,12 @@ button.status-pill.hud-toggle:disabled {
   position: absolute;
   inset: 0;
   z-index: 1;
+  opacity: 0;
   pointer-events: none;
+  transition: opacity 160ms ease-out;
 }
+
+.camera-live-layer.ready { opacity: 1; }
 
 .camera-live-layer .live-stack {
   background: transparent;
@@ -14200,9 +14204,29 @@ a.button { border-radius: 3px; }
 .live-activity-trigger:hover,
 .live-activity-trigger:focus-visible { background: var(--control-muted); }
 .live-activity-actions { grid-column: 1 / -1; }
-.camera-tile-control-menu .tile-controls { display: grid; }
+.camera-tile .camera-tile-control-menu {
+  width: min(168px, calc(100% - 8px));
+  padding: 2px;
+}
+.camera-tile .camera-tile-control-menu .tile-controls {
+  display: grid;
+  width: 100%;
+  justify-content: stretch;
+  gap: 0;
+}
+.camera-tile .camera-tile-control-menu .tile-control-button,
+.camera-tile .camera-tile-control-menu button.status-pill.hud-toggle {
+  width: 100%;
+  min-height: 32px;
+  height: 32px;
+  justify-content: flex-start !important;
+  gap: 6px;
+  padding: 0 6px;
+}
 
 @media (max-width: 760px) {
   .live-activity-trigger { top: 0; right: 0; }
   .live-camera-grid .camera-tile:not(.mobile-primary) .camera-tile-control-menu .tile-controls { display: grid; }
+  .camera-tile .camera-tile-control-menu .tile-control-button,
+  .camera-tile .camera-tile-control-menu button.status-pill.hud-toggle { min-height: 44px; height: 44px; }
 }
