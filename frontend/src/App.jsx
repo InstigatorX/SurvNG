@@ -6469,6 +6469,7 @@ function RecordingCompanionStrip({ cameras, routes, activeCameraId, source, epoc
   const expectedCompanions = expectedTimelineCameras(cameras, routes, activeCameraId, 6);
   const usingExpectedRoutes = expectedCompanions.length > 0;
   const companions = usingExpectedRoutes ? expectedCompanions : cameras.filter((camera) => camera.id !== activeCameraId).slice(0, 6);
+  if (!companions.length) return null;
   const grid = timelineCompanionGrid(companions.length);
   return <div
     className="recording-selected-companions"

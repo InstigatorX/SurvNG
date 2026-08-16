@@ -9679,14 +9679,21 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-player.selected-camera-stage video {
   right: auto;
-  width: calc(60% - 2px);
+  width: calc(100% - var(--timeline-companion-width, 0%));
 }
+
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions[data-camera-count="1"]) { --timeline-companion-width: 36%; }
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions[data-camera-count="2"]) { --timeline-companion-width: 30%; }
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions[data-camera-count="3"]) { --timeline-companion-width: 20%; }
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions[data-camera-count="4"]) { --timeline-companion-width: 46%; }
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions[data-camera-count="5"]),
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions[data-camera-count="6"]) { --timeline-companion-width: 40%; }
 
 .recording-selected-companions {
   position: absolute;
   inset: 0 0 0 auto;
   display: grid;
-  width: 40%;
+  width: var(--timeline-companion-width, 40%);
   grid-template-columns: repeat(var(--companion-columns, 2), minmax(0, 1fr));
   grid-template-rows: repeat(var(--companion-rows, 3), minmax(0, 1fr));
   gap: var(--timeline-media-gap);
@@ -9704,7 +9711,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   padding: 0;
 }
 
-.recording-selected-companions img { width: 100%; height: 100%; object-fit: cover; }
+.recording-selected-companions img { width: 100%; height: 100%; object-fit: contain; }
 .recording-selected-companions span {
   position: absolute;
   inset: 0 0 auto;
