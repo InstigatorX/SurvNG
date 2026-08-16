@@ -15,6 +15,40 @@ export function orderedLiveCamerasForFocus(cameras, focusedCameraId, mobile) {
 
 export const LIVE_DENSITY_OPTIONS = Object.freeze(["fit", "4", "6", "9", "16", "25"]);
 
+export function uniformLiveGridLayout(cameras, width, height, gap = 4, aspect = 16 / 9) {
+  const items = [...(cameras || [])];
+  const availableWidth = Number(width);
+  const availableHeight = Number(height);
+  const tileAspect = Number(aspect);
+  if (!items.length || !(availableWidth > 0) || !(availableHeight > 0) || !(tileAspect > 0)) return [];
+
+  let best = null;
+  for (let columns = 1; columns <= items.length; columns += 1) {
+    const rows = Math.ceil(items.length / columns);
+    const widthPerTile = (availableWidth - gap * (columns - 1)) / columns;
+    const heightPerTile = (availableHeight - gap * (rows - 1)) / rows;
+    if (!(widthPerTile > 0) || !(heightPerTile > 0)) continue;
+    const tileWidth = Math.min(widthPerTile, heightPerTile * tileAspect);
+    const tileHeight = tileWidth / tileAspect;
+    const area = tileWidth * tileHeight;
+    const emptyCells = columns * rows - items.length;
+    if (!best || area > best.area + 0.001 || (Math.abs(area - best.area) <= 0.001 && emptyCells < best.emptyCells)) {
+      best = { columns, rows, tileWidth, tileHeight, area, emptyCells };
+    }
+  }
+  if (!best) return [];
+
+  const gridWidth = best.columns * best.tileWidth + gap * (best.columns - 1);
+  const offsetX = Math.max(0, (availableWidth - gridWidth) / 2);
+  return items.map((camera, index) => ({
+    camera,
+    x: offsetX + (index % best.columns) * (best.tileWidth + gap),
+    y: Math.floor(index / best.columns) * (best.tileHeight + gap),
+    width: best.tileWidth,
+    height: best.tileHeight,
+  }));
+}
+
 export function normalizedLiveDensity(value) {
   const normalized = String(value || "fit").toLowerCase();
   return LIVE_DENSITY_OPTIONS.includes(normalized) ? normalized : "fit";

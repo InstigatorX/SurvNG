@@ -115,9 +115,9 @@ import { useVisiblePolling } from "./visibilityPolling.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
+import { recordingCameraAspect, recordingGridBestEpoch } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
-import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
+import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "./liveWorkspace.mjs";
 import { filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
@@ -5347,16 +5347,13 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   );
   const displayedCustomLayout = keyboardLayoutPreview || customLayout;
   const liveCameraLayout = useMemo(
-    () => recordingGridLayout(
+    () => uniformLiveGridLayout(
       visibleLiveCameras,
-      "live",
       liveCameraGridSize.width,
       liveCameraGridSize.height,
       4,
-      liveCameraAspects,
-      { portraitPriority: true, portraitRowSpan: 2 },
     ),
-    [liveCameraAspects, liveCameraGridSize.height, liveCameraGridSize.width, visibleLiveCameras],
+    [liveCameraGridSize.height, liveCameraGridSize.width, visibleLiveCameras],
   );
   const liveCameraLayoutById = useMemo(
     () => new Map(liveCameraLayout.map((item) => [item.camera.id, item])),

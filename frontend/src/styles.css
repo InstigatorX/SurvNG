@@ -13598,6 +13598,9 @@ a:focus-visible {
 .live-grid > .camera-zone { border-right: 1px solid var(--line); }
 .live-camera-grid.viewport-layout .camera-tile.viewport-layout .video-frame,
 .live-camera-grid .camera-tile .video-frame { border-radius: 2px; }
+.live-camera-grid.viewport-layout .camera-tile-poster,
+.live-camera-grid.viewport-layout .camera-live-layer .live-stack > video,
+.live-camera-grid.viewport-layout .camera-live-layer .live-stack > img { object-fit: cover; object-position: center; }
 .events-zone .section-head { min-height: 58px; border-bottom: 1px solid var(--line); padding: 9px 10px; }
 .events-zone .section-head h2 { font-size: 16px; font-weight: 620; }
 .incident-head-actions { gap: 5px; }
