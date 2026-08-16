@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { filteredTimelineCameras, normalizedTimelinePlaybackRate, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { readFileSync } from "node:fs";
+import { filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -15,10 +16,25 @@ assert.equal(filteredTimelineCameras(cameras, "missing").length, 0);
 assert.equal(filteredTimelineCameras(cameras, "").length, 2);
 assert.deepEqual(timelineStageCameras(cameras, "garage", 2).map((camera) => camera.id), ["garage", "front-door"]);
 assert.equal(timelineStageCameras(Array.from({ length: 12 }, (_, index) => ({ id: `camera-${index}` })), "camera-9").length, 7);
+assert.deepEqual(timelineStagePage(Array.from({ length: 15 }, (_, index) => ({ id: index })), 2), { cameras: [{ id: 14 }], page: 2, pages: 3 });
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["person"] }, "people"), true);
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["car"] }, "vehicles"), true);
 assert.equal(timelineEventMatchesFilter({ has_objects: false, labels: [] }, "motion"), true);
 const evidence = [0, 10, 20, 30].map((incident_epoch) => ({ incident_epoch }));
 assert.deepEqual(timelineEvidenceWindow(evidence, 18, 2).map((event) => event.incident_epoch), [10, 20]);
+const filteredEvidence = [
+  { id: 1, incident_epoch: 10, has_objects: true, labels: ["person"] },
+  { id: 2, incident_epoch: 11, has_objects: true, labels: ["car"] },
+  { id: 3, incident_epoch: 12, has_objects: false, labels: [] },
+].filter((event) => timelineEventMatchesFilter(event, "people"));
+assert.deepEqual(timelineEvidenceWindow(filteredEvidence, 10, 12).map((event) => event.id), [1]);
+assert.deepEqual(parseTimelineView("?camera=gate&date=2026-08-15&source=main&at=123.5&event=44101&filter=vehicles&inspector=ai&window=4&objects=0&thumbs=0&speed=2", "2026-08-16"), {
+  cameraId: "gate", date: "2026-08-15", source: "main", at: 123.5, eventFilter: "vehicles", eventId: 44101,
+  inspector: "ai", windowHours: 4, lanes: { object: false, motion: true }, thumbnails: false, speed: 2,
+});
+const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+const recordingsSource = appSource.slice(appSource.indexOf("function RecordingsPage"), appSource.indexOf("function exportStatusLabel"));
+assert.match(recordingsSource, /const timelineInspectorTriggerRef = useRef\(null\)/);
+assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);
 
 console.log("timeline workspace tests passed");

@@ -9546,7 +9546,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .recording-camera-grid.stage-layout {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(260px, 2fr);
-  grid-template-rows: repeat(3, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--timeline-media-gap);
 }
 
@@ -9560,8 +9560,16 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .recording-camera-grid.stage-layout .recording-grid-tile.primary {
-  grid-row: 1 / 4;
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.recording-grid-companions {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  gap: var(--timeline-media-gap);
 }
 
 .recording-grid-preview {
@@ -9590,6 +9598,70 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recording-grid-tile.companion .recording-grid-focus-hit { cursor: pointer; }
 .recording-grid-tile.primary .recording-grid-focus-hit { pointer-events: none; }
+
+.recordings-v2-player.selected-camera-stage video {
+  right: auto;
+  width: calc(60% - 2px);
+}
+
+.recording-selected-companions {
+  position: absolute;
+  inset: 0 0 0 auto;
+  display: grid;
+  width: 40%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  gap: var(--timeline-media-gap);
+  background: #020608;
+}
+
+.recording-selected-companions button {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: #030708;
+  padding: 0;
+}
+
+.recording-selected-companions img { width: 100%; height: 100%; object-fit: cover; }
+.recording-selected-companions span {
+  position: absolute;
+  inset: 0 0 auto;
+  display: flex;
+  min-height: 25px;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  background: rgba(2, 6, 8, .84);
+  color: #fff;
+  font-size: 9px;
+  padding: 0 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-selected-companions span i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
+.recording-selected-companions span i.online { background: #42ca66; }
+.recording-selected-companions span em { margin-left: auto; color: var(--muted); font-size: 7px; font-style: normal; text-transform: uppercase; }
+
+.recording-stage-pagination {
+  position: absolute;
+  z-index: 8;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.2);
+  border-radius: 3px;
+  background: rgba(2,6,8,.84);
+}
+
+.recording-stage-pagination button { width: 32px; min-height: 32px; border: 0; border-radius: 0; background: transparent; color: #fff; padding: 0; }
+.recording-stage-pagination span { min-width: 40px; color: #fff; font-size: 9px; text-align: center; }
 
 .recording-grid-tile {
   position: absolute;
@@ -9623,42 +9695,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   border-radius: 0;
   background: transparent;
   cursor: zoom-in;
-}
-
-.recording-camera-grid.has-focus .recording-grid-tile:not(.focused) {
-  opacity: .48;
-}
-
-.recording-grid-tile.focused {
-  position: absolute;
-  z-index: 6;
-  top: 50%;
-  left: 50%;
-  width: min(78%, 1100px);
-  height: min(86%, 760px);
-  aspect-ratio: auto;
-  opacity: 1;
-  transform: translate(-50%, -50%);
-  border-color: rgba(65, 214, 190, .8);
-  box-shadow: 0 18px 60px rgba(0, 0, 0, .75), 0 0 0 1px rgba(65, 214, 190, .18);
-}
-
-.recording-grid-tile.focused .recording-grid-focus-hit { cursor: zoom-out; }
-
-.recording-grid-close-focus {
-  position: absolute;
-  z-index: 8;
-  top: calc(7% + 6px);
-  right: calc(11% + 6px);
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border-color: rgba(255, 255, 255, .2);
-  background: rgba(3, 10, 11, .84);
-  color: #fff;
-  backdrop-filter: blur(7px);
 }
 
 .recording-grid-camera {
@@ -10648,11 +10684,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     padding: 40px 4px 48px;
   }
 
-  .recording-grid-tile.focused {
-    width: calc(100% - 12px);
-    height: min(76%, 620px);
-  }
-  .recording-grid-close-focus { top: calc(12% + 6px); right: 10px; }
   .recording-grid-camera { max-width: calc(100% - 12px); }
   .recording-grid-camera span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .recording-grid-controls time { display: none; }
@@ -13527,6 +13558,9 @@ a:focus-visible {
   text-transform: uppercase;
 }
 
+.recordings-inspector-toggle,
+.recordings-inspector-close { display: none; }
+
 .recordings-v2-events {
   gap: 10px;
   padding: 10px 12px;
@@ -13567,6 +13601,7 @@ a:focus-visible {
 }
 
 .recordings-event-inspector-tabs {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   border-bottom: 1px solid var(--line);
@@ -13583,6 +13618,7 @@ a:focus-visible {
 }
 
 .recordings-event-inspector-tabs button.active { border-bottom-color: var(--accent); color: var(--active-ink); }
+.recordings-event-inspector > [role="tabpanel"] { min-height: 0; overflow: auto; }
 .recordings-event-inspector dl { display: grid; align-content: start; gap: 5px; margin: 10px 0; }
 .recordings-event-inspector dl > div { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 6px; font-size: 10px; }
 .recordings-event-inspector dt { color: var(--muted); }
@@ -13606,8 +13642,13 @@ a:focus-visible {
     overflow: visible;
   }
   .recordings-commandbar-time { display: none; }
-  .recordings-v2-investigation { grid-template-columns: 240px minmax(0, 1fr); }
-  .recordings-event-inspector { display: none; }
+  .recordings-v2-investigation { position: relative; grid-template-columns: 240px minmax(0, 1fr); }
+  .recordings-event-inspector { position: absolute; z-index: 10; inset: 0 0 0 auto; display: none; width: min(360px, 56vw); min-height: 0; border-left: 1px solid var(--line); box-shadow: -12px 0 30px rgba(0,0,0,.4); }
+  .recordings-event-inspector.open { display: grid; }
+  .recordings-inspector-toggle { display: inline-flex; min-height: 44px; align-items: center; margin-left: auto; }
+  .recordings-related-events > header > span { display: none; }
+  .recordings-inspector-close { position: absolute; top: 0; right: 0; display: grid; width: 44px; min-height: 44px; place-items: center; border: 0; background: transparent; }
+  .recordings-event-inspector-tabs { padding-right: 44px; }
   .recordings-v2-selected-event { grid-template-columns: 88px minmax(0, 1fr); }
   .recordings-v2-selected-event-image { width: 88px; }
 }
@@ -13624,6 +13665,11 @@ a:focus-visible {
   .recordings-v2-selected-event a {
     min-height: 44px;
   }
+  .recordings-playback-rate select,
+  .recordings-commandbar-export button,
+  .recordings-commandbar-export a,
+  .recordings-timeline-display-controls button,
+  .recordings-event-inspector-tabs button { min-height: 44px; }
 }
 
 @media (max-width: 760px) {
@@ -13640,7 +13686,7 @@ a:focus-visible {
   .recordings-tabs { grid-column: 1; grid-row: 1; }
   .recordings-v2-cameras { grid-column: 1; grid-row: 2; }
   .recordings-v2-workspace { grid-column: 1; grid-row: 3; }
-  .recordings-commandbar { position: sticky; top: var(--topbar-height, 50px); z-index: 8; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; padding: 6px 8px; }
+  .recordings-commandbar { position: sticky; top: var(--topbar-height, 50px); z-index: 8; display: flex; gap: 6px; overflow-x: auto; padding: 6px 8px; }
   .recordings-commandbar-scope,
   .recordings-playback-rate { display: none; }
   .recordings-v2-date { min-width: 0; }
@@ -13651,22 +13697,38 @@ a:focus-visible {
   .recordings-camera-list { display: flex; gap: 6px; overflow-x: auto; padding: 7px 8px; }
   .recordings-camera-list button { flex: 0 0 auto; min-width: 130px; min-height: 44px; border: 1px solid var(--line); border-radius: 4px; padding-inline: 10px; }
   .recordings-camera-list button.active { border-color: var(--accent); }
-  .recordings-v2-workspace { grid-template-rows: minmax(230px, 48svh) auto auto; }
+  .recordings-v2-workspace { grid-template-rows: minmax(330px, 56svh) auto auto; }
   .recordings-v2-player { width: 100%; height: 100%; min-height: 0; }
+  .recording-camera-grid.stage-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(230px, 1fr) 86px; }
+  .recording-grid-companions { display: flex; gap: 5px; overflow-x: auto; }
+  .recording-grid-companions .recording-grid-tile { flex: 0 0 118px; }
+  .recordings-v2-player.selected-camera-stage video { width: 100%; height: calc(100% - 86px); }
+  .recording-selected-companions { inset: auto 0 0; display: flex; width: 100%; height: 86px; gap: 5px; overflow-x: auto; }
+  .recording-selected-companions button { flex: 0 0 118px; }
   .recordings-v2-timeline-toolbar { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; overflow-x: auto; }
   .recordings-v2-timeline-toolbar > span,
   .recordings-v2-filter-label,
   .recordings-v2-range span { display: none; }
   .recordings-v2-incidents-tools { min-width: max-content; }
-  .recordings-v2-timeline { height: 112px; padding-inline: 8px; }
+  .recordings-v2-timeline { height: 184px; padding-inline: 8px; }
   .recordings-v2-track { height: 78px; }
   .recordings-v2-event-lane.object { top: 34px; }
   .recordings-v2-event-lane.motion { top: 52px; }
   .recordings-v2-investigation { display: flex; flex-direction: column; overflow: visible; }
-  .recordings-v2-events { order: 1; min-height: 146px; }
-  .recordings-v2-selected-event { order: 2; grid-template-columns: 118px minmax(0, 1fr) auto; grid-template-rows: 1fr; border-right: 0; border-top: 1px solid var(--line); }
+  .recordings-related-events { order: 2; min-height: 178px; border-right: 0; border-top: 1px solid var(--line); }
+  .recordings-v2-events { min-height: 146px; }
+  .recordings-v2-selected-event { order: 1; grid-template-columns: 118px minmax(0, 1fr) auto; grid-template-rows: 1fr; border-right: 0; border-top: 1px solid var(--line); }
+  .recordings-v2-selected-event > header { display: none; }
   .recordings-v2-selected-event-image { grid-row: 1; width: 118px; min-height: 86px; }
   .recordings-v2-selected-event a { grid-column: 3; align-self: center; min-width: 44px; max-width: 74px; text-align: center; }
+  .recordings-event-inspector { order: 3; min-height: 190px; grid-template-rows: 44px minmax(100px, 1fr) auto; border-top: 1px solid var(--line); }
+  .recordings-inspector-toggle { display: none; }
+  .recordings-event-inspector-tabs button,
+  .recordings-event-inspector > a,
+  .recordings-timeline-display-controls button,
+  .recordings-v2-event-filter button,
+  .recordings-commandbar-export button,
+  .recordings-commandbar-export a { min-height: 44px; }
 }
 
 /* Live Command Center */

@@ -21,6 +21,14 @@ export function timelineStageCameras(cameras, primaryCameraId, limit = 7) {
   return [primary, ...available.filter((camera) => camera?.id !== primary.id)].slice(0, Math.max(1, limit));
 }
 
+export function timelineStagePage(cameras, page = 0, pageSize = 7) {
+  const available = Array.isArray(cameras) ? cameras : [];
+  const size = Math.max(1, Number(pageSize) || 7);
+  const pages = Math.max(1, Math.ceil(available.length / size));
+  const normalizedPage = Math.min(pages - 1, Math.max(0, Number(page) || 0));
+  return { cameras: available.slice(normalizedPage * size, (normalizedPage + 1) * size), page: normalizedPage, pages };
+}
+
 export function timelineEventMatchesFilter(event, filter) {
   if (filter === "all") return true;
   if (filter === "object") return Boolean(event?.has_objects);
@@ -39,4 +47,25 @@ export function timelineEvidenceWindow(events, playhead, limit = 12) {
     .sort((left, right) => Math.abs(left.incident_epoch - target) - Math.abs(right.incident_epoch - target))
     .slice(0, Math.max(1, limit))
     .sort((left, right) => left.incident_epoch - right.incident_epoch);
+}
+
+export function parseTimelineView(search, today = "") {
+  const params = search instanceof URLSearchParams ? search : new URLSearchParams(search || "");
+  const rawDate = params.get("date") || today;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) && (!today || rawDate <= today) ? rawDate : today;
+  const at = Number(params.get("at"));
+  const rawEvent = params.get("event");
+  return {
+    cameraId: params.get("camera") || "all",
+    date,
+    source: ["main", "live"].includes(params.get("source")) ? params.get("source") : null,
+    at: Number.isFinite(at) && at > 0 ? at : null,
+    eventFilter: ["all", "object", "motion", "people", "vehicles"].includes(params.get("filter")) ? params.get("filter") : "all",
+    eventId: rawEvent && Number.isFinite(Number(rawEvent)) ? Number(rawEvent) : rawEvent || null,
+    inspector: ["details", "ai", "related"].includes(params.get("inspector")) ? params.get("inspector") : "details",
+    windowHours: [1, 2, 4, 8, 12, 24].includes(Number(params.get("window"))) ? Number(params.get("window")) : 1,
+    lanes: { object: params.get("objects") !== "0", motion: params.get("motion") !== "0" },
+    thumbnails: params.get("thumbs") !== "0",
+    speed: normalizedTimelinePlaybackRate(params.get("speed")),
+  };
 }
