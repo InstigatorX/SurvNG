@@ -13461,6 +13461,101 @@ a:focus-visible {
   .faces-filter-group button { min-height: 44px; border: 1px solid var(--line); }
 }
 
+/* Admin and Detection Tune-Up */
+.settings-grid { grid-template-columns: 244px repeat(3, minmax(0, 1fr)); gap: 0; min-height: calc(100dvh - 58px); background: var(--canvas); padding: 0; }
+.settings-tabs { top: 58px; min-height: 54px; margin: 0; gap: 10px; background: var(--topbar); padding: 5px 10px; backdrop-filter: none; }
+.settings-context strong { font-size: 12px; font-weight: 620; }
+.settings-context small { font-size: 9px; }
+.settings-tab-list { gap: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 3px; }
+.settings-tab-list button { min-height: 38px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; font-size: 10px; font-weight: 540; padding-inline: 10px; }
+.settings-tab-list button:first-child { border-left: 0; }
+.settings-tab-list button.active { border-color: var(--line); background: color-mix(in srgb, var(--accent) 18%, var(--control)); }
+.admin-dirty-indicator,
+.camera-save-indicator { border-radius: 3px; font-size: 10px; font-weight: 560; }
+.settings-grid .config-tree,
+.settings-grid .settings-panel { border: 0; border-radius: 0; background: var(--panel-solid); box-shadow: none; }
+.settings-grid .config-tree { border-right: 1px solid var(--line); }
+.settings-grid .section-head { min-height: 58px; border-bottom: 1px solid var(--line); background: var(--panel-soft); padding: 9px 12px; }
+.settings-grid .section-head h2 { font-size: 14px; font-weight: 620; }
+.settings-grid .section-head p { font-size: 9px; }
+.settings-section-tree .tree-list { gap: 0; padding: 4px 0; }
+.settings-section-tree .tree-list button { min-height: 42px; border: 0; border-left: 3px solid transparent; border-radius: 0; background: transparent; font-size: 11px; font-weight: 540; padding-inline: 12px; }
+.settings-section-tree .tree-list button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.tree-group-label { margin: 10px 12px 3px; font-weight: 620; letter-spacing: .025em; }
+.general-settings-content { padding: 12px; }
+.general-settings-content > .sub-panel,
+.config-editor .sub-panel { border-radius: 3px; box-shadow: none; }
+.config-form input,
+.config-form select,
+.config-form textarea { border-radius: 3px; }
+.camera-save-button,
+.camera-command-area button { border-radius: 3px; font-weight: 560; }
+
+.calibration-tree .section-head { background: var(--panel-soft); }
+.tuneup-section-list em { border-radius: 3px; }
+.tuneup-resume-card { margin: 8px; border-radius: 3px; box-shadow: none; }
+.calibration-panel { background: var(--panel-solid); }
+.calibration-panel > .section-head { position: sticky; top: 112px; z-index: 3; }
+.tuneup-workflow,
+.tuneup-monitoring,
+.tuneup-history { gap: 12px; padding: 14px; }
+.tuneup-steps { position: relative; gap: 0; padding: 5px 0 14px; }
+.tuneup-steps::before { content: ""; position: absolute; top: 18px; left: 7%; right: 7%; height: 1px; background: var(--line); }
+.tuneup-steps span { position: relative; z-index: 1; gap: 5px; font-size: 10px; }
+.tuneup-steps b { width: 28px; height: 28px; border-radius: 50%; background: var(--panel-solid); font-weight: 620; }
+.tuneup-stage { gap: 14px; max-width: 1040px; }
+.tuneup-stage > header > span { font-size: 10px; font-weight: 620; }
+.tuneup-stage > header h3 { font-size: 20px; font-weight: 620; }
+.tuneup-stage > header p { font-size: 12px; }
+.tuneup-choice-grid,
+.tuneup-period-grid { gap: 8px; }
+.tuneup-choice-grid > button,
+.tuneup-period-grid > button { min-height: 120px; gap: 6px; border-radius: 3px; background: var(--panel-soft); padding: 14px; }
+.tuneup-choice-grid > button.selected,
+.tuneup-period-grid > button.selected { box-shadow: inset 3px 0 var(--accent); }
+.tuneup-choice-grid em,
+.tuneup-period-grid em { border-radius: 3px; font-weight: 560; }
+.tuneup-camera-list,
+.tuneup-camera-progress > div,
+.tuneup-summary-line,
+.tuneup-readiness,
+.tuneup-warning,
+.tuneup-countdown,
+.tuneup-recommendation-group > article,
+.tuneup-before-after > span,
+.tuneup-confirm-list > div,
+.tuneup-change-row,
+.tuneup-monitor-duration,
+.tuneup-monitor-card,
+.tuneup-history > article { border-radius: 3px; background: var(--panel-soft); }
+.tuneup-recommendation-group > h4 { font-size: 10px; font-weight: 620; }
+.tuneup-recommendation-group > article.selected { box-shadow: inset 3px 0 var(--accent); }
+.tuneup-progress-track { border-radius: 2px; }
+.tuneup-monitor-card > header em,
+.tuneup-health-list span { border-radius: 3px; }
+
+@media (max-width: 1050px) {
+  .settings-grid { gap: 8px; padding: 8px; }
+  .settings-tabs { margin: -8px -8px 0; }
+  .settings-grid .config-tree,
+  .settings-grid .settings-panel { border: 1px solid var(--line); border-radius: 4px; }
+}
+
+@media (max-width: 760px) {
+  .settings-grid { display: block; min-height: var(--workspace-available-height); padding: 0; }
+  .settings-tabs { top: var(--topbar-height); margin: 0; padding: 5px 8px; }
+  .settings-context { display: none; }
+  .settings-tab-list { border: 0; border-radius: 0; }
+  .settings-tab-list button { min-height: 44px; border: 1px solid var(--line); }
+  .settings-grid .config-tree,
+  .settings-grid .settings-panel { border-width: 0 0 1px; border-radius: 0; }
+  .calibration-panel > .section-head { top: calc(var(--topbar-height) + 54px); }
+  .tuneup-workflow,
+  .tuneup-monitoring,
+  .tuneup-history { padding: 10px; }
+  .tuneup-steps::before { display: none; }
+}
+
 @media (max-width: 760px) {
   .recordings-camera-group { display: none; }
   .recordings-v2-events::before { display: none; }
