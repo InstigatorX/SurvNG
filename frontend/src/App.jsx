@@ -6088,7 +6088,9 @@ function recordingIncidentEndEpoch(incident) {
 }
 
 function recordingEvidenceTypeLabel(type) {
-  return type === "motion" ? "motion-only" : "object";
+  if (type === "motion") return "motion-only";
+  if (type === "object") return "object";
+  return "total";
 }
 
 function recordingPlaybackTimeline(rows) {
@@ -6542,7 +6544,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [recordings, setRecordings] = useState([]);
   const [playbackDetail, setPlaybackDetail] = useState(null);
   const [events, setEvents] = useState([]);
-  const [eventFilter, setEventFilter] = useState("object");
+  const [eventFilter, setEventFilter] = useState("all");
   const [incidentRangeHours, setIncidentRangeHours] = useState(1);
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
@@ -6606,7 +6608,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   }, [manifestUrl, playbackTimeline]);
 
   const filteredEvents = useMemo(() => events
-    .filter((event) => eventFilter === "object" ? Boolean(event.has_objects) : !event.has_objects)
+    .filter((event) => eventFilter === "all" || (eventFilter === "object" ? Boolean(event.has_objects) : !event.has_objects))
     .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
     .filter((event) => Number.isFinite(event.incident_epoch))
     .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events]);
@@ -7256,11 +7258,13 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         <span className="recordings-commandbar-time">{Number.isFinite(playhead) ? formatDateTime(playhead, timeZone) : "Choose a recording time"}</span>
       </nav>
       <RecordingCameraRail subtitle="Choose recording source">
+        <span className="recordings-camera-group">Overview</span>
         <button type="button" className={isAllCameras ? "active" : ""} onClick={() => { setCameraId(ALL_RECORDING_CAMERAS_ID); setSource("live"); }}>
           <Grid2X2 size={16} />
           <span>All Cameras</span>
           <i className={cameras.some((camera) => camera.recording || camera.sub_recording) ? "online" : ""} />
         </button>
+        <span className="recordings-camera-group">Individual cameras · {cameras.length}</span>
         {cameras.map((camera) => (
           <button key={camera.id} type="button" className={camera.id === activeCameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
             <Camera size={16} />
@@ -7329,6 +7333,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             <div className="recordings-v2-incidents-tools">
               <span className="recordings-v2-filter-label"><SlidersHorizontal size={14} />Evidence</span>
               <div className="recordings-v2-event-filter" role="group" aria-label="Recording incident type">
+                <button type="button" className={eventFilter === "all" ? "active" : ""} aria-pressed={eventFilter === "all"} onClick={() => setEventFilter("all")}><Images size={14} />All events</button>
                 <button type="button" className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}><CircleDot size={14} />Objects</button>
                 <button type="button" className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion only</button>
               </div>
@@ -7422,7 +7427,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                   <b>{isAllCameras ? `${cameras.find((camera) => camera.id === event.camera_id)?.name || event.camera_id} · ` : ""}{event.labels?.length ? event.labels.join(", ") : "Motion only"}</b>
                 </span>
               </button>
-            )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter} incidents {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
+            )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter === "all" ? "events" : `${eventFilter} incidents`} {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
             </div>
             {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
               <span className="recordings-v2-selected-event-image">

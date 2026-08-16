@@ -13291,3 +13291,38 @@ a:focus-visible {
   .live-grid > .events-zone { border-width: 0 0 1px; border-radius: 0; }
   .live-activity-select { grid-template-columns: 112px minmax(0, 1fr); }
 }
+
+/* Timeline investigation completion */
+.recordings-camera-group {
+  display: block;
+  margin: 10px 13px 4px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 620;
+  letter-spacing: .025em;
+  text-transform: uppercase;
+}
+
+.recordings-v2-event-filter button:first-child.active {
+  background: color-mix(in srgb, var(--accent) 24%, var(--control));
+}
+
+.recordings-v2-events::before {
+  content: "Nearby evidence";
+  position: sticky;
+  left: 0;
+  display: grid;
+  min-width: 86px;
+  place-items: center start;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 610;
+  letter-spacing: .025em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 760px) {
+  .recordings-camera-group { display: none; }
+  .recordings-v2-events::before { display: none; }
+  .recordings-v2-event-filter button { min-width: max-content; }
+}
