@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { DEFAULT_LIVE_FRAMING, liveFramingStyle, normalizedLiveFraming } from "../src/liveFraming.mjs";
+import { camerasWithLiveFraming, DEFAULT_LIVE_FRAMING, liveFramingStyle, normalizedLiveFraming } from "../src/liveFraming.mjs";
 
 assert.deepEqual(normalizedLiveFraming({}, "live"), DEFAULT_LIVE_FRAMING);
 assert.deepEqual(normalizedLiveFraming({
@@ -18,5 +18,12 @@ assert.deepEqual(liveFramingStyle({
   "--live-object-position": "64% 42%",
   "--live-view-zoom": "1.4",
 });
+const statuses = [{ id: "gate", running: true }, { id: "yard", running: false, live_view: { live: { zoom: 1.2 } } }];
+const configured = [{ id: "gate", live_view: { live: { focal_x: 70 } } }];
+const merged = camerasWithLiveFraming(statuses, configured);
+assert.equal(merged[0].running, true);
+assert.equal(merged[0].live_view.live.focal_x, 70);
+assert.equal(merged[1].live_view.live.zoom, 1.2);
+assert.notEqual(merged[0], statuses[0]);
 
 console.log("live framing tests passed");

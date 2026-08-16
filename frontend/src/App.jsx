@@ -118,7 +118,7 @@ import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSee
 import { recordingCameraAspect, recordingGridBestEpoch } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "./liveWorkspace.mjs";
-import { liveFramingStyle, normalizedLiveFraming } from "./liveFraming.mjs";
+import { camerasWithLiveFraming, liveFramingStyle, normalizedLiveFraming } from "./liveFraming.mjs";
 import { filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
@@ -2009,13 +2009,10 @@ function usePollingData() {
   useVisiblePolling(load, 60_000);
   useEffect(() => () => { loadSequence.current += 1; }, []);
 
-  const camerasWithPresentation = useMemo(() => {
-    const configById = new Map((appConfig?.cameras || []).map((camera) => [camera.id, camera]));
-    return cameras.map((camera) => ({
-      ...camera,
-      live_view: configById.get(camera.id)?.live_view || camera.live_view,
-    }));
-  }, [appConfig, cameras]);
+  const camerasWithPresentation = useMemo(
+    () => camerasWithLiveFraming(cameras, appConfig?.cameras),
+    [appConfig, cameras],
+  );
 
   return { cameras: camerasWithPresentation, appConfig, loading, refresh: load };
 }
@@ -10132,7 +10129,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       const next = structuredClone(current);
       const camera = next.cameras.find((item) => item.id === cameraId);
       let target = camera;
-      for (let index = 0; index < path.length - 1; index += 1) target = target[path[index]];
+      for (let index = 0; index < path.length - 1; index += 1) {
+        const key = path[index];
+        if (!target[key] || typeof target[key] !== "object") target[key] = {};
+        target = target[key];
+      }
       target[path[path.length - 1]] = value;
       return next;
     });

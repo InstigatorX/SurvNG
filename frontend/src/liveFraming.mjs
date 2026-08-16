@@ -30,3 +30,11 @@ export function liveFramingStyle(camera, source = "live") {
     "--live-view-zoom": String(framing.zoom),
   };
 }
+
+export function camerasWithLiveFraming(statusCameras, configuredCameras) {
+  const configById = new Map((configuredCameras || []).map((camera) => [String(camera?.id || ""), camera]));
+  return (statusCameras || []).map((camera) => ({
+    ...camera,
+    live_view: configById.get(String(camera?.id || ""))?.live_view || camera?.live_view,
+  }));
+}

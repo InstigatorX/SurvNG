@@ -68,6 +68,10 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertIn(SECRET_PLACEHOLDER, payload["cameras"][0]["stream_url"])
         self.assertNotIn("camera-secret", str(payload))
         self.assertNotIn("broker-secret", str(payload))
+        self.assertEqual(payload["cameras"][0]["live_view"], {
+            "main": {"fit": "cover", "focal_x": 50.0, "focal_y": 50.0, "zoom": 1.0},
+            "live": {"fit": "cover", "focal_x": 50.0, "focal_y": 50.0, "zoom": 1.0},
+        })
 
     def test_config_update_reports_runtime_storage_validation_as_422(self) -> None:
         self.apply.side_effect = OSError(

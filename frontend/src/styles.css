@@ -4310,6 +4310,7 @@ button.status-pill.hud-toggle:disabled {
   object-position: var(--live-object-position, 50% 50%);
   transform: scale(var(--live-view-zoom, 1));
   transform-origin: var(--live-object-position, 50% 50%);
+  will-change: transform;
 }
 
 .live-framing-preview span {
@@ -4344,6 +4345,12 @@ button.status-pill.hud-toggle:disabled {
 .live-framing-controls output {
   color: var(--accent);
   font-variant-numeric: tabular-nums;
+}
+
+.live-framing-controls input[type="range"] {
+  min-height: 44px;
+  margin: 0;
+  padding-block: 10px;
 }
 
 .live-framing-actions {
