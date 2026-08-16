@@ -16,6 +16,7 @@
     "test:assistant-navigation": "node tests/assistant-navigation.mjs",
     "test:related-incidents": "node tests/related-incidents.mjs",
     "test:face-review": "node tests/face-review.mjs",
+    "test:people-workspace": "node tests/people-workspace.mjs",
     "test:assistant-export": "node tests/assistant-export.mjs",
     "test:export-center": "node tests/export-center.mjs",
     "test:recordings-soak": "node tests/recordings-soak.mjs",

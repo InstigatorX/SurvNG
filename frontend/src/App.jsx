@@ -116,6 +116,7 @@ import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentReques
 import { insertZonePointWithIndex } from "./zoneGeometry.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "./relatedIncidents.mjs";
 import { nextFaceReviewObservation } from "./faceReview.mjs";
+import { PEOPLE_REVIEW_FILTERS, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "./peopleWorkspace.mjs";
 import {
   canonicalWorkspaceUrl,
   DESKTOP_PRIMARY_WORKSPACES,
@@ -6101,7 +6102,6 @@ function RecordingSectionSwitcher({ mode, cameraId = "" }) {
   return (
     <div className="recordings-section-switcher" aria-label="Recording section">
       <a className={mode === "history" ? "active" : ""} href={appUrl(`/timeline${query}`)}><Clock3 size={14} />Timeline</a>
-      {mode === "search" ? <a className="active" href={appUrl("/search")}><Search size={14} />Search</a> : null}
       <a className={mode === "exports" ? "active" : ""} href={appUrl("/timeline/exports")}><Download size={14} />Exports</a>
     </div>
   );
@@ -6134,25 +6134,42 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   const [cameras, setCameras] = useState([]);
   const [cameraId, setCameraId] = useState(initialCameraId);
   const [query, setQuery] = useState(initialQueryText);
+  const [submittedQuery, setSubmittedQuery] = useState(initialQueryText);
+  const [resultsCameraId, setResultsCameraId] = useState(initialCameraId);
   const [results, setResults] = useState(() => restoredSearch?.results || []);
   const [searchHistory, setSearchHistory] = useState(() => readSemanticSearchHistory(localStorage));
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [setupError, setSetupError] = useState("");
   const searchRequestRef = useRef(null);
+  const initialSearchRunRef = useRef(false);
   const visibleResults = useMemo(
-    () => semanticSearchResultsForCamera(results, cameraId),
-    [cameraId, results],
+    () => semanticSearchResultsForCamera(results, resultsCameraId),
+    [results, resultsCameraId],
   );
 
+  async function loadSearchSetup() {
+    setSetupError("");
+    try {
+      const [cameraResponse, statusResponse] = await Promise.all([fetch("/api/cameras"), fetch("/api/semantic-search/status")]);
+      if (!cameraResponse.ok || !statusResponse.ok) throw new Error("Search status is unavailable.");
+      const [cameraRows, semanticStatus] = await Promise.all([cameraResponse.json(), statusResponse.json()]);
+      setCameras(cameraRows || []);
+      setStatus(semanticStatus);
+    } catch (reason) {
+      setSetupError(reason.message || "Could not load Smart Search.");
+    }
+  }
+  useEffect(() => { void loadSearchSetup(); }, []);
   useEffect(() => {
-    Promise.all([fetch("/api/cameras").then((r) => r.json()), fetch("/api/semantic-search/status").then((r) => r.json())])
-      .then(([cameraRows, semanticStatus]) => { setCameras(cameraRows || []); setStatus(semanticStatus); })
-      .catch((reason) => setError(reason.message || "Could not load Smart Search."));
-  }, []);
+    if (initialSearchRunRef.current || restoredSearch || !initialQueryText.trim() || !status) return;
+    initialSearchRunRef.current = true;
+    void runSearch(null, initialQueryText, initialCameraId);
+  }, [status]);
   useEffect(() => {
-    onAssistantContextChange?.({ page: "recordings", camera_id: cameraId, filters: { semantic_query: query } });
-  }, [cameraId, onAssistantContextChange, query]);
+    onAssistantContextChange?.({ page: "search", camera_id: cameraId, filters: { semantic_query: submittedQuery } });
+  }, [cameraId, onAssistantContextChange, submittedQuery]);
   useEffect(() => () => {
     const activeRequest = searchRequestRef.current;
     searchRequestRef.current = null;
@@ -6180,6 +6197,8 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
       if (!response.ok) throw new Error(payload.detail || "Smart Search failed.");
       const nextResults = payload.results || [];
       setResults(nextResults);
+      setSubmittedQuery(searchQuery);
+      setResultsCameraId(searchCameraId);
       writeSemanticSearchSession(sessionStorage, { query: searchQuery, cameraId: searchCameraId, results: nextResults });
       setSearchHistory((current) => {
         const next = addSemanticSearchHistory(current, {
@@ -6194,7 +6213,10 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
       if (searchCameraId) params.set("camera", searchCameraId);
       window.history.replaceState(null, "", appUrl(`/search?${params.toString()}`));
     } catch (reason) {
-      if (reason?.name !== "AbortError") setError(reason.message || "Smart Search failed.");
+      if (reason?.name !== "AbortError") {
+        setCameraId(resultsCameraId);
+        setError(reason.message || "Smart Search failed.");
+      }
     } finally {
       if (searchRequestRef.current === controller) {
         searchRequestRef.current = null;
@@ -6208,7 +6230,9 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     searchRequestRef.current = null;
     setLoading(false);
     setQuery("");
+    setSubmittedQuery("");
     setCameraId("");
+    setResultsCameraId("");
     setResults([]);
     setError("");
     clearSemanticSearchSession(sessionStorage);
@@ -6219,36 +6243,41 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     if (loading) return;
     const selectedCameraId = String(nextCameraId || "");
     setCameraId(selectedCameraId);
-    if (!query.trim()) return;
-    writeSemanticSearchSession(sessionStorage, { query: query.trim(), cameraId: selectedCameraId, results });
-    const params = new URLSearchParams({ q: query.trim() });
-    if (selectedCameraId) params.set("camera", selectedCameraId);
-    window.history.replaceState(null, "", appUrl(`/search?${params.toString()}`));
+    const committedQuery = String(submittedQuery || query || "").trim();
+    if (committedQuery) void runSearch(null, committedQuery, selectedCameraId);
   }
 
-  return <main className="recordings-v2-page semantic-search-page">
-    <nav className="recordings-tabs"><RecordingSectionSwitcher mode="search" cameraId={cameraId} /></nav>
-    <RecordingCameraRail subtitle="Filter search results">
-      <button type="button" className={!cameraId ? "active" : ""} onClick={() => selectCamera("")} disabled={loading}><Search size={16} /><span>All cameras</span><i /></button>
-      {cameras.map((camera) => <button type="button" key={camera.id} className={cameraId === camera.id ? "active" : ""} onClick={() => selectCamera(camera.id)} disabled={loading}><Camera size={16} /><span>{camera.name}</span><i className={camera.running ? "online" : ""} /></button>)}
-    </RecordingCameraRail>
-    <section className="semantic-search-workspace">
-      <header><div><h2>Smart Search</h2><p>Describe what you remember. SurvNG searches locally indexed incident images.</p></div><span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span></header>
-      <form onSubmit={runSearch}><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} disabled={loading} placeholder='Try “person in a red jacket” or “white delivery truck”' /><div className="semantic-search-actions"><button type="button" className="secondary" onClick={resetSearch} disabled={!query && !cameraId && !results.length && !error}>Reset</button><button type="submit" disabled={loading || !query.trim()}>{loading ? "Searching…" : "Search"}</button></div></form>
-      {searchHistory.length ? <div className="semantic-search-history" aria-label="Recent Smart Search history">
-        <span><Clock3 size={14} />Recent</span>
-        <div>{searchHistory.map((item) => {
+  return <main className="search-page">
+    <header className="search-commandbar">
+      <div><Search size={18} /><span><strong>Search recordings</strong><small>Find incidents by describing what you remember</small></span></div>
+      {setupError ? <button type="button" className="search-setup-retry" onClick={() => void loadSearchSetup()}><RefreshCcw size={15} />Retry status</button> : <span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span>}
+    </header>
+    <aside className="search-scope-panel">
+      <div className="search-scope-heading"><strong>Camera</strong><small>Refine current results</small></div>
+      <div className="search-camera-list">
+        <button type="button" className={!cameraId ? "active" : ""} onClick={() => selectCamera("")} disabled={loading} aria-pressed={!cameraId}><Search size={16} /><span>All cameras</span><i /></button>
+        {cameras.map((camera) => <button type="button" key={camera.id} className={cameraId === camera.id ? "active" : ""} onClick={() => selectCamera(camera.id)} disabled={loading} aria-pressed={cameraId === camera.id}><Camera size={16} /><span>{camera.name}</span><i className={camera.running ? "online" : ""} /></button>)}
+      </div>
+      {searchHistory.length ? <section className="search-history-panel" aria-labelledby="search-history-title">
+        <div id="search-history-title"><Clock3 size={15} /><strong>Recent searches</strong></div>
+        {searchHistory.map((item) => {
           const cameraName = item.cameraId ? cameras.find((camera) => camera.id === item.cameraId)?.name || item.cameraId : "All cameras";
           return <button type="button" key={`${item.query.toLocaleLowerCase()}-${item.cameraId}`} onClick={() => void runSearch(null, item.query, item.cameraId)} disabled={loading} title={`Search ${cameraName}`}><strong>{item.query}</strong><small>{cameraName}</small></button>;
-        })}</div>
-      </div> : null}
+        })}
+      </section> : null}
+    </aside>
+    <section className="semantic-search-workspace">
+      <form onSubmit={runSearch} className="semantic-search-form"><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} disabled={loading} placeholder='Try “person in a red jacket” or “white delivery truck”' aria-label="Describe what to find" autoFocus /><div className="semantic-search-actions"><button type="button" className="secondary" onClick={resetSearch} disabled={!query && !cameraId && !results.length && !error}>Reset</button><button type="submit" disabled={loading || !query.trim()}>{loading ? "Searching…" : "Search"}</button></div></form>
+      <div className="search-results-heading" aria-live="polite"><strong>{loading ? "Searching…" : results.length ? `${visibleResults.length} visual matches${submittedQuery ? ` for “${submittedQuery}”` : ""}` : "Visual matches"}</strong>{resultsCameraId ? <small>{cameras.find((camera) => camera.id === resultsCameraId)?.name || resultsCameraId}</small> : submittedQuery ? <small>All cameras</small> : null}</div>
       {error ? <div className="semantic-search-error"><CircleAlert size={17} />{error}</div> : null}
       <div className="semantic-search-results">
         {visibleResults.map((result) => {
           const item = result.event || {};
           const context = incidentRecordingContext(item);
           const matchLabel = ({ strong_match: "Strong match", possible_match: "Possible match" })[result.match_strength] || "Visually similar";
-          return <article key={item.id}><a href={appUrl(`/incidents?event_ids=${item.id}`)}><img src={result.snapshot_url} alt="" loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></a><footer><div><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</small></div><a href={recordingsHref(context)}><Play size={14} />View recording</a></footer></article>;
+          const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
+          const observedAt = formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone);
+          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><img src={result.snapshot_url} alt={`${cameraName} search result`} loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
         })}
         {!loading && !error && !visibleResults.length ? <div className="semantic-search-empty"><Search size={28} /><strong>{results.length && cameraId ? "No matching results from this camera" : "Search indexed incidents by appearance"}</strong><span>{results.length && cameraId ? "Choose All cameras or another camera to widen the current results." : "Results link to the exact incident and recording time."}</span></div> : null}
       </div>
@@ -12262,19 +12291,43 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
   const [newName, setNewName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const dialogRef = useRef(null);
+  const headingRef = useRef(null);
 
   useEffect(() => {
     setNewName("");
     setError("");
+    requestAnimationFrame(() => headingRef.current?.focus());
   }, [observation.id]);
 
   useEffect(() => {
-    function closeOnEscape(event) {
-      if (event.key === "Escape") onClose();
+    function handleDialogKey(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...(dialogRef.current?.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    window.addEventListener("keydown", handleDialogKey);
+    return () => window.removeEventListener("keydown", handleDialogKey);
   }, [onClose]);
+
+  const observedEpoch = Number.isFinite(Number(observation.observed_at))
+    ? Number(observation.observed_at)
+    : new Date(observation.observed_at).getTime() / 1000;
+  const timelineHref = recordingsHref({ cameraId: observation.camera_id, epoch: observedEpoch });
 
   async function assignPerson(nextPersonId) {
     setBusy(true);
@@ -12343,11 +12396,11 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
 
   return (
     <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="face-review-dialog" role="dialog" aria-modal="true" aria-label="Review face">
+      <section className="face-review-dialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="face-review-title">
         <button type="button" className="overlay-close" onClick={onClose} aria-label="Close"><X size={22} /></button>
         <img src={appUrl(`/api/faces/observations/${observation.id}/crop.jpg?padding=0.45`)} alt="Selected face" />
         <div className="face-review-form">
-          <div><strong>{observation.person_name || "Unknown face"}</strong><span>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</span></div>
+          <div><strong id="face-review-title" ref={headingRef} tabIndex={-1}>{observation.person_name || "Unknown face"}</strong><span>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</span></div>
           <div className="face-match-summary">
             <span>Face quality <strong>{observation.quality_score != null ? `${Math.round(Number(observation.quality_score) * 100)}%` : "Not scored"}</strong></span>
             {Number(observation.consensus?.candidate_count || 0) > 1 ? <span>Selected from <strong>{observation.consensus.candidate_count} incident frames</strong>{Number(observation.consensus?.agreement_count || 0) > 1 ? ` · ${observation.consensus.agreement_count} agreed on identity` : ""}</span> : null}
@@ -12359,6 +12412,10 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
           <label>Assign to person<select value={observation.person_id || ""} disabled={busy} onChange={(event) => assignPerson(event.target.value)}><option value="">Unknown</option>{people.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</select></label>
           {observation.person_id && observation.review_status === "confirmed" ? <button type="button" className="subtle" disabled={busy} onClick={() => updateReference(!observation.reference_pinned)}><ShieldCheck size={16} /> {observation.reference_pinned ? "Unpin reference" : "Pin as reference"}</button> : null}
           <div className="face-enroll-row"><input value={newName} disabled={busy} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createPerson(); }} placeholder="New person name" /><button type="button" onClick={createPerson} disabled={busy || !newName.trim()}><UserPlus size={16} /> Enroll</button></div>
+          <nav className="face-evidence-links" aria-label="Face evidence links">
+            {observation.event_id ? <a href={appUrl(`/incidents?event_ids=${observation.event_id}`)}>Open incident</a> : null}
+            {observation.camera_id && Number.isFinite(observedEpoch) ? <a href={timelineHref}><Play size={14} />View in Timeline</a> : null}
+          </nav>
           {error ? <span className="save-status error">{error}</span> : null}
         </div>
       </section>
@@ -12367,32 +12424,61 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
 }
 
 function FacesPage({ timeZone, onAssistantContextChange }) {
+  const initialPeopleQuery = useMemo(() => readPeopleWorkspaceQuery(window.location.search), []);
   const [people, setPeople] = useState([]);
   const [observations, setObservations] = useState([]);
   const [cameras, setCameras] = useState([]);
   const [status, setStatus] = useState(null);
   const [calibration, setCalibration] = useState(null);
   const [calibrating, setCalibrating] = useState(false);
-  const [filter, setFilter] = useState("unknown");
-  const [cameraId, setCameraId] = useState("");
-  const [personId, setPersonId] = useState("");
+  const [filter, setFilter] = useState(initialPeopleQuery.status);
+  const [cameraId, setCameraId] = useState(initialPeopleQuery.cameraId);
+  const [personId, setPersonId] = useState(initialPeopleQuery.personId);
   const [selected, setSelected] = useState(null);
   const [notice, setNotice] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [exactFaceError, setExactFaceError] = useState("");
+  const [requestedFaceId, setRequestedFaceId] = useState(initialPeopleQuery.faceId);
   const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(0);
+  const [page, setPage] = useState(initialPeopleQuery.page);
   const [totalObservations, setTotalObservations] = useState(0);
   const faceLoadSequence = useRef(0);
+  const faceReviewTriggerRef = useRef(null);
+  const faceReviewPanelRef = useRef(null);
+  const initialFaceIdRef = useRef(initialPeopleQuery.faceId);
+  const faceFiltersMountedRef = useRef(false);
+  const peopleHistoryWriteRef = useRef(true);
   const pageSize = isMobileViewport() ? 24 : 48;
   const pageCount = Math.max(1, Math.ceil(totalObservations / pageSize));
 
   useEffect(() => {
     onAssistantContextChange?.({
-      page: "faces",
+      page: "people",
       camera_id: selected?.camera_id || cameraId,
       incident_event_id: Number(selected?.event_id) || null,
       filters: { status: filter, person_id: personId },
     });
   }, [cameraId, filter, onAssistantContextChange, personId, selected?.camera_id, selected?.event_id]);
+
+  async function loadExactFace(faceId) {
+    const requestedId = String(faceId || "");
+    if (!requestedId) return;
+    setExactFaceError("");
+    try {
+      const response = await fetch(`/api/faces/observations/${requestedId}`);
+      if (response.status === 404) {
+        setRequestedFaceId("");
+        setNotice("That face observation is no longer available.");
+        return;
+      }
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Unable to open this face observation");
+      setRequestedFaceId("");
+      setSelected(payload);
+    } catch (error) {
+      setExactFaceError(error.message || "Unable to open this face observation");
+    }
+  }
 
   async function load() {
     const sequence = ++faceLoadSequence.current;
@@ -12416,8 +12502,19 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
         countResponse.ok ? countResponse.json() : null,
       ]);
       if (sequence !== faceLoadSequence.current) return;
+      setLoadError("");
       setPeople(peoplePayload);
       setObservations(observationPayload);
+      if (initialFaceIdRef.current) {
+        const requestedFace = observationPayload.find((item) => String(item.id) === initialFaceIdRef.current);
+        if (requestedFace) {
+          setRequestedFaceId("");
+          setSelected(requestedFace);
+        } else {
+          void loadExactFace(initialFaceIdRef.current);
+        }
+        initialFaceIdRef.current = "";
+      }
       if (countPayload) setTotalObservations(Number(countPayload.total || 0));
       setNotice("");
       void Promise.all([fetch("/api/cameras"), fetch("/api/faces/status")])
@@ -12433,7 +12530,7 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
         .catch(() => {});
       return observationPayload;
     } catch (error) {
-      if (sequence === faceLoadSequence.current) setNotice(error.message || "Unable to load faces");
+      if (sequence === faceLoadSequence.current) setLoadError(error.message || "Unable to load faces");
       return null;
     } finally {
       if (sequence === faceLoadSequence.current) setLoading(false);
@@ -12444,8 +12541,64 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
     void load();
     return () => { faceLoadSequence.current += 1; };
   }, [filter, cameraId, personId, page]);
-  useEffect(() => { setPage(0); }, [filter, cameraId, personId]);
+  useEffect(() => {
+    if (!faceFiltersMountedRef.current) {
+      faceFiltersMountedRef.current = true;
+      return;
+    }
+    setPage(0);
+  }, [filter, cameraId, personId]);
   useEffect(() => { if (page >= pageCount) setPage(Math.max(0, pageCount - 1)); }, [page, pageCount]);
+  useEffect(() => {
+    if (!peopleHistoryWriteRef.current) {
+      peopleHistoryWriteRef.current = true;
+      return;
+    }
+    const search = peopleWorkspaceSearch({ status: filter, cameraId, personId, page, faceId: selected?.id || requestedFaceId });
+    window.history.replaceState(window.history.state, "", appUrl(`/people${search}`));
+  }, [cameraId, filter, page, personId, requestedFaceId, selected?.id]);
+  useEffect(() => {
+    function restorePeopleState() {
+      const restored = readPeopleWorkspaceQuery(window.location.search);
+      peopleHistoryWriteRef.current = false;
+      setFilter(restored.status);
+      setCameraId(restored.cameraId);
+      setPersonId(restored.personId);
+      setPage(restored.page);
+      setRequestedFaceId(restored.faceId);
+      if (restored.faceId) void loadExactFace(restored.faceId);
+      else {
+        setSelected(null);
+        requestAnimationFrame(() => faceReviewTriggerRef.current?.isConnected && faceReviewTriggerRef.current.focus());
+      }
+    }
+    window.addEventListener("popstate", restorePeopleState);
+    return () => window.removeEventListener("popstate", restorePeopleState);
+  }, []);
+
+  function openFaceReview(observation, trigger) {
+    faceReviewTriggerRef.current = trigger || null;
+    const search = peopleWorkspaceSearch({ status: filter, cameraId, personId, page, faceId: observation.id });
+    window.history.pushState({ ...(window.history.state || {}), survngPeopleFace: true }, "", appUrl(`/people${search}`));
+    peopleHistoryWriteRef.current = false;
+    setRequestedFaceId("");
+    setSelected(observation);
+  }
+
+  function closeFaceReview() {
+    if (window.history.state?.survngPeopleFace) {
+      window.history.back();
+      return;
+    }
+    setSelected(null);
+    setRequestedFaceId("");
+    requestAnimationFrame(() => {
+      const target = faceReviewTriggerRef.current?.isConnected
+        ? faceReviewTriggerRef.current
+        : document.querySelector(".face-observation-card") || faceReviewPanelRef.current;
+      target?.focus();
+    });
+  }
 
   async function deletePerson(person) {
     if (!window.confirm(`Delete ${person.name}? Their observations will return to Unknown.`)) return;
@@ -12478,19 +12631,27 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
 
   return (
     <main className="faces-page">
+      <header className="faces-commandbar">
+        <div><Users size={18} /><span><strong>People</strong><small>Review identities and maintain trusted references</small></span></div>
+        <div className="faces-command-status">
+          <span><strong>{people.length}</strong> enrolled</span>
+          <span><strong>{totalObservations}</strong> in view</span>
+          <span className={status?.recognition_ready ? "healthy" : "caution"}><i />{status?.recognition_ready ? "Recognition ready" : "Needs attention"}</span>
+        </div>
+      </header>
       <aside className="faces-people-panel">
         <div className="faces-panel-heading">
           <div><h2>People</h2><span>{people.length} enrolled</span></div>
           <Users size={20} />
         </div>
-        <button type="button" className={`face-person-row ${personId === "" ? "active" : ""}`} onClick={() => { setPersonId(""); setPage(0); }}>
+        <button type="button" className={`face-person-row ${personId === "" ? "active" : ""}`} aria-pressed={personId === ""} onClick={() => { setPersonId(""); setPage(0); }}>
           <span className="face-avatar unknown"><ScanFace size={22} /></span>
           <span><strong>All faces</strong><small>{status?.observations || 0} observations</small></span>
         </button>
         <div className="face-person-list">
           {people.map((person) => (
             <div className={`face-person-row ${String(person.id) === personId ? "active" : ""}`} key={person.id}>
-              <button type="button" className="face-person-select" onClick={() => { setPersonId(String(person.id)); setPage(0); }}>
+              <button type="button" className="face-person-select" aria-pressed={String(person.id) === personId} onClick={() => { setPersonId(String(person.id)); setPage(0); }}>
                 {person.preview_observation_id
                   ? <img src={appUrl(`/api/faces/observations/${person.preview_observation_id}/crop.jpg`)} alt="" />
                   : <span className="face-avatar unknown"><ScanFace size={20} /></span>}
@@ -12502,13 +12663,17 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
         </div>
       </aside>
 
-      <section className="faces-review-panel">
+      <section className="faces-review-panel" ref={faceReviewPanelRef} tabIndex={-1} aria-label="Face review queue">
         <div className="faces-toolbar">
           <div className="faces-filter-group" role="group" aria-label="Face status">
-            {["unknown", "suggested", "known", "pending", "unusable", "all"].map((value) => (
-              <button type="button" className={filter === value && !personId ? "active" : ""} key={value} onClick={() => { setPersonId(""); setFilter(value); setPage(0); }}>{value}</button>
+            {Object.entries(PEOPLE_REVIEW_FILTERS).map(([value, label]) => (
+              <button type="button" className={filter === value && !personId ? "active" : ""} aria-pressed={filter === value && !personId} key={value} onClick={() => { setPersonId(""); setFilter(value); setPage(0); }}>{label}</button>
             ))}
           </div>
+          <select className="faces-mobile-person-filter" value={personId} onChange={(event) => { setPersonId(event.target.value); setPage(0); }} aria-label="Filter by person">
+            <option value="">All people</option>
+            {people.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}
+          </select>
           <select value={cameraId} onChange={(event) => { setCameraId(event.target.value); setPage(0); }} aria-label="Filter by camera">
             <option value="">All cameras</option>
             {cameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}
@@ -12517,26 +12682,26 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
         </div>
         <div className="face-messages">
           {!status?.recognition_ready || status?.recognition?.pending > 0 || status?.recognition?.failed > 0 ? <div className="face-readiness"><Activity size={16} /><span>{status?.recognition_message || "Automatic recognition is not configured."}</span></div> : null}
-          <div className="face-readiness face-calibration">
-            <Gauge size={16} />
-            <span>{calibration?.message || "Measure your confirmed and rejected faces before changing match thresholds."}</span>
-            {calibration?.ready ? <strong>{Math.round(Number(calibration.rank_one_accuracy || 0) * 100)}% identity accuracy · suggest at {Math.round(Number(calibration.recommended?.suggestion_threshold || 0) * 100)}% · automatic at {Math.round(Number(calibration.recommended?.automatic_threshold || 0) * 100)}% with a {Math.round(Number(calibration.recommended?.automatic_margin || 0) * 100)}-point lead</strong> : null}
-            <button type="button" className="subtle" disabled={calibrating} onClick={analyzeCalibration}>{calibrating ? "Analyzing..." : "Analyze matching"}</button>
-          </div>
-          {notice ? <div className="save-status">{notice}</div> : null}
+          <details className="face-calibration">
+            <summary><span><Gauge size={16} /><strong>Matching health</strong><small>{calibration?.ready ? `${Math.round(Number(calibration.rank_one_accuracy || 0) * 100)}% measured identity accuracy` : "Analyze confirmed reviews to measure recognition"}</small></span><ChevronRight size={16} /></summary>
+            <div><span>{calibration?.message || "Measure your confirmed and rejected faces. Analysis only—no settings are changed."}</span>{calibration?.ready ? <strong>{Math.round(Number(calibration.rank_one_accuracy || 0) * 100)}% identity accuracy · suggest at {Math.round(Number(calibration.recommended?.suggestion_threshold || 0) * 100)}% · automatic at {Math.round(Number(calibration.recommended?.automatic_threshold || 0) * 100)}% with a {Math.round(Number(calibration.recommended?.automatic_margin || 0) * 100)}-point lead</strong> : null}<button type="button" className="subtle" disabled={calibrating} onClick={analyzeCalibration}>{calibrating ? "Analyzing..." : "Analyze matching"}</button></div>
+          </details>
+          {notice ? <div className="save-status" role="status">{notice}</div> : null}
+          {loading && observations.length ? <div className="face-updating" role="status">Updating results…</div> : null}
+          {loadError ? <div className="face-load-error" role="alert"><span>{loadError}</span><button type="button" onClick={() => void load()}>Retry</button></div> : null}
+          {exactFaceError ? <div className="face-load-error" role="alert"><span>{exactFaceError}</span><button type="button" onClick={() => void loadExactFace(requestedFaceId)}>Retry face</button></div> : null}
         </div>
         <div className="face-observation-grid">
-          {loading ? <div className="empty-state">Loading face observations...</div> : null}
-          {!loading && !observations.length ? <div className="empty-state">No faces match these filters.</div> : null}
+          {loading && !observations.length ? <div className="empty-state">Loading face observations...</div> : null}
+          {!loading && !loadError && !observations.length ? <div className="empty-state">No faces match these filters.</div> : null}
           {observations.map((observation) => (
-            <button type="button" className="face-observation-card" key={observation.id} onClick={() => setSelected(observation)}>
+            <button type="button" className="face-observation-card" key={observation.id} aria-label={`Review ${observation.person_name || observation.candidate_person_name || "unknown face"} from ${observation.camera_id} at ${formatDateTime(observation.observed_at, timeZone)}`} onClick={(event) => openFaceReview(observation, event.currentTarget)}>
               <img src={appUrl(`/api/faces/observations/${observation.id}/crop.jpg`)} alt={observation.person_name || "Unknown face"} loading="lazy" />
               <span className="face-card-hud">
                 <strong>{observation.person_name || (observation.candidate_person_name ? `Suggested: ${observation.candidate_person_name}` : "Unknown")}</strong>
                 <small>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</small>
               </span>
-              <span className="face-confidence">{observation.candidate_confidence != null ? `${Math.round(Number(observation.candidate_confidence) * 100)}% match` : `${Math.round(Number(observation.confidence || 0) * 100)}%`}</span>
-              {Number(observation.consensus?.candidate_count || 0) > 1 ? <span className="face-frame-count">Best of {observation.consensus.candidate_count} frames</span> : null}
+              <span className="face-confidence">{Number(observation.consensus?.candidate_count || 0) > 1 ? `Best of ${observation.consensus.candidate_count} · ` : ""}{observation.candidate_confidence != null ? `${Math.round(Number(observation.candidate_confidence) * 100)}% match` : `${Math.round(Number(observation.confidence || 0) * 100)}%`}</span>
             </button>
           ))}
         </div>
@@ -12547,13 +12712,25 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
         </div>
       </section>
 
-      {selected ? <FaceReviewDialog observation={selected} people={people} timeZone={timeZone} onClose={() => setSelected(null)} onUpdated={async (message, action = {}) => {
+      {selected ? <FaceReviewDialog observation={selected} people={people} timeZone={timeZone} onClose={closeFaceReview} onUpdated={async (message, action = {}) => {
         const currentObservations = observations;
         if (message) setNotice(message);
         const refreshed = await load();
-        setSelected(action.advance && refreshed
+        const nextObservation = action.advance && refreshed
           ? nextFaceReviewObservation(action.observationId || selected.id, currentObservations, refreshed)
-          : null);
+          : null;
+        if (nextObservation) {
+          setSelected(nextObservation);
+        } else {
+          setSelected(null);
+          if (action.advance) setNotice(message || "Review complete");
+          requestAnimationFrame(() => {
+            const target = faceReviewTriggerRef.current?.isConnected
+              ? faceReviewTriggerRef.current
+              : document.querySelector(".face-observation-card") || faceReviewPanelRef.current;
+            target?.focus();
+          });
+        }
       }} /> : null}
     </main>
   );
