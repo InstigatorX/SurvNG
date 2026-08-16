@@ -106,6 +106,7 @@ import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } 
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContext } from "./assistantContext.mjs";
 import { safeMediaUrl } from "./mediaUrl.mjs";
+import { liveSnapshotRefreshMs, logPayloadSignature } from "./pollingPolicy.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
@@ -2004,7 +2005,11 @@ function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobilePrimary = false }) {
+function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobileView = false, mobilePrimary = false }) {
+  const tileRef = useRef(null);
+  const tileWasVisibleRef = useRef(true);
+  const [tileVisible, setTileVisible] = useState(true);
+  const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -2046,6 +2051,29 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
   }, [lastMotionMs]);
 
   useEffect(() => {
+    const tile = tileRef.current;
+    if (!tile || typeof IntersectionObserver !== "function") return undefined;
+    const observer = new IntersectionObserver(([entry]) => setTileVisible(entry.isIntersecting), { rootMargin: "80px" });
+    observer.observe(tile);
+    return () => observer.disconnect();
+  }, [camera.id]);
+
+  useEffect(() => {
+    if (tileVisible && !tileWasVisibleRef.current) setSnapshotToken(String(Date.now()));
+    tileWasVisibleRef.current = tileVisible;
+  }, [tileVisible]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      const visible = !document.hidden;
+      setDocumentVisible(visible);
+      if (visible && tileVisible) setSnapshotToken(String(Date.now()));
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [tileVisible]);
+
+  useEffect(() => {
     setMjpegToken(String(Date.now()));
     setSnapshotToken(String(Date.now()));
     setStreamReady(false);
@@ -2081,14 +2109,22 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
   }, [camera.id, camera.running, sourceMode, activeTransport, startDelayMs]);
 
   useEffect(() => {
-    if (!camera.running) return undefined;
-    if (camera.running && streamReady && activeTransport !== "snapshot") return undefined;
+    const refreshMs = liveSnapshotRefreshMs({
+      running: camera.running,
+      visible: tileVisible,
+      documentVisible,
+      streamReady,
+      transport: activeTransport,
+      mobile: mobileView,
+      primary: mobilePrimary,
+    });
+    if (!refreshMs) return undefined;
     const timer = window.setInterval(
       () => setSnapshotToken(String(Date.now())),
-      isMobileViewport() ? 8000 : 2000,
+      refreshMs,
     );
     return () => window.clearInterval(timer);
-  }, [camera.running, streamReady, activeTransport]);
+  }, [activeTransport, camera.running, documentVisible, mobilePrimary, mobileView, streamReady, tileVisible]);
 
   async function post(action) {
     if (cameraActionBusy) return;
@@ -2162,6 +2198,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
 
   return (
     <article
+      ref={tileRef}
       className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""} ${mobilePrimary ? "mobile-primary" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
       data-camera-id={camera.id}
@@ -5819,6 +5856,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
                 "aria-label": `Resize ${camera.name}. Press Enter, use arrow keys, S to fit the video, then Enter to save or Escape to cancel`,
               } : {}}
               mobilePrimary={camera.id === mobileFocusedCameraId}
+              mobileView={mobileLiveView}
             />
           )) : null}
         </div>
@@ -9227,6 +9265,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const cameraOrderOriginalRef = useRef([]);
   const [probe, setProbe] = useState(null);
   const [logLines, setLogLines] = useState([]);
+  const logSignatureRef = useRef("");
   const [logFilter, setLogFilter] = useStoredState("survng.logFilter.v1", "");
   const [logLevel, setLogLevel] = useStoredState("survng.logLevel.v1", "INFO");
   const [logOrder, setLogOrder] = useStoredState("survng.logOrder.v1", "newest");
@@ -9488,12 +9527,18 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
 
 
   async function loadLogs() {
+    if (document.hidden) return;
     try {
       const params = new URLSearchParams({ limit: "500", level: logLevel, q: logFilter });
       const response = await fetch(`/api/logs?${params.toString()}`);
       if (response.ok) {
         const payload = await response.json();
-        setLogLines(payload.lines || []);
+        const lines = payload.lines || [];
+        const signature = logPayloadSignature(lines);
+        if (signature !== logSignatureRef.current) {
+          logSignatureRef.current = signature;
+          setLogLines(lines);
+        }
       }
     } catch {
       // Preserve the current log view; polling retries automatically.
@@ -9504,7 +9549,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     if (settingsTab !== "logs") return undefined;
     loadLogs();
     const timer = window.setInterval(loadLogs, 2000);
-    return () => window.clearInterval(timer);
+    const onVisibility = () => { if (!document.hidden) void loadLogs(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [settingsTab, logLevel, logFilter]);
 
   async function loadMotionAudit(page = auditPage) {
