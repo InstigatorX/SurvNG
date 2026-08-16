@@ -5722,6 +5722,10 @@ function recordingIncidentEndEpoch(incident) {
   return Number.isFinite(parsed) ? parsed : recordingIncidentEpoch(incident);
 }
 
+function recordingEvidenceTypeLabel(type) {
+  return type === "motion" ? "motion-only" : "object";
+}
+
 function recordingPlaybackTimeline(rows) {
   let mediaOffset = 0;
   return (rows || [])
@@ -5962,7 +5966,7 @@ function RecordingSectionSwitcher({ mode, cameraId = "" }) {
   return (
     <div className="recordings-section-switcher" aria-label="Recording section">
       <a className={mode === "history" ? "active" : ""} href={appUrl(`/timeline${query}`)}><Clock3 size={14} />Timeline</a>
-      <a className={mode === "search" ? "active" : ""} href={appUrl("/search")}><Search size={14} />Search</a>
+      {mode === "search" ? <a className="active" href={appUrl("/search")}><Search size={14} />Search</a> : null}
       <a className={mode === "exports" ? "active" : ""} href={appUrl("/timeline/exports")}><Download size={14} />Exports</a>
     </div>
   );
@@ -6165,6 +6169,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [exportError, setExportError] = useState("");
   const [exportSubmitting, setExportSubmitting] = useState(false);
   const [gridPlaying, setGridPlaying] = useState(false);
+  const [selectedEventId, setSelectedEventId] = useState(null);
 
   const isAllCameras = cameraId === ALL_RECORDING_CAMERAS_ID;
   const activeCameraId = isAllCameras
@@ -6211,6 +6216,11 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     .filter((event) => Number.isFinite(event.incident_epoch))
     .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events]);
 
+  const timelineEvents = useMemo(() => events
+    .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
+    .filter((event) => Number.isFinite(event.incident_epoch))
+    .sort((left, right) => left.incident_epoch - right.incident_epoch), [events]);
+
   const nearbyEvents = useMemo(() => {
     if (!Number.isFinite(playhead)) return [];
     if (incidentRangeHours >= 24) return filteredEvents;
@@ -6220,6 +6230,14 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       .filter((event) => event.distance <= maximumDistance)
       .sort((left, right) => left.incident_epoch - right.incident_epoch)
   }, [filteredEvents, incidentRangeHours, playhead]);
+  const selectedEvent = nearbyEvents.find((event) => event.id === selectedEventId)
+    || nearbyEvents.reduce((closest, event) => (
+      !closest || Math.abs(event.incident_epoch - playhead) < Math.abs(closest.incident_epoch - playhead) ? event : closest
+    ), null);
+
+  useEffect(() => {
+    if (selectedEvent?.id !== selectedEventId) setSelectedEventId(selectedEvent?.id ?? null);
+  }, [selectedEvent?.id, selectedEventId]);
 
   useEffect(() => {
     if (!exportJob?.id || !["queued", "running", "cancelling"].includes(exportJob.status)) return undefined;
@@ -6671,16 +6689,24 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       : desiredEpochRef.current;
     const target = Number.isFinite(retained) ? snapToRecording(retained) : snapToRecording(Date.now() / 1000);
     const mediaTime = epochToPlaybackMediaTime(target);
-    if (Number.isFinite(mediaTime)) video.currentTime = mediaTime;
+    const seekRequired = Number.isFinite(mediaTime) && Math.abs(video.currentTime - mediaTime) > 0.05;
+    if (seekRequired) {
+      pendingSeekEpochRef.current = target;
+      pendingSeekModeRef.current = "window-ready";
+      setPlaybackNotice("Seeking...");
+      video.currentTime = mediaTime;
+    }
     if (Number.isFinite(target)) {
       desiredEpochRef.current = target;
       setPlayhead(target);
     }
-    pendingSeekEpochRef.current = null;
-    pendingSeekModeRef.current = null;
+    if (!seekRequired) {
+      pendingSeekEpochRef.current = null;
+      pendingSeekModeRef.current = null;
+      setPlaybackNotice("");
+    }
     setPlaybackError("");
     setPlaybackErrorStage("");
-    setPlaybackNotice("");
     if (autoplayRef.current) requestRecordingPlay(video);
   }
 
@@ -6693,7 +6719,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   }
 
   function handleRecordingSeeked(event) {
-    if (pendingSeekModeRef.current === "local") {
+    if (pendingSeekModeRef.current === "local" || pendingSeekModeRef.current === "window-ready") {
       const epoch = mediaTimeToEpoch(event.currentTarget.currentTime);
       if (Number.isFinite(epoch)) {
         desiredEpochRef.current = epoch;
@@ -6701,8 +6727,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       }
       pendingSeekEpochRef.current = null;
       pendingSeekModeRef.current = null;
+      setPlaybackNotice("");
     }
-    setPlaybackNotice("");
   }
 
   function handleRecordingError(error) {
@@ -6843,7 +6869,16 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
   return (
     <main className="recordings-v2-page">
-      <nav className="recordings-tabs"><RecordingSectionSwitcher mode="history" cameraId={activeCameraId} /></nav>
+      <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
+        <RecordingSectionSwitcher mode="history" cameraId={activeCameraId} />
+        <div className="recordings-v2-date">
+          <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={15} /></button>
+          <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
+          <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={15} /></button>
+          <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
+        </div>
+        <span className="recordings-commandbar-time">{Number.isFinite(playhead) ? formatDateTime(playhead, timeZone) : "Choose a recording time"}</span>
+      </nav>
       <RecordingCameraRail subtitle="Choose recording source">
         <button type="button" className={isAllCameras ? "active" : ""} onClick={() => { setCameraId(ALL_RECORDING_CAMERAS_ID); setSource("live"); }}>
           <Grid2X2 size={16} />
@@ -6886,7 +6921,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               onPlay={() => {
                 autoplayRef.current = true;
                 setPlaybackBlocked(false);
-                setPlaybackNotice("");
+                if (!Number.isFinite(pendingSeekEpochRef.current)) setPlaybackNotice("");
               }}
               onPause={(event) => {
                 if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
@@ -6927,7 +6962,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             startEpoch={dayStart}
             endEpoch={dayEnd}
             recordings={timeline}
-            events={filteredEvents}
+            events={timelineEvents}
+            evidenceFilter={eventFilter}
             playhead={playhead ?? dayStart}
             timeZone={timeZone}
             onSeek={(epoch) => playAt(epoch, true)}
@@ -6976,15 +7012,10 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         <div className="recordings-v2-incidents">
           <div className="recordings-v2-incidents-toolbar">
             <div className="recordings-v2-incidents-tools">
-              <div className="recordings-v2-date">
-                <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={15} /></button>
-                <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
-                <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={15} /></button>
-                <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
-              </div>
+              <span className="recordings-v2-filter-label">Nearby evidence</span>
               <div className="recordings-v2-event-filter" aria-label="Recording incident type">
                 <button type="button" className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}><CircleDot size={14} />Object</button>
-                <button type="button" className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion</button>
+                <button type="button" className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion only</button>
               </div>
               <label className="recordings-v2-range">
                 <span>Range</span>
@@ -7006,16 +7037,19 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 <Download size={15} />{isAllCameras ? "Select camera to export" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
               </button>
             </div>
-            <span>{nearbyEvents.length.toLocaleString()} of {filteredEvents.length.toLocaleString()} {eventFilter} incident{filteredEvents.length === 1 ? "" : "s"} · {incidentRangeHours >= 24 ? "full day" : `${incidentRangeHours} hour${incidentRangeHours === 1 ? "" : "s"} around current time`}</span>
+            <span>{nearbyEvents.length.toLocaleString()} of {filteredEvents.length.toLocaleString()} {recordingEvidenceTypeLabel(eventFilter)} incident{filteredEvents.length === 1 ? "" : "s"} · {incidentRangeHours >= 24 ? "full day" : `${incidentRangeHours} hour${incidentRangeHours === 1 ? "" : "s"} around current time`}</span>
           </div>
-          <div className="recordings-v2-events">
+          <div className="recordings-v2-investigation">
+            <div className="recordings-v2-events" aria-label="Nearby incidents">
             {nearbyEvents.length ? nearbyEvents.map((event) => (
               <button
                 key={event.id}
                 type="button"
-                className={event.has_objects ? "object" : "motion"}
-                onClick={() => playAt(event.incident_epoch, true)}
-                title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion"}`}
+                className={`${event.has_objects ? "object" : "motion"}${selectedEvent?.id === event.id ? " selected" : ""}`}
+                onClick={() => { setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
+                aria-pressed={selectedEvent?.id === event.id}
+                aria-label={`${event.labels?.length ? event.labels.join(", ") : "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
+                title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion only"}`}
               >
                 <span className="recordings-v2-event-image">
                   <Radar size={20} />
@@ -7023,10 +7057,19 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 </span>
                 <span className="recordings-v2-event-caption">
                   <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
-                  <b>{isAllCameras ? `${cameras.find((camera) => camera.id === event.camera_id)?.name || event.camera_id} · ` : ""}{event.labels?.length ? event.labels.join(", ") : "Motion"}</b>
+                  <b>{isAllCameras ? `${cameras.find((camera) => camera.id === event.camera_id)?.name || event.camera_id} · ` : ""}{event.labels?.length ? event.labels.join(", ") : "Motion only"}</b>
                 </span>
               </button>
             )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter} incidents {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
+            </div>
+            {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
+              <div>
+                <span>{selectedEvent.has_objects ? "Selected incident" : "Selected motion"}</span>
+                <strong>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion observed"}</strong>
+                <small>{isAllCameras ? `${cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id} · ` : ""}{formatDateTime(selectedEvent.incident_epoch, timeZone)}</small>
+              </div>
+              <a href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)}>View full incident <ArrowRight size={15} /></a>
+            </aside> : null}
           </div>
         </div>
       </section>
@@ -7346,7 +7389,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, playhead, timeZone, onSeek, exportRange, onExportRangeChange }) {
+function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, evidenceFilter, playhead, timeZone, onSeek, exportRange, onExportRangeChange }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const [draft, setDraft] = useState(offset);
@@ -7750,6 +7793,11 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
 
   return (
     <div className="recordings-v2-timeline">
+      <div className="recordings-v2-lane-legend">
+        <span className="visually-hidden">{eventMarkers.filter((event) => event.hasObjects).length} object incidents and {eventMarkers.filter((event) => !event.hasObjects).length} motion-only incidents on this day.</span>
+        <span className={evidenceFilter === "object" ? "active object" : "object"}>Objects ({eventMarkers.filter((event) => event.hasObjects).length})</span>
+        <span className={evidenceFilter === "motion" ? "active motion" : "motion"}>Motion only ({eventMarkers.filter((event) => !event.hasObjects).length})</span>
+      </div>
       <div className="recordings-v2-track">
         <div className="recordings-v2-ticks" aria-hidden="true">
           {ticks.map((tick) => (
@@ -7767,8 +7815,11 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
             }}
           />
         ))}
-        <div className="recordings-v2-event-markers" aria-hidden="true">
-          {eventMarkers.map((event) => <b key={event.id} className={event.hasObjects ? "object" : "motion"} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
+        <div className={`recordings-v2-event-lane object${evidenceFilter === "motion" ? " muted" : ""}`} aria-hidden="true">
+          {eventMarkers.filter((event) => event.hasObjects).map((event) => <b key={event.id} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
+        </div>
+        <div className={`recordings-v2-event-lane motion${evidenceFilter === "object" ? " muted" : ""}`} aria-hidden="true">
+          {eventMarkers.filter((event) => !event.hasObjects).map((event) => <b key={event.id} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
         </div>
         {exportRange ? (
           <>
