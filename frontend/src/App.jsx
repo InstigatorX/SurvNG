@@ -117,6 +117,7 @@ import { insertZonePointWithIndex } from "./zoneGeometry.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "./relatedIncidents.mjs";
 import { nextFaceReviewObservation } from "./faceReview.mjs";
 import { PEOPLE_REVIEW_FILTERS, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "./peopleWorkspace.mjs";
+import { ADMIN_WORKSPACES, GENERAL_SECTION_LABELS, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, nextTabId, preferredStoredValue, readAdminSubsection, readAdminWorkspace } from "./adminWorkspace.mjs";
 import {
   canonicalWorkspaceUrl,
   DESKTOP_PRIMARY_WORKSPACES,
@@ -136,6 +137,18 @@ const MEDIA_STORAGE_ROLES = [
   ["clips", "Clips"],
   ["exports", "Exports"],
 ];
+const ADMIN_WORKSPACE_ICONS = {
+  general: Cog,
+  cameras: Camera,
+  audit: Activity,
+  calibration: Sparkles,
+  telemetry: Gauge,
+  maintenance: Wrench,
+  logs: ListTree,
+};
+const CAMERA_ADMIN_SECTIONS = ["settings", "motion", "zones", "info"];
+const TELEMETRY_ADMIN_SECTIONS = ["overview", "cameras", "diagnostics"];
+const GENERAL_ADMIN_SECTIONS = ["general", "storage", "mqtt", "detection", "motion-review"];
 const LEGACY_INCIDENT_FILTER_KEYS = [
   "survng.liveEventFilter.v2",
   "survng.incidentDay.v1",
@@ -783,8 +796,8 @@ function eventThumbnailUrl(event, width = 720, quality = 82) {
   return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/thumbnail.jpg?width=${width}&quality=${quality}`) : "";
 }
 
-function useStoredState(key, initialValue) {
-  const [value, setValue] = useState(() => readStoredValue(browserStorage(window), key, initialValue));
+function useStoredState(key, initialValue, { preferInitial = false } = {}) {
+  const [value, setValue] = useState(() => preferredStoredValue(initialValue, readStoredValue(browserStorage(window), key, initialValue), preferInitial));
   useEffect(() => {
     writeStoredValue(browserStorage(window), key, value);
   }, [key, value]);
@@ -8988,7 +9001,7 @@ function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
       </div>
       {activeRun ? <button type="button" className="tuneup-resume-card" onClick={() => { setSelectedRunId(activeRun.id); setSection("tuneup"); setWizardStep(3); }}><RefreshCcw className="spin" size={16} /><span><strong>Review in progress</strong><small>{tuneupHistoryTitle(activeRun, cameras)}</small></span></button> : null}
     </section>
-    <section className="bento-card config-editor settings-panel calibration-panel">
+    <section id="admin-panel-calibration" className="bento-card config-editor settings-panel calibration-panel" role="tabpanel" aria-labelledby="admin-tab-calibration">
       <div className="section-head"><div><h2>{section === "tuneup" ? "Detection Tune-Up" : section === "monitoring" ? "Monitoring" : "Tune-Up History"}</h2><p>{section === "tuneup" ? "SurvNG reviews evidence; you approve every change" : section === "monitoring" ? "See how applied changes perform and undo them at any time" : "Past reviews, decisions, and results"}</p></div><button onClick={() => void loadCalibration()}><RefreshCcw size={16} /> Refresh</button></div>
       {error ? <div className="error-banner">{error}</div> : null}
       {section === "tuneup" ? <div className="tuneup-workflow">
@@ -9010,6 +9023,12 @@ function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
 }
 
 function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContextChange }) {
+  const initialAdminSearch = useMemo(() => window.location.search, []);
+  const initialAdminParams = useMemo(() => new URLSearchParams(initialAdminSearch), [initialAdminSearch]);
+  const initialAdminWorkspace = useMemo(() => readAdminWorkspace(
+    initialAdminSearch,
+    readStoredValue(browserStorage(window), "survng.configTab", "general"),
+  ), [initialAdminSearch]);
   const [config, setConfig] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState([]);
   const [accelerator, setAccelerator] = useState(null);
@@ -9020,10 +9039,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [mqttStatus, setMqttStatus] = useState(null);
   const [detectorStatus, setDetectorStatus] = useState(null);
   const [motionCatalog, setMotionCatalog] = useState(null);
-  const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
-  const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
-  const [cameraSection, setCameraSection] = useStoredState("survng.cameraSection.v1", "settings");
-  const [selectedId, setSelectedId] = useState("");
+  const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", initialAdminWorkspace, { preferInitial: initialAdminParams.has("section") });
+  const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", readAdminSubsection(initialAdminSearch, GENERAL_ADMIN_SECTIONS, "general"), { preferInitial: initialAdminWorkspace === "general" && initialAdminParams.has("subsection") });
+  const [cameraSection, setCameraSection] = useStoredState("survng.cameraSection.v1", readAdminSubsection(initialAdminSearch, CAMERA_ADMIN_SECTIONS, "settings"), { preferInitial: initialAdminWorkspace === "cameras" && initialAdminParams.has("subsection") });
+  const [selectedId, setSelectedId] = useState(() => new URLSearchParams(initialAdminSearch).get("camera") || "");
   const [saveNotice, setSaveNotice] = useState(null);
   const [configLoadError, setConfigLoadError] = useState("");
   const [generalSaving, setGeneralSaving] = useState(false);
@@ -9053,22 +9072,110 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [telemetry, setTelemetry] = useState(null);
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryError, setTelemetryError] = useState("");
-  const [telemetrySection, setTelemetrySection] = useStoredState("survng.telemetrySection.v1", "overview");
-  const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", "");
+  const [telemetrySection, setTelemetrySection] = useStoredState("survng.telemetrySection.v1", readAdminSubsection(initialAdminSearch, TELEMETRY_ADMIN_SECTIONS, "overview"), { preferInitial: initialAdminWorkspace === "telemetry" && initialAdminParams.has("subsection") });
+  const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", initialAdminParams.get("camera") || "", { preferInitial: initialAdminWorkspace === "telemetry" && initialAdminParams.has("camera") });
   const [diagnosticScope, setDiagnosticScope] = useState("system");
   const [diagnosticDuration, setDiagnosticDuration] = useState("3600");
   const [maintenance, setMaintenance] = useState(null);
   const [maintenanceError, setMaintenanceError] = useState("");
+  const [apiTokenSecretVisible, setApiTokenSecretVisible] = useState(false);
   const configLoadSequence = useRef(0);
+  const adminHistoryWriteRef = useRef(true);
+  const adminDirtyRef = useRef(false);
+  const apiTokenSecretVisibleRef = useRef(apiTokenSecretVisible);
+  const acceptedAdminLocationRef = useRef(`${window.location.pathname}${window.location.search}${window.location.hash}`);
+  const baselineConfigRef = useRef(null);
+  const [baselineRevision, setBaselineRevision] = useState(0);
   const auditPageSize = 24;
+
+  function adminLocationOptions(section = settingsTab) {
+    if (section === "general") return { subsection: generalSection === "general" ? "" : generalSection };
+    if (section === "cameras") return { subsection: cameraSection === "settings" ? "" : cameraSection, camera: selectedId };
+    if (section === "telemetry") return { subsection: telemetrySection === "overview" ? "" : telemetrySection, camera: telemetrySection === "cameras" ? telemetryCamera : "" };
+    return {};
+  }
 
   useEffect(() => {
     onAssistantContextChange?.({
-      page: "config",
+      page: "admin",
       camera_id: settingsTab === "cameras" ? selectedId : "",
       filters: { section: settingsTab, general_section: generalSection, camera_section: cameraSection },
     });
   }, [cameraSection, generalSection, onAssistantContextChange, selectedId, settingsTab]);
+
+  useEffect(() => {
+    if (!adminHistoryWriteRef.current) {
+      adminHistoryWriteRef.current = true;
+      return;
+    }
+    const search = adminWorkspaceSearch(settingsTab, window.location.search, adminLocationOptions());
+    const location = appUrl(`/admin${search}`);
+    window.history.replaceState(window.history.state, "", location);
+    acceptedAdminLocationRef.current = location;
+  }, [cameraSection, generalSection, selectedId, settingsTab, telemetryCamera, telemetrySection]);
+
+  useEffect(() => {
+    function restoreAdminWorkspace() {
+      const requestedLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (adminDirtyRef.current || apiTokenSecretVisibleRef.current) {
+        const warning = adminDirtyRef.current && apiTokenSecretVisibleRef.current
+          ? "Leave this Admin view, discard unsaved changes, and discard the one-time API token secret?"
+          : apiTokenSecretVisibleRef.current
+            ? "The new API token secret is shown only once. Leave this Admin view and discard the displayed secret?"
+            : "Leave this Admin view and discard unsaved changes?";
+        if (!window.confirm(warning)) {
+          window.history.pushState(window.history.state, "", acceptedAdminLocationRef.current);
+          return;
+        }
+        if (apiTokenSecretVisibleRef.current) setApiTokenSecretVisible(false);
+        if (adminDirtyRef.current) discardAdminChanges();
+      }
+      adminHistoryWriteRef.current = false;
+      const nextSection = readAdminWorkspace(window.location.search, settingsTab);
+      setSettingsTab(nextSection);
+      if (nextSection === "general") setGeneralSection(readAdminSubsection(window.location.search, GENERAL_ADMIN_SECTIONS, generalSection));
+      if (nextSection === "cameras") {
+        setCameraSection(readAdminSubsection(window.location.search, CAMERA_ADMIN_SECTIONS, cameraSection));
+        setSelectedId(new URLSearchParams(window.location.search).get("camera") || selectedId);
+      }
+      if (nextSection === "telemetry") {
+        setTelemetrySection(readAdminSubsection(window.location.search, TELEMETRY_ADMIN_SECTIONS, telemetrySection));
+        setTelemetryCamera(new URLSearchParams(window.location.search).get("camera") || telemetryCamera);
+      }
+      acceptedAdminLocationRef.current = requestedLocation;
+    }
+    window.addEventListener("popstate", restoreAdminWorkspace);
+    return () => window.removeEventListener("popstate", restoreAdminWorkspace);
+  }, [cameraSection, generalSection, selectedId, setSettingsTab, settingsTab, telemetryCamera, telemetrySection]);
+
+  function selectAdminWorkspace(nextTab) {
+    if (nextTab === settingsTab) return;
+    if (apiTokenSecretVisible && settingsTab === "general") {
+      if (!window.confirm("The new API token secret is shown only once. Leave this section and discard the displayed secret?")) return;
+      setApiTokenSecretVisible(false);
+    }
+    if (!confirmDiscardAdminChanges("Switch sections and discard unsaved changes?")) return;
+    const search = adminWorkspaceSearch(nextTab, window.location.search, adminLocationOptions(nextTab));
+    const location = appUrl(`/admin${search}`);
+    window.history.pushState({ ...(window.history.state || {}), survngAdminSection: nextTab }, "", location);
+    acceptedAdminLocationRef.current = location;
+    adminHistoryWriteRef.current = false;
+    setSettingsTab(nextTab);
+  }
+
+  function selectAdminSubsection(nextSubsection, setter, section = settingsTab, cameraOverride = "") {
+    const options = section === "general"
+      ? { subsection: nextSubsection === "general" ? "" : nextSubsection }
+      : section === "cameras"
+        ? { subsection: nextSubsection === "settings" ? "" : nextSubsection, camera: cameraOverride || selectedId }
+        : { subsection: nextSubsection === "overview" ? "" : nextSubsection, camera: nextSubsection === "cameras" ? cameraOverride || telemetryCamera : "" };
+    const search = adminWorkspaceSearch(section, window.location.search, options);
+    const location = appUrl(`/admin${search}`);
+    window.history.pushState({ ...(window.history.state || {}), survngAdminSubsection: nextSubsection }, "", location);
+    acceptedAdminLocationRef.current = location;
+    adminHistoryWriteRef.current = false;
+    setter(nextSubsection);
+  }
 
   async function load() {
     const sequence = ++configLoadSequence.current;
@@ -9078,6 +9185,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       if (!response.ok) throw new Error(`Configuration failed to load (${response.status})`);
       const nextConfig = await response.json();
       if (sequence !== configLoadSequence.current) return false;
+      baselineConfigRef.current = structuredClone(nextConfig);
+      setBaselineRevision((current) => current + 1);
       setConfig(nextConfig);
       setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
 
@@ -9366,6 +9475,21 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     ? telemetryCamera
     : cameras[0]?.id || "";
   const selectedCamera = cameras.find((camera) => camera.id === selectedId) || cameras[0] || null;
+  const baselineConfig = baselineConfigRef.current;
+  const baselineCamera = baselineConfig?.cameras?.find((camera) => camera.id === selectedCamera?.id) || null;
+  const generalDirty = Boolean(config && baselineConfig) && !configValuesEqual(comparableSystemConfig(config), comparableSystemConfig(baselineConfig));
+  const selectedCameraSettingsDirty = Boolean(selectedCamera) && !configValuesEqual(comparableCameraSettings(selectedCamera), comparableCameraSettings(baselineCamera));
+  const selectedZonesDirty = Boolean(selectedCamera) && !configValuesEqual(selectedCamera.zones || [], baselineCamera?.zones || []);
+  const cameraDirtyState = cameraConfigDirtyState(config?.cameras || [], baselineConfig?.cameras || []);
+  const cameraSettingsDirty = Boolean(config && baselineConfig) && cameraDirtyState.settings;
+  const zonesDirty = Boolean(config && baselineConfig) && cameraDirtyState.zones;
+  const cameraOrderDirty = Boolean(config && baselineConfig) && !configValuesEqual(
+    (config.cameras || []).map((camera) => camera.id),
+    (baselineConfig.cameras || []).map((camera) => camera.id),
+  );
+  const adminDirty = generalDirty || cameraSettingsDirty || zonesDirty || cameraOrderDirty;
+  adminDirtyRef.current = adminDirty;
+  apiTokenSecretVisibleRef.current = apiTokenSecretVisible;
   const selectedRuntimeStatus = runtimeStatus.find((camera) => camera.id === selectedCamera?.id);
   const selectedAudit = auditItems.find((item) => item.id === selectedAuditId)
     || (linkedAudit?.id === selectedAuditId ? linkedAudit : null);
@@ -9378,10 +9502,72 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     ? activeDetectorModel.classes
     : config?.detector?.labels || [];
 
+  useEffect(() => {
+    function warnBeforeUnload(event) {
+      if (!adminDirty && !apiTokenSecretVisible) return;
+      event.preventDefault();
+      event.returnValue = "";
+    }
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [adminDirty, apiTokenSecretVisible]);
+
 
 
   if (!config) {
     return <main className="bento-grid config-grid"><section className="bento-card config-editor"><div className="empty-state">{configLoadError || "Loading config..."}{configLoadError ? <button type="button" onClick={() => void load()}><RefreshCcw size={15} /> Retry</button> : null}</div></section></main>;
+  }
+
+  function discardAdminChanges() {
+    if (!baselineConfigRef.current) return;
+    setConfig(structuredClone(baselineConfigRef.current));
+    setSelectedId((current) => baselineConfigRef.current.cameras?.some((camera) => camera.id === current)
+      ? current
+      : baselineConfigRef.current.cameras?.[0]?.id || "");
+    setCameraOrderEditing(false);
+    setSaveNotice({ state: "saved", text: "Unsaved changes discarded." });
+  }
+
+  function confirmDiscardAdminChanges(message) {
+    if (!adminDirty) return true;
+    if (!window.confirm(message)) return false;
+    discardAdminChanges();
+    return true;
+  }
+
+  function moveTabFocus(event, ids, selected, select) {
+    const next = nextTabId(ids, selected, event.key);
+    if (!next) return;
+    event.preventDefault();
+    const tabListId = event.currentTarget.id;
+    select(next);
+    window.requestAnimationFrame(() => document.getElementById(tabListId)?.querySelector(`[data-tab-id="${next}"]`)?.focus());
+  }
+
+  function selectConfigCamera(cameraId) {
+    if (cameraId === selectedCamera?.id) return;
+    if ((selectedCameraSettingsDirty || selectedZonesDirty) && !window.confirm("Switch cameras and discard unsaved changes for this camera?")) return;
+    if (selectedCameraSettingsDirty || selectedZonesDirty) {
+      const restoredCamera = baselineConfigRef.current?.cameras?.find((camera) => camera.id === selectedCamera?.id);
+      if (restoredCamera) {
+        setConfig((current) => ({
+          ...current,
+          cameras: (current.cameras || []).map((camera) => camera.id === selectedCamera.id ? structuredClone(restoredCamera) : camera),
+        }));
+      } else {
+        setConfig((current) => ({
+          ...current,
+          cameras: (current.cameras || []).filter((camera) => camera.id !== selectedCamera?.id),
+        }));
+      }
+    }
+    setSelectedId(cameraId);
+    setProbe(null);
+    const search = adminWorkspaceSearch("cameras", window.location.search, { subsection: cameraSection === "settings" ? "" : cameraSection, camera: cameraId });
+    const location = appUrl(`/admin${search}`);
+    window.history.pushState({ ...(window.history.state || {}), survngAdminCamera: cameraId }, "", location);
+    acceptedAdminLocationRef.current = location;
+    adminHistoryWriteRef.current = false;
   }
 
   function updateConfig(path, value) {
@@ -9393,6 +9579,21 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       target[path[path.length - 1]] = value;
       return next;
     });
+  }
+
+  function commitImmediateConfig(path, value) {
+    const applyValue = (targetConfig) => {
+      const next = structuredClone(targetConfig);
+      let target = next;
+      for (let index = 0; index < path.length - 1; index += 1) target = target[path[index]];
+      target[path[path.length - 1]] = value;
+      return next;
+    };
+    setConfig((current) => applyValue(current));
+    if (baselineConfigRef.current) {
+      baselineConfigRef.current = applyValue(baselineConfigRef.current);
+      setBaselineRevision((current) => current + 1);
+    }
   }
 
   function updateCamera(cameraId, path, value) {
@@ -9444,6 +9645,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     setCameraOrderEditing(false);
     setDragConfigCameraId("");
     setDragConfigCameraTarget("");
+    setSaveNotice(null);
   }
 
   function moveConfigCamera(sourceId, targetId, after) {
@@ -9460,6 +9662,14 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     });
   }
 
+  function moveSelectedCameraBy(offset) {
+    const currentIndex = cameras.findIndex((camera) => camera.id === selectedCamera?.id);
+    const targetIndex = currentIndex + Number(offset || 0);
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= cameras.length) return;
+    moveConfigCamera(selectedCamera.id, cameras[targetIndex].id, offset > 0);
+    setSaveNotice({ state: "pending", text: `${selectedCamera.name || selectedCamera.id} moved to position ${targetIndex + 1}. Save order to apply.` });
+  }
+
   async function saveCameraOrder() {
     if (cameraOrderSaving) return;
     setCameraOrderSaving(true);
@@ -9472,6 +9682,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       });
       if (!response.ok) throw new Error(await response.text());
       cameraOrderOriginalRef.current = cameras.map((camera) => camera.id);
+      if (baselineConfigRef.current) {
+        const byId = new Map((baselineConfigRef.current.cameras || []).map((camera) => [camera.id, camera]));
+        baselineConfigRef.current.cameras = cameras.map((camera) => structuredClone(byId.get(camera.id) || camera));
+        setBaselineRevision((current) => current + 1);
+      }
       setCameraOrderEditing(false);
       setSaveNotice({ state: "saved", text: "Default live-view order saved." });
     } catch (error) {
@@ -9559,6 +9774,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       if (!response.ok) throw new Error(await response.text());
       const payload = await response.json();
       updateCamera(camera.id, ["zones"], payload.zones || []);
+      const baselineCameraToUpdate = baselineConfigRef.current?.cameras?.find((item) => item.id === camera.id);
+      if (baselineCameraToUpdate) {
+        baselineCameraToUpdate.zones = structuredClone(payload.zones || []);
+        setBaselineRevision((current) => current + 1);
+      }
       setSaveNotice({ state: "saved", text: "Zones saved without restarting cameras." });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
@@ -9589,6 +9809,18 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           : item),
       }));
       setSelectedId(savedCamera.id);
+      if (baselineConfigRef.current) {
+        const baselineCameras = baselineConfigRef.current.cameras || [];
+        const baselineMatch = baselineCameras.find((item) => item.id === camera.id);
+        const savedBaselineCamera = {
+          ...structuredClone(savedCamera),
+          zones: structuredClone(baselineMatch?.zones || camera.zones || []),
+        };
+        baselineConfigRef.current.cameras = baselineMatch
+          ? baselineCameras.map((item) => item.id === camera.id ? savedBaselineCamera : item)
+          : [...baselineCameras, savedBaselineCamera];
+        setBaselineRevision((current) => current + 1);
+      }
       setSaveNotice({
         state: "saved",
         text: payload.camera_workers_restarted
@@ -9618,6 +9850,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, { method: "DELETE" });
       if (!response.ok) throw new Error(await response.text());
       removeCamera(camera.id);
+      if (baselineConfigRef.current) {
+        baselineConfigRef.current.cameras = (baselineConfigRef.current.cameras || []).filter((item) => item.id !== camera.id);
+        setBaselineRevision((current) => current + 1);
+      }
       setSaveNotice({ state: "saved", text: "Camera removed. Workers reloaded." });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
@@ -9630,7 +9866,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
 
   async function probeCamera(camera) {
     setProbe({ loading: true });
-    setCameraSection("info");
     setCameraSection("info");
     const probeCameraConfig = cameraWithDerivedConnection(camera);
     if (probeCameraConfig !== camera) {
@@ -9671,43 +9906,46 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   return (
     <main className="bento-grid config-grid settings-grid">
       <div className="settings-tabs">
-        <div className="settings-tab-list" role="tablist" aria-label="Config sections">
-          <button className={settingsTab === "general" ? "active" : ""} onClick={() => setSettingsTab("general")} role="tab" aria-selected={settingsTab === "general"}><Cog size={16} /> General</button>
-          <button className={settingsTab === "cameras" ? "active" : ""} onClick={() => setSettingsTab("cameras")} role="tab" aria-selected={settingsTab === "cameras"}><Camera size={16} /> Camera Settings</button>
-          <button className={settingsTab === "audit" ? "active" : ""} onClick={() => setSettingsTab("audit")} role="tab" aria-selected={settingsTab === "audit"}><Activity size={16} /> Motion Audit</button>
-          <button className={settingsTab === "calibration" ? "active" : ""} onClick={() => setSettingsTab("calibration")} role="tab" aria-selected={settingsTab === "calibration"}><Sparkles size={16} /> Detection Tune-Up</button>
-          <button className={settingsTab === "telemetry" ? "active" : ""} onClick={() => setSettingsTab("telemetry")} role="tab" aria-selected={settingsTab === "telemetry"}><Gauge size={16} /> Telemetry</button>
-          <button className={settingsTab === "maintenance" ? "active" : ""} onClick={() => setSettingsTab("maintenance")} role="tab" aria-selected={settingsTab === "maintenance"}><Wrench size={16} /> Maintenance</button>
-          <button className={settingsTab === "logs" ? "active" : ""} onClick={() => setSettingsTab("logs")} role="tab" aria-selected={settingsTab === "logs"}><ListTree size={16} /> Logs</button>
+        <div className="settings-context"><Cog size={18} /><span><strong>Admin</strong><small>Configure, understand, and maintain SurvNG</small></span></div>
+        <div id="admin-workspace-tabs" className="settings-tab-list" role="tablist" aria-label="Admin workspaces" onKeyDown={(event) => moveTabFocus(event, ADMIN_WORKSPACES.map((item) => item.id), settingsTab, selectAdminWorkspace)}>
+          {ADMIN_WORKSPACES.map((workspace) => {
+            const Icon = ADMIN_WORKSPACE_ICONS[workspace.id];
+            return <button id={`admin-tab-${workspace.id}`} data-tab-id={workspace.id} tabIndex={settingsTab === workspace.id ? 0 : -1} aria-controls={`admin-panel-${workspace.id}`} className={settingsTab === workspace.id ? "active" : ""} onClick={() => selectAdminWorkspace(workspace.id)} role="tab" aria-selected={settingsTab === workspace.id} key={workspace.id}><Icon size={16} /> {workspace.label}</button>;
+          })}
         </div>
-        {saveNotice ? <span className={`camera-save-indicator settings-header-status ${saveNotice.state}`} role="status">{saveNotice.state === "saving" ? <RefreshCcw size={14} /> : saveNotice.state === "error" ? <CircleAlert size={14} /> : <CircleDot size={14} />}{saveNotice.text}</span> : null}
+        {adminDirty || saveNotice ? <div className="settings-status-stack">{adminDirty ? <span className="admin-dirty-indicator" role="status"><CircleDot size={14} />Unsaved changes<button type="button" onClick={discardAdminChanges}>Discard</button></span> : null}{saveNotice ? <span className={`camera-save-indicator settings-header-status ${saveNotice.state}`} role="status">{saveNotice.state === "saving" ? <RefreshCcw className="spin" size={14} /> : saveNotice.state === "error" ? <CircleAlert size={14} /> : <CircleDot size={14} />}{saveNotice.text}</span> : null}</div> : null}
       </div>
 
       {settingsTab === "general" ? (
         <>
         <section className="bento-card camera-tree config-tree settings-section-tree">
-          <div className="section-head compact"><div><h2>General</h2><p>Configuration sections</p></div></div>
+          <div className="section-head compact"><div><h2>Settings</h2><p>Choose a configuration area</p></div></div>
           <div className="tree-list">
-            <button type="button" className={generalSection === "general" ? "active" : ""} onClick={() => setGeneralSection("general")}><Cog size={16} /><span>General</span></button>
-            <button type="button" className={generalSection === "storage" ? "active" : ""} onClick={() => setGeneralSection("storage")}><HardDrive size={16} /><span>Storage</span></button>
-            <button type="button" className={generalSection === "mqtt" ? "active" : ""} onClick={() => setGeneralSection("mqtt")}><Radio size={16} /><span>API</span></button>
-            <button type="button" className={generalSection === "detection" ? "active" : ""} onClick={() => setGeneralSection("detection")}><Cpu size={16} /><span>Object Detection</span></button>
-            <button type="button" className={generalSection === "motion-review" ? "active" : ""} onClick={() => setGeneralSection("motion-review")}><Sparkles size={16} /><span>Camera Intelligence</span></button>
+            <span className="tree-group-label">System</span>
+            <button type="button" aria-current={generalSection === "general" ? "page" : undefined} className={generalSection === "general" ? "active" : ""} onClick={() => selectAdminSubsection("general", setGeneralSection, "general")}><Cog size={16} /><span>General</span></button>
+            <button type="button" aria-current={generalSection === "storage" ? "page" : undefined} className={generalSection === "storage" ? "active" : ""} onClick={() => selectAdminSubsection("storage", setGeneralSection, "general")}><HardDrive size={16} /><span>Storage &amp; Retention</span></button>
+            <button type="button" aria-current={generalSection === "mqtt" ? "page" : undefined} className={generalSection === "mqtt" ? "active" : ""} onClick={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}><Radio size={16} /><span>API &amp; MQTT</span></button>
+            <span className="tree-group-label">Intelligence</span>
+            <button type="button" aria-current={generalSection === "detection" ? "page" : undefined} className={generalSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setGeneralSection, "general")}><Cpu size={16} /><span>Object Detection</span></button>
+            <span className="tree-group-label">Tools</span>
+            <button type="button" aria-current={generalSection === "motion-review" ? "page" : undefined} className={generalSection === "motion-review" ? "active" : ""} onClick={() => selectAdminSubsection("motion-review", setGeneralSection, "general")}><Sparkles size={16} /><span>Camera Advisor</span></button>
           </div>
         </section>
-        <section className="bento-card config-editor settings-panel">
+        <section id="admin-panel-general" className="bento-card config-editor settings-panel" role="tabpanel" aria-labelledby="admin-tab-general">
           <div className="section-head">
-            <div><h2>General</h2><p>Application preferences and detector settings</p></div>
-            <div className="camera-command-area">
+            <div><h2>{GENERAL_SECTION_LABELS[generalSection] || "General"}</h2><p>{generalSection === "general" ? "Application preferences" : generalSection === "storage" ? "Media placement and retention" : generalSection === "mqtt" ? "API access and MQTT integration" : generalSection === "detection" ? "Models, inference, and object policy" : "Search, faces, tracking, and AI analysis"}</p></div>
+            {generalSection !== "motion-review" ? <div className="camera-command-area">
               <button className="primary camera-save-button" onClick={save} disabled={generalSaving}>
                 {generalSaving ? <RefreshCcw className="spin" size={16} /> : <Save size={16} />}
-                {generalSaving ? "Saving..." : "Save"}
+                {generalSaving ? "Saving..." : "Save settings"}
               </button>
-            </div>
+            </div> : <span className="admin-action-kind">Advisor actions apply immediately</span>}
           </div>
           <GeneralSettings
             config={config}
             updateConfig={updateConfig}
+            commitImmediateConfig={commitImmediateConfig}
+            onTokenSecretVisibleChange={setApiTokenSecretVisible}
             timeZone={timeZone}
             setTimeZone={setTimeZone}
             theme={theme}
@@ -9748,11 +9986,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
               ["clear", "No object"],
               ["not_run", "Detection skipped"],
             ].map(([value, label]) => (
-              <button type="button" className={auditOutcome === value ? "active" : ""} key={value} onClick={() => { setAuditOutcome(value); setAuditPage(0); }}><Activity size={16} /><span>{label}</span></button>
+              <button type="button" className={auditOutcome === value ? "active" : ""} aria-pressed={auditOutcome === value} key={value} onClick={() => { setAuditOutcome(value); setAuditPage(0); }}><Activity size={16} /><span>{label}</span></button>
             ))}
           </div>
         </section>
-        <section className="bento-card config-editor settings-panel motion-audit-panel">
+        <section id="admin-panel-audit" className="bento-card config-editor settings-panel motion-audit-panel" role="tabpanel" aria-labelledby="admin-tab-audit">
           <div className="section-head">
             <div><h2>{auditCategory === "visual_backup" ? "Visual Backup" : auditCategory === "active_followup" ? "Active-Event Follow-Up" : auditCategory === "qualification" ? "Filtered Motion" : "Motion Decisions"}</h2><p>Qualifier decisions, backup triggers, and detector outcomes</p></div>
             <button onClick={() => loadMotionAudit(auditPage)} disabled={auditLoading}><RefreshCcw className={auditLoading ? "spin" : ""} size={16} /> Refresh</button>
@@ -9774,25 +10012,25 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         <CalibrationLab cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} />
       ) : settingsTab === "telemetry" ? (
         <>
-        <section className="bento-card camera-tree config-tree settings-section-tree telemetry-camera-filter">
+        {telemetrySection === "cameras" ? <section className="bento-card camera-tree config-tree settings-section-tree telemetry-camera-filter">
           <div className="section-head compact"><div><h2>Cameras</h2><p>Select for camera statistics</p></div></div>
           <div className="tree-list">
-            {cameras.map((camera) => <button type="button" className={telemetrySection === "cameras" && selectedTelemetryCamera === camera.id ? "active" : ""} key={camera.id} onClick={() => { setTelemetryCamera(camera.id); setTelemetrySection("cameras"); }}><Camera size={16} /><span>{camera.name || camera.id}</span></button>)}
+            {cameras.map((camera) => <button type="button" className={telemetrySection === "cameras" && selectedTelemetryCamera === camera.id ? "active" : ""} aria-pressed={telemetrySection === "cameras" && selectedTelemetryCamera === camera.id} key={camera.id} onClick={() => { setTelemetryCamera(camera.id); selectAdminSubsection("cameras", setTelemetrySection, "telemetry", camera.id); }}><Camera size={16} /><span>{camera.name || camera.id}</span></button>)}
           </div>
-        </section>
-        <section className="bento-card config-editor settings-panel telemetry-panel">
+        </section> : null}
+        <section id="admin-panel-telemetry" className={`bento-card config-editor settings-panel telemetry-panel${telemetrySection === "cameras" ? "" : " settings-panel-wide"}`} role="tabpanel" aria-labelledby="admin-tab-telemetry">
           <div className="section-head telemetry-panel-head">
             <div><h2>Telemetry</h2><p>System, detection, event, and camera health</p></div>
             {telemetrySection === "overview" ? <TelemetryContinuity data={telemetry} /> : null}
             <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
           </div>
           {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
-          <div className="camera-section-tabs telemetry-section-tabs" role="tablist" aria-label="Telemetry sections">
-            <button type="button" className={telemetrySection === "overview" ? "active" : ""} onClick={() => setTelemetrySection("overview")} role="tab" aria-selected={telemetrySection === "overview"}><Gauge size={15} />Overview</button>
-            <button type="button" className={telemetrySection === "cameras" ? "active" : ""} onClick={() => setTelemetrySection("cameras")} role="tab" aria-selected={telemetrySection === "cameras"}><Camera size={15} />Per-camera</button>
-            <button type="button" className={telemetrySection === "diagnostics" ? "active" : ""} onClick={() => setTelemetrySection("diagnostics")} role="tab" aria-selected={telemetrySection === "diagnostics"}><Wrench size={15} />Diagnostics</button>
+          <div id="telemetry-section-tabs" className="camera-section-tabs telemetry-section-tabs" role="tablist" aria-label="Telemetry sections" onKeyDown={(event) => moveTabFocus(event, TELEMETRY_ADMIN_SECTIONS, telemetrySection, (next) => selectAdminSubsection(next, setTelemetrySection, "telemetry"))}>
+            <button id="telemetry-tab-overview" data-tab-id="overview" tabIndex={telemetrySection === "overview" ? 0 : -1} aria-controls="telemetry-view-panel" type="button" className={telemetrySection === "overview" ? "active" : ""} onClick={() => selectAdminSubsection("overview", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "overview"}><Gauge size={15} />Overview</button>
+            <button id="telemetry-tab-cameras" data-tab-id="cameras" tabIndex={telemetrySection === "cameras" ? 0 : -1} aria-controls="telemetry-view-panel" type="button" className={telemetrySection === "cameras" ? "active" : ""} onClick={() => selectAdminSubsection("cameras", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "cameras"}><Camera size={15} />Per-camera</button>
+            <button id="telemetry-tab-diagnostics" data-tab-id="diagnostics" tabIndex={telemetrySection === "diagnostics" ? 0 : -1} aria-controls="telemetry-view-panel" type="button" className={telemetrySection === "diagnostics" ? "active" : ""} onClick={() => selectAdminSubsection("diagnostics", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "diagnostics"}><Wrench size={15} />Diagnostics</button>
           </div>
-          {telemetrySection === "diagnostics" ? <div className="telemetry-diagnostics">
+          <div id="telemetry-view-panel" className="telemetry-tab-panel" role="tabpanel" aria-labelledby={`telemetry-tab-${telemetrySection}`}>{telemetrySection === "diagnostics" ? <div className="telemetry-diagnostics">
             <section className="telemetry-section">
               <div className="telemetry-section-head"><div><h3>Temporary diagnostics</h3><p>Capture detailed troubleshooting data for a limited time. Sessions stop automatically and never include images, video, or credentials.</p></div></div>
               <div className="telemetry-diagnostic-controls">
@@ -9808,43 +10046,26 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             </section>
             {(telemetry?.diagnostics?.recent || []).some((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()) ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent diagnostic reports</summary><div className="telemetry-diagnostic-list">{telemetry.diagnostics.recent.filter((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()).map((session) => <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? cameras.find((camera) => camera.id === session.camera_id)?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>{formatDateTime(session.started_at, timeZone)}</span></div><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a></article>)}</div></details></section> : null}
             {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
-          </div> : <TelemetryViewer data={telemetry} cameraId={telemetrySection === "cameras" ? selectedTelemetryCamera : ""} timeZone={timeZone} />}
+          </div> : <TelemetryViewer data={telemetry} cameraId={telemetrySection === "cameras" ? selectedTelemetryCamera : ""} timeZone={timeZone} />}</div>
         </section>
         </>
       ) : settingsTab === "maintenance" ? (
-        <>
-        <section className="bento-card camera-tree config-tree settings-section-tree">
-          <div className="section-head compact"><div><h2>Maintenance</h2><p>Safe system tools</p></div></div>
-          <div className="tree-list">
-            <button type="button" className="active"><HardDrive size={16} /><span>Storage Reconciliation</span></button>
-          </div>
-          <div className="maintenance-help"><strong>What it does</strong><p>Quick Check is bounded to recent media and the newest index rows, so it will not saturate network storage.</p><p>Full Scan checks the entire library, reports progress, and can be cancelled. Repair Database also checks a small bounded batch of older recording metadata. Repairs never delete media or incident history.</p></div>
-        </section>
-        <section className="bento-card config-editor settings-panel maintenance-panel">
+        <section id="admin-panel-maintenance" className="bento-card config-editor settings-panel settings-panel-wide maintenance-panel" role="tabpanel" aria-labelledby="admin-tab-maintenance">
           <div className="section-head">
             <div><h2>Storage Reconciliation</h2><p>Find missing references, stale recording rows, and unlinked media</p></div>
             <div className="camera-command-area maintenance-actions">
               {["running", "cancelling"].includes(maintenance?.status) ? <button onClick={() => void cancelMaintenance()} disabled={maintenance?.status === "cancelling"}><X size={16} /> {maintenance?.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : <><button onClick={() => void startMaintenance(false, false)}><RefreshCcw size={16} /> Quick Check</button><button onClick={() => void startMaintenance(false, true)}><Search size={16} /> Full Scan</button><button className="primary" onClick={() => void startMaintenance(true, maintenance?.result?.full === true)}><Wrench size={16} /> Repair Database</button></>}
             </div>
           </div>
+          <details className="maintenance-explanation"><summary>What these checks do</summary><div><p>Quick Check is bounded to recent media and the newest index rows, so it will not saturate network storage.</p><p>Full Scan checks the entire library, reports progress, and can be cancelled. Repair Database also checks a small bounded batch of older recording metadata. Repairs never delete media or incident history.</p></div></details>
           {maintenanceError ? <div className="error-banner">{maintenanceError}</div> : null}
           <MaintenanceViewer state={maintenance} />
         </section>
-        </>
       ) : settingsTab === "logs" ? (
-        <>
-        <section className="bento-card camera-tree config-tree settings-section-tree">
-          <div className="section-head compact"><div><h2>Logs</h2><p>Minimum severity</p></div></div>
-          <div className="tree-list">
-            {[["DEBUG", "Debug+"], ["INFO", "Info+"], ["WARNING", "Warning+"], ["ERROR", "Error+"], ["CRITICAL", "Critical"]].map(([value, label]) => (
-              <button type="button" className={logLevel === value ? "active" : ""} key={value} onClick={() => setLogLevel(value)}><ListTree size={16} /><span>{label}</span></button>
-            ))}
-          </div>
-        </section>
-        <section className="bento-card config-editor settings-panel log-panel">
+        <section id="admin-panel-logs" className="bento-card config-editor settings-panel settings-panel-wide log-panel" role="tabpanel" aria-labelledby="admin-tab-logs">
           <div className="section-head">
             <div><h2>Logs</h2><p>Live application log stream</p></div>
-            <button onClick={loadLogs}><RefreshCcw size={16} /> Refresh</button>
+            <div className="log-command-controls"><label>Minimum severity<select value={logLevel} onChange={(event) => setLogLevel(event.target.value)}>{[["DEBUG", "Debug+"], ["INFO", "Info+"], ["WARNING", "Warning+"], ["ERROR", "Error+"], ["CRITICAL", "Critical"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><button onClick={loadLogs}><RefreshCcw size={16} /> Refresh</button></div>
           </div>
           <LogViewer
             lines={logLines}
@@ -9855,7 +10076,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             timeZone={timeZone}
           />
         </section>
-        </>
       ) : (
         <>
       <section className="bento-card camera-tree config-tree">
@@ -9864,6 +10084,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           <div className="camera-tree-actions">
             {cameraOrderEditing ? (
               <>
+                <button type="button" onClick={() => moveSelectedCameraBy(-1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) <= 0}>Up</button>
+                <button type="button" onClick={() => moveSelectedCameraBy(1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) >= cameras.length - 1}>Down</button>
                 <button type="button" onClick={cancelCameraOrderEdit} disabled={cameraOrderSaving}>Cancel</button>
                 <button type="button" className="primary" onClick={saveCameraOrder} disabled={cameraOrderSaving}><Save size={14} /> {cameraOrderSaving ? "Saving" : "Save"}</button>
               </>
@@ -9879,10 +10101,23 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           {cameras.map((camera) => (
             <button
               type="button"
+              aria-current={camera.id === selectedCamera?.id ? "page" : undefined}
               key={camera.id}
               draggable={cameraOrderEditing}
               className={`${camera.id === selectedCamera?.id ? "active" : ""} ${cameraOrderEditing ? "ordering" : ""} ${dragConfigCameraTarget === camera.id ? (dragConfigCameraAfter ? "drag-after" : "drag-before") : ""}`}
-              onClick={() => { if (!cameraOrderEditing) { setSelectedId(camera.id); setProbe(null); } }}
+              onClick={() => { if (cameraOrderEditing) setSelectedId(camera.id); else selectConfigCamera(camera.id); }}
+              onKeyDown={(event) => {
+                if (!cameraOrderEditing || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+                event.preventDefault();
+                setSelectedId(camera.id);
+                const offset = event.key === "ArrowUp" ? -1 : 1;
+                const currentIndex = cameras.findIndex((item) => item.id === camera.id);
+                const targetIndex = currentIndex + offset;
+                if (targetIndex >= 0 && targetIndex < cameras.length) {
+                  moveConfigCamera(camera.id, cameras[targetIndex].id, offset > 0);
+                  setSaveNotice({ state: "pending", text: `${camera.name || camera.id} moved to position ${targetIndex + 1}. Save order to apply.` });
+                }
+              }}
               onDragStart={(event) => {
                 if (!cameraOrderEditing) return;
                 setDragConfigCameraId(camera.id);
@@ -9915,7 +10150,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           ))}
         </div>
       </section>
-      <section className="bento-card config-editor">
+      <section id="admin-panel-cameras" className="bento-card config-editor" role="tabpanel" aria-labelledby="admin-tab-cameras">
         <div className="section-head">
           <div><h2>{selectedCamera ? selectedCamera.name : "Camera Config"}</h2><p>Changes save to config.json; only structural motion or camera changes interrupt the affected camera</p></div>
           {selectedCamera ? (
@@ -9933,16 +10168,16 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           ) : null}
         </div>
 
-        <div className="config-form">
+        {selectedCamera ? <div id="camera-section-tabs" className="camera-section-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`} onKeyDown={(event) => moveTabFocus(event, CAMERA_ADMIN_SECTIONS, cameraSection, (next) => selectAdminSubsection(next, setCameraSection, "cameras"))}>
+          <button id="camera-tab-settings" data-tab-id="settings" tabIndex={cameraSection === "settings" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => selectAdminSubsection("settings", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
+          <button id="camera-tab-motion" data-tab-id="motion" tabIndex={cameraSection === "motion" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "motion" ? "active" : ""} onClick={() => selectAdminSubsection("motion", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "motion"}><Activity size={15} />Motion/Object</button>
+          <button id="camera-tab-zones" data-tab-id="zones" tabIndex={cameraSection === "zones" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "zones" ? "active" : ""} onClick={() => selectAdminSubsection("zones", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "zones"}><Crop size={15} />Zones</button>
+          <button id="camera-tab-info" data-tab-id="info" tabIndex={cameraSection === "info" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "info" ? "active" : ""} onClick={() => selectAdminSubsection("info", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "info"}><Gauge size={15} />Info</button>
+        </div> : null}
+
+        <div id="camera-settings-panel" className="config-form" role="tabpanel" aria-labelledby={`camera-tab-${cameraSection}`}>
           {selectedCamera ? (
             <>
-              <div className="camera-section-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`}>
-                <button type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => setCameraSection("settings")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
-                <button type="button" className={cameraSection === "motion" ? "active" : ""} onClick={() => setCameraSection("motion")} role="tab" aria-selected={cameraSection === "motion"}><Activity size={15} />Motion/Object</button>
-                <button type="button" className={cameraSection === "zones" ? "active" : ""} onClick={() => setCameraSection("zones")} role="tab" aria-selected={cameraSection === "zones"}><Crop size={15} />Zones</button>
-                <button type="button" className={cameraSection === "info" ? "active" : ""} onClick={() => setCameraSection("info")} role="tab" aria-selected={cameraSection === "info"}><Gauge size={15} />Info</button>
-              </div>
-
               {cameraSection === "settings" ? <>
               <div className="field-row camera-identity-fields">
                 <label>Name<input value={selectedCamera.name} onChange={(event) => updateCamera(selectedCamera.id, ["name"], event.target.value)} /></label>
@@ -11162,7 +11397,7 @@ function RetentionSummary({ status }) {
   );
 }
 
-function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, section }) {
+function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
   const [apiTokenDraft, setApiTokenDraft] = useState({ id: "", name: "", scopes: ["read"] });
@@ -11178,6 +11413,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
   const [modelEvaluation, setModelEvaluation] = useState({ status: "idle" });
   const [modelEvaluationError, setModelEvaluationError] = useState("");
   const [modelEvaluationPreview, setModelEvaluationPreview] = useState(null);
+  const [detectionSection, setDetectionSection] = useStoredState("survng.adminDetectionSection.v1", "object");
+  const modelEvaluationDialogRef = useRef(null);
+  const modelEvaluationTriggerRef = useRef(null);
   const mediaLocations = config.media_storage?.locations || [];
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
@@ -11253,6 +11491,39 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     ...trackingExcludedLabels,
   ].map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
+
+  function closeModelEvaluationPreview() {
+    setModelEvaluationPreview(null);
+    window.requestAnimationFrame(() => modelEvaluationTriggerRef.current?.isConnected && modelEvaluationTriggerRef.current.focus());
+  }
+
+  useEffect(() => {
+    if (!modelEvaluationPreview) return undefined;
+    const dialog = modelEvaluationDialogRef.current;
+    const focusable = () => [...(dialog?.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+    window.requestAnimationFrame(() => focusable()[0]?.focus());
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeModelEvaluationPreview();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [modelEvaluationPreview]);
 
   function selectOpenvinoModel(path) {
     updateConfig(["detector", "model_path"], path);
@@ -11401,6 +11672,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     setApiTokenBusy(true);
     setApiTokenError("");
     setApiTokenSecret("");
+    onTokenSecretVisibleChange?.(false);
     try {
       const response = await fetch("/api/config/api-tokens", {
         method: "POST",
@@ -11413,11 +11685,12 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Could not create API token");
-      updateConfig(["api_auth", "tokens"], [
+      commitImmediateConfig(["api_auth", "tokens"], [
         ...(config.api_auth?.tokens || []),
         { ...payload.credential, token_hash: "__SURVNG_SECRET_SET__" },
       ]);
       setApiTokenSecret(payload.token || "");
+      onTokenSecretVisibleChange?.(Boolean(payload.token));
       setApiTokenDraft({ id: "", name: "", scopes: ["read"] });
     } catch (error) {
       setApiTokenError(error.message || "Could not create API token");
@@ -11434,9 +11707,10 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
       const response = await fetch(`/api/config/api-tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Could not delete API token");
-      updateConfig(["api_auth", "tokens"], (config.api_auth?.tokens || []).filter((token) => token.id !== tokenId));
-      if (!payload.enabled) updateConfig(["api_auth", "enabled"], false);
+      commitImmediateConfig(["api_auth", "tokens"], (config.api_auth?.tokens || []).filter((token) => token.id !== tokenId));
+      if (!payload.enabled) commitImmediateConfig(["api_auth", "enabled"], false);
       setApiTokenSecret("");
+      onTokenSecretVisibleChange?.(false);
     } catch (error) {
       setApiTokenError(error.message || "Could not delete API token");
     } finally {
@@ -11455,9 +11729,10 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Theme<select value={theme} onChange={(event) => setTheme(event.target.value)}>
             {THEMES.map((value) => <option key={value} value={value}>{THEME_META[value].label}</option>)}
           </select></label>
+          <p className="admin-action-note">Timezone and theme apply immediately in this browser. Web Base Path is included in Save settings.</p>
           <label>Web Base Path<input value={config.base_path ?? "/survng"} onChange={(event) => updateConfig(["base_path"], event.target.value)} placeholder="/survng" /></label>
           <div className="preference-action general-server-actions">
-            <strong>Live Camera Order</strong>
+            <span><strong>Browser &amp; server actions</strong><small>These actions apply immediately and are not included in Save settings.</small></span>
             <div className="preference-action-buttons">
               <button type="button" onClick={resetLiveCameraOrder}><RotateCcw size={15} /> Reset Order</button>
               <button type="button" className="danger" onClick={restartServer} disabled={["requesting", "waiting"].includes(serverRestart.state)}>
@@ -11504,8 +11779,8 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
                     <label>Reserve free space<input type="number" min="0" max="95" step="1" value={location.reserve_percent ?? 15} onChange={(event) => updateMediaLocation(index, "reserve_percent", Number(event.target.value))} /></label>
                     <label>Priority<input type="number" min="1" max="1000" step="1" value={location.priority ?? 100} onChange={(event) => updateMediaLocation(index, "priority", Number(event.target.value))} /></label>
                   </div>
-                  <div className="media-location-roles">{MEDIA_STORAGE_ROLES.map(([role, label]) => <label key={role}><input type="checkbox" checked={(location.roles || []).includes(role)} onChange={(event) => toggleMediaRole(index, role, event.target.checked)} />{label}</label>)}</div>
-                  <div className="media-location-flags"><label><input type="checkbox" checked={location.enabled ?? true} onChange={(event) => updateMediaLocation(index, "enabled", event.target.checked)} />Accept new media</label><label><input type="checkbox" checked={location.require_mount ?? false} onChange={(event) => updateMediaLocation(index, "require_mount", event.target.checked)} />Require a real mount</label></div>
+                  <fieldset className="media-location-roles"><legend>Media roles</legend>{MEDIA_STORAGE_ROLES.map(([role, label]) => <label key={role}><input type="checkbox" checked={(location.roles || []).includes(role)} onChange={(event) => toggleMediaRole(index, role, event.target.checked)} />{label}</label>)}</fieldset>
+                  <fieldset className="media-location-flags"><legend>Availability</legend><label><input type="checkbox" checked={location.enabled ?? true} onChange={(event) => updateMediaLocation(index, "enabled", event.target.checked)} />Accept new media</label><label><input type="checkbox" checked={location.require_mount ?? false} onChange={(event) => updateMediaLocation(index, "require_mount", event.target.checked)} />Require a real mount</label></fieldset>
                   {status ? <small>{formatBytes(status.free_bytes)} free of {formatBytes(status.total_bytes)} · {Number(status.free_percent || 0).toFixed(1)}% free</small> : null}
                 </article>;
               })}
@@ -11563,6 +11838,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {retentionStatus?.plan ? <RetentionSummary status={retentionStatus} /> : <div className="probe-result"><strong>Calculating retention projection</strong><span>The first index-only plan normally appears within a few seconds.</span></div>}
             {retentionError ? <div className="error-banner">{retentionError}</div> : null}
             <div className="retention-actions">
+              <span className="admin-action-kind">Background task · applies immediately</span>
               <button type="button" onClick={() => runRetention(false)}><RefreshCcw size={15} /> Recalculate</button>
               <button type="button" className="danger" onClick={() => runRetention(true)} disabled={["queued", "planning", "cleaning", "waiting"].includes(retentionStatus?.state)}><Trash2 size={15} /> Clean Up Now</button>
             </div>
@@ -11577,7 +11853,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <section className="api-access-settings">
             <div className="detection-settings-subhead">
               <div><strong>API access tokens</strong><small>Long-lived credentials for Home Assistant and other integrations. Secrets are displayed only once and are never stored in readable form.</small></div>
-              <span className={`retention-state ${config.api_auth?.enabled ? "running" : "idle"}`}>{config.api_auth?.enabled ? "Enforced" : "Not enforced"}</span>
+              <div className="admin-action-status"><span className="admin-action-kind">Applies immediately</span><span className={`retention-state ${config.api_auth?.enabled ? "running" : "idle"}`}>{config.api_auth?.enabled ? "Enforced" : "Not enforced"}</span></div>
             </div>
             <div className="api-token-list">
               {(config.api_auth?.tokens || []).map((token) => (
@@ -11591,9 +11867,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <div className="api-token-create">
               <label>Token ID<input value={apiTokenDraft.id} onChange={(event) => setApiTokenDraft((current) => ({ ...current, id: event.target.value }))} placeholder="home-assistant" /></label>
               <label>Name<input value={apiTokenDraft.name} onChange={(event) => setApiTokenDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Home Assistant" /></label>
-              <div className="api-token-scopes" role="group" aria-label="API token scopes">
+              <fieldset className="api-token-scopes"><legend>Token scopes</legend>
                 {[["read", "Read"], ["camera:control", "Camera control"], ["admin", "Admin"]].map(([value, label]) => <label className="check-field" key={value}><input type="checkbox" checked={apiTokenDraft.scopes.includes(value)} onChange={() => toggleApiTokenScope(value)} /> {label}</label>)}
-              </div>
+              </fieldset>
               <button type="button" className="primary" onClick={createApiToken} disabled={apiTokenBusy || !apiTokenDraft.id.trim() || !apiTokenDraft.name.trim() || !apiTokenDraft.scopes.length}>{apiTokenBusy ? <RefreshCcw className="spin" size={15} /> : <Plus size={15} />} Create token</button>
             </div>
             {apiTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this token now</strong><code>{apiTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(apiTokenSecret)}><Copy size={14} /> Copy</button><small>It cannot be displayed again after you leave this page.</small></div> : null}
@@ -11602,7 +11878,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <section className="api-access-settings mqtt-access-settings">
             <div className="detection-settings-subhead">
               <div><strong>MQTT</strong><small>Broker connection, Home Assistant discovery, incident publishing, and server telemetry.</small></div>
-              <span className={`retention-state ${mqttStatus?.connected ? "running" : "idle"}`}>{mqttStatus?.connected ? "Connected" : config.mqtt?.enabled ? "Disconnected" : "Disabled"}</span>
+              <div className="admin-action-status"><span className="admin-action-kind">Save settings to apply</span><span className={`retention-state ${mqttStatus?.connected ? "running" : "idle"}`}>{mqttStatus?.connected ? "Connected" : config.mqtt?.enabled ? "Disconnected" : "Disabled"}</span></div>
             </div>
             <div className="admin-field-grid">
               <label className="check-field"><input type="checkbox" checked={config.mqtt?.enabled || false} onChange={(event) => updateConfig(["mqtt", "enabled"], event.target.checked)} /> Enabled</label>
@@ -11628,7 +11904,10 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
 
       {section === "detection" ? (
       <div className="detection-settings">
-        <section className="detection-settings-card primary">
+        <nav className="detection-subsection-tabs" aria-label="Intelligence and detection settings">
+          {[["object", "Object Detection"], ["models", "Models & Hardware"], ["tracking", "Tracking & ReID"], ["search", "Smart Search"], ["motion", "Motion Validation"], ["faces", "Face Recognition"], ["ai", "AI Provider"]].map(([value, label]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}>{label}</button>)}
+        </nav>
+        {detectionSection === "object" ? <section className="detection-settings-card primary">
           <header className="detection-settings-card-head">
             <div className="detection-settings-card-icon"><ScanFace size={18} /></div>
             <div><h3>Detection</h3><p>Choose the model, accelerator, and rules that turn motion into object incidents.</p></div>
@@ -11684,9 +11963,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
               </div>)}
             </div> : <span className="settings-help">Select a model with class metadata to configure per-object overrides.</span>}
           </details>
-        </section>
+        </section> : null}
 
-        <section className="detection-settings-card wide-card model-evaluation-card">
+        {detectionSection === "models" ? <section className="detection-settings-card wide-card model-evaluation-card">
           <header className="detection-settings-card-head">
             <div className="detection-settings-card-icon"><Gauge size={18} /></div>
             <div><h3>Model Evaluation</h3><p>Compare two models on the same recent clean incident images without changing production detection.</p></div>
@@ -11704,6 +11983,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label>Candidate threshold<input type="number" min="0.01" max="0.99" step="0.01" value={modelEvaluationDraft.confidence} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, confidence: Number(event.target.value) }))} /><small>Use the same low evidence threshold for both models.</small></label>
           </div>
           <div className="model-evaluation-actions">
+            <span className="admin-action-kind">Background task · does not change production</span>
             <button type="button" className="primary" onClick={startModelEvaluation} disabled={!modelEvaluationDraft.baseline_path || !modelEvaluationDraft.candidate_path || ["queued", "running", "cancelling"].includes(modelEvaluation.status)}><Activity size={15} />Run comparison</button>
             {["queued", "running", "cancelling"].includes(modelEvaluation.status) ? <button type="button" onClick={cancelModelEvaluation} disabled={modelEvaluation.status === "cancelling"}><X size={15} />Cancel</button> : null}
             <span className={`model-evaluation-state ${modelEvaluation.status}`}>{String(modelEvaluation.status || "idle").replaceAll("_", " ")}{modelEvaluation.progress?.total ? ` · ${modelEvaluation.progress.completed}/${modelEvaluation.progress.total}` : ""}</span>
@@ -11726,22 +12006,22 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <p className="settings-help">Stored-evidence recall is diagnostic, not verified accuracy: baseline {modelEvaluation.result.stored_evidence_recall?.baseline ?? "—"}, candidate {modelEvaluation.result.stored_evidence_recall?.candidate ?? "—"}. Review disagreements before promoting a model.</p>
             {modelEvaluation.result.disagreements?.length ? <div className="model-evaluation-disagreements">
               {modelEvaluation.result.disagreements.map((item) => <article key={`${item.source_kind}-${item.source_id}`}>
-                <button type="button" className="model-evaluation-image-button" onClick={() => setModelEvaluationPreview(item)} aria-label={`Enlarge ${item.camera_id} comparison image`}><img src={appUrl(item.image_url)} alt="" loading="lazy" /></button>
-                <span><strong>{item.camera_id}</strong><small>{item.source_kind === "motion_audit" ? "Motion audit negative" : "Incident"} · {item.created_at}</small><small>Old: {item.baseline_labels.join(", ") || "none"}</small><small>New: {item.candidate_labels.join(", ") || "none"}</small><a href={appUrl(item.source_kind === "motion_audit" ? `/config?section=audit&audit_id=${item.source_id}` : `/incidents?event_ids=${item.event_id}`)}>Open {item.source_kind === "motion_audit" ? "audit" : "incident"}</a></span>
+                <button type="button" className="model-evaluation-image-button" onClick={(event) => { modelEvaluationTriggerRef.current = event.currentTarget; setModelEvaluationPreview(item); }} aria-label={`Enlarge ${item.camera_id} comparison image`}><img src={appUrl(item.image_url)} alt="" loading="lazy" /></button>
+                <span><strong>{item.camera_id}</strong><small>{item.source_kind === "motion_audit" ? "Motion audit negative" : "Incident"} · {item.created_at}</small><small>Old: {item.baseline_labels.join(", ") || "none"}</small><small>New: {item.candidate_labels.join(", ") || "none"}</small><a href={appUrl(item.source_kind === "motion_audit" ? `/admin?section=audit&audit_id=${item.source_id}` : `/incidents?event_ids=${item.event_id}`)}>Open {item.source_kind === "motion_audit" ? "audit" : "incident"}</a></span>
               </article>)}
             </div> : <div className="probe-result ok"><strong>No label disagreements</strong><span>Both models returned the same label sets on this corpus.</span></div>}
           </div> : null}
-          {modelEvaluationPreview ? <div className="model-evaluation-preview" role="dialog" aria-modal="true" aria-label="Model comparison image">
-            <button type="button" className="live-overlay-backdrop" onClick={() => setModelEvaluationPreview(null)} aria-label="Close comparison image" />
-            <section>
-              <header><div><strong>{modelEvaluationPreview.camera_id}</strong><small>{modelEvaluationPreview.created_at}</small></div><button type="button" className="icon-only" onClick={() => setModelEvaluationPreview(null)} aria-label="Close comparison image"><X size={19} /></button></header>
+          {modelEvaluationPreview ? <div className="model-evaluation-preview" role="presentation">
+            <button type="button" className="live-overlay-backdrop" onClick={closeModelEvaluationPreview} aria-label="Close comparison image" />
+            <section ref={modelEvaluationDialogRef} role="dialog" aria-modal="true" aria-labelledby="model-evaluation-preview-title">
+              <header><div><strong id="model-evaluation-preview-title">{modelEvaluationPreview.camera_id}</strong><small>{modelEvaluationPreview.created_at}</small></div><button type="button" className="icon-only" onClick={closeModelEvaluationPreview} aria-label="Close comparison image"><X size={19} /></button></header>
               <img src={appUrl(modelEvaluationPreview.image_url)} alt={`${modelEvaluationPreview.camera_id} model comparison source`} />
-              <footer><span><strong>Old</strong> {modelEvaluationPreview.baseline_labels.join(", ") || "none"}</span><span><strong>New</strong> {modelEvaluationPreview.candidate_labels.join(", ") || "none"}</span><a className="primary" href={appUrl(modelEvaluationPreview.source_kind === "motion_audit" ? `/config?section=audit&audit_id=${modelEvaluationPreview.source_id}` : `/incidents?event_ids=${modelEvaluationPreview.event_id}`)}>Open {modelEvaluationPreview.source_kind === "motion_audit" ? "audit" : "incident"}</a></footer>
+              <footer><span><strong>Old</strong> {modelEvaluationPreview.baseline_labels.join(", ") || "none"}</span><span><strong>New</strong> {modelEvaluationPreview.candidate_labels.join(", ") || "none"}</span><a className="primary" href={appUrl(modelEvaluationPreview.source_kind === "motion_audit" ? `/admin?section=audit&audit_id=${modelEvaluationPreview.source_id}` : `/incidents?event_ids=${modelEvaluationPreview.event_id}`)}>Open {modelEvaluationPreview.source_kind === "motion_audit" ? "audit" : "incident"}</a></footer>
             </section>
           </div> : null}
-        </section>
+        </section> : null}
 
-        <section className="detection-settings-card detection-feature-card wide-card">
+        {detectionSection === "object" ? <section className="detection-settings-card detection-feature-card wide-card">
           <header className="detection-settings-card-head">
             <div className="detection-settings-card-icon"><Activity size={18} /></div>
             <div><h3>Stationary objects &amp; scene context</h3><p>Separate visual-motion filtering from object-level incident attribution.</p></div>
@@ -11755,9 +12035,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             </select><small>Runs after object detection. Repeated stable objects remain stored as evidence without being treated as the cause; moving or uncertain objects remain eligible.</small></label>
             <div className="detection-settings-subhead"><strong>Fixed areas remain explicit</strong><small>Object Ignore zones suppress only their matching classes. “Exclude from EMA” independently removes all visual motion in that polygon.</small></div>
           </div>
-        </section>
+        </section> : null}
 
-        <section className="detection-settings-card">
+        {detectionSection === "tracking" ? <section className="detection-settings-card wide-card">
           <header className="detection-settings-card-head">
             <div className="detection-settings-card-icon"><Activity size={18} /></div>
             <div><h3>Continuous tracking</h3><p>Keep one numbered identity while an object moves through an active incident.</p></div>
@@ -11851,9 +12131,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             ) : <div className="probe-result"><strong>Vehicle appearance matching is not active yet</strong><span>Save the configuration and restart SurvNG to start the model.</span></div>
           ) : null}
         </details>
-        </section>
+        </section> : null}
 
-        <details className="detection-settings-card detection-feature-card">
+        {detectionSection === "search" ? <details className="detection-settings-card detection-feature-card wide-card" open>
           <summary><span className="detection-settings-card-icon"><Search size={18} /></span><span><strong>Smart Search</strong><small>Find indexed incidents by describing visible details in plain language.</small></span></summary>
           <div className="detection-feature-body detection-field-grid">
             <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.enabled ?? false} onChange={(event) => updateConfig(["semantic_search", "enabled"], event.target.checked)} /><span>Smart Search enabled</span></label>
@@ -11865,9 +12145,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.index_object_crops ?? true} onChange={(event) => updateConfig(["semantic_search", "index_object_crops"], event.target.checked)} /><span>Index detected object crops</span></label>
             <label>Object crops per incident<input type="number" min="1" max="100" step="1" value={config.semantic_search?.max_object_crops_per_event ?? 24} onChange={(event) => updateConfig(["semantic_search", "max_object_crops_per_event"], Number(event.target.value))} /><small>Caps crop inference and memory for unusually busy incidents; highest-confidence detections are indexed first.</small></label>
           </div>
-        </details>
+        </details> : null}
 
-        <details className="detection-settings-card detection-feature-card wide-card">
+        {detectionSection === "motion" ? <details className="detection-settings-card detection-feature-card wide-card" open>
           <summary><span className="detection-settings-card-icon"><Gauge size={18} /></span><span><strong>Motion validation</strong><small>How camera and visual motion decide when object detection runs.</small></span></summary>
           <div className="detection-feature-body">
         <MotionAnalysisPresetEditor
@@ -11915,9 +12195,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           )}
         />
           </div>
-        </details>
+        </details> : null}
 
-        <details className="detection-settings-card detection-feature-card">
+        {detectionSection === "ai" ? <details className="detection-settings-card detection-feature-card wide-card" open>
           <summary><span className="detection-settings-card-icon"><Sparkles size={18} /></span><span><strong>AI analysis &amp; assistant</strong><small>One provider and API key, with your existing analysis model plus an optional deep-reasoning model.</small></span></summary>
           <div className="detection-feature-body detection-field-grid">
           <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /><span>AI features enabled</span></label>
@@ -11934,9 +12214,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>
           <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /><span>Allow confirmed changes</span></label>
           </div>
-        </details>
+        </details> : null}
 
-        <details className="detection-settings-card detection-feature-card">
+        {detectionSection === "faces" ? <details className="detection-settings-card detection-feature-card wide-card" open>
           <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Face recognition</strong><small>Identify detected faces using a separate embedding model.</small></span></summary>
           <div className="detection-feature-body detection-field-grid">
           <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Recognition enabled</span></label>
@@ -11955,9 +12235,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Automatic Match Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_threshold ?? 0.55} onChange={(event) => updateConfig(["detector", "face_auto_identify_threshold"], Number(event.target.value))} /></label>
           <label>Minimum Lead Over Next Person<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_margin ?? 0.12} onChange={(event) => updateConfig(["detector", "face_auto_identify_margin"], Number(event.target.value))} /></label>
           </div>
-        </details>
+        </details> : null}
 
-        <details className="detection-settings-card detection-feature-card diagnostics-card">
+        {detectionSection === "models" ? <details className="detection-settings-card detection-feature-card diagnostics-card wide-card" open>
           <summary><span className="detection-settings-card-icon"><Cpu size={18} /></span><span><strong>Model &amp; accelerator diagnostics</strong><small>Loaded model metadata and available processing hardware.</small></span></summary>
           <div className="detection-feature-body diagnostics-grid">
         {activeModel ? (
@@ -12001,7 +12281,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           {accelerator?.openvino_error ? <span>{accelerator.openvino_error}</span> : null}
         </div>
           </div>
-        </details>
+        </details> : null}
       </div>
       ) : null}
 
