@@ -14,6 +14,9 @@ try {
   assert.equal(await page.locator("h1").count(), 1);
   assert.equal(await page.locator(".live-command-scope").isVisible(), true);
   assert.ok(Number.parseFloat(await page.locator(".live-command-bar").evaluate((node) => getComputedStyle(node).borderRadius)) <= 4);
+  const cameraSurface = page.locator(".camera-open-target").first();
+  await cameraSurface.hover();
+  assert.equal(await cameraSurface.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(0, 0, 0, 0)");
 
   await page.evaluate(() => {
     window.__survngTileNodes = [...document.querySelectorAll(".camera-tile")];
@@ -63,6 +66,12 @@ try {
     assert.match(await page.locator(".workspace-content > h1").textContent(), new RegExp(`SurvNG — ${title}`));
     assert.equal(await page.locator("h1").count(), 1);
   }
+
+  await page.goto("http://127.0.0.1:8088/survng/incidents", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  const incidentSurface = page.locator(".incident-preview-media-action").first();
+  await incidentSurface.waitFor({ state: "visible" });
+  await incidentSurface.hover();
+  assert.equal(await incidentSurface.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(0, 0, 0, 0)");
 
   await page.setViewportSize({ width: 900, height: 844 });
   await page.goto("http://127.0.0.1:8088/survng/timeline", { waitUntil: "domcontentloaded", timeout: 30_000 });

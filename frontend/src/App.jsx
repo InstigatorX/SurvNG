@@ -2330,7 +2330,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
             ) : null}
           </>
         )}
-        <button type="button" className="camera-open-target" onClick={() => onOpen(camera)} aria-label={`Open ${camera.name} live view`} />
+        <button type="button" className="camera-open-target media-surface-action" onClick={() => onOpen(camera)} aria-label={`Open ${camera.name} live view`} />
         <time className="camera-tile-time">{formatTimeOnly(Date.now() / 1000, timeZone)}</time>
         <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
         {controlMenuOpen ? <div className="camera-tile-control-menu" role="group" aria-label={`${camera.name} controls`}>
@@ -3445,9 +3445,9 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
               : <IncidentSourceDot trigger={triggerLabel} className="event-count" onClick={openOverlay} ariaLabel={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`} />}
           </SnapshotImage>
         )}
-        {!expanded ? <button type="button" className="incident-card-open" onClick={toggle} aria-label={`Open ${incident.camera_id} incident at ${timeText}`} /> : null}
+        {!expanded ? <button type="button" className="incident-card-open media-surface-action" onClick={toggle} aria-label={`Open ${incident.camera_id} incident at ${timeText}`} /> : null}
         {expanded && activeWorkspaceView === "focus" && !inlineVideoActive && snapshotZoom.scale <= 1 ? (
-          <button type="button" className="incident-preview-media-action" onClick={openPreview} aria-label="Play selected event video" />
+          <button type="button" className="incident-preview-media-action media-surface-action" onClick={openPreview} aria-label="Play selected event video" />
         ) : null}
         {canShowMosaic || canShowEvidence ? (
           <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout" onClick={(event) => event.stopPropagation()}>
@@ -6313,7 +6313,7 @@ function RecordingGridTile({ camera, source, epoch, playing, primary, synchroniz
       /> : <img className="recording-grid-preview" src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" />}
       <button
         type="button"
-        className="recording-grid-focus-hit"
+        className="recording-grid-focus-hit media-surface-action"
         onClick={() => onFocus(camera.id)}
         aria-label={primary ? `${camera.name} is the primary recording` : `Show ${camera.name} as primary recording`}
         title={primary ? "Primary camera" : "Show as primary"}

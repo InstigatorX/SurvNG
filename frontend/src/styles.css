@@ -14055,6 +14055,15 @@ a.button { border-radius: 3px; }
 }
 
 /* Shared incident source marker used by Live Activity and Incident investigation. */
+.media-surface-action,
+.media-surface-action:hover:not(:disabled),
+.media-surface-action:active:not(:disabled),
+.media-surface-action:focus-visible {
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+}
+
 .incident-source-dot {
   display: grid;
   width: 20px;
