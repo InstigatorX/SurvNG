@@ -22,12 +22,13 @@ try {
     window.__survngTileNodes = [...document.querySelectorAll(".camera-tile")];
     window.__survngPosterNodes = [...document.querySelectorAll(".camera-tile-poster")];
   });
-  await page.getByRole("button", { name: "Motion only" }).click();
+  await page.getByRole("button", { name: "Motion", exact: true }).click();
   await page.waitForTimeout(250);
   assert.equal(await page.evaluate(() => window.__survngTileNodes.every((node) => node.isConnected && [...document.querySelectorAll(".camera-tile")].includes(node))), true);
   assert.equal(await page.evaluate(() => window.__survngPosterNodes.every((node) => node.isConnected && [...document.querySelectorAll(".camera-tile-poster")].includes(node))), true);
 
   await page.getByRole("button", { name: "Custom" }).click();
+  await page.getByRole("button", { name: /^Open .* controls$/ }).first().click();
   const move = page.getByRole("button", { name: /^Move / }).first();
   await move.focus();
   await page.keyboard.press("Enter");
@@ -100,7 +101,7 @@ try {
   ]) {
     assert.ok(await page.locator(selector).first().evaluate((node) => node.getBoundingClientRect().height >= 44));
   }
-  assert.equal(await page.getByRole("button", { name: /Main High/ }).getAttribute("aria-pressed"), "true");
+  assert.equal(await page.locator(".recordings-v2-player-source button[aria-pressed='true']").count(), 1);
 
   await page.setViewportSize({ width: 740, height: 844 });
   await page.goto("http://127.0.0.1:8088/survng/", { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -109,6 +110,39 @@ try {
   assert.equal(await page.locator(".mobile-workspace-nav").isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
   assert.ok(await page.locator(".mobile-workspace-nav a").first().evaluate((node) => node.getBoundingClientRect().height >= 44));
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("http://127.0.0.1:8088/survng/", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await page.locator(".camera-tile").first().waitFor({ state: "visible" });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+  const livePhoneCamera = await page.locator(".live-grid > .camera-zone").boundingBox();
+  const livePhoneActivity = await page.locator(".live-grid > .events-zone").boundingBox();
+  assert.ok(livePhoneCamera && livePhoneActivity && livePhoneActivity.y >= livePhoneCamera.y + livePhoneCamera.height - 1);
+
+  await page.goto("http://127.0.0.1:8088/survng/incidents", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  const incidentPhoneFilters = await page.locator(".incident-filter-selects").first().boundingBox();
+  assert.ok(incidentPhoneFilters && incidentPhoneFilters.width <= 390);
+  assert.ok(await page.locator(".incident-semantic-search button").last().evaluate((node) => node.getBoundingClientRect().height >= 44));
+
+  await page.goto("http://127.0.0.1:8088/survng/people", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  assert.equal(await page.locator(".faces-page").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length), 1);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+
+  await page.goto("http://127.0.0.1:8088/survng/timeline", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  assert.ok(await page.locator(".recordings-v2-page").evaluate((node) => node.scrollHeight > 800));
+  assert.ok(await page.locator(".recording-grid-camera").first().evaluate((node) => node.getBoundingClientRect().height >= 44));
+
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto("http://127.0.0.1:8088/survng/", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await page.locator(".camera-tile").first().waitFor({ state: "visible" });
+  const liveLandscapeCamera = await page.locator(".live-grid > .camera-zone").boundingBox();
+  const liveLandscapeActivity = await page.locator(".live-grid > .events-zone").boundingBox();
+  assert.ok(liveLandscapeCamera && liveLandscapeActivity && liveLandscapeActivity.y >= liveLandscapeCamera.y + liveLandscapeCamera.height - 1);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+
+  await page.goto("http://127.0.0.1:8088/survng/timeline", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  assert.ok(await page.locator(".recordings-v2-workspace").evaluate((node) => node.getBoundingClientRect().height >= 360));
+  assert.ok(await page.locator(".recording-grid-camera").first().evaluate((node) => node.getBoundingClientRect().height >= 44));
 } finally {
   await browser.close();
 }

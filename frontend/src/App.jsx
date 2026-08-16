@@ -6495,10 +6495,10 @@ function RecordingSectionSwitcher({ mode, cameraId = "" }) {
   );
 }
 
-function RecordingCameraRail({ cameras, value, query, onCameraChange, onQueryChange, children }) {
+function RecordingCameraRail({ cameras = [], value = ALL_RECORDING_CAMERAS_ID, query = "", onCameraChange = () => {}, onQueryChange = () => {}, showSearch = true, children }) {
   return (
     <aside className="recordings-v2-cameras" aria-label="Cameras">
-      <header className="recordings-camera-header">
+      <header className={`recordings-camera-header ${showSearch ? "" : "single"}`.trim()}>
         <label>
           <span className="sr-only">Timeline camera</span>
           <select value={value} onChange={(event) => onCameraChange(event.target.value)}>
@@ -6506,11 +6506,11 @@ function RecordingCameraRail({ cameras, value, query, onCameraChange, onQueryCha
             {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
           </select>
         </label>
-        <label className="recordings-camera-search">
+        {showSearch ? <label className="recordings-camera-search">
           <Search size={14} aria-hidden="true" />
           <span className="sr-only">Search cameras</span>
           <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search cameras" />
-        </label>
+        </label> : null}
       </header>
       <div className="recordings-camera-list">{children}</div>
     </aside>
@@ -8015,7 +8015,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   return (
     <main className="recordings-v2-page export-center-page">
       <nav className="recordings-tabs"><RecordingSectionSwitcher mode="exports" cameraId={cameraId} /></nav>
-      <RecordingCameraRail subtitle="Filter saved exports">
+      <RecordingCameraRail cameras={cameras} value={cameraId || ALL_RECORDING_CAMERAS_ID} onCameraChange={(nextCameraId) => setCameraId(nextCameraId === ALL_RECORDING_CAMERAS_ID ? "" : nextCameraId)} showSearch={false}>
         <button type="button" className={!cameraId ? "active" : ""} onClick={() => setCameraId("")}>
           <Film size={16} /><span>All exports</span><i className={Number(summary.total) ? "online" : ""} />
         </button>

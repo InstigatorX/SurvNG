@@ -132,11 +132,11 @@ try {
     body: "",
   }));
 
-  await page.goto("http://127.0.0.1:8088/survng/recordings/exports", {
+  await page.goto("http://127.0.0.1:8088/survng/timeline/exports", {
     waitUntil: "domcontentloaded",
     timeout: 30_000,
   });
-  await page.getByRole("link", { name: "Exports" }).first().waitFor({ state: "visible" });
+  await page.locator(".export-center-page").waitFor({ state: "visible" });
   await page.getByText("gate-clip.mp4", { exact: true }).waitFor({ state: "visible" });
   assert.equal(
     await page.getByRole("link", { name: "Download" }).getAttribute("href"),
