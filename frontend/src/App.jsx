@@ -45,6 +45,7 @@ import {
   Save,
   ScanFace,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Siren,
   SkipBack,
@@ -7233,11 +7234,20 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     <main className="recordings-v2-page">
       <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
         <RecordingSectionSwitcher mode="history" cameraId={activeCameraId} />
+        <div className="recordings-commandbar-scope">
+          {isAllCameras ? <Grid2X2 size={15} /> : <Camera size={15} />}
+          <strong>{isAllCameras ? "All cameras" : cameras.find((camera) => camera.id === activeCameraId)?.name || activeCameraId}</strong>
+          <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
+        </div>
         <div className="recordings-v2-date">
           <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={15} /></button>
           <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
           <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={15} /></button>
           <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
+        </div>
+        <div className="recordings-v2-player-source" aria-label="Recording stream">
+          <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main <small>High</small></button>
+          <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub <small>Medium</small></button>
         </div>
         <span className="recordings-commandbar-time">{Number.isFinite(playhead) ? formatDateTime(playhead, timeZone) : "Choose a recording time"}</span>
       </nav>
@@ -7302,10 +7312,6 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               Play recording
             </button>
           ) : null}
-          <div className="recordings-v2-player-source" aria-label="Recording stream">
-            <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
-            <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
-          </div>
           {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls">
             <button type="button" onClick={() => playAt(playhead - 10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
             <button type="button" className="primary" onClick={() => setGridPlaying((current) => !current)}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
@@ -7315,6 +7321,25 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         </div>
 
         <div className="recordings-v2-controls">
+          <div className="recordings-v2-timeline-toolbar">
+            <div className="recordings-v2-incidents-tools">
+              <span className="recordings-v2-filter-label"><SlidersHorizontal size={14} />Evidence</span>
+              <div className="recordings-v2-event-filter" role="group" aria-label="Recording incident type">
+                <button type="button" className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}><CircleDot size={14} />Objects</button>
+                <button type="button" className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion only</button>
+              </div>
+              <label className="recordings-v2-range">
+                <span>Window</span>
+                <select value={incidentRangeHours} onChange={(event) => setIncidentRangeHours(Number(event.target.value))} aria-label="Incident thumbnail time range">
+                  <option value="1">1 hour</option><option value="2">2 hours</option><option value="4">4 hours</option><option value="8">8 hours</option><option value="12">12 hours</option><option value="24">Full day</option>
+                </select>
+              </label>
+            </div>
+            <span>{nearbyEvents.length.toLocaleString()} nearby · {filteredEvents.length.toLocaleString()} {recordingEvidenceTypeLabel(eventFilter)}</span>
+            <button type="button" className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`} onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}>
+              <Download size={15} />{isAllCameras ? "Select camera" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
+            </button>
+          </div>
           <RecordingTimeline
             cameraId={isAllCameras ? "" : activeCameraId}
             source={source}
@@ -7372,35 +7397,6 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         </div>
 
         <div className="recordings-v2-incidents">
-          <div className="recordings-v2-incidents-toolbar">
-            <div className="recordings-v2-incidents-tools">
-              <span className="recordings-v2-filter-label">Nearby evidence</span>
-              <div className="recordings-v2-event-filter" aria-label="Recording incident type">
-                <button type="button" className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}><CircleDot size={14} />Object</button>
-                <button type="button" className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion only</button>
-              </div>
-              <label className="recordings-v2-range">
-                <span>Range</span>
-                <select value={incidentRangeHours} onChange={(event) => setIncidentRangeHours(Number(event.target.value))} aria-label="Incident thumbnail time range">
-                  <option value="1">1 hour</option>
-                  <option value="2">2 hours</option>
-                  <option value="4">4 hours</option>
-                  <option value="8">8 hours</option>
-                  <option value="12">12 hours</option>
-                  <option value="24">Full day</option>
-                </select>
-              </label>
-              <button
-                type="button"
-                className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`}
-                onClick={toggleExport}
-                disabled={isAllCameras || !timeline.length || exportActive}
-              >
-                <Download size={15} />{isAllCameras ? "Select camera to export" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
-              </button>
-            </div>
-            <span>{nearbyEvents.length.toLocaleString()} of {filteredEvents.length.toLocaleString()} {recordingEvidenceTypeLabel(eventFilter)} incident{filteredEvents.length === 1 ? "" : "s"} · {incidentRangeHours >= 24 ? "full day" : `${incidentRangeHours} hour${incidentRangeHours === 1 ? "" : "s"} around current time`}</span>
-          </div>
           <div className="recordings-v2-investigation">
             <div className="recordings-v2-events" aria-label="Nearby incidents">
             {nearbyEvents.length ? nearbyEvents.map((event) => (
@@ -7425,10 +7421,15 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter} incidents {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
             </div>
             {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
+              <span className="recordings-v2-selected-event-image">
+                <Radar size={22} />
+                {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 360, 88)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
+              </span>
               <div>
                 <span>{selectedEvent.has_objects ? "Selected incident" : "Selected motion"}</span>
-                <strong>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion observed"}</strong>
-                <small>{isAllCameras ? `${cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id} · ` : ""}{formatDateTime(selectedEvent.incident_epoch, timeZone)}</small>
+                <strong>{formatTimeOnly(selectedEvent.incident_epoch, timeZone)}</strong>
+                <small>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</small>
+                <em>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion only"}</em>
               </div>
               <a href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)}>View full incident <ArrowRight size={15} /></a>
             </aside> : null}
@@ -13217,7 +13218,7 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
 
 function App() {
   const [timeZone, setTimeZone] = useStoredState("survng.timeZone", DEFAULT_TIME_ZONE);
-  const [theme, setTheme] = useStoredState("survng.theme", "auto");
+  const [theme, setTheme] = useStoredState("survng.theme", "dark");
   const [recordingContext, setRecordingContext] = useState(null);
   const pathname = appPathname();
   const workspace = resolveWorkspace(pathname);
