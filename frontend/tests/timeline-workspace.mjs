@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -33,6 +33,12 @@ const routes = [
 assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "gate").map((camera) => camera.id), ["lower-garage", "upper-garage"]);
 assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "front-door").map((camera) => camera.id), ["gate"]);
 assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "lower-garage").map((camera) => camera.id), []);
+assert.deepEqual(timelineCompanionGrid(0), { columns: 1, rows: 1 });
+assert.deepEqual(timelineCompanionGrid(2), { columns: 1, rows: 2 });
+assert.deepEqual(timelineCompanionGrid(3), { columns: 1, rows: 3 });
+assert.deepEqual(timelineCompanionGrid(4), { columns: 2, rows: 2 });
+assert.deepEqual(timelineCompanionGrid(6), { columns: 2, rows: 3 });
+assert.deepEqual(timelineCompanionGrid(99), { columns: 2, rows: 3 });
 assert.deepEqual(timelineStagePage(Array.from({ length: 15 }, (_, index) => ({ id: index })), 2), { cameras: [{ id: 14 }], page: 2, pages: 3 });
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["person"] }, "people"), true);
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["car"] }, "vehicles"), true);
@@ -57,5 +63,6 @@ assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false
 assert.match(recordingsSource, /<a className="recordings-v2-selected-event-image"[^>]+\/incidents\?event_ids=/);
 assert.doesNotMatch(recordingsSource, /View full incident/);
 assert.match(stylesSource, /\.recordings-v2-incidents\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1;[\s\S]*?grid-row:\s*3;/);
+assert.match(stylesSource, /\.recordings-v2-selected-event-image img\s*\{[^}]*object-fit:\s*contain;/);
 
 console.log("timeline workspace tests passed");

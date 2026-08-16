@@ -119,7 +119,7 @@ import { recordingCameraAspect, recordingGridBestEpoch } from "./recordingGrid.m
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "./liveWorkspace.mjs";
 import { camerasWithLiveFraming, liveFramingStyle, normalizedLiveFraming } from "./liveFraming.mjs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -6467,7 +6467,13 @@ function RecordingCompanionStrip({ cameras, routes, activeCameraId, source, epoc
   const expectedCompanions = expectedTimelineCameras(cameras, routes, activeCameraId, 6);
   const usingExpectedRoutes = expectedCompanions.length > 0;
   const companions = usingExpectedRoutes ? expectedCompanions : cameras.filter((camera) => camera.id !== activeCameraId).slice(0, 6);
-  return <div className="recording-selected-companions" aria-label={usingExpectedRoutes ? "Expected route camera previews" : "Companion camera previews"}>
+  const grid = timelineCompanionGrid(companions.length);
+  return <div
+    className="recording-selected-companions"
+    style={{ "--companion-columns": grid.columns, "--companion-rows": grid.rows }}
+    data-camera-count={companions.length}
+    aria-label={usingExpectedRoutes ? "Expected route camera previews" : "Companion camera previews"}
+  >
     {companions.map((camera) => <button key={camera.id} type="button" onClick={() => onSelect(camera.id)} aria-label={`Show ${camera.name} recording`}>
       <img src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" loading="lazy" decoding="async" />
       <span><i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />{camera.name}<em>{usingExpectedRoutes ? "Expected" : "Preview"}</em></span>
@@ -7687,7 +7693,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               <header>Selected incident</header>
               <a className="recordings-v2-selected-event-image" href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)} aria-label={`Open selected incident at ${formatTimeOnly(selectedEvent.incident_epoch, timeZone)}`}>
                 <Radar size={22} />
-                {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 720, 120)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
+                {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 720, 95)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
                 {selectedEventDuration > 0 ? <time>{formatDuration(selectedEventDuration)}</time> : null}
               </a>
               <div>

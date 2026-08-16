@@ -42,6 +42,14 @@ export function expectedTimelineCameras(cameras, routes, activeCameraId, limit =
   return expected;
 }
 
+export function timelineCompanionGrid(count) {
+  const available = Math.max(0, Math.min(6, Math.trunc(Number(count) || 0)));
+  if (available <= 1) return { columns: 1, rows: 1 };
+  if (available <= 3) return { columns: 1, rows: available };
+  if (available === 4) return { columns: 2, rows: 2 };
+  return { columns: 2, rows: 3 };
+}
+
 export function timelineStagePage(cameras, page = 0, pageSize = 7) {
   const available = Array.isArray(cameras) ? cameras : [];
   const size = Math.max(1, Number(pageSize) || 7);
