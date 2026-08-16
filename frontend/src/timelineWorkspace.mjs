@@ -20,3 +20,23 @@ export function timelineStageCameras(cameras, primaryCameraId, limit = 7) {
   if (!primary) return [];
   return [primary, ...available.filter((camera) => camera?.id !== primary.id)].slice(0, Math.max(1, limit));
 }
+
+export function timelineEventMatchesFilter(event, filter) {
+  if (filter === "all") return true;
+  if (filter === "object") return Boolean(event?.has_objects);
+  if (filter === "motion") return !event?.has_objects;
+  const labels = (Array.isArray(event?.labels) ? event.labels : []).map((label) => String(label).toLocaleLowerCase());
+  if (filter === "people") return labels.some((label) => label === "person" || label === "people");
+  if (filter === "vehicles") return labels.some((label) => ["vehicle", "car", "truck", "bus", "motorcycle", "bicycle"].includes(label));
+  return true;
+}
+
+export function timelineEvidenceWindow(events, playhead, limit = 12) {
+  const available = (Array.isArray(events) ? events : []).filter((event) => Number.isFinite(event?.incident_epoch));
+  if (!available.length) return [];
+  const target = Number.isFinite(playhead) ? playhead : available[0].incident_epoch;
+  return [...available]
+    .sort((left, right) => Math.abs(left.incident_epoch - target) - Math.abs(right.incident_epoch - target))
+    .slice(0, Math.max(1, limit))
+    .sort((left, right) => left.incident_epoch - right.incident_epoch);
+}

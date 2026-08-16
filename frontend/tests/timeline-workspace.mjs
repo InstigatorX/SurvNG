@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { filteredTimelineCameras, normalizedTimelinePlaybackRate, timelineStageCameras, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { filteredTimelineCameras, normalizedTimelinePlaybackRate, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -15,5 +15,10 @@ assert.equal(filteredTimelineCameras(cameras, "missing").length, 0);
 assert.equal(filteredTimelineCameras(cameras, "").length, 2);
 assert.deepEqual(timelineStageCameras(cameras, "garage", 2).map((camera) => camera.id), ["garage", "front-door"]);
 assert.equal(timelineStageCameras(Array.from({ length: 12 }, (_, index) => ({ id: `camera-${index}` })), "camera-9").length, 7);
+assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["person"] }, "people"), true);
+assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["car"] }, "vehicles"), true);
+assert.equal(timelineEventMatchesFilter({ has_objects: false, labels: [] }, "motion"), true);
+const evidence = [0, 10, 20, 30].map((incident_epoch) => ({ incident_epoch }));
+assert.deepEqual(timelineEvidenceWindow(evidence, 18, 2).map((event) => event.incident_epoch), [10, 20]);
 
 console.log("timeline workspace tests passed");

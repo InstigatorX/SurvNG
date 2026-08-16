@@ -118,7 +118,7 @@ import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSee
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
-import { filteredTimelineCameras, normalizedTimelinePlaybackRate, timelineStageCameras, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
+import { filteredTimelineCameras, normalizedTimelinePlaybackRate, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -6556,6 +6556,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [playbackDetail, setPlaybackDetail] = useState(null);
   const [events, setEvents] = useState([]);
   const [eventFilter, setEventFilter] = useState("all");
+  const [timelineLanes, setTimelineLanes] = useState({ object: true, motion: true });
+  const [showTimelineThumbnails, setShowTimelineThumbnails] = useState(true);
   const [incidentRangeHours, setIncidentRangeHours] = useState(1);
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
@@ -6629,7 +6631,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   }, [playbackRate]);
 
   const filteredEvents = useMemo(() => events
-    .filter((event) => eventFilter === "all" || (eventFilter === "object" ? Boolean(event.has_objects) : !event.has_objects))
+    .filter((event) => timelineEventMatchesFilter(event, eventFilter))
     .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
     .filter((event) => Number.isFinite(event.incident_epoch))
     .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events]);
@@ -7372,6 +7374,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 <button type="button" className={eventFilter === "all" ? "active" : ""} aria-pressed={eventFilter === "all"} onClick={() => setEventFilter("all")}><Images size={14} />All events</button>
                 <button type="button" className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}><CircleDot size={14} />Objects</button>
                 <button type="button" className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion only</button>
+                <button type="button" className={eventFilter === "people" ? "active" : ""} aria-pressed={eventFilter === "people"} onClick={() => setEventFilter("people")}><UserRound size={14} />People</button>
+                <button type="button" className={eventFilter === "vehicles" ? "active" : ""} aria-pressed={eventFilter === "vehicles"} onClick={() => setEventFilter("vehicles")}><CarFront size={14} />Vehicles</button>
               </div>
               <label className="recordings-v2-range">
                 <span>Window</span>
@@ -7380,7 +7384,11 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 </select>
               </label>
             </div>
-            <span>{nearbyEvents.length.toLocaleString()} nearby · {filteredEvents.length.toLocaleString()} {recordingEvidenceTypeLabel(eventFilter)}</span>
+            <div className="recordings-timeline-display-controls">
+              <button type="button" className={timelineLanes.object ? "active object" : "object"} aria-pressed={timelineLanes.object} onClick={() => setTimelineLanes((current) => ({ ...current, object: !current.object }))}>Objects</button>
+              <button type="button" className={timelineLanes.motion ? "active motion" : "motion"} aria-pressed={timelineLanes.motion} onClick={() => setTimelineLanes((current) => ({ ...current, motion: !current.motion }))}>Motion</button>
+              <button type="button" className={showTimelineThumbnails ? "active" : ""} aria-pressed={showTimelineThumbnails} onClick={() => setShowTimelineThumbnails((current) => !current)}>Thumbnails</button>
+            </div>
             <button type="button" className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`} onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}>
               <Download size={15} />{isAllCameras ? "Select camera" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
             </button>
@@ -7396,6 +7404,10 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             recordings={timeline}
             events={timelineEvents}
             evidenceFilter={eventFilter}
+            laneVisibility={timelineLanes}
+            showThumbnails={showTimelineThumbnails}
+            selectedEventId={selectedEvent?.id}
+            onEventSelect={(event) => { setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
             playhead={playhead ?? dayStart}
             timeZone={timeZone}
             onSeek={(epoch) => playAt(epoch, true)}
@@ -7799,7 +7811,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, evidenceFilter, playhead, timeZone, onSeek, exportRange, onExportRangeChange }) {
+function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, showThumbnails, selectedEventId, onEventSelect, playhead, timeZone, onSeek, exportRange, onExportRangeChange }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const [draft, setDraft] = useState(offset);
@@ -7859,8 +7871,13 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
       hasObjects: Boolean(event.has_objects),
       left: ((boundedStart - startEpoch) / duration) * 100,
       width: ((boundedEnd - boundedStart) / duration) * 100,
+      event: { ...event, incident_epoch: start },
     };
   }).filter(Boolean), [duration, endEpoch, events, startEpoch]);
+  const evidenceItems = useMemo(
+    () => timelineEvidenceWindow(eventMarkers.map((marker) => marker.event), playhead, 12),
+    [eventMarkers, playhead],
+  );
   useEffect(() => {
     if (dragRef.current) return;
     draftRef.current = offset;
@@ -8233,10 +8250,10 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
             }}
           />
         ))}
-        <div className={`recordings-v2-event-lane object${evidenceFilter === "motion" ? " muted" : ""}`} aria-hidden="true">
+        <div className={`recordings-v2-event-lane object${!laneVisibility?.object ? " hidden" : evidenceFilter === "motion" ? " muted" : ""}`} aria-hidden="true">
           {eventMarkers.filter((event) => event.hasObjects).map((event) => <b key={event.id} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
         </div>
-        <div className={`recordings-v2-event-lane motion${evidenceFilter === "object" ? " muted" : ""}`} aria-hidden="true">
+        <div className={`recordings-v2-event-lane motion${!laneVisibility?.motion ? " hidden" : evidenceFilter === "object" ? " muted" : ""}`} aria-hidden="true">
           {eventMarkers.filter((event) => !event.hasObjects).map((event) => <b key={event.id} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
         </div>
         {exportRange ? (
@@ -8325,6 +8342,20 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
           aria-label="24 hour recording timeline"
         />
       </div>
+      {showThumbnails ? <div className="recordings-timeline-evidence" aria-label="Events near the selected time">
+        {evidenceItems.map((event) => <button
+          key={event.id}
+          type="button"
+          className={`${event.has_objects ? "object" : "motion"}${event.id === selectedEventId ? " selected" : ""}`}
+          onClick={() => onEventSelect?.(event)}
+          aria-pressed={event.id === selectedEventId}
+          aria-label={`${event.labels?.join(", ") || "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
+        >
+          <i>{event.has_objects ? <CircleDot size={12} /> : <Radar size={12} />}</i>
+          <span>{event.snapshot_path ? <img src={eventThumbnailUrl(event, 180, 72)} alt="" loading="lazy" decoding="async" /> : <Film size={18} />}</span>
+          <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
+        </button>)}
+      </div> : null}
     </div>
   );
 }
