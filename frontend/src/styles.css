@@ -51,6 +51,11 @@
   --live-activity-width: 306px;
   --live-tile-gap: 4px;
   --workspace-control-radius: 4px;
+  --timeline-camera-rail-width: 244px;
+  --timeline-command-height: 52px;
+  --timeline-inspector-width: 280px;
+  --timeline-evidence-height: 188px;
+  --timeline-media-gap: 4px;
 }
 
 :root[data-embedded="true"] {
@@ -13029,8 +13034,8 @@ a:focus-visible {
 
 /* Timeline workspace */
 .recordings-v2-page {
-  grid-template-columns: 244px minmax(0, 1fr);
-  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-columns: var(--timeline-camera-rail-width) minmax(0, 1fr);
+  grid-template-rows: var(--timeline-command-height) minmax(0, 1fr);
   gap: 0;
   height: calc(100dvh - 58px);
   min-height: calc(100dvh - 58px);
@@ -13042,7 +13047,7 @@ a:focus-visible {
 .recordings-commandbar {
   grid-template-columns: auto minmax(170px, auto) auto auto minmax(170px, 1fr);
   gap: 10px;
-  min-height: 52px;
+  min-height: var(--timeline-command-height);
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
