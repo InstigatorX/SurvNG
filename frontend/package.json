@@ -10,6 +10,7 @@
     "test:live-grid-layout": "node tests/live-grid-layout.mjs",
     "test:live-custom-layout": "node tests/live-custom-layout.mjs",
     "test:live-defaults": "node tests/live-defaults.mjs",
+    "test:live-workspace": "node tests/live-workspace.mjs",
     "test:storage": "node tests/storage.mjs",
     "test:assistant-storage": "node tests/assistant-storage.mjs",
     "test:assistant-navigation": "node tests/assistant-navigation.mjs",

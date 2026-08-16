@@ -108,6 +108,7 @@ import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incid
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
+import { focusedLiveCameraId, liveActivityEventId, liveActivityIncidentHref, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -911,6 +912,18 @@ function formatCompactDuration(seconds) {
 
 function isMobileViewport() {
   return typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
+}
+
+function useViewportQuery(query) {
+  const [matches, setMatches] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const update = () => setMatches(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, [query]);
+  return matches;
 }
 
 function preferredStreamSource() {
@@ -1864,7 +1877,7 @@ function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false }) {
+function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobilePrimary = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -2022,7 +2035,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
 
   return (
     <article
-      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""}`}
+      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""} ${mobilePrimary ? "mobile-primary" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
       data-camera-id={camera.id}
       style={customLayout ? customStyle : layout ? {
@@ -2033,18 +2046,8 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
       } : undefined}
     >
       <div
-        className="video-frame camera-open-target"
+        className="video-frame"
         style={{ "--media-aspect": aspect }}
-        role="button"
-        tabIndex={0}
-        onClick={() => onOpen(camera)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onOpen(camera);
-          }
-        }}
-        aria-label={`Open ${camera.name} live view`}
       >
         {!camera.running ? (
           <div className="camera-offline-state" role="img" aria-label={`${camera.name} is powered off`}>
@@ -2077,11 +2080,11 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
             ) : null}
           </>
         )}
+        <button type="button" className="camera-open-target" onClick={() => onOpen(camera)} aria-label={`Open ${camera.name} live view`} />
         <div
           className="tile-header camera-hud"
-          onClick={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
         >
+          <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
           <div className="tile-title">
             <h2>{camera.name}</h2>
           </div>
@@ -4980,6 +4983,46 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   );
 }
 
+function LiveCommandBar({ layoutMode, customAvailable, onLayoutModeChange, onResetLayout }) {
+  return (
+    <header className="live-command-bar">
+      <div className="live-command-context"><strong>Command Center</strong><span>Live cameras and recent security activity</span></div>
+      <div className="live-layout-control" role="group" aria-label="Live camera layout">
+        <span>Layout</span>
+        <button type="button" className={layoutMode === "auto" ? "active" : ""} aria-pressed={layoutMode === "auto"} onClick={() => onLayoutModeChange("auto")}><Grid2X2 size={15} /> Automatic</button>
+        <button type="button" className={layoutMode === "custom" ? "active" : ""} aria-pressed={layoutMode === "custom"} onClick={() => onLayoutModeChange("custom")} disabled={!customAvailable} title={customAvailable ? "Arrange and resize cameras" : "Custom layout is available on desktop"}><GripVertical size={15} /> Custom</button>
+        {layoutMode === "custom" && customAvailable ? <button type="button" className="secondary live-layout-reset" onClick={onResetLayout}><RotateCcw size={14} /> Reset</button> : null}
+      </div>
+    </header>
+  );
+}
+
+function LiveActivityItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect, onOpenOverlay }) {
+  const labels = incidentLabels(incident);
+  const trigger = incidentTriggerLabel(incident);
+  const eventId = liveActivityEventId(incident);
+  const time = incident.start_at || incident.created_at;
+  return (
+    <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
+      <button type="button" className="live-activity-select" onClick={() => onSelect(incident.id)} aria-label={`Select ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
+        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
+        <span className="live-activity-copy">
+          <strong>{cameraName}</strong>
+          <time>{formatDateTime(time, timeZone)}</time>
+          <span className="pill-row compact"><IncidentObjectBadges labels={labels} />{!labels.length ? <span className="pill quiet">Motion only</span> : null}</span>
+        </span>
+      </button>
+      <button type="button" className={`live-activity-trigger trigger-${trigger.toLowerCase()}`} onClick={() => onOpenOverlay(incident)} aria-label={`Preview exact ${trigger} event`}>{trigger}</button>
+      {selected ? (
+        <div className="live-activity-actions">
+          <a href={appUrl(liveActivityIncidentHref(incident))}>Open incident <ChevronRight size={14} /></a>
+        </div>
+      ) : null}
+      {!eventId ? <span className="sr-only">No exact event link is available.</span> : null}
+    </article>
+  );
+}
+
 function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
@@ -4990,6 +5033,9 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [cameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
   const [liveLayoutMode, setLiveLayoutMode] = useStoredState("survng.liveLayoutMode.v1", "auto");
   const [customLayoutValue, setCustomLayoutValue] = useStoredState("survng.liveCustomLayout.v1", "{}");
+  const [storedMobileFocus, setStoredMobileFocus] = useStoredState("survng.liveFocusedCamera.v1", "");
+  const customLayoutAvailable = useViewportQuery("(min-width: 1051px)");
+  const mobileLiveView = useViewportQuery("(max-width: 760px)");
   const [customSizePreview, setCustomSizePreview] = useState({});
   const [resizingCameraId, setResizingCameraId] = useState("");
   const customMoveCleanupRef = useRef(null);
@@ -5031,8 +5077,10 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const liveIncidentGalleryRef = useRef(null);
   const liveIncidentZoneRef = useRef(null);
   const [liveIncidentGallerySize, setLiveIncidentGallerySize] = useState({ width: 0, height: 0 });
-  const liveIncidentGalleryReady = liveIncidentGallerySize.width > 0 && liveIncidentGallerySize.height > 0;
-  const incidentsPerPage = liveIncidentGalleryReady
+  const liveIncidentGalleryReady = mobileLiveView || (liveIncidentGallerySize.width > 0 && liveIncidentGallerySize.height > 0);
+  const incidentsPerPage = mobileLiveView
+    ? 5
+    : liveIncidentGalleryReady
     ? incidentThumbnailPageSize({ ...liveIncidentGallerySize, density: "compact", columns: 2, gap: 10, horizontalPadding: 24 })
     : 12;
   const orderedCameras = useMemo(() => {
@@ -5048,11 +5096,17 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     return [...sorted, ...cameras.filter((camera) => !seen.has(camera.id))];
   }, [cameras, cameraOrder]);
   const normalizedLayoutMode = liveLayoutMode === "custom" ? "custom" : "auto";
+  const effectiveLayoutMode = customLayoutAvailable ? normalizedLayoutMode : "auto";
+  const mobileFocusedCameraId = focusedLiveCameraId(orderedCameras, storedMobileFocus);
+  const renderedCameras = useMemo(
+    () => orderedLiveCamerasForFocus(orderedCameras, mobileFocusedCameraId, mobileLiveView),
+    [mobileFocusedCameraId, mobileLiveView, orderedCameras],
+  );
+  const liveCameraStartIndex = useMemo(() => new Map(orderedCameras.map((camera, index) => [camera.id, index])), [orderedCameras]);
   const customLayout = useMemo(
     () => readLiveCustomLayout(customLayoutValue, cameras, liveCameraAspects),
     [cameras, customLayoutValue, liveCameraAspects],
   );
-  const displayedCameras = orderedCameras;
   const liveCameraLayout = useMemo(
     () => recordingGridLayout(
       orderedCameras,
@@ -5204,6 +5258,12 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
 
   function saveCustomLayout(order, sizes) {
     setCustomLayoutValue(JSON.stringify({ version: 1, order, sizes }));
+  }
+
+  function resetCustomLayout() {
+    if (!window.confirm("Reset the saved custom camera positions and sizes?")) return;
+    setCustomLayoutValue("{}");
+    setCustomSizePreview({});
   }
 
   function beginCustomMove(event, cameraId) {
@@ -5533,29 +5593,17 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
 
   return (
     <main className="bento-grid live-grid">
+      <LiveCommandBar layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} />
       <section className="bento-card camera-zone live-camera-zone">
-        <div className="live-layout-switch" aria-label="Live camera layout">
-          <button
-            type="button"
-            className={normalizedLayoutMode === "auto" ? "active" : ""}
-            onClick={() => setLiveLayoutMode("auto")}
-            title="Automatic layout"
-            aria-label="Use automatic live layout"
-          ><Grid2X2 size={16} /></button>
-          <button
-            type="button"
-            className={normalizedLayoutMode === "custom" ? "active" : ""}
-            onClick={() => setLiveLayoutMode("custom")}
-            title="Custom layout"
-            aria-label="Use custom live layout"
-          ><GripVertical size={16} /></button>
+        <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
+          {orderedCameras.map((camera) => <button type="button" key={camera.id} className={camera.id === mobileFocusedCameraId ? "active" : ""} aria-pressed={camera.id === mobileFocusedCameraId} onClick={() => setStoredMobileFocus(camera.id)}>{camera.name || camera.id}</button>)}
         </div>
         <div
           ref={liveCameraGridRef}
-          className={`camera-grid live-camera-grid${normalizedLayoutMode === "custom" ? " custom-layout" : liveCameraLayoutReady ? " viewport-layout" : ""}`}
-          style={normalizedLayoutMode === "custom" ? { "--custom-pack-row-height": `${customGridMetrics.packRowHeight}px` } : undefined}
+          className={`camera-grid live-camera-grid${effectiveLayoutMode === "custom" ? " custom-layout" : liveCameraLayoutReady ? " viewport-layout" : ""}`}
+          style={effectiveLayoutMode === "custom" ? { "--custom-pack-row-height": `${customGridMetrics.packRowHeight}px` } : undefined}
         >
-          {liveDefaultsReady ? displayedCameras.map((camera, index) => (
+          {liveDefaultsReady ? renderedCameras.map((camera) => (
             <CameraTile
               key={`${camera.id}:${liveDefaultsInstance}`}
               camera={camera}
@@ -5563,9 +5611,9 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
               refresh={refreshBase}
               onOpen={setExpandedCamera}
               onAspectChange={updateLiveCameraAspect}
-              layout={normalizedLayoutMode === "auto" ? liveCameraLayoutById.get(camera.id) : null}
-              customLayout={normalizedLayoutMode === "custom"}
-              customStyle={normalizedLayoutMode === "custom" ? (() => {
+              layout={effectiveLayoutMode === "auto" ? liveCameraLayoutById.get(camera.id) : null}
+              customLayout={effectiveLayoutMode === "custom"}
+              customStyle={effectiveLayoutMode === "custom" ? (() => {
                 const size = customSizePreview[camera.id] || customLayout.sizes[camera.id];
                 const measuredAspect = Number(liveCameraAspects[camera.id]);
                 const placement = liveCustomTilePlacement(size, customGridMetrics, measuredAspect);
@@ -5576,31 +5624,34 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
                   height: `${placement.height}px`,
                 };
               })() : undefined}
-              startDelayMs={index * 450}
+              startDelayMs={(liveCameraStartIndex.get(camera.id) || 0) * 450}
               resizing={resizingCameraId === camera.id}
               aspectSnapped={Boolean((customSizePreview[camera.id] || customLayout.sizes[camera.id]).aspectLocked)}
-              dragHandleProps={normalizedLayoutMode === "custom" ? {
+              dragHandleProps={effectiveLayoutMode === "custom" ? {
                 onPointerDown: (event) => beginCustomMove(event, camera.id),
               } : {}}
-              resizeHandleProps={normalizedLayoutMode === "custom" ? {
+              resizeHandleProps={effectiveLayoutMode === "custom" ? {
                 onPointerDown: (event) => beginCustomResize(event, camera.id),
               } : {}}
+              mobilePrimary={camera.id === mobileFocusedCameraId}
             />
           )) : null}
         </div>
       </section>
       <section className="bento-card events-zone" ref={liveIncidentZoneRef}>
         <div className="section-head compact incident-head">
-          <div><h2>Recent Incidents</h2></div>
+          <div><h2>Recent Activity</h2></div>
           <div className="incident-head-actions">
-            <div className="incident-filter-toggle compact" aria-label="Incident type filter">
-              <button className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}>Object</button>
-              <button className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}>Motion</button>
+            <div className="incident-filter-toggle compact" role="group" aria-label="Incident type filter">
+              <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Object</button>
+              <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => setEventFilter("motion")}>Motion only</button>
             </div>
             <span className="shown-bubble">{visibleIncidents.length} shown</span>
           </div>
         </div>
-        <div className="event-filter incident-filter-panel" aria-label="Incident filters">
+        <details className="live-activity-filters">
+          <summary>Filters{[incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length ? ` (${[incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length})` : ""}</summary>
+          <div className="event-filter incident-filter-panel" aria-label="Incident filters">
           <div className="incident-filter-selects">
             <label>
               <span>Camera</span>
@@ -5624,42 +5675,34 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
               </select>
             </label>
           </div>
-        </div>
-        {focusedIncident ? (
-          <div className="incident-focus">
-            <IncidentCard
-              incident={focusedIncident}
-              timeZone={timeZone}
-              expanded
-              thumbnailAnnotations={thumbnailAnnotations}
-              onToggle={toggleIncident}
-              onSelect={openIncidentOverlay}
-            />
           </div>
-        ) : null}
-        <div className="incident-gallery" ref={liveIncidentGalleryRef}>
+        </details>
+        <div className="live-activity-list" ref={liveIncidentGalleryRef}>
           {incidentLoading && !visibleIncidents.length ? <div className="empty-state">Loading {eventFilter} incidents...</div> : null}
-          {!visibleIncidents.length && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
+          {!visibleIncidents.length && incidentLoadError ? <div className="empty-state live-activity-error"><span>{incidentLoadError}</span><button type="button" onClick={refreshIncidents}>Retry</button></div> : null}
           {visibleIncidents.length
             ? pagedIncidents.map((incident) => (
-              <IncidentCard
+              <LiveActivityItem
                 key={incident.id}
-                incident={incident}
+                incident={incident.id === focusedIncident?.id ? focusedIncident : incident}
+                cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id}
                 timeZone={timeZone}
-                expanded={false}
                 selected={incident.id === focusedIncident?.id}
                 thumbnailAnnotations={thumbnailAnnotations}
-                onToggle={toggleIncident}
-                onSelect={openIncidentOverlay}
+                onSelect={toggleIncident}
+                onOpenOverlay={openIncidentOverlay}
               />
             ))
             : null}
           {!incidentLoading && !incidentLoadError && !visibleIncidents.length ? <div className="empty-state">No incidents match the current filters.</div> : null}
         </div>
-        <div className={`incident-pager ${incidentPage > 0 || incidentHasMore ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={incidentPage === 0 && !incidentHasMore}>
-          <button type="button" onClick={() => changeIncidentPage(incidentPage - 1)} disabled={clampedIncidentPage === 0}>Prev</button>
-          <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-          <button type="button" onClick={() => changeIncidentPage(incidentPage + 1)} disabled={!incidentHasMore}>Next</button>
+        <div className="live-activity-footer">
+          <div className={`incident-pager ${incidentPage > 0 || incidentHasMore ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={incidentPage === 0 && !incidentHasMore}>
+            <button type="button" onClick={() => changeIncidentPage(incidentPage - 1)} disabled={clampedIncidentPage === 0}>Prev</button>
+            <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
+            <button type="button" onClick={() => changeIncidentPage(incidentPage + 1)} disabled={!incidentHasMore}>Next</button>
+          </div>
+          <a href={appUrl("/incidents")}>View all incidents <ChevronRight size={14} /></a>
         </div>
       </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
