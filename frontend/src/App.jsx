@@ -118,7 +118,7 @@ import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSee
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
-import { filteredTimelineCameras, normalizedTimelinePlaybackRate, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
+import { filteredTimelineCameras, normalizedTimelinePlaybackRate, timelineStageCameras, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -6159,7 +6159,7 @@ function recordingPlaybackTimeline(rows) {
     });
 }
 
-function RecordingGridTile({ camera, source, epoch, playing, focused, layout, onAspectChange, onFocus, onSelect }) {
+function RecordingGridTile({ camera, source, epoch, playing, primary, onFocus, onSelect }) {
   const videoRef = useRef(null);
   const previousEpochRef = useRef(null);
   const [playback, setPlayback] = useState(null);
@@ -6180,7 +6180,7 @@ function RecordingGridTile({ camera, source, epoch, playing, focused, layout, on
   const hasCoverage = Number.isFinite(mediaTime);
 
   useEffect(() => {
-    if (!camera?.id || !bucket) return undefined;
+    if (!primary || !camera?.id || !bucket) return undefined;
     const controller = new AbortController();
     let cancelled = false;
     setPlayback(null);
@@ -6215,7 +6215,7 @@ function RecordingGridTile({ camera, source, epoch, playing, focused, layout, on
       cancelled = true;
       controller.abort();
     };
-  }, [bucket, camera?.id, retryCount, source]);
+  }, [bucket, camera?.id, primary, retryCount, source]);
 
   useEffect(() => {
     const nearLive = Math.abs(Date.now() / 1000 - epoch) <= 5 * 60;
@@ -6249,27 +6249,16 @@ function RecordingGridTile({ camera, source, epoch, playing, focused, layout, on
     else video.pause();
   }, [briefGap, mediaTime, playing]);
 
-  const manifestUrl = playback
+  const manifestUrl = primary && playback
     ? recordingDayHlsUrl(camera.id, playback.start, playback.end, playback.source)
     : "";
   const initialMediaTime = playbackMediaTimeForEpoch(timeline, playback?.targetEpoch, 1.25);
   const displayedSource = playback?.source || source;
   const aspect = recordingCameraAspect(camera, displayedSource);
-  useEffect(() => {
-    onAspectChange(camera.id, aspect);
-  }, [aspect, camera.id, onAspectChange]);
   return (
     <article
-      className={`recording-grid-tile${hasCoverage ? "" : " gap"}${focused ? " focused" : ""}`}
-      style={{
-        "--recording-aspect": aspect,
-        ...(!focused && layout ? {
-          left: `${layout.x}px`,
-          top: `${layout.y}px`,
-          width: `${layout.width}px`,
-          height: `${layout.height}px`,
-        } : {}),
-      }}
+      className={`recording-grid-tile${primary ? " primary" : " companion"}${primary && hasCoverage ? "" : primary ? " gap" : ""}`}
+      style={{ "--recording-aspect": aspect }}
     >
       {manifestUrl ? <ShakaVideo
         ref={videoRef}
@@ -6286,91 +6275,55 @@ function RecordingGridTile({ camera, source, epoch, playing, focused, layout, on
           if (playing && Number.isFinite(mediaTime)) video.play().catch(() => {});
         }}
         onError={() => setError("Playback unavailable")}
-      /> : null}
+      /> : <img className="recording-grid-preview" src={recordingPreviewUrl(camera.id, epoch, source)} alt="" />}
       <button
         type="button"
         className="recording-grid-focus-hit"
         onClick={() => onFocus(camera.id)}
-        aria-label={focused ? `Restore ${camera.name} grid tile` : `Enlarge ${camera.name} recording`}
-        title={focused ? "Return to camera grid" : "Enlarge camera"}
+        aria-label={primary ? `${camera.name} is the primary recording` : `Show ${camera.name} as primary recording`}
+        title={primary ? "Primary camera" : "Show as primary"}
+        disabled={primary}
       />
       <button type="button" className="recording-grid-camera" onClick={() => onSelect(camera.id)} title={`Open ${camera.name} recording`}>
         <Camera size={14} /><span>{camera.name}</span>
         {playback?.source && playback.source !== source ? <em>{playback.source === "live" ? "Sub" : "Main"}</em> : null}
       </button>
-      {!playback && !error ? <div className="recording-grid-status"><RefreshCcw className="spin" size={17} />Loading</div> : null}
-      {(!hasCoverage || error) && playback ? <div className="recording-grid-status"><Film size={17} />{error || "No recording at this time"}</div> : null}
-      {error && !playback ? <div className="recording-grid-status"><Film size={17} />{error}</div> : null}
+      {primary && !playback && !error ? <div className="recording-grid-status"><RefreshCcw className="spin" size={17} />Loading</div> : null}
+      {primary && (!hasCoverage || error) && playback ? <div className="recording-grid-status"><Film size={17} />{error || "No recording at this time"}</div> : null}
+      {primary && error && !playback ? <div className="recording-grid-status"><Film size={17} />{error}</div> : null}
     </article>
   );
 }
 
 function RecordingCameraGrid({ cameras, source, epoch, playing, onSelect }) {
-  const [focusedCameraId, setFocusedCameraId] = useState("");
-  const [gridSize, setGridSize] = useState({ width: 0, height: 0 });
-  const [aspectOverrides, setAspectOverrides] = useState({});
+  const [primaryCameraId, setPrimaryCameraId] = useState(cameras[0]?.id || "");
   const gridRef = useRef(null);
-  const layout = useMemo(
-    () => recordingGridLayout(cameras, source, gridSize.width, gridSize.height, 6, aspectOverrides),
-    [aspectOverrides, cameras, gridSize.height, gridSize.width, source],
+  const displayedCameras = useMemo(
+    () => timelineStageCameras(cameras, primaryCameraId),
+    [cameras, primaryCameraId],
   );
 
-  const updateCameraAspect = React.useCallback((cameraId, aspect) => {
-    setAspectOverrides((current) => (
-      current[cameraId] === aspect ? current : { ...current, [cameraId]: aspect }
-    ));
-  }, []);
-
-  useLayoutEffect(() => {
-    const grid = gridRef.current;
-    if (!grid) return undefined;
-    const update = () => {
-      const next = { width: grid.clientWidth, height: grid.clientHeight };
-      setGridSize((current) => (
-        current.width === next.width && current.height === next.height ? current : next
-      ));
-    };
-    update();
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", update);
-      return () => window.removeEventListener("resize", update);
-    }
-    const observer = new ResizeObserver(update);
-    observer.observe(grid);
-    return () => observer.disconnect();
-  }, []);
-
   useEffect(() => {
-    if (!focusedCameraId) return undefined;
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape") setFocusedCameraId("");
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [focusedCameraId]);
+    if (!displayedCameras.some((camera) => camera.id === primaryCameraId)) {
+      setPrimaryCameraId(displayedCameras[0]?.id || "");
+    }
+  }, [displayedCameras, primaryCameraId]);
 
-  function focusCamera(cameraId) {
-    setFocusedCameraId((current) => current === cameraId ? "" : cameraId);
-    gridRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  const items = layout.length
-    ? layout
-    : cameras.map((camera) => ({ camera, x: 0, y: 0, width: 0, height: 0 }));
-  return <div ref={gridRef} className={`recording-camera-grid${focusedCameraId ? " has-focus" : ""}`}>
-    {items.map((item) => <RecordingGridTile
-      key={item.camera.id}
-      camera={item.camera}
+  const primaryCamera = displayedCameras.find((camera) => camera.id === primaryCameraId) || displayedCameras[0];
+  const orderedCameras = primaryCamera
+    ? [primaryCamera, ...displayedCameras.filter((camera) => camera.id !== primaryCamera.id)]
+    : [];
+  return <div ref={gridRef} className="recording-camera-grid stage-layout">
+    {orderedCameras.map((camera) => <RecordingGridTile
+      key={camera.id}
+      camera={camera}
       source={source}
       epoch={epoch}
       playing={playing}
-      focused={item.camera.id === focusedCameraId}
-      layout={item}
-      onAspectChange={updateCameraAspect}
-      onFocus={focusCamera}
+      primary={camera.id === primaryCamera?.id}
+      onFocus={setPrimaryCameraId}
       onSelect={onSelect}
     />)}
-    {focusedCameraId ? <button type="button" className="recording-grid-close-focus" onClick={() => setFocusedCameraId("")} aria-label="Return to all camera tiles"><X size={18} /></button> : null}
   </div>;
 }
 
@@ -6594,10 +6547,10 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const queryDate = initialQuery.get("date") || (initialEpoch ? dateKeyForTimeZone(initialEpoch * 1000, timeZone) : today);
   const querySource = initialQuery.get("source");
   const [cameras, setCameras] = useState([]);
-  const [cameraId, setCameraId] = useState(initialQuery.get("camera") || "");
+  const [cameraId, setCameraId] = useState(initialQuery.get("camera") || ALL_RECORDING_CAMERAS_ID);
   const [source, setSource] = useState(querySource === "live" || querySource === "main"
     ? querySource
-    : initialQuery.get("camera") === ALL_RECORDING_CAMERAS_ID ? "live" : preferredStreamSource());
+    : !initialQuery.get("camera") || initialQuery.get("camera") === ALL_RECORDING_CAMERAS_ID ? "live" : preferredStreamSource());
   const [date, setDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(queryDate) && queryDate <= today ? queryDate : today);
   const [recordings, setRecordings] = useState([]);
   const [playbackDetail, setPlaybackDetail] = useState(null);

@@ -13,3 +13,10 @@ export function filteredTimelineCameras(cameras, query) {
     return searchable.includes(normalizedQuery);
   });
 }
+
+export function timelineStageCameras(cameras, primaryCameraId, limit = 7) {
+  const available = Array.isArray(cameras) ? cameras : [];
+  const primary = available.find((camera) => camera?.id === primaryCameraId) || available[0];
+  if (!primary) return [];
+  return [primary, ...available.filter((camera) => camera?.id !== primary.id)].slice(0, Math.max(1, limit));
+}

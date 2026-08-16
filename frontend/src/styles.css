@@ -9532,7 +9532,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-player.all-camera-grid {
   display: block;
-  padding: 42px 6px 48px;
+  padding: 4px;
 }
 
 .recording-camera-grid {
@@ -9542,6 +9542,54 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   height: 100%;
   overflow: hidden;
 }
+
+.recording-camera-grid.stage-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(260px, 2fr);
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  gap: var(--timeline-media-gap);
+}
+
+.recording-camera-grid.stage-layout .recording-grid-tile {
+  position: relative;
+  inset: auto;
+  width: auto;
+  height: auto;
+  aspect-ratio: auto;
+  border-radius: 2px;
+}
+
+.recording-camera-grid.stage-layout .recording-grid-tile.primary {
+  grid-row: 1 / 4;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.recording-grid-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #030708;
+}
+
+.recording-grid-tile.primary .recording-grid-camera {
+  top: 8px;
+  left: 8px;
+  min-height: 32px;
+  font-size: 12px;
+}
+
+.recording-grid-tile.companion .recording-grid-camera {
+  inset: 0 0 auto;
+  max-width: none;
+  min-height: 26px;
+  border: 0;
+  border-radius: 0;
+  background: rgba(2, 6, 8, .82);
+}
+
+.recording-grid-tile.companion .recording-grid-focus-hit { cursor: pointer; }
+.recording-grid-tile.primary .recording-grid-focus-hit { pointer-events: none; }
 
 .recording-grid-tile {
   position: absolute;
