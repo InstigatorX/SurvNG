@@ -170,6 +170,31 @@ class SystemTelemetryRouterTest(unittest.TestCase):
         self.assertEqual(status["storage"]["free_bytes"], 40)
         self.assertTrue(status["storage"]["available"])
 
+    def test_system_status_counts_only_expected_camera_and_recording_health(self) -> None:
+        manager = SimpleNamespace(
+            recorder=SimpleNamespace(retention_status=Mock(return_value={"plan": {"storage": {}}})),
+            statuses=Mock(return_value=[
+                {"expected_enabled": True, "running": True, "recording_configured": True, "recording_enabled": True, "recording": True},
+                {"expected_enabled": True, "running": False, "recording_configured": True, "recording_enabled": True, "recording": False},
+                {"expected_enabled": False, "running": False, "recording_configured": True, "recording_enabled": True, "recording": False},
+                {"expected_enabled": True, "running": True, "recording_configured": True, "recording_enabled": False, "recording": False},
+            ]),
+            detector_status=Mock(return_value={}),
+            mqtt_status=Mock(return_value={}),
+            go2rtc_status=Mock(return_value={}),
+            camera_startup_status=Mock(return_value={}),
+        )
+
+        status = SystemTelemetryService().system_status(manager)
+
+        self.assertEqual(status["cameras"], {
+            "total": 4,
+            "enabled": 3,
+            "online": 2,
+            "recording_expected": 2,
+            "recording": 1,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

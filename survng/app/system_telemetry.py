@@ -82,6 +82,12 @@ class SystemTelemetryService:
             load_1m = os.getloadavg()[0]
         except OSError:
             load_1m = 0.0
+        enabled_cameras = [camera for camera in cameras if camera.get("expected_enabled", True)]
+        expected_recordings = [
+            camera
+            for camera in enabled_cameras
+            if camera.get("recording_configured") and camera.get("recording_enabled", True)
+        ]
         payload = {
             "instance_id": self.process_instance_id,
             "lifecycle": str((mqtt or {}).get("server_lifecycle") or "running"),
@@ -109,8 +115,10 @@ class SystemTelemetryService:
             "detector": manager.detector_status(),
             "cameras": {
                 "total": len(cameras),
-                "online": sum(1 for camera in cameras if camera.get("running")),
-                "recording": sum(1 for camera in cameras if camera.get("recording")),
+                "enabled": len(enabled_cameras),
+                "online": sum(1 for camera in enabled_cameras if camera.get("running")),
+                "recording_expected": len(expected_recordings),
+                "recording": sum(1 for camera in expected_recordings if camera.get("recording")),
             },
             "mqtt": mqtt,
             "go2rtc": manager.go2rtc_status(),

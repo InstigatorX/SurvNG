@@ -206,6 +206,11 @@ export function adjacentIncident(incidents, event, direction) {
   return incidents[(currentIndex + step + incidents.length) % incidents.length] || null;
 }
 
+export function incidentArrowNavigationAllowed(target) {
+  if (!target || typeof target.closest !== "function") return true;
+  return !target.closest('button, a, input, select, textarea, video, audio, [contenteditable="true"], [role="slider"], [role="spinbutton"], [role="tablist"]');
+}
+
 export function showIncidentCardAnnotations(expanded, thumbnailAnnotations) {
   return !expanded && Boolean(thumbnailAnnotations);
 }

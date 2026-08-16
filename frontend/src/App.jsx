@@ -113,7 +113,7 @@ import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackErro
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, liveActivityEventId, liveActivityIncidentHref, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
@@ -1657,6 +1657,8 @@ function MobileMoreSheet({ links, page, onClose }) {
       <div id="mobile-more-panel" className="mobile-more-panel" tabIndex={-1}>
         <header><h2 id="mobile-more-title">More</h2><button type="button" data-modal-initial onClick={onClose} aria-label="Close more menu"><X size={20} /></button></header>
         {links.slice(4).map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} href={href} key={id}><Icon size={20} /><span>{label}</span></a>)}
+        <a href={appUrl("/admin?section=telemetry")}><Gauge size={20} /><span>System status</span></a>
+        <a href={appUrl("/admin?section=general")}><Sun size={20} /><span>Appearance</span></a>
       </div>
     </div>
   ), document.body);
@@ -1848,7 +1850,8 @@ function LiveHeaderStats() {
   const { healthy: systemHealthy, label: healthLabel } = systemHealthState({
     lifecycle: stats.lifecycle,
     storage: stats.storage,
-    detector,
+    detector: stats.detector,
+    cameras: stats.cameras,
   });
 
   return (
@@ -4135,6 +4138,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   useEffect(() => {
     function onKey(keyEvent) {
       if (keyEvent.key !== "ArrowLeft" && keyEvent.key !== "ArrowRight") return;
+      if (!incidentArrowNavigationAllowed(keyEvent.target)) return;
       const direction = keyEvent.key === "ArrowRight" ? 1 : -1;
       const nextIncident = adjacentIncident(events, event, direction);
       if (!nextIncident) return;
@@ -8149,6 +8153,19 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
     onExportRangeChange?.(next);
   }
 
+  function handleExportKey(kind, event) {
+    if (!exportRange || !onExportRangeChange) return;
+    const step = event.shiftKey ? 60 : 1;
+    let epoch = kind === "start" ? exportRange.start : exportRange.end;
+    if (event.key === "ArrowLeft" || event.key === "ArrowDown") epoch -= step;
+    else if (event.key === "ArrowRight" || event.key === "ArrowUp") epoch += step;
+    else if (event.key === "Home") epoch = kind === "start" ? startEpoch : exportRange.start + 1;
+    else if (event.key === "End") epoch = kind === "start" ? exportRange.end - 1 : endEpoch;
+    else return;
+    event.preventDefault();
+    updateExportHandle(kind, epoch);
+  }
+
   function startExportDrag(kind, event) {
     const track = event.currentTarget.parentElement;
     const rect = track?.getBoundingClientRect();
@@ -8222,6 +8239,7 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
               onPointerMove={moveExportDrag}
               onPointerUp={finishExportDrag}
               onPointerCancel={finishExportDrag}
+              onKeyDown={(event) => handleExportKey("start", event)}
               disabled={!onExportRangeChange}
               aria-label={`Export start ${formatTimeOnly(exportRange.start, timeZone)}`}
             ><span>{formatExportHandleTime(exportRange.start, timeZone)}</span></button>
@@ -8233,6 +8251,7 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
               onPointerMove={moveExportDrag}
               onPointerUp={finishExportDrag}
               onPointerCancel={finishExportDrag}
+              onKeyDown={(event) => handleExportKey("end", event)}
               disabled={!onExportRangeChange}
               aria-label={`Export end ${formatTimeOnly(exportRange.end, timeZone)}`}
             ><span>{formatExportHandleTime(exportRange.end, timeZone)}</span></button>
@@ -9203,16 +9222,17 @@ function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
   return <>
     <section className="bento-card camera-tree config-tree settings-section-tree calibration-tree">
       <div className="section-head compact"><div><h2>Detection Tune-Up</h2><p>Choose, review, decide, and monitor</p></div></div>
-      <div className="tree-list tuneup-section-list" role="tablist" aria-label="Detection Tune-Up sections">
-        <button type="button" className={section === "tuneup" ? "active" : ""} onClick={() => setSection("tuneup")} role="tab" aria-selected={section === "tuneup"}><Sparkles size={16} /><span>Tune-Up</span></button>
-        <button type="button" className={section === "monitoring" ? "active" : ""} onClick={() => setSection("monitoring")} role="tab" aria-selected={section === "monitoring"}><Activity size={16} /><span>Monitoring{monitoringSets.length ? <em>{monitoringSets.length}</em> : null}</span></button>
-        <button type="button" className={section === "history" ? "active" : ""} onClick={() => setSection("history")} role="tab" aria-selected={section === "history"}><Clock3 size={16} /><span>History</span></button>
+      <div className="tree-list tuneup-section-list" role="tablist" aria-label="Detection Tune-Up sections" onKeyDown={(event) => { const next = nextTabId(["tuneup", "monitoring", "history"], section, event.key); if (!next) return; event.preventDefault(); setSection(next); window.requestAnimationFrame(() => document.getElementById(`tuneup-tab-${next}`)?.focus()); }}>
+        <button id="tuneup-tab-tuneup" type="button" tabIndex={section === "tuneup" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "tuneup" ? "active" : ""} onClick={() => setSection("tuneup")} role="tab" aria-selected={section === "tuneup"}><Sparkles size={16} /><span>Tune-Up</span></button>
+        <button id="tuneup-tab-monitoring" type="button" tabIndex={section === "monitoring" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "monitoring" ? "active" : ""} onClick={() => setSection("monitoring")} role="tab" aria-selected={section === "monitoring"}><Activity size={16} /><span>Monitoring{monitoringSets.length ? <em>{monitoringSets.length}</em> : null}</span></button>
+        <button id="tuneup-tab-history" type="button" tabIndex={section === "history" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "history" ? "active" : ""} onClick={() => setSection("history")} role="tab" aria-selected={section === "history"}><Clock3 size={16} /><span>History</span></button>
       </div>
       {activeRun ? <button type="button" className="tuneup-resume-card" onClick={() => { setSelectedRunId(activeRun.id); setSection("tuneup"); setWizardStep(3); }}><RefreshCcw className="spin" size={16} /><span><strong>Review in progress</strong><small>{tuneupHistoryTitle(activeRun, cameras)}</small></span></button> : null}
     </section>
     <section id="admin-panel-calibration" className="bento-card config-editor settings-panel calibration-panel" role="tabpanel" aria-labelledby="admin-tab-calibration">
       <div className="section-head"><div><h2>{section === "tuneup" ? "Detection Tune-Up" : section === "monitoring" ? "Monitoring" : "Tune-Up History"}</h2><p>{section === "tuneup" ? "SurvNG reviews evidence; you approve every change" : section === "monitoring" ? "See how applied changes perform and undo them at any time" : "Past reviews, decisions, and results"}</p></div><button onClick={() => void loadCalibration()}><RefreshCcw size={16} /> Refresh</button></div>
       {error ? <div className="error-banner">{error}</div> : null}
+      <div id="tuneup-section-panel" role="tabpanel" aria-labelledby={`tuneup-tab-${section}`}>
       {section === "tuneup" ? <div className="tuneup-workflow">
         <nav className="tuneup-steps" aria-label="Tune-Up progress">{["Choose cameras", "Review period", "Review performance", "Choose changes", "Confirm", "Monitor", "Results"].map((label, index) => <span className={wizardStep === index + 1 ? "active" : wizardStep > index + 1 ? "done" : ""} key={label}><b>{wizardStep > index + 1 ? <Check size={13} /> : index + 1}</b>{label}</span>)}</nav>
         {wizardStep === 1 ? <div className="tuneup-stage"><header><span>Step 1 of 7</span><h3>Which cameras should SurvNG review?</h3></header><div className="tuneup-choice-grid">
@@ -9227,6 +9247,7 @@ function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
       </div> : null}
       {section === "monitoring" ? <div className="tuneup-monitoring">{monitoringSets.length ? monitoringSets.map((item) => { const rolledBack = new Set(item.rolled_back_change_ids || []); const remaining = (item.changes || []).filter((change) => !rolledBack.has(change.id)); const [outcome, tone] = tuneupOutcome(item); const affected = [...new Set((item.changes || []).flatMap((change) => change.camera_id ? [change.camera_id] : (runs.find((run) => run.id === item.run_id)?.camera_ids || [])))]; return <article className="tuneup-monitor-card" key={item.id}><header><span><strong>{item.status === "collecting" ? "Monitoring changes" : item.status === "reviewing" ? "Reviewing results" : outcome}</strong><small>{formatDateTime(item.created_at, timeZone)} · {item.changes?.length || 0} changes</small></span><em className={tone}>{String(item.status).replaceAll("_", " ")}</em></header>{item.status === "collecting" ? <div className="tuneup-countdown"><Clock3 size={19} /><span><strong>{item.seconds_until_ready > 86400 ? `${Math.ceil(item.seconds_until_ready / 86400)} days remaining` : item.seconds_until_ready > 3600 ? `${Math.ceil(item.seconds_until_ready / 3600)} hours remaining` : "Ready for review"}</strong><small>SurvNG is collecting matched follow-up evidence.</small></span></div> : null}<div className="tuneup-health-list">{affected.map((cameraId) => { const status = statuses.get(cameraId) || {}; const healthy = status.running !== false && status.frame_fresh !== false; return <span className={healthy ? "healthy" : "unhealthy"} key={cameraId}><CircleDot size={13} />{cameras.find((camera) => camera.id === cameraId)?.name || cameraId}</span>; })}</div>{item.evaluation?.summary ? <p>{item.evaluation.summary}</p> : null}<details><summary>Applied changes</summary>{remaining.map((change) => <div className="tuneup-change-row" key={change.id}><span>{TUNEUP_SETTING_NAMES[change.setting] || String(change.setting).split(".").pop().replaceAll("_", " ")}</span><b>{tuneupValue(change.before)} → {tuneupValue(change.after)}</b><button onClick={() => void rollback(item, { changeIds: [change.id] })} disabled={busy}><Undo2 size={14} />Undo</button></div>)}</details><footer>{item.status === "collecting" && item.seconds_until_ready <= 0 ? <button onClick={() => void evaluate(item)} disabled={busy}><Activity size={15} />Review now</button> : null}{item.status === "evaluated" ? <><button onClick={runAnotherTuneup}><Plus size={15} />Run another</button><button className="primary" onClick={() => void simpleAction(`/api/calibration/change-sets/${item.id}/keep`, "Changes could not be marked as kept")} disabled={busy}><Check size={15} />Keep changes</button></> : null}{remaining.length ? <button onClick={() => void rollback(item)} disabled={busy}><Undo2 size={15} />Undo changes</button> : null}</footer></article>; }) : <div className="empty-state"><ShieldCheck size={28} /><strong>No tune-up is being monitored</strong><span>Apply a recommendation to begin a before-and-after review.</span><button className="primary" onClick={runAnotherTuneup}>Run a tune-up</button></div>}</div> : null}
       {section === "history" ? <div className="tuneup-history"><div className="tuneup-history-actions"><span>{runs.length} recent review{runs.length === 1 ? "" : "s"}</span><button className="primary" onClick={runAnotherTuneup}><Plus size={15} />Run another tune-up</button></div>{runs.map((run) => { const applied = changeSets.filter((item) => item.run_id === run.id && item.action === "apply"); return <article key={run.id}><button type="button" onClick={() => { setSelectedRunId(run.id); setSection("tuneup"); setWizardStep(run.status === "completed" ? 4 : 3); }}><span><strong>{tuneupHistoryTitle(run, cameras)}</strong><small>{formatDateTime(run.created_at, timeZone)} · {String(run.status).replaceAll("_", " ")}</small></span><ArrowRight size={16} /></button><div><span>{applied.reduce((count, item) => count + Number(item.changes?.length || 0), 0)} changes applied</span>{applied.map((item) => <em key={item.id}>{item.evaluation?.summary || String(item.status).replaceAll("_", " ")}</em>)}</div>{applied.map((item) => { const rolledBack = new Set(item.rolled_back_change_ids || []); const remaining = (item.changes || []).filter((change) => !rolledBack.has(change.id)); return remaining.length ? <details className="tuneup-history-changes" key={item.id}><summary>Review or undo {remaining.length} applied change{remaining.length === 1 ? "" : "s"}</summary>{remaining.map((change) => <div className="tuneup-change-row" key={change.id}><span>{change.camera_id ? cameras.find((camera) => camera.id === change.camera_id)?.name || change.camera_id : "System default"} · {TUNEUP_SETTING_NAMES[change.setting] || String(change.setting).split(".").pop().replaceAll("_", " ")}</span><b>{tuneupValue(change.before)} → {tuneupValue(change.after)}</b><button onClick={() => void rollback(item, { changeIds: [change.id] })} disabled={busy}><Undo2 size={14} />Undo</button></div>)}</details> : null; })}</article>; })}{!runs.length ? <div className="empty-state">No tune-ups have been run yet.</div> : null}</div> : null}
+      </div>
     </section>
   </>;
 }
@@ -10262,10 +10283,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
               </div>
               {(telemetry?.diagnostics?.active || []).length ? <div className="telemetry-diagnostic-list">{telemetry.diagnostics.active.map((session) => {
                 const camera = cameras.find((item) => item.id === session.camera_id);
-                return <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? camera?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>Active until {formatDateTime(session.expires_at, timeZone)}</span></div><div className="button-row"><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a><button type="button" onClick={() => void stopTelemetryDiagnostics(session.id)}>Stop</button></div></article>;
+                return <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? camera?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>Active until {formatDateTime(session.expires_at, timeZone)}</span></div><div className="button-row"><a className="button" href={appUrl(`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`)} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a><button type="button" onClick={() => void stopTelemetryDiagnostics(session.id)}>Stop</button></div></article>;
               })}</div> : <p className="telemetry-diagnostic-empty">No diagnostic capture is active.</p>}
             </section>
-            {(telemetry?.diagnostics?.recent || []).some((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()) ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent diagnostic reports</summary><div className="telemetry-diagnostic-list">{telemetry.diagnostics.recent.filter((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()).map((session) => <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? cameras.find((camera) => camera.id === session.camera_id)?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>{formatDateTime(session.started_at, timeZone)}</span></div><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a></article>)}</div></details></section> : null}
+            {(telemetry?.diagnostics?.recent || []).some((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()) ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent diagnostic reports</summary><div className="telemetry-diagnostic-list">{telemetry.diagnostics.recent.filter((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()).map((session) => <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? cameras.find((camera) => camera.id === session.camera_id)?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>{formatDateTime(session.started_at, timeZone)}</span></div><a className="button" href={appUrl(`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`)} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a></article>)}</div></details></section> : null}
             {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
           </div> : <TelemetryViewer data={telemetry} cameraId={telemetrySection === "cameras" ? selectedTelemetryCamera : ""} timeZone={timeZone} />}</div>
         </section>
