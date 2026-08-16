@@ -382,6 +382,12 @@ ambiguous scenes remain unchanged for later tracking-based verification. See
 [Incident evidence data path](docs/incident-evidence-data-path.md) for the full
 source, timing, geometry, refinement, and cover-promotion contract.
 
+Live camera tiles use equal 16:9 display frames. Admin > Cameras > Settings >
+Live view framing can independently center or zoom the Main and Sub streams,
+or fit the full source without cropping. These settings affect browser
+presentation only: they do not crop recordings, snapshots, object detection,
+motion analysis, or exported media. Detection Zones remain independent.
+
 Recorder timestamp handling is discontinuity-aware. Persistent regressing or rebased FFmpeg timestamps are coalesced into one diagnostic event and cause only the affected camera/source to begin a new recording epoch. The old recorder is finalized before its replacement starts, replacement health is verified, and recovery is rate-limited to prevent restart loops. Per-source discontinuity, rollover, failure, and rate-limit counters are exposed with camera status and under Admin > Telemetry.
 
 ### Evidence image storage

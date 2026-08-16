@@ -83,6 +83,10 @@
       "video_backend": "baichuan_native",
       "stream_url": "rtsp://USER:PASSWORD@CAMERA_IP:554/h264Preview_01_main",
       "live_stream_url": "rtsp://USER:PASSWORD@CAMERA_IP:554/h264Preview_01_sub",
+      "live_view": {
+        "main": { "fit": "cover", "focal_x": 50, "focal_y": 50, "zoom": 1 },
+        "live": { "fit": "cover", "focal_x": 50, "focal_y": 50, "zoom": 1 }
+      },
       "record": true,
       "motion_qualification": {
         "mode": "inherit",

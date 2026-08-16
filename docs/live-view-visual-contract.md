@@ -13,12 +13,30 @@ following geometry and interaction rules are product requirements.
 - The primary camera surface receives all remaining width after a 306px Recent
   Activity rail. Camera tiles use four-pixel gutters and compact black media
   chrome.
-- Automatic density choices are `Fit`, `4`, `6`, `9`, `16`, and `25`. `Fit`
-  remains aspect-aware; numbered choices establish a predictable camera count.
+- Automatic density choices are `Fit`, `4`, `6`, `9`, `16`, and `25`. Every
+  automatic tile uses the same 16:9 frame; `Fit` chooses the largest equal-size
+  grid that shows the current camera set, while numbered choices establish a
+  predictable camera count.
 - Recent Activity uses `All`, `Person`, and `Vehicle` quick filters, a separate
   advanced-filter action, one incident per row, and an explicit View all action.
 - Selecting recent activity is local. Opening an incident is always an explicit
   action and never remounts a live camera.
+
+## Camera framing
+
+- Equal tile geometry never changes recording, detection, snapshot, or source
+  resolution. Media is presentation-cropped inside the tile.
+- Each camera stores independent Main and Sub framing. `fit` is `cover` (fill
+  and crop) or `contain` (show the entire frame); `focal_x` and `focal_y` are
+  normalized percentages; `zoom` is bounded from 1× through 3×.
+- The same framing is applied to the idle poster, hover-promoted live stream,
+  fallback transport, and full Live overlay. Source fallback uses the framing
+  belonging to the source actually displayed.
+- Framing is edited under Admin > Cameras > Settings using a still preview. It
+  is a scoped configuration save and never restarts a camera or recorder.
+- Detection zones are not framing controls. The UI may reuse their normalized
+  geometry conventions, but changing security policy must never silently
+  change Live presentation (or the reverse).
 
 ## Mobile composition
 
