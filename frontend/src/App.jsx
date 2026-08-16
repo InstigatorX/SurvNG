@@ -6480,7 +6480,7 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
 
   return <main className="search-page">
     <header className="search-commandbar">
-      <div><Search size={18} /><span><strong>Search recordings</strong><small>Find incidents by describing what you remember</small></span></div>
+      <div><Search size={18} /><span><strong>Smart Search</strong><small>Find incidents by describing what you remember</small></span></div>
       {setupError ? <button type="button" className="search-setup-retry" onClick={() => void loadSearchSetup()}><RefreshCcw size={15} />Retry status</button> : <span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span>}
     </header>
     <aside className="search-scope-panel">

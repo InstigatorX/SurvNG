@@ -13382,6 +13382,85 @@ a:focus-visible {
   .incidents-desktop-page.with-inspector .incidents-desktop-workspace { grid-template-columns: 280px minmax(0, 1fr); }
 }
 
+/* Search and People workspaces */
+.search-page,
+.faces-page { height: calc(100dvh - 58px); min-height: 0; gap: 0; background: var(--canvas); padding: 0; }
+
+.search-page { grid-template-columns: 226px minmax(0, 1fr); grid-template-rows: 52px minmax(0, 1fr); }
+.search-commandbar,
+.faces-commandbar { min-height: 52px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--topbar); box-shadow: none; padding: 6px 12px; }
+.search-commandbar > div > span,
+.faces-commandbar > div:first-child span { gap: 0; }
+.search-commandbar strong,
+.faces-commandbar strong { font-weight: 620; }
+.search-commandbar small,
+.faces-commandbar small { font-size: 10px; }
+.semantic-status { border-radius: 3px; font-size: 10px; font-weight: 560; }
+.search-scope-panel { border: 0; border-right: 1px solid var(--line); border-radius: 0; background: var(--panel-solid); box-shadow: none; }
+.search-scope-heading { min-height: 52px; border-bottom: 1px solid var(--line); background: var(--panel-soft); padding: 9px 12px; }
+.search-scope-heading strong { font-size: 12px; font-weight: 620; }
+.search-scope-heading small { font-size: 9px; }
+.search-camera-list { gap: 0; padding: 4px 0; }
+.search-camera-list button { min-height: 42px; border: 0; border-left: 3px solid transparent; border-radius: 0; background: transparent; font-size: 11px; font-weight: 540; padding-inline: 12px; }
+.search-camera-list button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.search-camera-list i.online { box-shadow: none; }
+.search-history-panel { border-top: 1px solid var(--line); }
+.search-history-panel > div { min-height: 38px; background: var(--panel-soft); padding-inline: 12px; }
+.search-history-panel > button { min-height: 42px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding-inline: 12px; }
+.semantic-search-workspace { border: 0; border-radius: 0; background: var(--panel-solid); box-shadow: none; padding: 14px; }
+.semantic-search-workspace form { max-width: 960px; min-height: 48px; margin-inline: auto; border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,.14); }
+.semantic-search-workspace form input { font-size: 14px; }
+.semantic-search-workspace form button,
+.semantic-search-results footer a { border-radius: 3px; font-weight: 560; }
+.search-results-heading { max-width: 1200px; margin: 12px auto 0; }
+.semantic-search-results { max-width: 1200px; margin: 8px auto 0; gap: 10px; }
+.semantic-search-results article { border-radius: 3px; background: var(--panel-soft); }
+.semantic-result-image span { border-radius: 3px; font-weight: 560; }
+.semantic-search-results footer { min-height: 62px; padding: 8px; }
+.semantic-search-results footer strong { font-size: 11px; font-weight: 620; }
+.semantic-search-results footer small { font-size: 9px; }
+
+.faces-page { grid-template-columns: 244px minmax(0, 1fr); grid-template-rows: 52px minmax(0, 1fr); }
+.faces-command-status { gap: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 3px; }
+.faces-command-status > span { min-height: 34px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; font-size: 9px; font-weight: 540; }
+.faces-command-status > span:first-child { border-left: 0; }
+.faces-people-panel { border: 0; border-right: 1px solid var(--line); border-radius: 0; background: var(--panel-solid); box-shadow: none; }
+.faces-panel-heading { min-height: 54px; border-bottom: 1px solid var(--line); background: var(--panel-soft); padding: 9px 12px; }
+.faces-panel-heading h2 { font-size: 13px; font-weight: 620; }
+.face-person-row { min-height: 48px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.face-person-row.active { border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.face-person-select { min-height: 52px; border: 0; border-radius: 0; background: transparent; }
+.face-person-select strong { font-size: 11px; font-weight: 620; }
+.face-person-select small { font-size: 8px; }
+.faces-review-panel { border: 0; border-radius: 0; background: var(--panel-solid); box-shadow: none; }
+.faces-toolbar { min-height: 50px; gap: 7px; border-bottom: 1px solid var(--line); background: var(--panel-soft); padding: 7px 10px; }
+.faces-filter-group { gap: 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 3px; }
+.faces-filter-group button { min-height: 34px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; font-size: 10px; font-weight: 540; }
+.faces-filter-group button:first-child { border-left: 0; }
+.faces-filter-group button.active { background: color-mix(in srgb, var(--accent) 18%, var(--control)); }
+.faces-toolbar select { min-height: 34px; border-radius: 3px; font-size: 10px; }
+.face-messages > * { border-radius: 0; }
+.face-observation-grid { gap: 8px; padding: 10px; }
+.face-observation-card { border-radius: 3px; background: var(--panel-soft); }
+.face-card-hud { background: linear-gradient(transparent, rgba(2,6,8,.88)); }
+.faces-pagination { min-height: 48px; border-top: 1px solid var(--line); background: var(--panel-soft); }
+.faces-pagination button { border-radius: 3px; }
+
+@media (max-width: 760px) {
+  .search-page,
+  .faces-page { height: auto; min-height: var(--workspace-available-height); }
+  .search-page,
+  .faces-page { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; }
+  .search-commandbar,
+  .faces-commandbar { min-height: 48px; }
+  .search-scope-panel,
+  .faces-people-panel { border-right: 0; border-bottom: 1px solid var(--line); }
+  .semantic-search-workspace { padding: 8px; }
+  .semantic-search-results { gap: 8px; }
+  .faces-filter-group { border: 0; }
+  .faces-filter-group button { min-height: 44px; border: 1px solid var(--line); }
+}
+
 @media (max-width: 760px) {
   .recordings-camera-group { display: none; }
   .recordings-v2-events::before { display: none; }
