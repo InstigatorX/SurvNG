@@ -110,7 +110,7 @@ import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigat
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
-import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
+import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, liveActivityEventId, liveActivityIncidentHref, orderedLiveCamerasForFocus } from "./liveWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
@@ -1664,6 +1664,7 @@ function MobileMoreSheet({ links, page, onClose }) {
 function Shell({ page, theme, recordingContext, children }) {
   const shellRef = useRef(null);
   const topbarRef = useRef(null);
+  const workspaceHeadingRef = useRef(null);
   const mobileMoreButtonRef = useRef(null);
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const workspaceLink = (id) => {
@@ -1677,6 +1678,12 @@ function Shell({ page, theme, recordingContext, children }) {
   };
   const workspaceLinks = [...DESKTOP_PRIMARY_WORKSPACES, "admin"].map(workspaceLink);
   const mobileLinks = MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more").map(workspaceLink);
+
+  useEffect(() => {
+    const label = workspaceDefinition(page)?.label || "SurvNG";
+    document.title = label === "Live" ? "SurvNG" : `SurvNG · ${label}`;
+    window.requestAnimationFrame(() => workspaceHeadingRef.current?.focus({ preventScroll: true }));
+  }, [page]);
 
   useLayoutEffect(() => {
     const shell = shellRef.current;
@@ -1716,12 +1723,12 @@ function Shell({ page, theme, recordingContext, children }) {
             <img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" />
           </div>
           <div className="brand-title">
-            <h1>SurvNG</h1>
+            <strong>SurvNG</strong>
           </div>
         </a>
         <div className="workspace-system-bar" aria-label="System status"><LiveHeaderStats /></div>
       </header>
-      <div className="workspace-content">{children}</div>
+      <div className="workspace-content"><h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>{children}</div>
       <nav className="mobile-workspace-nav" aria-label="Primary">
         {mobileLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} href={href} key={id}><Icon size={21} /><span>{label}</span></a>)}
         <button ref={mobileMoreButtonRef} type="button" className={page === "people" || page === "admin" || mobileMoreOpen ? "active" : ""} onClick={() => setMobileMoreOpen((current) => !current)} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-panel"><Rows3 size={21} /><span>More</span></button>
@@ -5147,6 +5154,8 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const customLayoutAvailable = useViewportQuery("(min-width: 1051px)");
   const mobileLiveView = useViewportQuery("(max-width: 760px)");
   const [customSizePreview, setCustomSizePreview] = useState({});
+  const [keyboardLayoutPreview, setKeyboardLayoutPreview] = useState(null);
+  const [layoutAnnouncement, setLayoutAnnouncement] = useState("");
   const [resizingCameraId, setResizingCameraId] = useState("");
   const customMoveCleanupRef = useRef(null);
   const liveCameraGridRef = useRef(null);
@@ -5217,6 +5226,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     () => readLiveCustomLayout(customLayoutValue, cameras, liveCameraAspects),
     [cameras, customLayoutValue, liveCameraAspects],
   );
+  const displayedCustomLayout = keyboardLayoutPreview || customLayout;
   const liveCameraLayout = useMemo(
     () => recordingGridLayout(
       orderedCameras,
@@ -5374,6 +5384,62 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     if (!window.confirm("Reset the saved custom camera positions and sizes?")) return;
     setCustomLayoutValue("{}");
     setCustomSizePreview({});
+    setKeyboardLayoutPreview(null);
+  }
+
+  function handleCustomLayoutKey(event, cameraId, actionType) {
+    const activation = event.key === "Enter" || event.key === " ";
+    const active = keyboardLayoutPreview?.cameraId === cameraId && keyboardLayoutPreview?.type === actionType;
+    if (!active && !activation) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const cameraName = cameras.find((camera) => camera.id === cameraId)?.name || cameraId;
+    if (!active) {
+      setKeyboardLayoutPreview({ type: actionType, cameraId, order: [...customLayout.order], sizes: structuredClone(customLayout.sizes) });
+      setLayoutAnnouncement(`${actionType === "move" ? "Move" : "Resize"} mode for ${cameraName}. Use arrow keys, Enter to save, or Escape to cancel.`);
+      return;
+    }
+    if (event.key === "Escape") {
+      setKeyboardLayoutPreview(null);
+      setLayoutAnnouncement(`${actionType === "move" ? "Move" : "Resize"} cancelled for ${cameraName}.`);
+      return;
+    }
+    if (event.key === "Enter") {
+      saveCustomLayout(keyboardLayoutPreview.order, keyboardLayoutPreview.sizes);
+      setKeyboardLayoutPreview(null);
+      setLayoutAnnouncement(`${cameraName} layout saved.`);
+      return;
+    }
+    const arrows = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+    if (actionType === "move" && arrows.includes(event.key)) {
+      const order = keyboardLayoutPreview.order;
+      const index = order.indexOf(String(cameraId));
+      const delta = ["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 1;
+      const targetIndex = Math.max(0, Math.min(order.length - 1, index + delta));
+      if (targetIndex === index) return;
+      const nextOrder = moveLiveCamera(order, String(cameraId), order[targetIndex], "swap");
+      setKeyboardLayoutPreview((current) => ({ ...current, order: nextOrder }));
+      setLayoutAnnouncement(`${cameraName} moved to position ${targetIndex + 1} of ${order.length}.`);
+      return;
+    }
+    if (actionType === "resize" && (arrows.includes(event.key) || event.key.toLowerCase() === "s")) {
+      const currentSize = keyboardLayoutPreview.sizes[cameraId];
+      let nextSize;
+      if (event.key.toLowerCase() === "s") {
+        nextSize = currentSize.aspectLocked
+          ? { ...currentSize, aspectLocked: false }
+          : resizeLiveCameraToAspect(currentSize, 0, 0, customGridMetrics, liveCameraAspects[cameraId]);
+      } else {
+        const step = event.shiftKey ? 2 : 1;
+        nextSize = resizeLiveCamera(
+          currentSize,
+          event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0,
+          event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0,
+        );
+      }
+      setKeyboardLayoutPreview((current) => ({ ...current, sizes: { ...current.sizes, [cameraId]: nextSize } }));
+      setLayoutAnnouncement(`${cameraName} size ${nextSize.columns} columns by ${nextSize.rows} rows${nextSize.aspectLocked ? ", fitted to video" : ""}.`);
+    }
   }
 
   function beginCustomMove(event, cameraId) {
@@ -5704,6 +5770,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   return (
     <main className="bento-grid live-grid">
       <LiveCommandBar layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} />
+      <div className="sr-only" role="status" aria-live="polite">{layoutAnnouncement}</div>
       <section className="bento-card camera-zone live-camera-zone">
         <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
           {orderedCameras.map((camera) => <button type="button" key={camera.id} className={camera.id === mobileFocusedCameraId ? "active" : ""} aria-pressed={camera.id === mobileFocusedCameraId} onClick={() => setStoredMobileFocus(camera.id)}>{camera.name || camera.id}</button>)}
@@ -5724,11 +5791,11 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
               layout={effectiveLayoutMode === "auto" ? liveCameraLayoutById.get(camera.id) : null}
               customLayout={effectiveLayoutMode === "custom"}
               customStyle={effectiveLayoutMode === "custom" ? (() => {
-                const size = customSizePreview[camera.id] || customLayout.sizes[camera.id];
+                const size = customSizePreview[camera.id] || displayedCustomLayout.sizes[camera.id];
                 const measuredAspect = Number(liveCameraAspects[camera.id]);
                 const placement = liveCustomTilePlacement(size, customGridMetrics, measuredAspect);
                 return {
-                  order: customLayout.order.indexOf(String(camera.id)),
+                  order: displayedCustomLayout.order.indexOf(String(camera.id)),
                   gridColumn: `span ${placement.columns}`,
                   gridRow: `span ${placement.packedRows}`,
                   height: `${placement.height}px`,
@@ -5736,12 +5803,20 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
               })() : undefined}
               startDelayMs={(liveCameraStartIndex.get(camera.id) || 0) * 450}
               resizing={resizingCameraId === camera.id}
-              aspectSnapped={Boolean((customSizePreview[camera.id] || customLayout.sizes[camera.id]).aspectLocked)}
+              aspectSnapped={Boolean((customSizePreview[camera.id] || displayedCustomLayout.sizes[camera.id]).aspectLocked)}
               dragHandleProps={effectiveLayoutMode === "custom" ? {
                 onPointerDown: (event) => beginCustomMove(event, camera.id),
+                onKeyDown: (event) => handleCustomLayoutKey(event, camera.id, "move"),
+                "aria-pressed": keyboardLayoutPreview?.cameraId === camera.id && keyboardLayoutPreview?.type === "move",
+                title: "Drag to move, or press Enter and use arrow keys",
+                "aria-label": `Move ${camera.name}. Press Enter, use arrow keys, then Enter to save or Escape to cancel`,
               } : {}}
               resizeHandleProps={effectiveLayoutMode === "custom" ? {
                 onPointerDown: (event) => beginCustomResize(event, camera.id),
+                onKeyDown: (event) => handleCustomLayoutKey(event, camera.id, "resize"),
+                "aria-pressed": keyboardLayoutPreview?.cameraId === camera.id && keyboardLayoutPreview?.type === "resize",
+                title: "Drag to resize, or press Enter and use arrow keys; S fits the video",
+                "aria-label": `Resize ${camera.name}. Press Enter, use arrow keys, S to fit the video, then Enter to save or Escape to cancel`,
               } : {}}
               mobilePrimary={camera.id === mobileFocusedCameraId}
             />

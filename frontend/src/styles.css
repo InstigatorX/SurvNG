@@ -219,6 +219,12 @@ p {
   align-self: stretch;
 }
 
+.brand-title > strong {
+  color: var(--ink);
+  font-size: 20px;
+  letter-spacing: -0.025em;
+}
+
 .header-stats {
   display: flex;
   align-items: center;
