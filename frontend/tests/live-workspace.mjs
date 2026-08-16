@@ -20,10 +20,10 @@ assert.deepEqual(liveDensityPage([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { 
   pageCount: 2,
 });
 assert.deepEqual(liveDensityPage(cameras, "fit", 9), { cameras, page: 0, pageCount: 1 });
-assert.equal(liveActivityQuickFilter("all", "all"), "all");
-assert.equal(liveActivityQuickFilter("object", "person"), "person");
-assert.equal(liveActivityQuickFilter("object", "car"), "vehicle");
-assert.equal(liveActivityQuickFilter("motion", "all"), "custom");
-assert.deepEqual(liveActivityQuickSelection("vehicle"), { eventType: "object", objectFilter: "car" });
+assert.equal(liveActivityQuickFilter("object", "all"), "object");
+assert.equal(liveActivityQuickFilter("motion", "all"), "motion");
+assert.equal(liveActivityQuickFilter("object", "person"), "custom");
+assert.deepEqual(liveActivityQuickSelection("object"), { eventType: "object", objectFilter: "all" });
+assert.deepEqual(liveActivityQuickSelection("motion"), { eventType: "motion", objectFilter: "all" });
 
 console.log("live workspace tests passed");

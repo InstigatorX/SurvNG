@@ -2019,6 +2019,8 @@ function mediaAspectRatio(aspect) {
 
 function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobileView = false, mobilePrimary = false }) {
   const tileRef = useRef(null);
+  const controlMenuButtonRef = useRef(null);
+  const hoverTimerRef = useRef(null);
   const tileWasVisibleRef = useRef(true);
   const [tileVisible, setTileVisible] = useState(true);
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
@@ -2041,14 +2043,46 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
   const [detectionError, setDetectionError] = useState("");
   const [cameraActionBusy, setCameraActionBusy] = useState(false);
   const [cameraActionError, setCameraActionError] = useState("");
-  const shouldUseLiveMedia = liveMediaShouldRun({ running: camera.running, streamReady, mediaActive, transport: activeTransport });
-  const shouldUseWebRtc = shouldUseLiveMedia && activeTransport === "webrtc";
+  const [controlMenuOpen, setControlMenuOpen] = useState(false);
+  const [hoverPreview, setHoverPreview] = useState(false);
+  const displayedTransport = hoverPreview ? "webrtc" : activeTransport;
+  const shouldUseLiveMedia = liveMediaShouldRun({ running: camera.running, streamReady: hoverPreview || streamReady, mediaActive, transport: displayedTransport });
+  const shouldUseWebRtc = shouldUseLiveMedia && displayedTransport === "webrtc";
   const shouldUseMjpegStream = shouldUseLiveMedia && activeTransport === "mjpeg";
   const cameraConnected = camera.connected ?? camera.running;
 
   useEffect(() => {
     onAspectChange?.(camera.id, mediaAspectRatio(aspect));
   }, [aspect, camera.id, onAspectChange]);
+
+  useEffect(() => () => window.clearTimeout(hoverTimerRef.current), []);
+
+  useEffect(() => {
+    if (!controlMenuOpen) return undefined;
+    function closeMenu(event) {
+      if (event.type === "keydown" && event.key !== "Escape") return;
+      if (event.type === "pointerdown" && tileRef.current?.contains(event.target)) return;
+      setControlMenuOpen(false);
+      if (event.type === "keydown") window.requestAnimationFrame(() => controlMenuButtonRef.current?.focus());
+    }
+    window.addEventListener("keydown", closeMenu);
+    window.addEventListener("pointerdown", closeMenu);
+    return () => {
+      window.removeEventListener("keydown", closeMenu);
+      window.removeEventListener("pointerdown", closeMenu);
+    };
+  }, [controlMenuOpen]);
+
+  function beginHoverPreview(event) {
+    if (event.pointerType && event.pointerType !== "mouse") return;
+    window.clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = window.setTimeout(() => setHoverPreview(true), 180);
+  }
+
+  function endHoverPreview() {
+    window.clearTimeout(hoverTimerRef.current);
+    setHoverPreview(false);
+  }
 
   useEffect(() => {
     if (!STREAM_MODES.includes(streamMode)) setStreamMode("motion");
@@ -2225,6 +2259,9 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
       className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""} ${mobilePrimary ? "mobile-primary" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
       data-camera-id={camera.id}
+      data-hover-preview={hoverPreview ? "true" : "false"}
+      onPointerEnter={beginHoverPreview}
+      onPointerLeave={endHoverPreview}
       style={customLayout ? customStyle : layout ? {
         left: `${layout.x}px`,
         top: `${layout.y}px`,
@@ -2239,7 +2276,15 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
         <div className="camera-tile-chrome">
           <span className="camera-tile-name"><i className={cameraConnected ? "online" : "offline"} aria-hidden="true" /><strong>{camera.name}</strong></span>
           <span className="camera-tile-live-state">{cameraConnected ? "LIVE" : camera.running ? "WAIT" : "OFF"}</span>
-          <span className="camera-tile-menu" aria-hidden="true">⋮</span>
+          <button
+            type="button"
+            ref={controlMenuButtonRef}
+            className="camera-tile-menu"
+            aria-label={`Open ${camera.name} controls`}
+            aria-expanded={controlMenuOpen}
+            aria-haspopup="true"
+            onClick={() => setControlMenuOpen((open) => !open)}
+          >⋮</button>
         </div>
         {!camera.running ? (
           <div className="camera-offline-state" role="img" aria-label={`${camera.name} is powered off`}>
@@ -2274,24 +2319,22 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
         )}
         <button type="button" className="camera-open-target" onClick={() => onOpen(camera)} aria-label={`Open ${camera.name} live view`} />
         <time className="camera-tile-time">{formatTimeOnly(Date.now() / 1000, timeZone)}</time>
-        <div
-          className="tile-header camera-hud"
-        >
-          <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
-          <div className="tile-controls" aria-label={`${camera.name} controls`}>
+        <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
+        {controlMenuOpen ? <div className="camera-tile-control-menu" role="group" aria-label={`${camera.name} controls`}>
+          <div className="tile-controls">
             {dragHandleProps.onPointerDown ? <button
               type="button"
-              className="tile-control-button icon-only camera-drag-handle"
+              className="tile-control-button camera-drag-handle"
               title="Drag to move camera"
               aria-label={`Move ${camera.name}`}
               {...dragHandleProps}
             >
               <GripVertical size={16} />
+              <span>Move camera</span>
             </button> : null}
             <button type="button" className="tile-control-button" onClick={toggleSourceMode} title="Switch main/sub stream">
               <Radio size={15} />
-              <span className="hud-full-label">{sourceMode === "main" ? "Main" : "Sub"}</span>
-              <span className="hud-short-label">{sourceMode === "main" ? "M" : "S"}</span>
+              <span>Stream: {sourceMode === "main" ? "Main" : "Sub"}</span>
             </button>
             <button
               type="button"
@@ -2299,11 +2342,8 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
               onClick={cycleStreamMode}
               title={normalizedStreamMode === "motion" ? `Automatic motion switching: ${activeTransport === "webrtc" ? "WebRTC active" : "snapshot idle"}` : "Cycle transport: Auto, MJPEG, WebRTC"}
             >
-              <span className="hud-full-label">
+              <span>
                 {normalizedStreamMode === "motion" ? `Auto ${activeTransport === "webrtc" ? "RTC" : "Snap"}` : STREAM_LABELS[normalizedStreamMode]}
-              </span>
-              <span className="hud-short-label">
-                {normalizedStreamMode === "motion" ? (activeTransport === "webrtc" ? "RTC" : "Snap") : normalizedStreamMode === "mjpeg" ? "MJ" : "RTC"}
               </span>
             </button>
             <button
@@ -2314,7 +2354,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
               title={recordingError || (!camera.recording_configured ? "Recording is not configured for this camera" : camera.recording_enabled ? "Stop recording" : "Start recording")}
               aria-label={`${camera.recording_enabled ? "Stop" : "Start"} recording ${camera.name}`}
             >
-              <Video size={13} /> <span className="hud-full-label">{recordingBusy ? "..." : "rec"}</span>
+              <Video size={13} /> <span>{recordingBusy ? "Updating recording…" : camera.recording_enabled ? "Stop recording" : "Start recording"}</span>
             </button>
             <button
               type="button"
@@ -2324,20 +2364,21 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
               title={detectionError || (camera.detection_enabled ? "Stop motion and object detection" : "Start motion and object detection")}
               aria-label={`${camera.detection_enabled ? "Stop" : "Start"} motion and object detection for ${camera.name}`}
             >
-              <Radar size={13} /> <span className="hud-full-label">{detectionBusy ? "..." : "detect"}</span>
+              <Radar size={13} /> <span>{detectionBusy ? "Updating detection…" : camera.detection_enabled ? "Stop detection" : "Start detection"}</span>
             </button>
             <button
               type="button"
-              className={`tile-control-button icon-only ${camera.running ? "danger" : ""} ${cameraActionError ? "bad" : ""}`}
+              className={`tile-control-button ${camera.running ? "danger" : ""} ${cameraActionError ? "bad" : ""}`}
               onClick={() => post(camera.running ? "camera/stop" : "camera/start")}
               disabled={cameraActionBusy}
               title={cameraActionError || (camera.running ? "Stop camera" : "Start camera")}
               aria-label={`${camera.running ? "Stop" : "Start"} ${camera.name}`}
             >
               {cameraActionBusy ? <RefreshCcw className="spin" size={16} /> : <Power size={16} />}
+              <span>{cameraActionBusy ? "Updating camera…" : camera.running ? "Stop camera" : "Start camera"}</span>
             </button>
           </div>
-        </div>
+        </div> : null}
       </div>
       {customLayout ? <button
         type="button"
@@ -5192,18 +5233,18 @@ function LiveActivityItem({ incident, cameraName, timeZone, selected, thumbnailA
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
   const time = incident.start_at || incident.created_at;
-  const activityLabel = labels.length ? `${labels.join(", ")} detected` : "Motion detected";
+  const activityLabel = labels.length ? labels.join(", ") : "Motion only";
   return (
     <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
       <button type="button" className="live-activity-select" onClick={() => onSelect(incident.id)} aria-label={`Select ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
         <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
         <span className="live-activity-copy">
-          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><strong>{activityLabel}</strong></span>
+          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><span className="sr-only">{activityLabel}</span></span>
           <b>{cameraName}</b>
           <time>{formatDateTime(time, timeZone)}</time>
         </span>
       </button>
-      <button type="button" className={`live-activity-trigger trigger-${trigger.toLowerCase()}`} onClick={() => onOpenOverlay(incident)} aria-label={`Preview exact ${trigger} event`}>{trigger}</button>
+      <button type="button" className={`live-activity-trigger trigger-${trigger.toLowerCase()}`} onClick={() => onOpenOverlay(incident)} aria-label={`Preview exact ${trigger} event`} title={`${trigger} trigger`}><span className="sr-only">{trigger}</span></button>
       {selected ? (
         <div className="live-activity-actions">
           <a href={appUrl(liveActivityIncidentHref(incident))}>Open incident <ChevronRight size={14} /></a>
@@ -5921,9 +5962,8 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
           <div><h2>Recent Activity</h2></div>
           <div className="incident-head-actions">
             <div className="incident-filter-toggle compact live-quick-filters" role="group" aria-label="Recent activity filter">
-              <button className={activityQuickFilter === "all" ? "active" : ""} aria-pressed={activityQuickFilter === "all"} onClick={() => selectActivityQuickFilter("all")}>All</button>
-              <button className={activityQuickFilter === "person" ? "active" : ""} aria-pressed={activityQuickFilter === "person"} onClick={() => selectActivityQuickFilter("person")}>Person</button>
-              <button className={activityQuickFilter === "vehicle" ? "active" : ""} aria-pressed={activityQuickFilter === "vehicle"} onClick={() => selectActivityQuickFilter("vehicle")}>Vehicle</button>
+              <button className={activityQuickFilter === "object" ? "active" : ""} aria-pressed={activityQuickFilter === "object"} onClick={() => selectActivityQuickFilter("object")}>Object</button>
+              <button className={activityQuickFilter === "motion" ? "active" : ""} aria-pressed={activityQuickFilter === "motion"} onClick={() => selectActivityQuickFilter("motion")}>Motion</button>
             </div>
           </div>
         </div>
