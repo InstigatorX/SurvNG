@@ -5005,8 +5005,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
         <section className="bento-card incidents-desktop-shell">
           <div className="incidents-desktop-toolbar">
             <div className="incidents-command-primary">
-              <div className="incident-filter-toggle compact" aria-label="Incident type filter">
-                <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Object</button>
+              <div className="incident-filter-toggle compact" role="group" aria-label="Incident type filter">
+                <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Objects</button>
                 <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion only</button>
               </div>
               <label className="incident-day-field"><span>Day</span><input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" /></label>
