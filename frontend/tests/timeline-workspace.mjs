@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -16,6 +16,23 @@ assert.equal(filteredTimelineCameras(cameras, "missing").length, 0);
 assert.equal(filteredTimelineCameras(cameras, "").length, 2);
 assert.deepEqual(timelineStageCameras(cameras, "garage", 2).map((camera) => camera.id), ["garage", "front-door"]);
 assert.equal(timelineStageCameras(Array.from({ length: 12 }, (_, index) => ({ id: `camera-${index}` })), "camera-9").length, 7);
+const routeCameras = [
+  { id: "gate", name: "Gate" },
+  { id: "lower-garage", name: "Lower Garage" },
+  { id: "upper-garage", name: "Upper Garage" },
+  { id: "front-door", name: "Front Door" },
+];
+const routes = [
+  { from_camera: "gate", to_camera: "lower-garage", enabled: true },
+  { from_camera: "upper-garage", to_camera: "gate", enabled: true, bidirectional: true },
+  { from_camera: "front-door", to_camera: "gate", enabled: true, bidirectional: false },
+  { from_camera: "gate", to_camera: "lower-garage", enabled: true },
+  { from_camera: "gate", to_camera: "missing", enabled: true },
+  { from_camera: "gate", to_camera: "front-door", enabled: false },
+];
+assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "gate").map((camera) => camera.id), ["lower-garage", "upper-garage"]);
+assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "front-door").map((camera) => camera.id), ["gate"]);
+assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "lower-garage").map((camera) => camera.id), []);
 assert.deepEqual(timelineStagePage(Array.from({ length: 15 }, (_, index) => ({ id: index })), 2), { cameras: [{ id: 14 }], page: 2, pages: 3 });
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["person"] }, "people"), true);
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["car"] }, "vehicles"), true);

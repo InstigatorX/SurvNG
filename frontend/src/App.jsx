@@ -119,7 +119,7 @@ import { recordingCameraAspect, recordingGridBestEpoch } from "./recordingGrid.m
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "./liveWorkspace.mjs";
 import { camerasWithLiveFraming, liveFramingStyle, normalizedLiveFraming } from "./liveFraming.mjs";
-import { filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -6445,13 +6445,15 @@ function RecordingCameraGrid({ cameras, source, epoch, playing, onSelect }) {
   </div>;
 }
 
-function RecordingCompanionStrip({ cameras, activeCameraId, source, epoch, onSelect }) {
+function RecordingCompanionStrip({ cameras, routes, activeCameraId, source, epoch, onSelect }) {
   const previewEpoch = Math.floor(Math.max(0, Number(epoch) || 0) / 15) * 15;
-  const companions = cameras.filter((camera) => camera.id !== activeCameraId).slice(0, 6);
-  return <div className="recording-selected-companions" aria-label="Companion camera previews">
+  const expectedCompanions = expectedTimelineCameras(cameras, routes, activeCameraId, 6);
+  const usingExpectedRoutes = expectedCompanions.length > 0;
+  const companions = usingExpectedRoutes ? expectedCompanions : cameras.filter((camera) => camera.id !== activeCameraId).slice(0, 6);
+  return <div className="recording-selected-companions" aria-label={usingExpectedRoutes ? "Expected route camera previews" : "Companion camera previews"}>
     {companions.map((camera) => <button key={camera.id} type="button" onClick={() => onSelect(camera.id)} aria-label={`Show ${camera.name} recording`}>
       <img src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" loading="lazy" decoding="async" />
-      <span><i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />{camera.name}<em>Preview</em></span>
+      <span><i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />{camera.name}<em>{usingExpectedRoutes ? "Expected" : "Preview"}</em></span>
     </button>)}
   </div>;
 }
@@ -6676,6 +6678,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const recordingUpdatesInFlightRef = useRef(false);
   const gridUpdatesInFlightRef = useRef(false);
   const [cameras, setCameras] = useState([]);
+  const [cameraTransitionRoutes, setCameraTransitionRoutes] = useState([]);
   const [cameraId, setCameraId] = useState(initialView.cameraId);
   const [source, setSource] = useState(initialView.source || (initialView.cameraId === ALL_RECORDING_CAMERAS_ID ? "live" : preferredStreamSource()));
   const [date, setDate] = useState(initialDate);
@@ -7027,12 +7030,22 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/cameras", { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error(`Camera status failed (${response.status})`);
-        return response.json();
+    Promise.all([
+      fetch("/api/cameras", { signal: controller.signal }),
+      fetch("/api/config", { signal: controller.signal }).catch(() => null),
+    ])
+      .then(async ([cameraResponse, configResponse]) => {
+        if (!cameraResponse.ok) throw new Error(`Camera status failed (${cameraResponse.status})`);
+        const [cameraPayload, configPayload] = await Promise.all([
+          cameraResponse.json(),
+          configResponse?.ok ? configResponse.json() : null,
+        ]);
+        return { cameraPayload, configPayload };
       })
-      .then(setCameras)
+      .then(({ cameraPayload, configPayload }) => {
+        setCameras(cameraPayload);
+        setCameraTransitionRoutes(configPayload?.detector?.tracking?.camera_transition_routes || []);
+      })
       .catch((error) => {
         if (error.name !== "AbortError") {
           setPlaybackErrorStage("index");
@@ -7543,7 +7556,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               }}
             />
           ) : null}
-          {!isAllCameras && Number.isFinite(playhead) ? <RecordingCompanionStrip cameras={cameras} activeCameraId={activeCameraId} source={source} epoch={playhead} onSelect={(camera) => { checkpointTimelineView(); setCameraId(camera); }} /> : null}
+          {!isAllCameras && Number.isFinite(playhead) ? <RecordingCompanionStrip cameras={cameras} routes={cameraTransitionRoutes} activeCameraId={activeCameraId} source={source} epoch={playhead} onSelect={(camera) => { checkpointTimelineView(); setCameraId(camera); }} /> : null}
           {loading ? <div className="recordings-v2-message"><Film size={28} />Loading recordings</div> : null}
           {!loading && !timeline.length ? <div className="recordings-v2-message"><Film size={28} />No recordings on this day</div> : null}
           {playbackError ? <div className="recordings-v2-error"><span>{playbackError}</span><button type="button" onClick={retryRecordingPlayback}><RefreshCcw size={14} />Retry</button></div> : null}

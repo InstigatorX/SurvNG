@@ -21,6 +21,27 @@ export function timelineStageCameras(cameras, primaryCameraId, limit = 7) {
   return [primary, ...available.filter((camera) => camera?.id !== primary.id)].slice(0, Math.max(1, limit));
 }
 
+export function expectedTimelineCameras(cameras, routes, activeCameraId, limit = 6) {
+  const available = Array.isArray(cameras) ? cameras : [];
+  const availableById = new Map(available.map((camera) => [String(camera?.id || ""), camera]));
+  const selectedId = String(activeCameraId || "");
+  const seen = new Set();
+  const expected = [];
+  for (const route of Array.isArray(routes) ? routes : []) {
+    if (!route || route.enabled === false) continue;
+    const fromCamera = String(route.from_camera || "");
+    const toCamera = String(route.to_camera || "");
+    let expectedId = "";
+    if (fromCamera === selectedId) expectedId = toCamera;
+    else if (route.bidirectional && toCamera === selectedId) expectedId = fromCamera;
+    if (!expectedId || expectedId === selectedId || seen.has(expectedId) || !availableById.has(expectedId)) continue;
+    seen.add(expectedId);
+    expected.push(availableById.get(expectedId));
+    if (expected.length >= Math.max(1, Number(limit) || 6)) break;
+  }
+  return expected;
+}
+
 export function timelineStagePage(cameras, page = 0, pageSize = 7) {
   const available = Array.isArray(cameras) ? cameras : [];
   const size = Math.max(1, Number(pageSize) || 7);
