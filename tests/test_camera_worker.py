@@ -972,6 +972,10 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertEqual(trigger.topic, "adaptive/visual_backup")
         self.assertTrue(trigger.prequalified.features["visual_backup"])
+        effectiveness = worker.onvif.effectiveness_snapshot()
+        self.assertEqual(effectiveness["ema_qualified_observations"], 1)
+        self.assertEqual(effectiveness["ema_onvif_matches"], 0)
+        self.assertEqual(effectiveness["ema_without_onvif"], 1)
 
     def test_visual_backup_merges_with_admitted_request_without_duplicate(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1001,6 +1005,10 @@ class CameraWorkerTest(unittest.TestCase):
             worker.motion_analysis.consider_visual_backup(accepted, samples, 100.5)
         self.assertTrue(worker.motion_events.queue.empty())
         self.assertEqual(worker.motion_state._stats["visual_backup_onvif_matches"], 1)
+        effectiveness = worker.onvif.effectiveness_snapshot()
+        self.assertEqual(effectiveness["ema_qualified_observations"], 1)
+        self.assertEqual(effectiveness["ema_onvif_matches"], 1)
+        self.assertEqual(effectiveness["ema_without_onvif"], 0)
 
     def test_raw_onvif_observation_does_not_suppress_visual_backup(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

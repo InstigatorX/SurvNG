@@ -28,6 +28,29 @@ def _trigger(index: int = 1, *, topic: str = "manual/test") -> MotionTrigger:
     )
 
 
+def test_durable_trigger_preserves_generation_qualified_evidence_token() -> None:
+    trigger = MotionTrigger(
+        topic="adaptive/motion",
+        message="qualified EMA evidence",
+        event_at=datetime.now(timezone.utc),
+        received_at=100.25,
+        lifecycle_generation=4,
+        evidence_frame_at_epoch=100.125,
+        evidence_frame_sequence=27,
+        evidence_capture_generation=9,
+    )
+
+    recovered = MotionTrigger.from_durable_payload(
+        trigger.durable_payload(),
+        "motion-trigger:test",
+    )
+
+    assert recovered.evidence_frame_at_epoch == 100.125
+    assert recovered.evidence_frame_sequence == 27
+    assert recovered.evidence_capture_generation == 9
+    assert recovered.lifecycle_generation == 4
+
+
 def test_full_queue_evicts_oldest_trigger_and_reports_drop() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=2)
     stats: list[str] = []

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +33,11 @@ SUBSCRIPTION_DURATION = "PT1H"
 SUBSCRIPTION_RENEW_MAX_MARGIN_SECONDS = 300.0
 SUBSCRIPTION_RENEW_MIN_MARGIN_SECONDS = 5.0
 MAX_EVENT_MESSAGE_CHARACTERS = 16_384
+EFFECTIVENESS_WINDOW_SECONDS = 3600.0
+EFFECTIVENESS_MINIMUM_OBSERVATIONS = 3
+EFFECTIVENESS_DEGRADED_MISMATCH_RATIO = 0.8
+UNKNOWN_NOTIFICATION_SAMPLE_LIMIT = 5
+EFFECTIVENESS_OBSERVATION_LIMIT = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +87,19 @@ class OnvifEventListener:
         self.motion_events_received = 0
         self.inactive_motion_events = 0
         self.unrecognized_notifications = 0
+        self._unknown_notification_samples: deque[dict[str, Any]] = deque(
+            maxlen=UNKNOWN_NOTIFICATION_SAMPLE_LIMIT
+        )
+        self._effectiveness_lock = threading.Lock()
+        self.ema_qualified_observations = 0
+        self.ema_onvif_matches = 0
+        self.ema_without_onvif = 0
+        self.last_ema_observation_at = ""
+        self.last_ema_onvif_match_at = ""
+        self.last_ema_without_onvif_at = ""
+        self._ema_effectiveness_window: deque[tuple[float, bool]] = deque(
+            maxlen=EFFECTIVENESS_OBSERVATION_LIMIT
+        )
         self.callback_errors = 0
         self.renewal_attempts = 0
         self.renewals = 0
@@ -340,6 +360,11 @@ class OnvifEventListener:
                             self.inactive_motion_events += 1
                         else:
                             self.unrecognized_notifications += 1
+                            self._record_unknown_notification(
+                                topic,
+                                message,
+                                received_at,
+                            )
                 except Exception as exc:
                     if stop_event.is_set() or not self._generation_matches(generation):
                         return
@@ -596,6 +621,128 @@ class OnvifEventListener:
     def _generation_matches(self, generation: int) -> bool:
         with self._lifecycle_lock:
             return generation == self._generation
+
+    def record_ema_observation(
+        self,
+        matched_onvif: bool,
+        observed_at: datetime | float | None = None,
+    ) -> None:
+        """Record whether one qualified EMA observation matched camera motion.
+
+        This is diagnostic only. It never changes transport state, motion
+        admission, or ONVIF subscription behavior.
+        """
+        if isinstance(observed_at, datetime):
+            observed = observed_at
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            observed = observed.astimezone(timezone.utc)
+        elif isinstance(observed_at, (int, float)):
+            observed = datetime.fromtimestamp(float(observed_at), timezone.utc)
+        else:
+            observed = datetime.now(timezone.utc)
+        value = observed.isoformat()
+        observed_monotonic = time.monotonic()
+        with self._effectiveness_lock:
+            self.ema_qualified_observations += 1
+            self.last_ema_observation_at = value
+            if matched_onvif:
+                self.ema_onvif_matches += 1
+                self.last_ema_onvif_match_at = value
+            else:
+                self.ema_without_onvif += 1
+                self.last_ema_without_onvif_at = value
+            self._ema_effectiveness_window.append(
+                (observed_monotonic, bool(matched_onvif))
+            )
+            self._prune_effectiveness_window(observed_monotonic)
+
+    def effectiveness_snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        with self._effectiveness_lock:
+            self._prune_effectiveness_window(now)
+            observations = len(self._ema_effectiveness_window)
+            matches = sum(1 for _, matched in self._ema_effectiveness_window if matched)
+            mismatches = observations - matches
+            match_rate = matches / observations if observations else None
+            recognized = self.motion_events_received + self.inactive_motion_events
+            recognition_rate = (
+                recognized / self.notifications_received
+                if self.notifications_received
+                else None
+            )
+            active_motion_rate = (
+                self.motion_events_received / recognized if recognized else None
+            )
+            degraded = bool(
+                self.camera.onvif.enabled
+                and self.connected
+                and observations >= EFFECTIVENESS_MINIMUM_OBSERVATIONS
+                and mismatches / observations
+                >= EFFECTIVENESS_DEGRADED_MISMATCH_RATIO
+            )
+            if not self.camera.onvif.enabled:
+                status = "disabled"
+            elif not self.connected:
+                status = "transport_unavailable"
+            elif observations < EFFECTIVENESS_MINIMUM_OBSERVATIONS:
+                status = "insufficient_data"
+            elif degraded:
+                status = "degraded"
+            else:
+                status = "effective"
+            return {
+                "signal_effectiveness_status": status,
+                "signal_degraded": degraded,
+                "recognized_notifications": recognized,
+                "notification_recognition_rate": (
+                    round(recognition_rate, 4) if recognition_rate is not None else None
+                ),
+                "active_motion_rate": (
+                    round(active_motion_rate, 4) if active_motion_rate is not None else None
+                ),
+                "ema_qualified_observations": self.ema_qualified_observations,
+                "ema_onvif_matches": self.ema_onvif_matches,
+                "ema_without_onvif": self.ema_without_onvif,
+                "ema_window_observations": observations,
+                "ema_window_onvif_matches": matches,
+                "ema_window_without_onvif": mismatches,
+                "ema_window_match_rate": (
+                    round(match_rate, 4) if match_rate is not None else None
+                ),
+                "effectiveness_window_seconds": EFFECTIVENESS_WINDOW_SECONDS,
+                "last_ema_observation_at": self.last_ema_observation_at,
+                "last_ema_onvif_match_at": self.last_ema_onvif_match_at,
+                "last_ema_without_onvif_at": self.last_ema_without_onvif_at,
+                "unknown_notification_samples": list(
+                    self._unknown_notification_samples
+                ),
+            }
+
+    def _prune_effectiveness_window(self, now: float) -> None:
+        cutoff = now - EFFECTIVENESS_WINDOW_SECONDS
+        while (
+            self._ema_effectiveness_window
+            and self._ema_effectiveness_window[0][0] < cutoff
+        ):
+            self._ema_effectiveness_window.popleft()
+
+    def _record_unknown_notification(
+        self,
+        topic: str,
+        message: str,
+        received_at: datetime,
+    ) -> None:
+        redacted_message = redact_secret_text(message)
+        encoded = redacted_message.encode("utf-8", errors="replace")
+        sample = {
+            "at": received_at.isoformat(),
+            "topic": redact_secret_text(topic)[:256],
+            "message_characters": len(message),
+            "message_fingerprint": hashlib.sha256(encoded).hexdigest()[:16],
+        }
+        with self._effectiveness_lock:
+            self._unknown_notification_samples.append(sample)
 
 
     def _is_timeout_error(self, exc: Exception) -> bool:

@@ -16,10 +16,11 @@ from survng.app.motion_analysis_service import (
     MotionAnalysisService,
     MotionFrameSubmission,
 )
+from survng.app.config import CameraTransitionRoute, MotionQualificationConfig
+from survng.app.detection_watch import RouteDetectionWatch
 from survng.app.ema_v2 import EmaPolicy
 from survng.app.motion_events import MotionEventCoordinator
 from survng.app.motion_pipeline import MotionDebugSnapshotStore
-from survng.app.config import MotionQualificationConfig
 
 
 def _hooks(
@@ -86,9 +87,14 @@ def _hooks(
     )
 
 
-def _service(dependencies: SimpleNamespace, queue_size: int = 1) -> MotionAnalysisService:
+def _service(
+    dependencies: SimpleNamespace,
+    queue_size: int = 1,
+    *,
+    camera_id: str = "gate",
+) -> MotionAnalysisService:
     service = MotionAnalysisService(
-        camera_id="gate",
+        camera_id=camera_id,
         frame_lock=threading.Lock(),
         analysis_lock=threading.Lock(),
         ring_size=8,
@@ -97,7 +103,7 @@ def _service(dependencies: SimpleNamespace, queue_size: int = 1) -> MotionAnalys
         events=MotionEventCoordinator(
             queue_size=4,
             retry_limit=2,
-            camera_id="gate",
+            camera_id=camera_id,
         ),
         evidence=Mock(),
         audit_recorder=Mock(),
@@ -132,6 +138,80 @@ def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     assert telemetry["derived_frame_count"] == 3
     assert telemetry["derived_frame_bytes"] == 90 * 320 * 5
     assert telemetry["preprocess_count"] == 1
+
+
+def test_evidence_frame_selection_is_nearest_and_generation_bounded() -> None:
+    service = _service(_hooks())
+    stop_event = threading.Event()
+    first = np.full((18, 32, 3), 11, dtype=np.uint8)
+    second = np.full((18, 32, 3), 22, dtype=np.uint8)
+
+    service.submit_frame(
+        first,
+        10.0,
+        stop_event,
+        100.0,
+        capture_sequence=41,
+        capture_generation=7,
+        lifecycle_generation=3,
+    )
+    submitted = service.queue.get_nowait()
+    assert isinstance(submitted, MotionFrameSubmission)
+    service._preprocess_frame(
+        submitted.image,
+        submitted.captured_at_epoch,
+        captured_at_monotonic=submitted.captured_at_monotonic,
+        capture_sequence=submitted.capture_sequence,
+        capture_generation=submitted.capture_generation,
+        lifecycle_generation=submitted.lifecycle_generation,
+    )
+    service.submit_frame(
+        second,
+        10.3,
+        stop_event,
+        100.3,
+        capture_sequence=42,
+        capture_generation=7,
+        lifecycle_generation=3,
+    )
+    submitted = service.queue.get_nowait()
+    assert isinstance(submitted, MotionFrameSubmission)
+    service._preprocess_frame(
+        submitted.image,
+        submitted.captured_at_epoch,
+        captured_at_monotonic=submitted.captured_at_monotonic,
+        capture_sequence=submitted.capture_sequence,
+        capture_generation=submitted.capture_generation,
+        lifecycle_generation=submitted.lifecycle_generation,
+    )
+
+    selected = service.evidence_frame_near(
+        100.01,
+        sequence=41,
+        capture_generation=7,
+        lifecycle_generation=3,
+    )
+    assert selected is not None
+    assert selected.sequence == 41
+    assert int(selected.image[0, 0, 0]) == 11
+    assert service.evidence_frame_near(
+        100.0,
+        sequence=41,
+        capture_generation=8,
+        lifecycle_generation=3,
+    ) is None
+    assert service.evidence_frame_near(
+        100.0,
+        sequence=41,
+        capture_generation=7,
+        lifecycle_generation=4,
+    ) is None
+    assert service.evidence_frame_near(
+        105.0,
+        sequence=41,
+        capture_generation=7,
+        lifecycle_generation=3,
+    ) is None
 
 
 def test_portrait_sampling_caps_the_long_edge_instead_of_expanding_pixels() -> None:
@@ -451,6 +531,21 @@ def test_backward_wall_clock_step_resets_runtime_without_suspending_frames() -> 
     reset_runtime.assert_called_once()
     assert callable(reset_runtime.call_args.kwargs["clear_observation_evidence"])
     assert service.telemetry_snapshot()["clock_discontinuity_resets"] == 1
+
+
+def test_runtime_reset_clears_both_ema_conditioners_and_route_replay_history() -> None:
+    service = _service(_hooks())
+    service.ema_v2.scene_ready = True
+    service.ema_verification.scene_ready = True
+    service.recent_accepted_results.append(
+        (100.0, MotionQualificationResult(True, 0.6, 0.48, "qualified", 3, {}))
+    )
+
+    service.reset()
+
+    assert service.ema_v2.scene_ready is False
+    assert service.ema_verification.scene_ready is False
+    assert list(service.recent_accepted_results) == []
 
 
 def test_failed_deferred_analysis_is_not_retried_in_idle_loop() -> None:
@@ -854,6 +949,306 @@ def test_ema_v2_qualified_edge_bypasses_legacy_fusion_gate() -> None:
     trigger = service.events.queue.get_nowait()
     assert trigger.prequalified.reason == "ema_v2_qualified"
     assert trigger.detection_intent_id
+
+
+def test_persistent_accepted_ema_below_rescue_score_still_requests_analysis() -> None:
+    service = _service(_hooks())
+    for conditioner in (service.ema_v2, service.ema_verification):
+        conditioner.scene_ready = True
+        conditioner.analysis_started_at = 90.0
+        conditioner.observation_count = 3
+    accepted = MotionQualificationResult(True, 0.61, 0.48, "qualified", 3, {})
+    samples = [(100.0, np.zeros((90, 160, 3), dtype=np.uint8))]
+
+    for captured_at in (100.0, 100.5, 101.0, 101.5, 102.0, 102.5, 103.0):
+        service.consider_visual_backup(accepted, samples, captured_at)
+
+    trigger = service.events.queue.get_nowait()
+    assert trigger.prequalified.features["security_verification"] is True
+    assert (
+        trigger.prequalified.features["security_verification_reason"]
+        == "persistent_ema"
+    )
+    assert trigger.prequalified.features["visual_backup_required_score"] == 0.48
+
+
+def test_route_watch_accelerates_below_score_ema_verification() -> None:
+    service = _service(_hooks())
+    onvif_observer = Mock()
+    service.set_onvif_effectiveness_observer(onvif_observer)
+    watch = SimpleNamespace(as_dict=lambda: {
+        "source_camera_id": "gate",
+        "target_camera_id": "back-left",
+        "source_event_id": 44,
+    })
+    consume = Mock(return_value=True)
+    service.set_security_verification_context(
+        route_watch=lambda _camera_id, _captured_at: watch,
+        consume_route_watch=consume,
+    )
+    accepted = MotionQualificationResult(True, 0.61, 0.48, "qualified", 3, {})
+    samples = [(100.0, np.zeros((90, 160, 3), dtype=np.uint8))]
+
+    service.consider_visual_backup(accepted, samples, 100.0)
+
+    trigger = service.events.queue.get_nowait()
+    features = trigger.prequalified.features
+    assert features["security_verification_reason"] == "route_watch"
+    assert features["route_detection_watch"]["source_event_id"] == 44
+    assert features["security_verification_bypass_limits"] is True
+    consume.assert_called_once_with("gate", 44)
+    onvif_observer.assert_not_called()
+
+
+def test_route_watch_replays_recent_accepted_ema_seen_before_confirmation() -> None:
+    service = _service(_hooks())
+    accepted = MotionQualificationResult(True, 0.56, 0.48, "qualified", 3, {})
+    service.recent_accepted_results.append((105.0, accepted))
+    watch = SimpleNamespace(
+        target_camera_id="gate",
+        eligible_at=100.0,
+        expires_at=110.0,
+        as_dict=lambda: {
+            "source_camera_id": "lower-garage",
+            "target_camera_id": "gate",
+            "source_event_id": 45,
+        },
+    )
+    service.set_security_verification_context(
+        route_watch=lambda _camera_id, captured_at: (
+            watch if 100.0 <= captured_at <= 110.0 else None
+        ),
+    )
+
+    assert service.consider_route_watch(watch) is True
+
+    trigger = service.events.queue.get_nowait()
+    assert trigger.event_at.timestamp() == 105.0
+    assert (
+        trigger.prequalified.features["security_verification_reason"]
+        == "route_watch"
+    )
+
+
+def test_route_watch_replays_durable_ema_after_service_restart() -> None:
+    service = _service(_hooks(), camera_id="back-right")
+    watch = SimpleNamespace(
+        target_camera_id="back-right",
+        eligible_at=100.0,
+        expires_at=110.0,
+        as_dict=lambda: {
+            "source_camera_id": "back-middle",
+            "target_camera_id": "back-right",
+            "source_event_id": 44723,
+        },
+    )
+    service.set_security_verification_context(
+        route_watch=lambda _camera_id, captured_at: (
+            watch if 100.0 <= captured_at <= 110.0 else None
+        ),
+        load_ema_candidates=lambda _camera_id, _start, _end: [(
+            105.0,
+            {
+                "accepted": True,
+                "score": 0.5545,
+                "threshold": 0.48,
+                "reason": "qualified",
+                "frame_count": 3,
+                "features": {"motion_regions": [[0.1, 0.2, 0.3, 0.4]]},
+                "telemetry": {},
+            },
+        )],
+    )
+
+    assert service.consider_route_watch(watch) is True
+
+    trigger = service.events.queue.get_nowait()
+    assert trigger.event_at.timestamp() == 105.0
+    assert trigger.detection_intent_id == "route:back-right:back-middle:44723"
+    assert (
+        trigger.prequalified.features["security_verification_reason"]
+        == "route_watch"
+    )
+
+
+def test_confirmed_route_chain_replays_reported_multi_camera_vehicle_trace() -> None:
+    watches = RouteDetectionWatch([
+        CameraTransitionRoute(
+            from_camera="lower-garage",
+            to_camera="gate",
+            max_seconds=30,
+        ),
+        CameraTransitionRoute(
+            from_camera="lower-garage",
+            to_camera="upper-garage",
+            max_seconds=30,
+        ),
+        CameraTransitionRoute(
+            from_camera="gate",
+            to_camera="back-left",
+            max_seconds=30,
+        ),
+        CameraTransitionRoute(
+            from_camera="back-left",
+            to_camera="back-middle",
+            max_seconds=30,
+        ),
+        CameraTransitionRoute(
+            from_camera="back-middle",
+            to_camera="back-right",
+            max_seconds=30,
+        ),
+    ])
+    observations = {
+        "gate": (1001.0, 0.7250),
+        "upper-garage": (1004.0, 0.7651),
+        "back-left": (1027.0, 0.7101),
+        "back-middle": (1029.0, 0.6107),
+        "back-right": (1048.0, 0.5545),
+    }
+    services: dict[str, MotionAnalysisService] = {}
+    for camera_id, (captured_at, score) in observations.items():
+        service = _service(_hooks(), camera_id=camera_id)
+        service.recent_accepted_results.append((
+            captured_at,
+            MotionQualificationResult(
+                True,
+                score,
+                0.48,
+                "qualified",
+                3,
+                {},
+            ),
+        ))
+        service.set_security_verification_context(
+            route_watch=watches.match,
+            consume_route_watch=watches.consume,
+        )
+        services[camera_id] = service
+
+    def confirm(camera_id: str, event_id: int, event_at: float) -> None:
+        for watch in watches.observe_incident(
+            camera_id=camera_id,
+            event_id=event_id,
+            event_at=event_at,
+            objects=[{"label": "car", "incident_eligible": True}],
+        ):
+            assert services[watch.target_camera_id].consider_route_watch(watch)
+
+    confirm("lower-garage", 44720, 1000.0)
+    confirm("gate", 44721, 1001.0)
+    confirm("back-left", 44722, 1027.0)
+    confirm("back-middle", 44723, 1029.0)
+
+    for camera_id, service in services.items():
+        trigger = service.events.queue.get_nowait()
+        assert trigger.prequalified.features["security_verification_reason"] == "route_watch"
+        assert trigger.prequalified.features["security_verification_bypass_limits"] is True
+        assert trigger.event_at.timestamp() == observations[camera_id][0]
+
+
+def test_route_verification_wins_when_ordinary_conditioner_also_qualifies() -> None:
+    service = _service(_hooks())
+    accepted = MotionQualificationResult(True, 0.9, 0.48, "qualified", 3, {})
+    service.ema_v2.scene_ready = True
+    service.ema_v2.analysis_started_at = 90.0
+    service.ema_v2.observation_count = 3
+    policy = service.qualification.visual_backup_policy()
+    service.ema_v2.evaluate(accepted, 98.0, 998.0, policy, detection_enabled=True)
+    service.ema_v2.evaluate(accepted, 99.0, 999.0, policy, detection_enabled=True)
+    watch = SimpleNamespace(as_dict=lambda: {
+        "source_camera_id": "lower-garage",
+        "target_camera_id": "gate",
+        "source_event_id": 46,
+    })
+    service.set_security_verification_context(
+        route_watch=lambda _camera_id, _captured_at: watch,
+    )
+
+    service.consider_visual_backup(
+        accepted,
+        [(100.0, np.zeros((90, 160, 3), dtype=np.uint8))],
+        100.0,
+    )
+
+    trigger = service.events.queue.get_nowait()
+    assert trigger.prequalified.features["security_verification_reason"] == "route_watch"
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_route_watch_gets_distinct_durable_intent_during_existing_episode(
+    terminal: bool,
+) -> None:
+    service = _service(_hooks())
+    service.ema_v2.scene_ready = True
+    service.ema_v2.analysis_started_at = 80.0
+    service.ema_v2.observation_count = 3
+    strong = MotionQualificationResult(True, 0.9, 0.48, "qualified", 3, {})
+    samples = [(100.0, np.zeros((90, 160, 3), dtype=np.uint8))]
+    for captured_at in (100.0, 101.0, 102.0):
+        service.consider_visual_backup(strong, samples, captured_at)
+    original = service.events.queue.get_nowait()
+    if terminal:
+        service.events.episode_controller.complete(
+            original.detection_intent_id,
+            occurred_monotonic=time.monotonic(),
+        )
+
+    watch = SimpleNamespace(as_dict=lambda: {
+        "source_camera_id": "lower-garage",
+        "target_camera_id": "gate",
+        "source_event_id": 44720,
+    })
+    consume = Mock(return_value=True)
+    service.set_security_verification_context(
+        route_watch=lambda _camera_id, _captured_at: watch,
+        consume_route_watch=consume,
+    )
+    route_result = MotionQualificationResult(
+        True,
+        0.55,
+        0.48,
+        "qualified",
+        3,
+        {},
+    )
+
+    service.consider_visual_backup(route_result, samples, 120.0)
+
+    routed = service.events.queue.get_nowait()
+    assert routed.detection_intent_id == "route:gate:lower-garage:44720"
+    assert routed.detection_intent_id != original.detection_intent_id
+    assert routed.event_at.timestamp() == 120.0
+    consume.assert_called_once_with("gate", 44720)
+
+
+def test_degraded_onvif_accelerates_below_score_ema_verification() -> None:
+    service = _service(_hooks())
+    for conditioner in (service.ema_v2, service.ema_verification):
+        conditioner.scene_ready = True
+        conditioner.analysis_started_at = 90.0
+        conditioner.observation_count = 3
+    service.set_security_verification_context(
+        onvif_effectiveness=lambda: {
+            "signal_degraded": True,
+            "signal_effectiveness_status": "degraded",
+        },
+    )
+    accepted = MotionQualificationResult(True, 0.55, 0.48, "qualified", 3, {})
+    samples = [(100.0, np.zeros((90, 160, 3), dtype=np.uint8))]
+
+    for captured_at in (100.0, 101.0, 102.0):
+        service.consider_visual_backup(accepted, samples, captured_at)
+
+    trigger = service.events.queue.get_nowait()
+    assert (
+        trigger.prequalified.features["security_verification_reason"]
+        == "onvif_degraded"
+    )
+    assert (
+        trigger.prequalified.features["onvif_signal_effectiveness_status"]
+        == "degraded"
+    )
 
 
 def test_visual_backup_audits_one_summary_for_sustained_below_gate_episode() -> None:

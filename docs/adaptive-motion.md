@@ -24,11 +24,14 @@ Semantic ONVIF notices naming a person, vehicle, animal, or face bypass ordinary
 ONVIF camera notice ───────────────────────────────┐
                                                    ├→ object detection
 strong persistent EMA motion                       │
-  → wait briefly for ONVIF                         │
-  → conservative score and persistence safeguards ┘
+  → conservative score and persistence safeguards │
+accepted lower-score persistent EMA                │
+  → slower security-verification lane              ┘
 ```
 
-This default mode keeps ONVIF as the primary trigger but covers a camera that occasionally fails to send a notice. After a startup learning period lets the adaptive background stabilize, an EMA backup is considered only when motion is accepted, exceeds both an absolute confidence floor and a margin above the learned scene threshold, persists for multiple samples, and does not match known illumination, insect, persistent-scene, or stationary-foreground rejection reasons.
+This default mode keeps ONVIF as the primary trigger but covers a camera that occasionally fails to send a notice. After a startup learning period lets the adaptive background stabilize, strong accepted motion uses the normal score and persistence safeguards. Accepted motion below that rescue score is not permanently discarded: a second, slower conditioner requests one security-verification pass when it persists longer. Known illumination, insect, persistent-scene, and stationary-foreground rejection reasons remain ineligible for either path.
+
+A confirmed eligible object can open a short verification window on the next camera in a configured camera-transition route. During that bounded window, one accepted non-nuisance EMA sample is enough to request analysis because the upstream object supplies the temporal prior. After ONVIF transport has repeatedly failed to correlate with qualified EMA evidence, the slower lane instead uses the normal persistence duration. These signals authorize object analysis only; they never create an incident or bypass object confidence, temporal confirmation, zones, activity attribution, or EMA/object correlation.
 
 Camera notices and qualified EMA evidence enter one per-camera motion episode. An ONVIF notice suppresses duplicate EMA work only after an object-detection request for that episode was actually admitted; an observed notice whose work could not be queued cannot hide a later EMA rescue. A backup invocation does not create an empty incident: durable main-recording refinement must find an incident-eligible object that passes the required causal checks. Every completed backup attempt is stored under **Admin > Motion Audit > EMA backup**, including attempts where no object was found.
 
@@ -88,6 +91,8 @@ Only enabled visual processors consume analysis time. Camera + EMA backup and EM
 
 ## Episode admission
 
-EMA scene learning and score persistence produce a single qualified edge rather than detector work for every sampled frame. A generation-tagged episode controller then merges that edge with camera notices and is the sole owner of detector reservation, admission, follow-up limits, completion, and incident linkage. A qualified edge is never passed through a second motion state machine. Queue rejection aborts the reservation without starting cooldown, detector retry exhaustion is recorded separately from nuisance rejection, and an old lifecycle generation cannot mutate the replacement camera runtime.
+EMA scene learning and score persistence produce a single qualified edge rather than detector work for every sampled frame. A generation-tagged episode controller then merges that edge with camera notices and is the sole owner of detector reservation, admission, follow-up limits, completion, and incident linkage. Every controller incarnation has a random durable namespace, so restarting SurvNG or replacing a camera runtime cannot reuse an old episode, refinement-job, or event idempotency key. Exact retries still coalesce; a conflicting reuse is an explicit error instead of a silent drop.
+
+A qualified edge is never passed through a second motion state machine. Queue pressure durably defers admitted work rather than discarding it. Ordinary and persistent nuisance protection still use cooldown and request budgets. Only a one-shot, confirmed route watch receives a stable route-specific intent that bypasses those two pre-detector limits; downstream eligibility remains unchanged. Compact accepted EMA route candidates are retained for ten minutes in the separate security-work database so a restart during delayed upstream confirmation does not erase downstream evidence. Detector retry exhaustion is recorded separately from nuisance rejection, and an old lifecycle generation cannot mutate the replacement camera runtime.
 
 Capture, recording, and live view are not limited to two cameras. Runtime camera status reports analyzed frames, accepted candidates, dropped scheduling requests, delivered triggers, pipeline failures, and per-stage timing.

@@ -460,6 +460,51 @@ class SystemTelemetryService:
                 "renewal_errors": int(status.get("onvif_renewal_errors") or 0),
                 "last_motion_at": status.get("onvif_last_motion_event_at"),
                 "last_error": status.get("onvif_last_error") or "",
+                "signal_effectiveness_status": (
+                    status.get("onvif_signal_effectiveness_status")
+                    or "insufficient_data"
+                ),
+                "signal_degraded": bool(status.get("onvif_signal_degraded")),
+                "recognized_notifications": int(
+                    status.get("onvif_recognized_notifications") or 0
+                ),
+                "notification_recognition_rate": status.get(
+                    "onvif_notification_recognition_rate"
+                ),
+                "active_motion_rate": status.get("onvif_active_motion_rate"),
+                "ema_qualified_observations": int(
+                    status.get("onvif_ema_qualified_observations") or 0
+                ),
+                "ema_onvif_matches": int(
+                    status.get("onvif_ema_onvif_matches") or 0
+                ),
+                "ema_without_onvif": int(
+                    status.get("onvif_ema_without_onvif") or 0
+                ),
+                "ema_window_observations": int(
+                    status.get("onvif_ema_window_observations") or 0
+                ),
+                "ema_window_onvif_matches": int(
+                    status.get("onvif_ema_window_onvif_matches") or 0
+                ),
+                "ema_window_without_onvif": int(
+                    status.get("onvif_ema_window_without_onvif") or 0
+                ),
+                "ema_window_match_rate": status.get(
+                    "onvif_ema_window_match_rate"
+                ),
+                "last_ema_observation_at": status.get(
+                    "onvif_last_ema_observation_at"
+                ),
+                "last_ema_onvif_match_at": status.get(
+                    "onvif_last_ema_onvif_match_at"
+                ),
+                "last_ema_without_onvif_at": status.get(
+                    "onvif_last_ema_without_onvif_at"
+                ),
+                "unknown_notification_samples": list(
+                    status.get("onvif_unknown_notification_samples") or []
+                ),
             },
             "motion": {
                 "mode": motion.get("mode") or "",

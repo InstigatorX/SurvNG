@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+import tempfile
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 
+from survng.app.events import EventStore
 from survng.app.motion_incidents import MotionIncidentService
 from survng.app.motion_pipeline.decision_handler import MotionDecisionOutcome
 
@@ -15,6 +18,7 @@ def _service(
     outcome: MotionDecisionOutcome,
     *,
     tracking_enabled: bool = True,
+    refinement_store: EventStore | None = None,
 ) -> tuple[MotionIncidentService, Mock, Mock, Mock, Mock]:
     decision = Mock()
     decision.handle.return_value = outcome
@@ -55,6 +59,7 @@ def _service(
         start_tracking=start_tracking,
         prewarm_tracking=prewarm,
         image_reader=image_reader,
+        refinement_store=refinement_store,
     )
     return service, decision, tracking, prewarm, image_reader
 
@@ -405,9 +410,13 @@ def test_duplicate_refinement_for_same_episode_is_coalesced() -> None:
     stop = threading.Event()
     service.start(stop)
     event_at = datetime.now(timezone.utc)
-    service.process("motion", "first", event_at, {"motion_episode_sequence": 7})
+    qualification = {
+        "motion_episode_sequence": 7,
+        "detection_intent_id": "gate:iruntime-a:g1:e7:request:1",
+    }
+    service.process("motion", "first", event_at, qualification)
     assert entered.wait(1.0)
-    service.process("motion", "duplicate", event_at, {"motion_episode_sequence": 7})
+    service.process("motion", "first", event_at, qualification)
 
     status = service.status()
     assert status["refinements_coalesced"] == 1
@@ -452,9 +461,13 @@ def test_coalesced_refinement_does_not_duplicate_initial_tracking_handoff() -> N
     stop = threading.Event()
     service.start(stop)
     event_at = datetime.now(timezone.utc)
-    service.process("motion", "first", event_at, {"motion_episode_sequence": 9})
+    qualification = {
+        "motion_episode_sequence": 9,
+        "detection_intent_id": "gate:iruntime-a:g1:e9:request:1",
+    }
+    service.process("motion", "first", event_at, qualification)
     assert entered.wait(1.0)
-    service.process("motion", "duplicate", event_at, {"motion_episode_sequence": 9})
+    service.process("motion", "first", event_at, qualification)
     # Strong provisional evidence starts tracking immediately; the duplicate
     # and later refinement must not start a second session.
     tracking.start.assert_called_once()
@@ -499,14 +512,27 @@ def test_refinement_burst_is_durable_and_does_not_supersede_episodes() -> None:
     stop = threading.Event()
     service.start(stop)
     event_at = datetime.now(timezone.utc)
-    service.process("motion", "1", event_at, {"motion_episode_sequence": 1})
+    service.process(
+        "motion",
+        "1",
+        event_at,
+        {
+            "motion_episode_sequence": 1,
+            "detection_intent_id": "gate:iruntime-a:g1:e1:request:1",
+        },
+    )
     assert entered.wait(1.0)
     for sequence in (2, 3, 4, 5):
         service.process(
             "motion",
             str(sequence),
             event_at,
-            {"motion_episode_sequence": sequence},
+            {
+                "motion_episode_sequence": sequence,
+                "detection_intent_id": (
+                    f"gate:iruntime-a:g1:e{sequence}:request:1"
+                ),
+            },
         )
 
     assert service.status()["refinement_pending_episodes"] == 5
@@ -552,7 +578,8 @@ def test_refinement_admission_closes_before_shutdown_sentinel() -> None:
         detected_objects=({"label": "person", "incident_eligible": True},),
         refinement_pending=True,
     )
-    service, _decision, tracking, _prewarm, image_reader = _service(initial)
+    service, decision, tracking, _prewarm, image_reader = _service(initial)
+    decision.refine.return_value = initial
     image_reader.return_value = np.ones((10, 10, 3), dtype=np.uint8)
     tracking.start.return_value = True
     stop = threading.Event()
@@ -586,6 +613,52 @@ def test_refinement_thread_start_failure_restores_stopped_state() -> None:
 
     assert not service.running()
     assert service.wait_stopped(0.01)
+
+
+def test_replacement_runtime_same_episode_sequence_queues_distinct_refinement() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        first, *_ = _service(initial, refinement_store=store)
+        replacement, *_ = _service(initial, refinement_store=store)
+        event_at = datetime(2026, 8, 16, 14, 44, 17, tzinfo=timezone.utc)
+
+        first.process(
+            "adaptive/visual_backup",
+            "credible motion",
+            event_at,
+            {
+                "motion_episode_sequence": 3,
+                "detection_intent_id": "gate:iruntime-a:g1:e3:request:1",
+            },
+        )
+        replacement.process(
+            "adaptive/visual_backup",
+            "credible motion",
+            event_at,
+            {
+                "motion_episode_sequence": 3,
+                "detection_intent_id": "gate:iruntime-b:g1:e3:request:1",
+            },
+        )
+
+        assert store.detection_job_status("gate") == {"queued": 2}
+        with store._connect_jobs() as connection:
+            dedupe_keys = {
+                str(row[0])
+                for row in connection.execute(
+                    "select dedupe_key from detection_jobs where camera_id = 'gate'"
+                )
+            }
+        assert dedupe_keys == {
+            "intent:gate:iruntime-a:g1:e3:request:1",
+            "intent:gate:iruntime-b:g1:e3:request:1",
+        }
 
 
 def test_failed_refinement_preserves_initial_handoff_and_reports_cause() -> None:

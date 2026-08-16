@@ -28,7 +28,9 @@ class RecordedMotionDetector(Protocol):
         event_at: datetime,
     ) -> tuple[Any | None, list[dict[str, Any]], str]: ...
 
-    def detect_initial(self, event_at: datetime) -> Any: ...
+    def detect_initial(
+        self, event_at: datetime, evidence: dict[str, Any] | None = None
+    ) -> Any: ...
 
 
 class CameraMediaService:
@@ -164,8 +166,12 @@ class CameraMediaService:
     ) -> tuple[Any | None, list[dict[str, Any]], str]:
         return self.motion_detector.detect(event_at)
 
-    def detect_initial_recorded_motion(self, event_at: datetime) -> Any:
-        return self.motion_detector.detect_initial(event_at)
+    def detect_initial_recorded_motion(
+        self,
+        event_at: datetime,
+        evidence: dict[str, Any] | None = None,
+    ) -> Any:
+        return self.motion_detector.detect_initial(event_at, evidence)
 
     @staticmethod
     def read_image(path: str) -> Any | None:

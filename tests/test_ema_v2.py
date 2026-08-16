@@ -220,6 +220,81 @@ def test_camera_and_ema_merge_only_after_request_is_admitted() -> None:
     assert controller.intent(ema.intent.intent_id) == camera.intent
 
 
+def test_route_security_verification_is_not_dropped_by_cooldown_or_rate_limit() -> None:
+    controller = MotionEpisodeController(
+        "gate",
+        episode_gap_seconds=5.0,
+        cooldown_seconds=60.0,
+        maximum_ema_requests_5m=1,
+    )
+    controller.start_generation(1)
+    first = controller.observe_ema(_qualified("gate"), generation=1)
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id,
+        admitted=True,
+        occurred_monotonic=1011.1,
+    )
+    controller.complete(first.intent.intent_id, occurred_monotonic=1011.2)
+    verified = _qualified("gate")
+    verified = replace(
+        verified,
+        captured_at=20.0,
+        observed_monotonic=1020.0,
+        result=MotionQualificationResult(
+            accepted=True,
+            score=0.55,
+            threshold=0.48,
+            reason="credible_motion",
+            frame_count=3,
+            features={
+                "security_verification": True,
+                "security_verification_bypass_limits": True,
+            },
+            telemetry={},
+        ),
+    )
+
+    second = controller.observe_ema(verified, generation=1)
+
+    assert second.reason is EpisodeDecisionReason.REQUEST_RESERVED
+    assert second.intent is not None
+    assert second.intent.intent_id != first.intent.intent_id
+
+
+def test_persistent_security_verification_still_obeys_configured_budget() -> None:
+    controller = MotionEpisodeController(
+        "gate",
+        episode_gap_seconds=5.0,
+        cooldown_seconds=60.0,
+        maximum_ema_requests_5m=1,
+    )
+    controller.start_generation(1)
+    first = controller.observe_ema(_qualified("gate"), generation=1)
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id,
+        admitted=True,
+        occurred_monotonic=1011.1,
+    )
+    controller.complete(first.intent.intent_id, occurred_monotonic=1011.2)
+    verified = _qualified("gate")
+    verified = replace(
+        verified,
+        captured_at=20.0,
+        observed_monotonic=1020.0,
+        result=replace(
+            verified.result,
+            features={"security_verification": True},
+        ),
+    )
+
+    second = controller.observe_ema(verified, generation=1)
+
+    assert second.reason is EpisodeDecisionReason.COOLDOWN_ACTIVE
+    assert second.intent is None
+
+
 def test_in_flight_intent_cannot_be_orphaned_by_episode_rollover() -> None:
     controller = MotionEpisodeController("gate", episode_gap_seconds=30.0)
     controller.start_generation(8)
@@ -325,6 +400,31 @@ def test_episode_transitions_explain_every_request_boundary() -> None:
         } else 0)
         for reason in EpisodeDecisionReason
     }
+
+
+def test_controller_replacement_namespaces_same_generation_and_sequence() -> None:
+    first_controller = MotionEpisodeController("gate", incarnation_id="runtime-a")
+    replacement = MotionEpisodeController("gate", incarnation_id="runtime-b")
+    first_controller.start_generation(1)
+    replacement.start_generation(1)
+
+    first = first_controller.observe_ema(_qualified("gate"), generation=1)
+    second = replacement.observe_ema(_qualified("gate"), generation=1)
+
+    assert first.intent is not None
+    assert second.intent is not None
+    assert first.intent.episode_id == "gate:iruntime-a:g1:e1"
+    assert second.intent.episode_id == "gate:iruntime-b:g1:e1"
+    assert first.intent.intent_id != second.intent.intent_id
+    assert first_controller.snapshot()["incarnation_id"] == "runtime-a"
+    assert replacement.snapshot()["incarnation_id"] == "runtime-b"
+
+
+def test_controller_incarnation_is_unique_by_default() -> None:
+    first = MotionEpisodeController("gate")
+    replacement = MotionEpisodeController("gate")
+
+    assert first.incarnation_id != replacement.incarnation_id
 
 
 def test_terminal_detector_failure_is_distinct_from_policy_abort() -> None:

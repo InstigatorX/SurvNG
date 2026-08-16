@@ -17,6 +17,33 @@ from .incident_utils import event_snapshot_path, portable_media_path
 from .media_storage import MediaStorageRegistry
 
 
+def _detection_job_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
+    qualification = payload.get("qualification")
+    qualification = qualification if isinstance(qualification, dict) else {}
+    return {
+        "topic": str(payload.get("topic") or ""),
+        "event_at": str(payload.get("event_at") or ""),
+        "existing_event_id": payload.get("existing_event_id"),
+        "detection_intent_id": str(
+            qualification.get("detection_intent_id") or ""
+        ),
+        "require_eligible_object": bool(payload.get("require_eligible_object")),
+        "require_motion_correlation": bool(
+            payload.get("require_motion_correlation")
+        ),
+    }
+
+
+def _motion_trigger_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "topic": str(payload.get("topic") or ""),
+        "event_at": str(payload.get("event_at") or ""),
+        "episode_id": str(payload.get("episode_id") or ""),
+        "detection_intent_id": str(payload.get("detection_intent_id") or ""),
+        "lifecycle_generation": int(payload.get("lifecycle_generation") or 0),
+    }
+
+
 class EventStore:
     SNAPSHOT_SIZE_WRITE_BATCH = 50
     SNAPSHOT_REFERENCE_WRITE_BATCH = 50
@@ -45,6 +72,8 @@ class EventStore:
         self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._jobs_maintenance_lock = threading.Lock()
+        self._last_detection_job_prune_monotonic = 0.0
         self._init_db()
         self._init_jobs_db()
         self._migrate_legacy_jobs()
@@ -60,6 +89,14 @@ class EventStore:
         conn = sqlite3.connect(self.jobs_db_path, timeout=2.0)
         conn.row_factory = sqlite3.Row
         conn.execute("pragma busy_timeout = 2000")
+        conn.execute("pragma synchronous = full")
+        return conn
+
+    def _connect_jobs_low_priority(self) -> sqlite3.Connection:
+        """Open a fail-fast connection for optional bounded evidence caching."""
+        conn = sqlite3.connect(self.jobs_db_path, timeout=0.025)
+        conn.row_factory = sqlite3.Row
+        conn.execute("pragma busy_timeout = 25")
         conn.execute("pragma synchronous = full")
         return conn
 
@@ -132,6 +169,31 @@ class EventStore:
             conn.execute(
                 "create index if not exists idx_motion_trigger_jobs_claim "
                 "on motion_trigger_jobs(camera_id, state, available_at, created_at)"
+            )
+            conn.execute(
+                """
+                create table if not exists route_watch_consumptions (
+                    target_camera_id text not null,
+                    source_event_id integer not null,
+                    consumed_at text not null,
+                    primary key(target_camera_id, source_event_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists ema_route_candidates (
+                    camera_id text not null,
+                    captured_at real not null,
+                    payload_json text not null,
+                    created_at text not null,
+                    primary key(camera_id, captured_at)
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_ema_route_candidates_window "
+                "on ema_route_candidates(camera_id, captured_at)"
             )
 
     def _migrate_legacy_jobs(self) -> None:
@@ -510,6 +572,7 @@ class EventStore:
     ) -> str:
         """Durably admit mandatory delayed object discovery."""
         now_iso = datetime.now(timezone.utc).isoformat()
+        payload_json = durable_json_dumps(payload, sort_keys=True)
         with self._connect_jobs() as conn:
             cursor = conn.execute(
                 "insert or ignore into detection_jobs "
@@ -519,13 +582,41 @@ class EventStore:
                     job_id,
                     camera_id,
                     dedupe_key,
-                    durable_json_dumps(payload, sort_keys=True),
+                    payload_json,
                     time.time(),
                     now_iso,
                     now_iso,
                 ),
             )
-        return "queued" if cursor.rowcount else "coalesced"
+            if cursor.rowcount:
+                return "queued"
+            existing = conn.execute(
+                "select id, camera_id, dedupe_key, payload_json "
+                "from detection_jobs where id = ? "
+                "or (camera_id = ? and dedupe_key = ?)",
+                (job_id, camera_id, dedupe_key),
+            ).fetchone()
+            if existing is None:
+                raise RuntimeError("detection job insert collision was not recoverable")
+            if (
+                str(existing["id"]) != job_id
+                or str(existing["camera_id"]) != camera_id
+                or str(existing["dedupe_key"]) != dedupe_key
+            ):
+                raise RuntimeError(
+                    "detection job identity collision with different occurrence"
+                )
+            try:
+                existing_payload = json.loads(str(existing["payload_json"]))
+            except (TypeError, ValueError):
+                existing_payload = {}
+            if _detection_job_occurrence(existing_payload) != _detection_job_occurrence(
+                payload
+            ):
+                raise RuntimeError(
+                    "detection job identity collision with different occurrence"
+                )
+            return "coalesced"
 
     def claim_detection_job(
         self,
@@ -624,6 +715,44 @@ class EventStore:
             ).fetchall()
         return {str(row["state"]): int(row["count"]) for row in rows}
 
+    def prune_detection_jobs(
+        self,
+        *,
+        retention_seconds: float = 7 * 24 * 60 * 60,
+        limit: int = 250,
+        minimum_interval_seconds: float = 60 * 60,
+        force: bool = False,
+    ) -> int:
+        """Bound terminal security-job history without touching active work."""
+        now_monotonic = time.monotonic()
+        with self._jobs_maintenance_lock:
+            if (
+                not force
+                and now_monotonic - self._last_detection_job_prune_monotonic
+                < max(1.0, float(minimum_interval_seconds))
+            ):
+                return 0
+            self._last_detection_job_prune_monotonic = now_monotonic
+            cutoff = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=max(60.0, float(retention_seconds)))
+            ).isoformat()
+            with self._connect_jobs() as conn:
+                rows = conn.execute(
+                    "select id from detection_jobs "
+                    "where state in ('completed','failed') and updated_at < ? "
+                    "order by updated_at asc limit ?",
+                    (cutoff, max(1, min(int(limit), 1000))),
+                ).fetchall()
+                if not rows:
+                    return 0
+                conn.executemany(
+                    "delete from detection_jobs "
+                    "where id = ? and state in ('completed','failed')",
+                    [(str(row["id"]),) for row in rows],
+                )
+                return len(rows)
+
     def enqueue_motion_trigger(
         self,
         *,
@@ -632,14 +761,35 @@ class EventStore:
         payload: dict[str, Any],
     ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
+        payload_json = durable_json_dumps(payload, sort_keys=True)
         with self._connect_jobs() as conn:
             cursor = conn.execute(
                 "insert or ignore into motion_trigger_jobs "
                 "(id, camera_id, payload_json, state, available_at, created_at, updated_at) "
                 "values (?, ?, ?, 'queued', ?, ?, ?)",
-                (job_id, camera_id, durable_json_dumps(payload), time.time(), now, now),
+                (job_id, camera_id, payload_json, time.time(), now, now),
             )
-        return bool(cursor.rowcount)
+            if cursor.rowcount:
+                return True
+            existing = conn.execute(
+                "select camera_id, payload_json from motion_trigger_jobs where id = ?",
+                (job_id,),
+            ).fetchone()
+            if existing is None:
+                raise RuntimeError("motion trigger collision was not recoverable")
+            try:
+                existing_payload = json.loads(str(existing["payload_json"]))
+            except (TypeError, ValueError):
+                existing_payload = {}
+            if (
+                str(existing["camera_id"]) != camera_id
+                or _motion_trigger_occurrence(existing_payload)
+                != _motion_trigger_occurrence(payload)
+            ):
+                raise RuntimeError(
+                    "motion trigger identity collision with different occurrence"
+                )
+            return False
 
     def claim_motion_trigger(
         self,
@@ -739,6 +889,102 @@ class EventStore:
                 (camera_id,),
             ).fetchall()
         return {str(row["state"]): int(row["count"]) for row in rows}
+
+    def mark_route_watch_consumed(
+        self,
+        target_camera_id: str,
+        source_event_id: int,
+    ) -> None:
+        """Persist route admission so restart recovery cannot replay it."""
+        with self._connect_jobs() as conn:
+            conn.execute(
+                "insert or ignore into route_watch_consumptions "
+                "(target_camera_id, source_event_id, consumed_at) values (?, ?, ?)",
+                (
+                    str(target_camera_id),
+                    int(source_event_id),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(hours=24)
+            ).isoformat()
+            conn.execute(
+                "delete from route_watch_consumptions where consumed_at < ?",
+                (cutoff,),
+            )
+
+    def route_watch_consumed(
+        self,
+        target_camera_id: str,
+        source_event_id: int,
+    ) -> bool:
+        with self._connect_jobs() as conn:
+            row = conn.execute(
+                "select 1 from route_watch_consumptions "
+                "where target_camera_id = ? and source_event_id = ?",
+                (str(target_camera_id), int(source_event_id)),
+            ).fetchone()
+        return row is not None
+
+    def record_ema_route_candidate(
+        self,
+        camera_id: str,
+        captured_at: float,
+        payload: dict[str, Any],
+        *,
+        retention_seconds: float = 600.0,
+    ) -> None:
+        """Retain compact accepted EMA evidence across a short restart gap."""
+        payload_json = durable_json_dumps(payload, sort_keys=True)
+        with self._connect_jobs_low_priority() as conn:
+            conn.execute(
+                "insert or replace into ema_route_candidates "
+                "(camera_id, captured_at, payload_json, created_at) values (?, ?, ?, ?)",
+                (
+                    str(camera_id),
+                    float(captured_at),
+                    payload_json,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.execute(
+                "delete from ema_route_candidates where camera_id = ? and captured_at < ?",
+                (
+                    str(camera_id),
+                    float(captured_at) - max(300.0, float(retention_seconds)),
+                ),
+            )
+
+    def ema_route_candidates_between(
+        self,
+        camera_id: str,
+        start_at: float,
+        end_at: float,
+        *,
+        limit: int = 4096,
+    ) -> list[tuple[float, dict[str, Any]]]:
+        with self._connect_jobs() as conn:
+            rows = conn.execute(
+                "select captured_at, payload_json from ema_route_candidates "
+                "where camera_id = ? and captured_at >= ? and captured_at <= ? "
+                "order by captured_at desc limit ?",
+                (
+                    str(camera_id),
+                    float(start_at),
+                    float(end_at),
+                    max(1, min(int(limit), 4096)),
+                ),
+            ).fetchall()
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict):
+                candidates.append((float(row["captured_at"]), payload))
+        return candidates
 
     @staticmethod
     def _calibration_run_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -1343,11 +1589,22 @@ class EventStore:
                 event_id = cursor.lastrowid
             elif detection_intent_id:
                 row = conn.execute(
-                    "select id from events where detection_intent_id = ?",
+                    "select id, camera_id, kind, topic, message, created_at "
+                    "from events where detection_intent_id = ?",
                     (detection_intent_id,),
                 ).fetchone()
                 if row is None:
                     raise RuntimeError("detection intent event insert was not recoverable")
+                if (
+                    str(row["camera_id"]) != camera_id
+                    or str(row["kind"]) != kind
+                    or str(row["topic"]) != topic
+                    or str(row["message"]) != message
+                    or str(row["created_at"]) != created_at
+                ):
+                    raise RuntimeError(
+                        "detection intent identity collision with different occurrence"
+                    )
                 event_id = int(row["id"])
             else:
                 raise RuntimeError("event insert failed")

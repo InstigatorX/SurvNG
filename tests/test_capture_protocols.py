@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -436,6 +437,57 @@ class CaptureProtocolTest(unittest.TestCase):
             )
         )
         self.assertIsNone(listener._motion_event_state("tns1:VideoSource", "signal ok"))
+
+    def test_onvif_effectiveness_degrades_without_changing_transport_health(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        listener.connected = True
+        listener.notifications_received = 10
+        listener.motion_events_received = 2
+        listener.inactive_motion_events = 6
+        now = datetime.now(timezone.utc)
+
+        for _ in range(3):
+            listener.record_ema_observation(False, now)
+
+        status = listener.effectiveness_snapshot()
+        self.assertTrue(listener.connected)
+        self.assertEqual(status["signal_effectiveness_status"], "degraded")
+        self.assertTrue(status["signal_degraded"])
+        self.assertEqual(status["ema_window_observations"], 3)
+        self.assertEqual(status["ema_window_without_onvif"], 3)
+        self.assertEqual(status["ema_window_match_rate"], 0.0)
+        self.assertEqual(status["recognized_notifications"], 8)
+        self.assertEqual(status["notification_recognition_rate"], 0.8)
+        self.assertEqual(status["active_motion_rate"], 0.25)
+
+    def test_onvif_effectiveness_requires_enough_ema_evidence(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        listener.connected = True
+
+        listener.record_ema_observation(False)
+        listener.record_ema_observation(False)
+
+        status = listener.effectiveness_snapshot()
+        self.assertEqual(status["signal_effectiveness_status"], "insufficient_data")
+        self.assertFalse(status["signal_degraded"])
+
+    def test_unknown_notification_samples_are_bounded_and_do_not_store_payload(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        observed = datetime.now(timezone.utc)
+
+        for index in range(8):
+            listener._record_unknown_notification(
+                f"tns1:Device/Status/{index}",
+                f"username=admin&password=secret-{index}",
+                observed,
+            )
+
+        samples = listener.effectiveness_snapshot()["unknown_notification_samples"]
+        self.assertEqual(len(samples), 5)
+        self.assertEqual(samples[0]["topic"], "tns1:Device/Status/3")
+        self.assertIn("message_fingerprint", samples[0])
+        self.assertNotIn("message", samples[0])
+        self.assertNotIn("secret", repr(samples))
 
     def test_onvif_subscription_renews_before_expiration(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())

@@ -74,6 +74,14 @@ class CameraWorker:
         onvif_cache_dir: Path | None = None,
         capture_backend: CaptureBackend | None = None,
         media_storage: MediaStorageRegistry | None = None,
+        route_detection_watch: Callable[[str, float], Any | None] | None = None,
+        consume_route_detection_watch: Callable[[str, int], bool] | None = None,
+        record_ema_route_candidate: (
+            Callable[[str, float, dict[str, Any]], None] | None
+        ) = None,
+        load_ema_route_candidates: (
+            Callable[[str, float, float], list[tuple[float, dict[str, Any]]]] | None
+        ) = None,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -102,6 +110,7 @@ class CameraWorker:
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
             timestamped_live_frame_provider=self._get_latest_detection_frame,
+            timestamped_evidence_frame_provider=self._get_evidence_detection_frame,
             stop_requested=lambda: (
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
@@ -145,6 +154,13 @@ class CameraWorker:
             detection_provider=lambda event_at: self._recorded_motion_frame(event_at),
             initial_detection_provider=(
                 lambda event_at: self._recorded_motion_frame(event_at, initial=True)
+            ),
+            initial_evidence_detection_provider=(
+                lambda event_at, evidence: self._recorded_motion_frame(
+                    event_at,
+                    initial=True,
+                    evidence=evidence,
+                )
             ),
             snapshot_writer=lambda frame, event_at: self._write_snapshot(frame, event_at),
             event_callback=(
@@ -285,6 +301,16 @@ class CameraWorker:
             self.handle_motion_event,
             cache_dir=onvif_cache_dir or storage_dir / "onvif",
         )
+        self.motion_analysis.set_onvif_effectiveness_observer(
+            self.onvif.record_ema_observation
+        )
+        self.motion_analysis.set_security_verification_context(
+            onvif_effectiveness=self.onvif.effectiveness_snapshot,
+            route_watch=route_detection_watch,
+            consume_route_watch=consume_route_detection_watch,
+            record_ema_candidate=record_ema_route_candidate,
+            load_ema_candidates=load_ema_route_candidates,
+        )
         self.lifecycle = CameraLifecycleService(
             camera_id=camera.id,
             state=self.runtime_state,
@@ -343,6 +369,9 @@ class CameraWorker:
 
     def start(self) -> None:
         self.lifecycle.start()
+
+    def consider_route_detection_watch(self, watch: Any) -> bool:
+        return self.motion_analysis.consider_route_watch(watch)
 
     def stop(self) -> None:
         self.lifecycle.stop()
@@ -464,10 +493,15 @@ class CameraWorker:
 
     def _capture_frame(self, frame: CapturedFrame) -> None:
         if frame.source == "live":
+            with self.runtime_state.lock:
+                lifecycle_generation = self.runtime_state.generation
             self.motion_runtime.submit_frame(
                 frame.image,
                 frame.captured_at_monotonic,
                 frame.captured_at_epoch,
+                capture_sequence=frame.sequence,
+                capture_generation=frame.generation,
+                lifecycle_generation=lifecycle_generation,
             )
         elif frame.source == "main":
             self._remember_tracking_frame(frame.image, frame.captured_at_epoch)
@@ -508,6 +542,47 @@ class CameraWorker:
             height=height,
         )
 
+    def _get_evidence_detection_frame(
+        self,
+        evidence: dict[str, Any],
+    ) -> TimestampedLiveFrame | None:
+        expected_lifecycle = int(evidence.get("evidence_lifecycle_generation") or 0)
+        expected_capture = int(evidence.get("evidence_capture_generation") or 0)
+        expected_sequence = int(evidence.get("evidence_frame_sequence") or 0)
+        expected_epoch = evidence.get("evidence_frame_at_epoch")
+        if not isinstance(expected_epoch, (int, float)):
+            return None
+        with self.runtime_state.lock:
+            current_lifecycle = self.runtime_state.generation
+        if (
+            expected_lifecycle <= 0
+            or expected_capture <= 0
+            or current_lifecycle != expected_lifecycle
+        ):
+            return None
+        selected = self.motion_analysis.evidence_frame_near(
+            float(expected_epoch),
+            sequence=expected_sequence,
+            capture_generation=expected_capture,
+            lifecycle_generation=expected_lifecycle,
+        )
+        if selected is None:
+            return None
+        height, width = selected.image.shape[:2]
+        alignment = self._motion_spatial_alignment(self.camera)
+        return TimestampedLiveFrame(
+            frame=selected.image,
+            captured_at_epoch=selected.captured_at_epoch,
+            captured_at_monotonic=selected.captured_at_monotonic,
+            sequence=selected.sequence,
+            camera_generation=selected.lifecycle_generation,
+            capture_generation=selected.capture_generation,
+            source="live",
+            geometry_trusted=bool(alignment.get("reliable", False)),
+            width=width,
+            height=height,
+        )
+
     def _get_latest_tracking_frame(
         self,
         source: str = "main",
@@ -543,9 +618,10 @@ class CameraWorker:
         event_at: datetime,
         *,
         initial: bool = False,
+        evidence: dict[str, Any] | None = None,
     ) -> Any:
         if initial:
-            return self.media.detect_initial_recorded_motion(event_at)
+            return self.media.detect_initial_recorded_motion(event_at, evidence)
         return self.media.detect_recorded_motion(event_at)
 
     def _write_snapshot(self, frame: Any, event_at: datetime | None = None) -> str:

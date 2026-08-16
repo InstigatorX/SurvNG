@@ -113,6 +113,31 @@ deduplication, reservation, cooldown, and lifecycle generation. Camera + EMA
 Backup treats the camera notice as primary and merges credible EMA evidence
 without silently losing an admitted request.
 
+Episode and intent IDs include a process-unique controller incarnation as well
+as camera, lifecycle generation, and episode sequence. The full intent ID is the
+durable refinement key and event idempotency key. A restart may repeat a local
+generation or sequence number, but it cannot collide with historical work.
+Exact redelivery of one intent coalesces; a different occurrence presenting the
+same durable identity raises a terminal error rather than returning an old job
+or incident.
+
+The fast EMA check carries the qualifying frame's epoch, capture sequence,
+capture generation, and camera lifecycle generation. It selects that exact
+bounded-ring frame, or a nearby frame from the same generations, instead of
+asking for whatever substream image happens to be newest after queueing. If the
+token is stale or unavailable, the fast result remains nonterminal and durable
+main-recording refinement still runs.
+
+Accepted EMA below the normal rescue score enters a longer persistence lane
+instead of becoming a permanent drop. A confirmed upstream object on a
+configured camera route, or measured ONVIF semantic degradation, shortens that
+extra persistence. Route windows are bounded and directional. Matching remains
+non-consuming while evidence is evaluated; a watch is consumed only after its
+route-specific trigger is durably admitted, and that consumption is persisted
+across restarts. Only a newly confirmed downstream incident opens the next leg.
+Watches authorize analysis, not admission, and therefore cannot propagate a
+false incident by themselves.
+
 ### 2. Object and incident admission
 
 Confidence, temporal confirmation, configured zones, stationary-scene context,

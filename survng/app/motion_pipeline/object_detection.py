@@ -756,6 +756,9 @@ class MotionRecordingProvider(Protocol):
 
 LiveFrameProvider = Callable[[], Frame | None]
 TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | tuple[Frame, float] | None]
+TimestampedEvidenceFrameProvider = Callable[
+    [dict[str, Any]], TimestampedLiveFrame | tuple[Frame, float] | None
+]
 StopRequested = Callable[[], bool]
 
 
@@ -893,6 +896,7 @@ class RecordedMotionObjectDetector:
         recorder: MotionRecordingProvider,
         live_frame_provider: LiveFrameProvider,
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
+        timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
     ) -> None:
         self.camera = camera
@@ -900,6 +904,7 @@ class RecordedMotionObjectDetector:
         self.recorder = recorder
         self.live_frame_provider = live_frame_provider
         self.timestamped_live_frame_provider = timestamped_live_frame_provider
+        self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
         self.stop_requested = stop_requested
 
     def detect(self, event_at: datetime) -> RecordedDetectionResult:
@@ -911,7 +916,11 @@ class RecordedMotionObjectDetector:
             refinement_pending=False,
         )
 
-    def detect_initial(self, event_at: datetime) -> RecordedDetectionResult:
+    def detect_initial(
+        self,
+        event_at: datetime,
+        evidence: dict[str, Any] | None = None,
+    ) -> RecordedDetectionResult:
         """Run one strictly fresh live-frame check and always refine later.
 
         Finalized recordings intentionally lag the live edge by a segment. The
@@ -931,8 +940,26 @@ class RecordedMotionObjectDetector:
             "recording_samples_requested": 0.0,
             "recording_samples_decoded": 0.0,
         }
+        evidence_provider = self.timestamped_evidence_frame_provider
         provider = self.timestamped_live_frame_provider
-        sample = provider() if provider is not None else None
+        evidence_token = evidence or {}
+        has_evidence_token = bool(
+            evidence_token.get("evidence_frame_at_epoch") is not None
+            and int(evidence_token.get("evidence_frame_sequence") or 0) > 0
+            and int(evidence_token.get("evidence_capture_generation") or 0) > 0
+            and int(evidence_token.get("evidence_lifecycle_generation") or 0) > 0
+        )
+        evidence_required = bool(evidence_token.get("evidence_frame_required"))
+        if has_evidence_token:
+            sample = (
+                evidence_provider(evidence_token)
+                if evidence_provider is not None
+                else None
+            )
+        elif evidence_required:
+            sample = None
+        else:
+            sample = provider() if provider is not None else None
         if sample is None:
             return self._result(
                 None,
@@ -1830,6 +1857,7 @@ class RecordedMotionObjectDetectorFactory:
         camera: CameraConfig,
         live_frame_provider: LiveFrameProvider,
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
+        timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
@@ -1838,5 +1866,6 @@ class RecordedMotionObjectDetectorFactory:
             recorder=self.recorder,
             live_frame_provider=live_frame_provider,
             timestamped_live_frame_provider=timestamped_live_frame_provider,
+            timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
             stop_requested=stop_requested,
         )

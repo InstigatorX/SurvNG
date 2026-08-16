@@ -23,6 +23,23 @@ from .security import redact_secret_text
 LOGGER = logging.getLogger(__name__)
 
 
+def _refinement_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
+    qualification = payload.get("qualification")
+    qualification = qualification if isinstance(qualification, dict) else {}
+    return {
+        "topic": str(payload.get("topic") or ""),
+        "event_at": str(payload.get("event_at") or ""),
+        "existing_event_id": payload.get("existing_event_id"),
+        "detection_intent_id": str(
+            qualification.get("detection_intent_id") or ""
+        ),
+        "require_eligible_object": bool(payload.get("require_eligible_object")),
+        "require_motion_correlation": bool(
+            payload.get("require_motion_correlation")
+        ),
+    }
+
+
 class MotionDecisionProcessor(Protocol):
     def activity_status(self) -> dict[str, Any]: ...
 
@@ -106,12 +123,14 @@ class _RefinementJob:
     callback: RefinementCallback | None
     initial_outcome: MotionDecisionOutcome
 
-    def key(self) -> tuple[str, int | float]:
+    def key(self) -> tuple[str, str | int | float]:
+        intent_id = str(self.qualification.get("detection_intent_id") or "").strip()
+        if intent_id:
+            return ("intent", intent_id)
         if self.existing_event_id is not None:
             return ("event", self.existing_event_id)
-        sequence = self.qualification.get("motion_episode_sequence")
-        if isinstance(sequence, int):
-            return ("episode", sequence)
+        # Legacy/manual callers without a durable intent may still refine, but
+        # a runtime-local episode sequence is never a safe durable identity.
         return ("time", round(self.event_at.timestamp(), 3))
 
     def dedupe_key(self) -> str:
@@ -180,7 +199,32 @@ class _MemoryDetectionJobStore:
 
     def enqueue_detection_job(self, *, job_id, camera_id, dedupe_key, payload):
         with self._lock:
-            if job_id in self._jobs:
+            existing = self._jobs.get(job_id)
+            if existing is None:
+                existing = next(
+                    (
+                        job
+                        for job in self._jobs.values()
+                        if job["camera_id"] == camera_id
+                        and job["dedupe_key"] == dedupe_key
+                    ),
+                    None,
+                )
+            if existing is not None:
+                if (
+                    existing["id"] != job_id
+                    or existing["camera_id"] != camera_id
+                    or existing["dedupe_key"] != dedupe_key
+                ):
+                    raise RuntimeError(
+                        "detection job identity collision with different occurrence"
+                    )
+                if _refinement_occurrence(
+                    existing["payload"]
+                ) != _refinement_occurrence(payload):
+                    raise RuntimeError(
+                        "detection job identity collision with different occurrence"
+                    )
                 return "coalesced"
             self._jobs[job_id] = {
                 "id": job_id, "camera_id": camera_id, "dedupe_key": dedupe_key,
@@ -558,10 +602,22 @@ class MotionIncidentService:
         return "queued"
 
     def _run_refinements(self) -> None:
+        last_prune = 0.0
         while True:
             stop = self._refinement_stop
             if stop is None or stop.is_set():
                 return
+            prune = getattr(self.refinement_store, "prune_detection_jobs", None)
+            now = time.monotonic()
+            if callable(prune) and now - last_prune >= 60.0:
+                last_prune = now
+                try:
+                    prune()
+                except Exception:
+                    LOGGER.exception(
+                        "terminal detection-job pruning failed for %s",
+                        self.camera_id,
+                    )
             claimed = self.refinement_store.claim_detection_job(
                 self.camera_id,
                 lease_owner=self._lease_owner,

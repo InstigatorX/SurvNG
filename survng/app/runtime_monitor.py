@@ -451,6 +451,8 @@ class ApplicationRuntimeMonitor:
             "onvif_last_event_at", "onvif_last_motion_event_at", "onvif_last_error",
             "onvif_last_poll_success_at", "onvif_last_poll_error_at",
             "onvif_notifications_received", "onvif_motion_events_received",
+            "onvif_signal_effectiveness_status", "onvif_signal_degraded",
+            "onvif_ema_window_observations", "onvif_ema_window_without_onvif",
             "onvif_renewals", "onvif_renewal_errors", "last_motion_at",
             "detection_enabled", "recording", "sub_recording", "recording_enabled",
             "recording_configured", "stream_dimensions",

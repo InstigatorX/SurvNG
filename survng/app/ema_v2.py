@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import threading
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -108,6 +109,10 @@ class EmaSignalConditioner:
         self.scene_ready = False
         self.readiness_audited = False
         self._samples: deque[_SignalSample] = deque()
+
+    def clear_candidate(self) -> None:
+        """Forget only pending persistence while preserving scene readiness."""
+        self._samples.clear()
 
     def evaluate(
         self,
@@ -369,8 +374,14 @@ class MotionEpisodeController:
         minimum_followup_interval_seconds: float = 1.5,
         followup_maximum_overlap: float = 0.10,
         followup_minimum_center_distance: float = 0.10,
+        incarnation_id: str | None = None,
     ) -> None:
         self.camera_id = camera_id
+        # Generations and episode sequences are intentionally runtime-local.
+        # Namespace them with a fresh controller incarnation so durable intent
+        # identities can never be reused after a process restart or camera
+        # runtime replacement.
+        self.incarnation_id = incarnation_id or uuid.uuid4().hex
         self.episode_gap_seconds = max(0.1, float(episode_gap_seconds))
         self.cooldown_seconds = max(0.0, float(cooldown_seconds))
         self.maximum_ema_requests_5m = max(1, int(maximum_ema_requests_5m))
@@ -466,6 +477,10 @@ class MotionEpisodeController:
                 episode.ema = ema
             if camera_notice is not None:
                 episode.camera_notice = camera_notice
+            bypass_ema_limits = bool(
+                ema is not None
+                and ema.result.features.get("security_verification_bypass_limits")
+            )
             if episode.status in {
                 DetectionRequestStatus.RESERVED,
                 DetectionRequestStatus.ADMITTED,
@@ -522,6 +537,7 @@ class MotionEpisodeController:
                     )
             if (
                 source is MotionSource.EMA
+                and not bypass_ema_limits
                 and self._last_completed_monotonic is not None
                 and observed_monotonic - self._last_completed_monotonic
                 < self.cooldown_seconds
@@ -532,8 +548,10 @@ class MotionEpisodeController:
                     observed_monotonic,
                     episode,
                 )
-            if source is MotionSource.EMA and self._ema_limit_reached(
-                observed_monotonic
+            if (
+                source is MotionSource.EMA
+                and not bypass_ema_limits
+                and self._ema_limit_reached(observed_monotonic)
             ):
                 if ema is not None:
                     self._remember_ema(episode, ema)
@@ -694,6 +712,7 @@ class MotionEpisodeController:
         with self._lock:
             episode = self._episode
             return {
+                "incarnation_id": self.incarnation_id,
                 "generation": self._generation,
                 "episode_id": episode.episode_id if episode else None,
                 "sequence": episode.sequence if episode else self._sequence,
@@ -780,7 +799,10 @@ class MotionEpisodeController:
         ):
             self._sequence += 1
             episode = _Episode(
-                episode_id=f"{self.camera_id}:g{self._generation}:e{self._sequence}",
+                episode_id=(
+                    f"{self.camera_id}:i{self.incarnation_id}:"
+                    f"g{self._generation}:e{self._sequence}"
+                ),
                 sequence=self._sequence,
                 generation=self._generation,
                 started_monotonic=observed_monotonic,

@@ -5,7 +5,9 @@ import threading
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig
@@ -13,6 +15,7 @@ from survng.app.camera_fleet import CameraFleetLifecycle
 from survng.app.camera_control import CameraControlService
 from survng.app.camera_startup import CameraStartupCoordinator
 from survng.app.manager import AppManager
+from survng.app.detection_watch import RouteDetectionWatch
 from survng.app.mqtt_lifecycle import MqttLifecycle
 from survng.app.recording_lifecycle import RecordingLifecycle
 from survng.app.runtime_monitor import ApplicationRuntimeMonitor
@@ -57,6 +60,9 @@ def manager_with_mocks() -> AppManager:
     )
     manager.mqtt = Mock()
     manager.state_events = Mock()
+    manager.detection_watch = Mock()
+    manager.detection_watch.observe_incident.return_value = ()
+    manager.detection_watch.status.return_value = {}
     manager.workers = {"gate": Mock()}
     manager.workers["gate"].live_capture_ready.return_value = True
     manager.workers["gate"].wait_stopped.return_value = True
@@ -84,6 +90,167 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_restart_reconstructs_unexpired_route_watch_from_incident_store(self) -> None:
+        now = datetime.now(timezone.utc)
+        manager = object.__new__(AppManager)
+        manager.config = AppConfig(
+            cameras=[
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main"),
+                CameraConfig(
+                    id="back-left",
+                    name="Back Left",
+                    stream_url="rtsp://back-left/main",
+                ),
+            ],
+            detector={"tracking": {"camera_transition_routes": [{
+                "from_camera": "gate",
+                "to_camera": "back-left",
+                "max_seconds": 30,
+            }]}},
+        )
+        routes = manager.config.detector.tracking.camera_transition_routes
+        manager.detection_watch = RouteDetectionWatch(routes)
+        manager._restored_detection_watches = []
+        manager.events = Mock()
+        manager.events.route_watch_consumed.return_value = False
+        manager.events.between.return_value = [{
+            "id": 88,
+            "camera_id": "gate",
+            "created_at": (now - timedelta(seconds=5)).isoformat(),
+            "objects_json": json.dumps([{
+                "label": "car",
+                "incident_eligible": True,
+            }]),
+        }]
+
+        manager._restore_detection_watches()
+
+        assert manager.detection_watch.match("back-left", now.timestamp()) is not None
+
+    def test_restart_does_not_restore_consumed_route_watch(self) -> None:
+        now = datetime.now(timezone.utc)
+        manager = object.__new__(AppManager)
+        manager.config = AppConfig(
+            cameras=[
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main"),
+                CameraConfig(
+                    id="back-left",
+                    name="Back Left",
+                    stream_url="rtsp://back-left/main",
+                ),
+            ],
+            detector={"tracking": {"camera_transition_routes": [{
+                "from_camera": "gate",
+                "to_camera": "back-left",
+                "max_seconds": 30,
+            }]}},
+        )
+        manager.detection_watch = RouteDetectionWatch(
+            manager.config.detector.tracking.camera_transition_routes
+        )
+        manager._restored_detection_watches = []
+        manager.events = Mock()
+        manager.events.route_watch_consumed.return_value = True
+        manager.events.between.return_value = [{
+            "id": 88,
+            "camera_id": "gate",
+            "created_at": (now - timedelta(seconds=5)).isoformat(),
+            "objects_json": json.dumps([{
+                "label": "car",
+                "incident_eligible": True,
+            }]),
+        }]
+
+        manager._restore_detection_watches()
+
+        assert manager.detection_watch.match("back-left", now.timestamp()) is None
+
+    def test_startup_replays_restored_watch_into_target_worker(self) -> None:
+        manager = object.__new__(AppManager)
+        watch = SimpleNamespace(
+            target_camera_id="back-left",
+            source_event_id=88,
+        )
+        target = Mock()
+        target.consider_route_detection_watch.return_value = True
+        manager._restored_detection_watches = [watch]
+        manager.workers = {"back-left": target}
+
+        manager._replay_restored_detection_watches()
+
+        target.consider_route_detection_watch.assert_called_once_with(watch)
+        assert manager._restored_detection_watches == []
+
+    def test_startup_route_replay_retries_false_and_exception_until_success(self) -> None:
+        manager = object.__new__(AppManager)
+        watch = SimpleNamespace(
+            target_camera_id="back-left",
+            source_event_id=88,
+            expires_at=time.time() + 30.0,
+        )
+        target = Mock()
+        target.consider_route_detection_watch.side_effect = [
+            False,
+            RuntimeError("temporary candidate read failure"),
+            True,
+        ]
+        manager._restored_detection_watches = [watch]
+        manager._restored_watch_retry_lock = threading.Lock()
+        manager._restored_watch_retry_timer = None
+        manager._started = False
+        manager._stopping = False
+        manager._closed = False
+        manager.workers = {"back-left": target}
+
+        manager._replay_restored_detection_watches()
+        assert manager._restored_detection_watches == [watch]
+        manager._replay_restored_detection_watches()
+        assert manager._restored_detection_watches == [watch]
+        manager._replay_restored_detection_watches()
+
+        assert target.consider_route_detection_watch.call_count == 3
+        assert manager._restored_detection_watches == []
+
+    def test_confirmed_object_event_opens_route_detection_watch(self) -> None:
+        manager = manager_with_mocks()
+        manager.events = Mock()
+        manager.events.get.return_value = None
+        payload = {
+            "event_id": 42,
+            "camera_id": "gate",
+            "timestamp": "2026-08-16T14:44:13+00:00",
+            "objects": [{"label": "car", "confidence": 0.96}],
+            "incident_objects": [{"label": "car", "confidence": 0.96}],
+        }
+
+        manager.publish_event("object", payload)
+
+        manager.detection_watch.observe_incident.assert_called_once_with(
+            camera_id="gate",
+            event_id=42,
+            event_at=datetime.fromisoformat(payload["timestamp"]).timestamp(),
+            objects=payload["incident_objects"],
+        )
+
+    def test_ineligible_object_event_does_not_open_route_detection_watch(self) -> None:
+        manager = manager_with_mocks()
+        manager.events = Mock()
+        manager.events.get.return_value = None
+
+        manager.publish_event("object", {
+            "event_id": 43,
+            "camera_id": "gate",
+            "timestamp": "2026-08-16T14:44:13+00:00",
+            "objects": [{
+                "label": "car",
+                "confidence": 0.15,
+                "incident_eligible": False,
+            }],
+            "incident_objects": [],
+        })
+
+        manager.detection_watch.observe_incident.assert_not_called()
+
     def test_presentation_update_refreshes_clients_without_reopening_mqtt_incident(self) -> None:
         manager = manager_with_mocks()
         manager.events = Mock()

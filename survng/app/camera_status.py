@@ -217,7 +217,18 @@ class CameraStatusService:
             "renewal_errors", "last_renewed_at", "subscription_current_time",
             "subscription_termination_time", "subscription_lifetime_seconds",
         )
-        return {
+        diagnostics = {
             f"onvif_{field}": getattr(self.onvif, field)
             for field in fields
         }
+        effectiveness_snapshot = getattr(
+            self.onvif, "effectiveness_snapshot", None
+        )
+        if callable(effectiveness_snapshot):
+            diagnostics.update(
+                {
+                    f"onvif_{field}": value
+                    for field, value in effectiveness_snapshot().items()
+                }
+            )
+        return diagnostics

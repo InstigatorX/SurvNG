@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import threading
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock
 
 from survng.app.motion import MotionQualificationResult
 from survng.app.ema_v2 import CameraNotice
+from survng.app.events import EventStore
 from survng.app.motion_decisions import (
     MotionDecisionOrchestrator,
     audit_features,
@@ -302,6 +305,87 @@ def test_camera_rescue_camera_notice_skips_burst_coalescing_delay() -> None:
     assert events.coalesce.call_args.kwargs["quiet_seconds"] == 0.0
 
 
+def test_claimed_trigger_is_released_when_shutdown_arrives_after_claim() -> None:
+    stop = threading.Event()
+    now = datetime.now(timezone.utc)
+    trigger = MotionTrigger(
+        topic="adaptive/visual_backup",
+        message="motion",
+        event_at=now,
+        received_at=now.timestamp(),
+        delivery_job_id="claimed-1",
+    )
+    events = Mock()
+
+    def claim(*_args: object, **_kwargs: object) -> MotionTrigger:
+        stop.set()
+        return trigger
+
+    events.next_trigger.side_effect = claim
+    events.episode_controller = Mock()
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=Mock(),
+        config=MotionQualificationConfig(),
+        qualification=Mock(),
+        incidents=Mock(),
+        media=Mock(),
+        analysis=Mock(),
+        state=Mock(),
+    )
+
+    orchestrator.run_until_error(stop)
+
+    events.release_deliveries.assert_called_once()
+    released = events.release_deliveries.call_args.args[0]
+    assert released.triggers == (trigger,)
+
+
+def test_shutdown_after_durable_claim_returns_row_to_queued_state() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stop = threading.Event()
+        store = EventStore(Path(tmpdir))
+        events = MotionEventCoordinator(
+            queue_size=4,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        now = datetime.now(timezone.utc)
+        assert events.enqueue(MotionTrigger(
+            topic="adaptive/visual_backup",
+            message="motion",
+            event_at=now,
+            received_at=now.timestamp(),
+            detection_intent_id="durable-claim-1",
+        ))
+        original_claim = store.claim_motion_trigger
+
+        def claim(*args: object, **kwargs: object) -> dict | None:
+            claimed = original_claim(*args, **kwargs)
+            stop.set()
+            return claimed
+
+        store.claim_motion_trigger = claim  # type: ignore[method-assign]
+        qualification = Mock()
+        orchestrator = MotionDecisionOrchestrator(
+            camera_id="gate",
+            events=events,
+            audit_recorder=Mock(),
+            config=MotionQualificationConfig(),
+            qualification=qualification,
+            incidents=Mock(),
+            media=Mock(),
+            analysis=Mock(),
+            state=Mock(),
+        )
+
+        orchestrator.run_until_error(stop)
+
+        assert store.motion_trigger_status("gate") == {"queued": 1}
+
+
 def test_learned_camera_nuisance_remains_suppressed_without_forced_check() -> None:
     events = MotionEventCoordinator(queue_size=4, retry_limit=2)
     now = datetime.now(timezone.utc)
@@ -464,6 +548,7 @@ def test_refined_active_followup_updates_completed_outcome_telemetry() -> None:
         borderline_candidate=False,
         suppression_verification_candidate=False,
         episode_sequence=events.current_episode_sequence(),
+        episode_managed=True,
     )
 
     state.increment_stat.assert_any_call("active_followup_objects", 1)

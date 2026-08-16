@@ -235,7 +235,12 @@ class MotionDecisionOrchestrator:
                 first = self._events.next_trigger(timeout=0.5)
             except queue.Empty:
                 continue
-            if first is None or stop_event.is_set():
+            if first is None:
+                return
+            if stop_event.is_set():
+                claimed = MotionTriggerBatch((first,))
+                self._abort_episode_intents(claimed)
+                self._events.release_deliveries(claimed)
                 return
             mode, _sensitivity, _frame_width = self._qualification.settings()
             immediate_camera_primary = bool(
@@ -387,7 +392,22 @@ class MotionDecisionOrchestrator:
             ),
             "would_suppress": bool(mode in AUDITED_MODES and not result.accepted),
             "motion_episode_sequence": self._events.current_episode_sequence(),
+            "motion_episode_managed": bool(
+                representative.detection_intent_id
+                and self._events.episode_controller.intent(
+                    representative.detection_intent_id
+                )
+                is not None
+            ),
             "detection_intent_id": representative.delivery_job_id,
+            "evidence_frame_at_epoch": representative.evidence_frame_at_epoch,
+            "evidence_frame_sequence": representative.evidence_frame_sequence,
+            "evidence_capture_generation": representative.evidence_capture_generation,
+            "evidence_lifecycle_generation": representative.lifecycle_generation,
+            "evidence_frame_required": bool(
+                representative.prequalified is not None
+                and representative.prequalified.features.get("ema_v2")
+            ),
         }
         effective_accepted = bool(
             mode in {"off", "audit"}
@@ -602,6 +622,9 @@ class MotionDecisionOrchestrator:
                     borderline_candidate=borderline_candidate,
                     suppression_verification_candidate=suppression_verification_candidate,
                     episode_sequence=episode_sequence,
+                    episode_managed=bool(
+                        qualification.get("motion_episode_managed")
+                    ),
                 ),
             ).as_dict()
             event_id = outcome.get("event_id")
@@ -610,10 +633,11 @@ class MotionDecisionOrchestrator:
                 # A persisted incident is the idempotency boundary. Failures in
                 # later audits or notifications must never replay detection.
                 self._events.set_active(None)
-                self._events.link_incident(
-                    int(event_id),
-                    expected_sequence=episode_sequence,
-                )
+                if qualification.get("motion_episode_managed"):
+                    self._events.link_incident(
+                        int(event_id),
+                        expected_sequence=episode_sequence,
+                    )
             object_outcome = outcome.get("object_detected")
             found_object = object_outcome is True
             if borderline_candidate and found_object:
@@ -705,12 +729,13 @@ class MotionDecisionOrchestrator:
         borderline_candidate: bool,
         suppression_verification_candidate: bool,
         episode_sequence: int,
+        episode_managed: bool,
     ) -> None:
         outcome = refined.as_dict()
         event_id = outcome.get("event_id")
         object_outcome = outcome.get("object_detected")
         found_object = object_outcome is True
-        if event_id is not None:
+        if event_id is not None and episode_managed:
             self._events.link_incident(
                 int(event_id),
                 expected_sequence=episode_sequence,

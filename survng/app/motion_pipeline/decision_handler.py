@@ -20,6 +20,7 @@ from .context import Frame
 
 
 MotionDetectionProvider = Callable[[datetime], Any]
+MotionEvidenceDetectionProvider = Callable[[datetime, dict[str, Any]], Any]
 MotionSnapshotWriter = Callable[[Frame, datetime], str]
 MotionEventCallback = Callable[[str, dict[str, Any]], None]
 MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
@@ -381,6 +382,7 @@ class MotionDecisionHandler:
         snapshot_writer: MotionSnapshotWriter,
         object_serializer: MotionObjectSerializer,
         initial_detection_provider: MotionDetectionProvider | None = None,
+        initial_evidence_detection_provider: MotionEvidenceDetectionProvider | None = None,
         event_callback: MotionEventCallback | None = None,
         activity_attributor: ObjectActivityAttributor | None = None,
         face_candidate_sink: FaceCandidateSink | None = None,
@@ -391,6 +393,7 @@ class MotionDecisionHandler:
         self.events = events
         self.detection_provider = detection_provider
         self.initial_detection_provider = initial_detection_provider
+        self.initial_evidence_detection_provider = initial_evidence_detection_provider
         self.snapshot_writer = snapshot_writer
         self.object_serializer = object_serializer
         self.event_callback = event_callback
@@ -430,6 +433,7 @@ class MotionDecisionHandler:
             qualification,
             require_eligible_object=require_eligible_object,
             require_motion_correlation=require_motion_correlation,
+            evidence_provider=self.initial_evidence_detection_provider,
         )
 
     def refine(
@@ -466,10 +470,15 @@ class MotionDecisionHandler:
         existing_event_id: int | None = None,
         require_eligible_object: bool = False,
         require_motion_correlation: bool = False,
+        evidence_provider: MotionEvidenceDetectionProvider | None = None,
     ) -> MotionDecisionOutcome:
         detection_started = time.monotonic()
         detection_started_epoch = time.time()
-        provider_result = provider(event_at)
+        provider_result = (
+            evidence_provider(event_at, qualification)
+            if evidence_provider is not None
+            else provider(event_at)
+        )
         frame, objects, recording_path = provider_result
         frame_captured_at_epoch = getattr(
             provider_result,
@@ -943,6 +952,7 @@ class MotionDecisionHandlerFactory:
         detection_provider: MotionDetectionProvider,
         snapshot_writer: MotionSnapshotWriter,
         initial_detection_provider: MotionDetectionProvider | None = None,
+        initial_evidence_detection_provider: MotionEvidenceDetectionProvider | None = None,
         event_callback: MotionEventCallback | None = None,
         activity_attributor: ObjectActivityAttributor | None = None,
         spatial_alignment: dict[str, Any] | None = None,
@@ -952,6 +962,7 @@ class MotionDecisionHandlerFactory:
             events=self.events,
             detection_provider=detection_provider,
             initial_detection_provider=initial_detection_provider,
+            initial_evidence_detection_provider=initial_evidence_detection_provider,
             snapshot_writer=snapshot_writer,
             object_serializer=self.object_serializer,
             event_callback=event_callback,

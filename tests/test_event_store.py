@@ -33,7 +33,7 @@ class EventStoreTest(unittest.TestCase):
                 job_id="job-1",
                 camera_id="gate",
                 dedupe_key="episode:7",
-                payload={},
+                payload={"event_at": "2026-08-15T12:00:00+00:00"},
             ), "coalesced")
             claimed = store.claim_detection_job("gate", lease_seconds=1.0)
             self.assertEqual(claimed["payload"]["event_at"], "2026-08-15T12:00:00+00:00")
@@ -119,6 +119,35 @@ class EventStoreTest(unittest.TestCase):
                     payload={"score": float("nan")},
                 )
 
+    def test_motion_trigger_exact_retry_coalesces_but_occurrence_collision_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            payload = {
+                "topic": "adaptive/visual_backup",
+                "event_at": "2026-08-16T14:44:14+00:00",
+                "episode_id": "gate:i1:g1:e3",
+                "detection_intent_id": "gate:i1:g1:e3:request:1",
+                "lifecycle_generation": 1,
+                "retry_count": 0,
+            }
+            self.assertTrue(store.enqueue_motion_trigger(
+                job_id="intent-1", camera_id="gate", payload=payload
+            ))
+            self.assertFalse(store.enqueue_motion_trigger(
+                job_id="intent-1",
+                camera_id="gate",
+                payload={**payload, "retry_count": 1},
+            ))
+            with self.assertRaisesRegex(RuntimeError, "different occurrence"):
+                store.enqueue_motion_trigger(
+                    job_id="intent-1",
+                    camera_id="gate",
+                    payload={
+                        **payload,
+                        "event_at": "2026-08-16T14:45:14+00:00",
+                    },
+                )
+
     def test_motion_trigger_lease_owner_prevents_stale_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
@@ -137,6 +166,59 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(store.motion_trigger_status("gate"), {"running": 1})
             store.complete_motion_trigger("trigger-1", lease_owner="generation-a")
             self.assertEqual(store.motion_trigger_status("gate"), {})
+
+    def test_route_watch_consumption_survives_store_recreation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+
+            self.assertFalse(store.route_watch_consumed("back-left", 44720))
+            store.mark_route_watch_consumed("back-left", 44720)
+            store.mark_route_watch_consumed("back-left", 44720)
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update route_watch_consumptions set consumed_at = ? "
+                    "where target_camera_id = ? and source_event_id = ?",
+                    ("2020-01-01T00:00:00+00:00", "back-left", 44720),
+                )
+            store.mark_route_watch_consumed("back-right", 44721)
+
+            recreated = EventStore(root)
+            self.assertFalse(recreated.route_watch_consumed("back-left", 44720))
+            self.assertTrue(recreated.route_watch_consumed("back-right", 44721))
+
+    def test_ema_route_candidate_survives_restart_and_is_window_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            store.record_ema_route_candidate(
+                "back-right",
+                1048.0,
+                {
+                    "accepted": True,
+                    "score": 0.5545,
+                    "threshold": 0.48,
+                    "reason": "qualified",
+                    "frame_count": 3,
+                    "features": {"motion_regions": [[0.1, 0.2, 0.3, 0.4]]},
+                    "telemetry": {},
+                },
+            )
+
+            recreated = EventStore(root)
+
+            rows = recreated.ema_route_candidates_between(
+                "back-right", 1040.0, 1050.0
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0], 1048.0)
+            self.assertEqual(rows[0][1]["score"], 0.5545)
+            self.assertEqual(
+                recreated.ema_route_candidates_between(
+                    "back-right", 1050.1, 1060.0
+                ),
+                [],
+            )
 
     def test_detection_job_lease_owner_prevents_stale_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -163,14 +245,17 @@ class EventStoreTest(unittest.TestCase):
     def test_detection_intent_idempotently_links_one_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
+            created_at = "2026-08-15T12:00:00+00:00"
             first = store.add_event(
                 "gate",
                 "motion",
+                created_at=created_at,
                 detection_intent_id="intent-1",
             )
             replay = store.add_event(
                 "gate",
                 "motion",
+                created_at=created_at,
                 detection_intent_id="intent-1",
             )
             self.assertTrue(first["created"])
@@ -179,6 +264,106 @@ class EventStoreTest(unittest.TestCase):
             with store._connect() as connection:
                 count = connection.execute("select count(*) from events").fetchone()[0]
             self.assertEqual(count, 1)
+
+    def test_detection_job_collision_rejects_different_occurrence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.enqueue_detection_job(
+                job_id="job-1",
+                camera_id="gate",
+                dedupe_key="intent:first",
+                payload={"event_at": "2026-08-15T12:00:00+00:00"},
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "different occurrence"):
+                store.enqueue_detection_job(
+                    job_id="job-1",
+                    camera_id="gate",
+                    dedupe_key="intent:first",
+                    payload={"event_at": "2026-08-16T12:00:00+00:00"},
+                )
+            with self.assertRaisesRegex(RuntimeError, "different occurrence"):
+                store.enqueue_detection_job(
+                    job_id="job-2",
+                    camera_id="gate",
+                    dedupe_key="intent:first",
+                    payload={"event_at": "2026-08-15T12:00:00+00:00"},
+                )
+
+    def test_detection_job_retry_metadata_does_not_change_occurrence_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            payload = {
+                "topic": "adaptive/visual_backup",
+                "event_at": "2026-08-16T14:44:14+00:00",
+                "qualification": {"detection_intent_id": "intent-1", "retry_count": 0},
+                "initial_outcome": {"processing_timing": {"queue_wait_ms": 20}},
+                "require_eligible_object": True,
+                "require_motion_correlation": True,
+            }
+            self.assertEqual(store.enqueue_detection_job(
+                job_id="job-1",
+                camera_id="gate",
+                dedupe_key="intent:intent-1",
+                payload=payload,
+            ), "queued")
+            self.assertEqual(store.enqueue_detection_job(
+                job_id="job-1",
+                camera_id="gate",
+                dedupe_key="intent:intent-1",
+                payload={
+                    **payload,
+                    "qualification": {
+                        "detection_intent_id": "intent-1",
+                        "retry_count": 1,
+                    },
+                    "initial_outcome": {
+                        "processing_timing": {"queue_wait_ms": 45},
+                    },
+                },
+            ), "coalesced")
+
+    def test_detection_job_pruning_is_bounded_and_preserves_active_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            for index in range(4):
+                store.enqueue_detection_job(
+                    job_id=f"job-{index}",
+                    camera_id="gate",
+                    dedupe_key=f"intent:{index}",
+                    payload={"event_at": f"2026-08-0{index + 1}T12:00:00+00:00"},
+                )
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set state='completed', "
+                    "updated_at='2026-01-01T00:00:00+00:00' where id in ('job-0','job-1')"
+                )
+                connection.execute(
+                    "update detection_jobs set state='failed', "
+                    "updated_at='2026-01-01T00:00:00+00:00' where id='job-2'"
+                )
+
+            self.assertEqual(store.prune_detection_jobs(limit=2, force=True), 2)
+            self.assertEqual(store.prune_detection_jobs(limit=2, force=True), 1)
+            self.assertEqual(store.detection_job_status("gate"), {"queued": 1})
+
+    def test_detection_intent_collision_rejects_different_event_occurrence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.add_event(
+                "gate",
+                "motion",
+                created_at="2026-08-15T12:00:00+00:00",
+                detection_intent_id="intent-1",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "different occurrence"):
+                store.add_event(
+                    "gate",
+                    "motion",
+                    created_at="2026-08-16T12:00:00+00:00",
+                    detection_intent_id="intent-1",
+                )
 
     def test_motion_trigger_lease_is_not_stolen_by_store_recreation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

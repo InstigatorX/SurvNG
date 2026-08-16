@@ -79,6 +79,9 @@ class MotionTrigger:
     episode_id: str = ""
     detection_intent_id: str = ""
     lifecycle_generation: int = 0
+    evidence_frame_at_epoch: float | None = None
+    evidence_frame_sequence: int = 0
+    evidence_capture_generation: int = 0
     delivery_job_id: str = ""
 
     def __post_init__(self) -> None:
@@ -121,6 +124,18 @@ class MotionTrigger:
             raise TypeError("motion trigger lifecycle generation must be an integer")
         if not isinstance(self.delivery_job_id, str):
             raise TypeError("motion trigger delivery job ID must be a string")
+        if self.evidence_frame_at_epoch is not None:
+            if isinstance(self.evidence_frame_at_epoch, bool) or not isinstance(
+                self.evidence_frame_at_epoch, (int, float)
+            ):
+                raise TypeError("motion trigger evidence frame time must be numeric")
+            self.evidence_frame_at_epoch = float(self.evidence_frame_at_epoch)
+            if not math.isfinite(self.evidence_frame_at_epoch):
+                raise ValueError("motion trigger evidence frame time must be finite")
+        for name in ("evidence_frame_sequence", "evidence_capture_generation"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise TypeError(f"motion trigger {name} must be a non-negative integer")
         if self.retry_batch is not None and (
             not isinstance(self.retry_batch, tuple)
             or not all(isinstance(item, MotionTrigger) for item in self.retry_batch)
@@ -152,6 +167,9 @@ class MotionTrigger:
             "episode_id": self.episode_id,
             "detection_intent_id": self.detection_intent_id,
             "lifecycle_generation": self.lifecycle_generation,
+            "evidence_frame_at_epoch": self.evidence_frame_at_epoch,
+            "evidence_frame_sequence": self.evidence_frame_sequence,
+            "evidence_capture_generation": self.evidence_capture_generation,
         }
 
     @classmethod
@@ -180,6 +198,15 @@ class MotionTrigger:
             episode_id=str(payload.get("episode_id") or ""),
             detection_intent_id=str(payload.get("detection_intent_id") or ""),
             lifecycle_generation=int(payload.get("lifecycle_generation") or 0),
+            evidence_frame_at_epoch=(
+                float(payload["evidence_frame_at_epoch"])
+                if payload.get("evidence_frame_at_epoch") is not None
+                else None
+            ),
+            evidence_frame_sequence=int(payload.get("evidence_frame_sequence") or 0),
+            evidence_capture_generation=int(
+                payload.get("evidence_capture_generation") or 0
+            ),
             delivery_job_id=job_id,
         )
 
@@ -472,6 +499,30 @@ class MotionEventCoordinator:
             ),
             lifecycle_generation=max(
                 (item.lifecycle_generation for item in retry_triggers), default=0
+            ),
+            evidence_frame_at_epoch=next(
+                (
+                    item.evidence_frame_at_epoch
+                    for item in retry_triggers
+                    if item.evidence_frame_at_epoch is not None
+                ),
+                None,
+            ),
+            evidence_frame_sequence=next(
+                (
+                    item.evidence_frame_sequence
+                    for item in retry_triggers
+                    if item.evidence_frame_sequence > 0
+                ),
+                0,
+            ),
+            evidence_capture_generation=next(
+                (
+                    item.evidence_capture_generation
+                    for item in retry_triggers
+                    if item.evidence_capture_generation > 0
+                ),
+                0,
             ),
         )
         with self._lock:

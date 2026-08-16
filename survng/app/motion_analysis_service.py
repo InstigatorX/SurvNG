@@ -6,9 +6,9 @@ import queue
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import cv2
 import numpy as np
@@ -17,12 +17,14 @@ from .motion import MotionQualificationResult, preprocess_motion_frame
 from .config import MotionQualificationConfig
 from .domain_events import MotionObserved
 from .ema_v2 import (
+    DetectionIntent,
     EmaPolicy,
     EmaQualified,
     EmaSignalDecision,
     EmaSignalAction,
     EmaSignalConditioner,
     EpisodeDecisionReason,
+    VISUAL_BACKUP_EXCLUDED_REASONS,
     MotionSource,
 )
 from .motion_analysis import FairMotionAnalysisLimiter
@@ -87,6 +89,21 @@ class MotionFrameSubmission:
     captured_at_epoch: float
     captured_at_monotonic: float
     sequence: int = 0
+    capture_sequence: int = 0
+    capture_generation: int = 0
+    lifecycle_generation: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class MotionEvidenceFrame:
+    """Bounded, generation-qualified color evidence retained for fast detection."""
+
+    image: np.ndarray
+    captured_at_epoch: float
+    captured_at_monotonic: float
+    sequence: int
+    capture_generation: int
+    lifecycle_generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +155,7 @@ class MotionAnalysisService:
         self.events = events
         self.evidence = evidence
         self.ema_v2 = EmaSignalConditioner(camera_id)
+        self.ema_verification = EmaSignalConditioner(camera_id)
         self.audit_recorder = audit_recorder
         self.debug_store = debug_store
         self.config = config
@@ -146,10 +164,21 @@ class MotionAnalysisService:
         self.state = state
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
+        self.evidence_frames: deque[MotionEvidenceFrame] = deque(
+            # Enough history to cover the EMA decision/dispatch delay without
+            # retaining the full qualification ring as color images.
+            maxlen=max(6, min(16, ring_size))
+        )
         self.processed_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
         self.qualification_results: deque[
             tuple[float, MotionQualificationResult]
         ] = deque(maxlen=ring_size)
+        # Route confirmation may arrive after recorded main-stream refinement.
+        # The maximum route horizon is 300s at up to 10 EMA samples per second;
+        # retain the full supported window plus scheduling margin.
+        self.recent_accepted_results: deque[
+            tuple[float, MotionQualificationResult]
+        ] = deque(maxlen=4096)
         self.queue: queue.Queue[
             float | MotionFrameSubmission | _AnalysisSlotWakeup | None
         ] = queue.Queue(
@@ -168,6 +197,20 @@ class MotionAnalysisService:
         self.debug_last_run_clock = 0.0
         self._visual_lock = threading.Lock()
         self._visual_nonpromotion_episode: _VisualBackupNonpromotionEpisode | None = None
+        self._onvif_effectiveness_observer: (
+            Callable[[bool, float], None] | None
+        ) = None
+        self._onvif_effectiveness_provider: Callable[[], dict[str, Any]] | None = None
+        self._route_watch_provider: Callable[[str, float], Any | None] | None = None
+        self._route_watch_consumer: Callable[[str, int], bool] | None = None
+        self._ema_candidate_sink: (
+            Callable[[str, float, dict[str, Any]], None] | None
+        ) = None
+        self._ema_candidate_source: (
+            Callable[[str, float, float], list[tuple[float, dict[str, Any]]]] | None
+        ) = None
+        self._last_persisted_ema_candidate_at = 0.0
+        self._last_ema_candidate_failure_log_monotonic = 0.0
         self._stop_event: threading.Event | None = None
         self._stop_requested = threading.Event()
         self._admission_lock = threading.Lock()
@@ -243,6 +286,34 @@ class MotionAnalysisService:
     def reset_ema_policy_state(self) -> None:
         with self._visual_lock:
             self.ema_v2.reset()
+            self.ema_verification.reset()
+
+    def set_onvif_effectiveness_observer(
+        self,
+        observer: Callable[[bool, float], None] | None,
+    ) -> None:
+        """Attach diagnostic-only EMA/ONVIF correlation instrumentation."""
+        self._onvif_effectiveness_observer = observer
+
+    def set_security_verification_context(
+        self,
+        *,
+        onvif_effectiveness: Callable[[], dict[str, Any]] | None = None,
+        route_watch: Callable[[str, float], Any | None] | None = None,
+        consume_route_watch: Callable[[str, int], bool] | None = None,
+        record_ema_candidate: (
+            Callable[[str, float, dict[str, Any]], None] | None
+        ) = None,
+        load_ema_candidates: (
+            Callable[[str, float, float], list[tuple[float, dict[str, Any]]]] | None
+        ) = None,
+    ) -> None:
+        """Attach advisory signals that may accelerate persistent EMA checks."""
+        self._onvif_effectiveness_provider = onvif_effectiveness
+        self._route_watch_provider = route_watch
+        self._route_watch_consumer = consume_route_watch
+        self._ema_candidate_sink = record_ema_candidate
+        self._ema_candidate_source = load_ema_candidates
 
     def request_stop(self) -> None:
         with self._admission_lock:
@@ -280,8 +351,11 @@ class MotionAnalysisService:
         with self.frame_lock:
             self.frames.clear()
             self.color_frames.clear()
+            self.evidence_frames.clear()
             self.processed_frames.clear()
             self.qualification_results.clear()
+            self.recent_accepted_results.clear()
+            self._last_persisted_ema_candidate_at = 0.0
             self.last_sample_clock = 0.0
             self.last_continuous_result = None
             self.last_processed_at = 0.0
@@ -293,6 +367,7 @@ class MotionAnalysisService:
         self.clear_queue()
         with self._visual_lock:
             self.ema_v2.reset()
+            self.ema_verification.reset()
             self._visual_nonpromotion_episode = None
 
     def schedule(self, captured_at: float, stop_event: threading.Event) -> None:
@@ -304,6 +379,10 @@ class MotionAnalysisService:
         frame_clock: float,
         stop_event: threading.Event,
         captured_at: float | None = None,
+        *,
+        capture_sequence: int = 0,
+        capture_generation: int = 0,
+        lifecycle_generation: int = 0,
     ) -> None:
         """Hand a stable raw frame to the analysis worker without preprocessing."""
         if not self._admit_frame(frame_clock, stop_event):
@@ -325,6 +404,9 @@ class MotionAnalysisService:
                 captured_at_epoch=frame_epoch,
                 captured_at_monotonic=frame_clock,
                 sequence=sequence,
+                capture_sequence=capture_sequence,
+                capture_generation=capture_generation,
+                lifecycle_generation=lifecycle_generation,
             ),
             stop_event,
         )
@@ -402,6 +484,11 @@ class MotionAnalysisService:
         self,
         frame: np.ndarray,
         frame_epoch: float,
+        *,
+        captured_at_monotonic: float = 0.0,
+        capture_sequence: int = 0,
+        capture_generation: int = 0,
+        lifecycle_generation: int = 0,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
         self._reset_for_clock_discontinuity(frame_epoch)
         preprocess_started = time.monotonic()
@@ -442,6 +529,14 @@ class MotionAnalysisService:
         with self.frame_lock:
             self.frames.append((frame_epoch, gray))
             self.color_frames.append((frame_epoch, resized))
+            self.evidence_frames.append(MotionEvidenceFrame(
+                image=resized,
+                captured_at_epoch=frame_epoch,
+                captured_at_monotonic=captured_at_monotonic,
+                sequence=capture_sequence,
+                capture_generation=capture_generation,
+                lifecycle_generation=lifecycle_generation,
+            ))
             if processed is not None:
                 self.processed_frames.append((frame_epoch, processed))
             else:
@@ -456,8 +551,11 @@ class MotionAnalysisService:
                 return
             self.frames.clear()
             self.color_frames.clear()
+            self.evidence_frames.clear()
             self.processed_frames.clear()
             self.qualification_results.clear()
+            self.recent_accepted_results.clear()
+            self._last_persisted_ema_candidate_at = 0.0
             self.last_continuous_result = None
             self.last_processed_at = 0.0
             self.primary_last_processed_at = 0.0
@@ -466,6 +564,7 @@ class MotionAnalysisService:
         self.limiter.cancel(self.camera_id)
         with self._visual_lock:
             self.ema_v2.reset()
+            self.ema_verification.reset()
         self.events.reset_timebase()
         with self._telemetry_lock:
             self._telemetry["clock_discontinuity_resets"] += 1
@@ -479,6 +578,51 @@ class MotionAnalysisService:
                 (timestamp, self._share_frame(frame, "samples"))
                 for timestamp, frame in self.frames
             ]
+
+    def evidence_frame_near(
+        self,
+        captured_at_epoch: float,
+        *,
+        sequence: int,
+        capture_generation: int,
+        lifecycle_generation: int,
+        maximum_delta_seconds: float = 1.0,
+    ) -> MotionEvidenceFrame | None:
+        """Select the intended EMA frame without crossing a capture generation."""
+        with self.frame_lock:
+            candidates = tuple(self.evidence_frames)
+        if sequence > 0:
+            exact = next(
+                (
+                    item
+                    for item in candidates
+                    if item.sequence == sequence
+                    and item.capture_generation == capture_generation
+                    and item.lifecycle_generation == lifecycle_generation
+                ),
+                None,
+            )
+            if (
+                exact is not None
+                and abs(exact.captured_at_epoch - captured_at_epoch)
+                <= maximum_delta_seconds
+            ):
+                return exact
+        compatible = [
+            item
+            for item in candidates
+            if item.capture_generation == capture_generation
+            and item.lifecycle_generation == lifecycle_generation
+        ]
+        if not compatible:
+            return None
+        nearest = min(
+            compatible,
+            key=lambda item: abs(item.captured_at_epoch - captured_at_epoch),
+        )
+        if abs(nearest.captured_at_epoch - captured_at_epoch) > maximum_delta_seconds:
+            return None
+        return nearest
 
     def samples_since(self, captured_at: float) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
@@ -723,6 +867,10 @@ class MotionAnalysisService:
                     prepared = self._preprocess_frame(
                         work.image,
                         work.captured_at_epoch,
+                        captured_at_monotonic=work.captured_at_monotonic,
+                        capture_sequence=work.capture_sequence,
+                        capture_generation=work.capture_generation,
+                        lifecycle_generation=work.lifecycle_generation,
                     )
                     if prepared is None:
                         continue
@@ -901,6 +1049,7 @@ class MotionAnalysisService:
                 error,
             )
             return
+        persist_candidate: dict[str, Any] | None = None
         with self.frame_lock:
             self.last_continuous_result = result
             self.primary_last_processed_at = captured_at
@@ -911,6 +1060,24 @@ class MotionAnalysisService:
                 self.qualification_results[-1] = (captured_at, result)
             else:
                 self.qualification_results.append((captured_at, result))
+            if (
+                result.accepted
+                and result.reason not in VISUAL_BACKUP_EXCLUDED_REASONS
+            ):
+                self.recent_accepted_results.append((captured_at, result))
+                if (
+                    self._ema_candidate_sink is not None
+                    and captured_at - self._last_persisted_ema_candidate_at >= 0.5
+                ):
+                    persist_candidate = {
+                        "accepted": bool(result.accepted),
+                        "score": float(result.score),
+                        "threshold": float(result.threshold),
+                        "reason": str(result.reason),
+                        "frame_count": int(result.frame_count),
+                        "features": dict(result.features),
+                        "telemetry": dict(result.telemetry),
+                    }
         self._record_continuous_stats(result)
         if self._stopping():
             return
@@ -922,7 +1089,34 @@ class MotionAnalysisService:
                 captured_at,
                 trigger_mode=trigger_mode,
             )
+            self._persist_ema_route_candidate(captured_at, persist_candidate)
             return
+
+    def _persist_ema_route_candidate(
+        self,
+        captured_at: float,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        if payload is None or self._ema_candidate_sink is None:
+            return
+        # Admission has already run. This optional restart cache must never
+        # stand in front of immediate detector work or wait materially on the
+        # security ledger's writer.
+        self._last_persisted_ema_candidate_at = captured_at
+        try:
+            self._ema_candidate_sink(self.camera_id, captured_at, payload)
+        except Exception:
+            self.state.increment_stat("ema_candidate_persist_failures", 1)
+            now_monotonic = time.monotonic()
+            if (
+                now_monotonic - self._last_ema_candidate_failure_log_monotonic
+                >= 60.0
+            ):
+                self._last_ema_candidate_failure_log_monotonic = now_monotonic
+                LOGGER.exception(
+                    "could not persist EMA route candidate for %s",
+                    self.camera_id,
+                )
 
     def consider_visual_backup(
         self,
@@ -982,13 +1176,144 @@ class MotionAnalysisService:
             )
         else:
             with self._visual_lock:
+                policy = self.qualification.visual_backup_policy()
                 decision = self.ema_v2.evaluate(
                     result,
                     captured_at,
                     observed_monotonic,
-                    self.qualification.visual_backup_policy(),
+                    policy,
                     detection_enabled=self.state.detection_enabled(),
                 )
+                try:
+                    watch = (
+                        self._route_watch_provider(self.camera_id, captured_at)
+                        if self._route_watch_provider is not None
+                        else None
+                    )
+                except Exception:
+                    watch = None
+                    LOGGER.exception(
+                        "route detection watch lookup failed for %s",
+                        self.camera_id,
+                    )
+                try:
+                    effectiveness = (
+                        self._onvif_effectiveness_provider()
+                        if self._onvif_effectiveness_provider is not None
+                        else {}
+                    )
+                except Exception:
+                    effectiveness = {}
+                    LOGGER.exception(
+                        "ONVIF effectiveness lookup failed for %s",
+                        self.camera_id,
+                    )
+                onvif_degraded = bool(effectiveness.get("signal_degraded"))
+                onvif_unavailable = bool(
+                    effectiveness.get("signal_effectiveness_status")
+                    == "transport_unavailable"
+                )
+                verification_reason = (
+                    "route_watch"
+                    if watch is not None
+                    else "onvif_degraded"
+                    if onvif_degraded
+                    else "onvif_unavailable"
+                    if onvif_unavailable
+                    else "persistent_ema"
+                )
+                watch_payload = (
+                    watch.as_dict()
+                    if watch is not None and hasattr(watch, "as_dict")
+                    else {}
+                )
+                verification_result = MotionQualificationResult(
+                    accepted=result.accepted,
+                    score=result.score,
+                    threshold=result.threshold,
+                    reason=result.reason,
+                    frame_count=result.frame_count,
+                    features={
+                        **result.features,
+                        "security_verification": True,
+                        "security_verification_bypass_limits": watch is not None,
+                        "security_verification_reason": verification_reason,
+                        "route_detection_watch": watch_payload,
+                        "onvif_signal_effectiveness_status": effectiveness.get(
+                            "signal_effectiveness_status"
+                        ),
+                    },
+                    telemetry=dict(result.telemetry),
+                )
+                # The ordinary edge remains the efficient primary path.  A
+                # second conditioner guarantees that accepted, persistent
+                # motion is eventually verified even below the operator's
+                # rescue score.  Route evidence or proven ONVIF degradation
+                # accelerates that verification; otherwise it requires more
+                # persistence to keep nuisance cost bounded.
+                verification_policy = replace(
+                    policy,
+                    minimum_score=min(
+                        float(policy.minimum_score),
+                        float(result.threshold),
+                    ),
+                    score_margin=0.0,
+                    minimum_consecutive=(
+                        1
+                        if watch is not None
+                        else policy.minimum_consecutive
+                        if onvif_degraded or onvif_unavailable
+                        else policy.minimum_consecutive + 2
+                    ),
+                    grace_seconds=(
+                        0.0
+                        if watch is not None
+                        else policy.grace_seconds
+                        if onvif_degraded or onvif_unavailable
+                        else policy.grace_seconds + 1.0
+                    ),
+                )
+                verification = self.ema_verification.evaluate(
+                    verification_result,
+                    captured_at,
+                    observed_monotonic,
+                    verification_policy,
+                    detection_enabled=self.state.detection_enabled(),
+                )
+                route_verification = bool(
+                    watch is not None
+                    and verification_result.accepted
+                    and verification_result.reason
+                    not in VISUAL_BACKUP_EXCLUDED_REASONS
+                    and self.state.detection_enabled()
+                )
+                if route_verification:
+                    qualified = EmaQualified(
+                        camera_id=self.camera_id,
+                        captured_at=captured_at,
+                        observed_monotonic=observed_monotonic,
+                        result=verification_result,
+                        required_score=float(result.threshold),
+                        qualifying_samples=1,
+                        window_samples=1,
+                        candidate_started_at=captured_at,
+                    )
+                    decision = EmaSignalDecision(
+                        action=EmaSignalAction.QUALIFIED,
+                        result=verification_result,
+                        required_score=float(result.threshold),
+                        scene_ready=True,
+                        qualifying_samples=1,
+                        window_samples=1,
+                        qualified=qualified,
+                    )
+                    self.ema_v2.clear_candidate()
+                    self.ema_verification.clear_candidate()
+                elif decision.action is EmaSignalAction.QUALIFIED:
+                    self.ema_verification.clear_candidate()
+                elif verification.action is EmaSignalAction.QUALIFIED:
+                    self.ema_v2.clear_candidate()
+                    decision = verification
         result = decision.result
         if decision.action in {EmaSignalAction.DISABLED, EmaSignalAction.REJECTED}:
             if decision.count_nonpromotion:
@@ -1018,11 +1343,56 @@ class MotionAnalysisService:
             return
         if decision.action != EmaSignalAction.QUALIFIED or decision.qualified is None:
             return
-        episode = self.events.episode_controller.observe_ema(
-            decision.qualified,
-            generation=self.state.lifecycle_generation(),
+        route_details = result.features.get("route_detection_watch")
+        standalone_route = bool(
+            result.features.get("security_verification_bypass_limits")
+            and isinstance(route_details, dict)
+            and route_details.get("source_camera_id")
+            and route_details.get("source_event_id")
         )
-        if episode.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST:
+        episode = None
+        if standalone_route:
+            # A route observation represents a distinct physical occurrence.
+            # It must not be absorbed by an unrelated request that happens to
+            # own the camera's ordinary EMA episode.  The upstream durable
+            # event makes this identity stable across retries and restarts.
+            route_identity = (
+                f"route:{self.camera_id}:"
+                f"{route_details['source_camera_id']}:"
+                f"{int(route_details['source_event_id'])}"
+            )
+            intent = DetectionIntent(
+                intent_id=route_identity,
+                episode_id=route_identity,
+                camera_id=self.camera_id,
+                generation=self.state.lifecycle_generation(),
+                event_at=captured_at,
+                created_monotonic=observed_monotonic,
+                primary_source=MotionSource.EMA,
+                sources=(MotionSource.EMA,),
+                ema=decision.qualified,
+            )
+        else:
+            episode = self.events.episode_controller.observe_ema(
+                decision.qualified,
+                generation=self.state.lifecycle_generation(),
+            )
+            intent = episode.intent
+        matched_onvif = bool(
+            intent is not None
+            and MotionSource.CAMERA in intent.sources
+        )
+        observer = self._onvif_effectiveness_observer
+        if observer is not None and not standalone_route:
+            try:
+                observer(matched_onvif, captured_at)
+            except Exception:
+                # Health instrumentation must never interfere with detection.
+                LOGGER.exception(
+                    "ONVIF effectiveness observer failed for %s",
+                    self.camera_id,
+                )
+        if episode is not None and episode.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST:
             if (
                 episode.intent is not None
                 and MotionSource.CAMERA in episode.intent.sources
@@ -1031,8 +1401,11 @@ class MotionAnalysisService:
             elif trigger_mode == "adaptive":
                 self.state.increment_stat("adaptive_triggers_deferred", 1)
             return
-        followup = episode.reason is EpisodeDecisionReason.FOLLOWUP_RESERVED
-        if episode.reason in {
+        followup = bool(
+            episode is not None
+            and episode.reason is EpisodeDecisionReason.FOLLOWUP_RESERVED
+        )
+        if episode is not None and episode.reason in {
             EpisodeDecisionReason.FOLLOWUP_DUPLICATE,
             EpisodeDecisionReason.FOLLOWUP_RATE_LIMITED,
             EpisodeDecisionReason.FOLLOWUP_LIMIT_REACHED,
@@ -1044,16 +1417,15 @@ class MotionAnalysisService:
             }[episode.reason]
             self.state.increment_stat(stat, 1)
             return
-        if episode.reason is EpisodeDecisionReason.EMA_RATE_LIMITED:
+        if episode is not None and episode.reason is EpisodeDecisionReason.EMA_RATE_LIMITED:
             self.state.increment_stat("visual_backup_rate_limited", 1)
             return
-        if episode.reason not in {
+        if episode is not None and episode.reason not in {
             EpisodeDecisionReason.REQUEST_RESERVED,
             EpisodeDecisionReason.FOLLOWUP_RESERVED,
         }:
             self.state.increment_stat("visual_backup_not_promoted", 1)
             return
-        intent = episode.intent
         if intent is None:
             return
 
@@ -1088,6 +1460,24 @@ class MotionAnalysisService:
             )
             self.last_continuous_result = fused
             event_at = datetime.fromtimestamp(captured_at, timezone.utc)
+            with self.frame_lock:
+                compatible_evidence = tuple(
+                    item
+                    for item in self.evidence_frames
+                    if item.lifecycle_generation == intent.generation
+                    and item.capture_generation > 0
+                )
+            nearest_evidence = min(
+                compatible_evidence,
+                key=lambda item: abs(item.captured_at_epoch - captured_at),
+                default=None,
+            )
+            evidence_frame = (
+                nearest_evidence
+                if nearest_evidence is not None
+                and abs(nearest_evidence.captured_at_epoch - captured_at) <= 1.0
+                else None
+            )
             trigger_enqueued = self._enqueue_trigger(
                 MotionTrigger(
                     topic=(
@@ -1110,21 +1500,40 @@ class MotionAnalysisService:
                     episode_id=intent.episode_id,
                     detection_intent_id=intent.intent_id,
                     lifecycle_generation=intent.generation,
+                    evidence_frame_at_epoch=(
+                        evidence_frame.captured_at_epoch
+                        if evidence_frame is not None
+                        else captured_at
+                    ),
+                    evidence_frame_sequence=(
+                        evidence_frame.sequence if evidence_frame is not None else 0
+                    ),
+                    evidence_capture_generation=(
+                        evidence_frame.capture_generation
+                        if evidence_frame is not None
+                        else 0
+                    ),
                 )
             )
-            self.events.episode_controller.acknowledge_admission(
-                intent.intent_id,
-                admitted=trigger_enqueued,
-                occurred_monotonic=time.monotonic(),
-            )
-            if not trigger_enqueued:
+            if not standalone_route:
+                self.events.episode_controller.acknowledge_admission(
+                    intent.intent_id,
+                    admitted=trigger_enqueued,
+                    occurred_monotonic=time.monotonic(),
+                )
+            if not trigger_enqueued and not standalone_route:
                 if followup:
                     self.state.increment_stat("active_followup_queue_rejected", 1)
                 return
+            self._consume_route_watch(result)
             self.state.increment_stat(
                 "active_followup_triggers" if followup else "visual_backup_triggers",
                 1,
             )
+            if result.features.get("security_verification"):
+                self.state.increment_stat("security_verification_triggers", 1)
+                if result.features.get("route_detection_watch"):
+                    self.state.increment_stat("route_watch_triggers", 1)
             self.state.increment_stat(
                 "illumination_verification_probes",
                 int(illumination_probe_allowed),
@@ -1147,6 +1556,100 @@ class MotionAnalysisService:
                     )
                 except ValueError:
                     pass
+
+    def consider_route_watch(self, watch: Any) -> bool:
+        """Replay recent accepted EMA evidence when route confirmation is late."""
+        if self._stopping() or getattr(watch, "target_camera_id", "") != self.camera_id:
+            return False
+        eligible_at = float(getattr(watch, "eligible_at", 0.0))
+        expires_at = float(getattr(watch, "expires_at", 0.0))
+        with self.frame_lock:
+            candidates = [
+                item
+                for item in self.recent_accepted_results
+                if eligible_at <= item[0] <= expires_at
+                and item[1].reason not in VISUAL_BACKUP_EXCLUDED_REASONS
+            ]
+            color_samples = [
+                (captured_at, frame)
+                for captured_at, frame in self.color_frames
+                if eligible_at <= captured_at <= expires_at
+            ]
+        if self._ema_candidate_source is not None:
+            try:
+                durable_candidates = self._ema_candidate_source(
+                    self.camera_id,
+                    eligible_at,
+                    expires_at,
+                )
+            except Exception:
+                durable_candidates = []
+                LOGGER.exception(
+                    "could not load EMA route candidates for %s",
+                    self.camera_id,
+                )
+            known_times = {captured_at for captured_at, _result in candidates}
+            for candidate_at, payload in durable_candidates:
+                if candidate_at in known_times or not isinstance(payload, dict):
+                    continue
+                try:
+                    restored = MotionQualificationResult(
+                        accepted=bool(payload.get("accepted")),
+                        score=float(payload.get("score") or 0.0),
+                        threshold=float(payload.get("threshold") or 0.0),
+                        reason=str(payload.get("reason") or "qualified"),
+                        frame_count=int(payload.get("frame_count") or 0),
+                        features=(
+                            dict(payload.get("features") or {})
+                            if isinstance(payload.get("features"), dict)
+                            else {}
+                        ),
+                        telemetry=(
+                            dict(payload.get("telemetry") or {})
+                            if isinstance(payload.get("telemetry"), dict)
+                            else {}
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    restored.accepted
+                    and restored.reason not in VISUAL_BACKUP_EXCLUDED_REASONS
+                ):
+                    candidates.append((float(candidate_at), restored))
+        if not candidates:
+            self.state.increment_stat("route_watch_without_recent_ema", 1)
+            return False
+        captured_at, result = max(
+            candidates,
+            key=lambda item: (float(item[1].score), item[0]),
+        )
+        self.consider_visual_backup(
+            result,
+            color_samples,
+            captured_at,
+            trigger_mode="camera_rescue",
+        )
+        return True
+
+    def _consume_route_watch(self, result: MotionQualificationResult) -> None:
+        route_details = result.features.get("route_detection_watch")
+        if (
+            not isinstance(route_details, dict)
+            or not route_details.get("source_event_id")
+            or self._route_watch_consumer is None
+        ):
+            return
+        try:
+            self._route_watch_consumer(
+                self.camera_id,
+                int(route_details["source_event_id"]),
+            )
+        except Exception:
+            LOGGER.exception(
+                "route detection watch consumption failed for %s",
+                self.camera_id,
+            )
 
     def capture_debug(self, captured_at: float) -> None:
         samples = self.samples()

@@ -63,6 +63,12 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
         "subscription_current_time": "current-at",
         "subscription_termination_time": "termination-at",
         "subscription_lifetime_seconds": 3600.0,
+        "effectiveness_snapshot": lambda: {
+            "signal_effectiveness_status": "degraded",
+            "signal_degraded": True,
+            "ema_window_without_onvif": 4,
+            "unknown_notification_samples": [],
+        },
     }
     onvif = SimpleNamespace(**onvif_values)
     pipelines = [Mock(), Mock(), Mock()]
@@ -145,6 +151,9 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
     assert status["lifecycle"]["active_worker_count"] == 4
     assert status["onvif_poll_timeouts"] == 2
     assert status["onvif_subscription_lifetime_seconds"] == 3600.0
+    assert status["onvif_signal_effectiveness_status"] == "degraded"
+    assert status["onvif_signal_degraded"] is True
+    assert status["onvif_ema_window_without_onvif"] == 4
     motion = status["motion_qualification"]
     assert motion["triggers"] == 4
     assert motion["analysis_worker_running"] is True

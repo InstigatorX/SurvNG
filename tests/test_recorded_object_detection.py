@@ -976,6 +976,97 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             },
         )
 
+    def test_initial_detection_prefers_generation_qualified_evidence_frame(self) -> None:
+        event_epoch = 1_800_000_000.0
+        latest = np.full((20, 20, 3), 99, dtype=np.uint8)
+        evidence = np.full((20, 20, 3), 17, dtype=np.uint8)
+        observed: list[int] = []
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, frame, confidence_threshold=None):
+                observed.append(int(frame[0, 0, 0]))
+                return []
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            SimpleNamespace(),
+            lambda: None,
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=latest,
+                captured_at_epoch=event_epoch + 1.0,
+                captured_at_monotonic=1.0,
+                sequence=9,
+                camera_generation=4,
+                capture_generation=8,
+            ),
+            timestamped_evidence_frame_provider=lambda token: TimestampedLiveFrame(
+                frame=evidence,
+                captured_at_epoch=float(token["evidence_frame_at_epoch"]),
+                captured_at_monotonic=0.5,
+                sequence=int(token["evidence_frame_sequence"]),
+                camera_generation=int(token["evidence_lifecycle_generation"]),
+                capture_generation=int(token["evidence_capture_generation"]),
+            ),
+        )
+        with patch(
+            "survng.app.motion_pipeline.object_detection.time.time",
+            return_value=event_epoch + 0.5,
+        ):
+            result = backend.detect_initial(
+                datetime.fromtimestamp(event_epoch, timezone.utc),
+                {
+                    "evidence_frame_at_epoch": event_epoch,
+                    "evidence_frame_sequence": 7,
+                    "evidence_capture_generation": 8,
+                    "evidence_lifecycle_generation": 4,
+                },
+            )
+
+        self.assertEqual(observed, [17])
+        self.assertIs(result.frame, evidence)
+        self.assertEqual(result.frame_captured_at_epoch, event_epoch)
+        self.assertTrue(result.refinement_pending)
+
+    def test_initial_detection_missing_evidence_does_not_fall_forward_to_latest(self) -> None:
+        event_epoch = 1_800_000_000.0
+        latest_calls = 0
+
+        def latest():
+            nonlocal latest_calls
+            latest_calls += 1
+            return None
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            SimpleNamespace(config=SimpleNamespace()),
+            SimpleNamespace(),
+            lambda: None,
+            timestamped_live_frame_provider=latest,
+            timestamped_evidence_frame_provider=lambda _token: None,
+        )
+        result = backend.detect_initial(
+            datetime.fromtimestamp(event_epoch, timezone.utc),
+            {
+                "evidence_frame_at_epoch": event_epoch,
+                "evidence_frame_sequence": 7,
+                "evidence_capture_generation": 8,
+                "evidence_lifecycle_generation": 4,
+            },
+        )
+
+        self.assertEqual(latest_calls, 0)
+        self.assertIsNone(result.frame)
+        self.assertEqual(result.objects[0]["status"], "fast_frame_unavailable")
+        self.assertTrue(result.refinement_pending)
+
     def test_initial_detection_rejects_stale_live_frame_but_keeps_refinement_pending(self) -> None:
         event_epoch = 1_800_000_000.0
 

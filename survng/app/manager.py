@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import threading
 import time
@@ -31,6 +32,7 @@ from .config import (
 )
 from .events import EventStore
 from .detector import objects_to_json
+from .detection_watch import RouteDetectionWatch
 from .go2rtc import Go2RtcAdapter
 from .inference_lifecycle import InferenceLifecycle
 from .image_cache import LocalImageCache
@@ -187,6 +189,12 @@ class AppManager:
     def __init__(self, config: AppConfig) -> None:
         validate_manager_configuration(config)
         self.config = config
+        self.detection_watch = RouteDetectionWatch(
+            config.detector.tracking.camera_transition_routes
+        )
+        self._restored_detection_watches: list[Any] = []
+        self._restored_watch_retry_lock = threading.Lock()
+        self._restored_watch_retry_timer: threading.Timer | None = None
         self.storage_dir = Path(config.storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.database_dir = Path(config.database_dir) if config.database_dir else self.storage_dir
@@ -199,6 +207,7 @@ class AppManager:
             database_dir=self.database_dir,
             media_storage=self.media_storage,
         )
+        self._restore_detection_watches()
         self.telemetry = TelemetryStore(self.database_dir)
         migrate_legacy_runtime_telemetry(self.events.db_path, self.telemetry)
         self.appearance_index = AppearanceIndex(self.events.db_path)
@@ -385,6 +394,131 @@ class AppManager:
             LOGGER.exception("could not evaluate adaptive tracking burst capacity")
             return False
 
+    def _restore_detection_watches(self) -> None:
+        """Rebuild unexpired route windows from locally durable incidents."""
+        routes = tuple(self.config.detector.tracking.camera_transition_routes)
+        maximum_window = max(
+            (float(route.max_seconds) for route in routes if route.enabled),
+            default=0.0,
+        )
+        if maximum_window <= 0.0:
+            return
+        now = datetime.now(timezone.utc)
+        start = datetime.fromtimestamp(
+            now.timestamp() - maximum_window,
+            timezone.utc,
+        ).isoformat()
+        for event in self.events.between(start, now.isoformat(), limit=200000):
+            try:
+                objects = json.loads(str(event.get("objects_json") or "[]"))
+            except (TypeError, ValueError):
+                continue
+            eligible = [
+                item
+                for item in objects
+                if isinstance(item, dict)
+                and item.get("label")
+                and item.get("incident_eligible") is not False
+            ] if isinstance(objects, list) else []
+            if not eligible:
+                continue
+            try:
+                event_at = datetime.fromisoformat(
+                    str(event.get("created_at") or "")
+                ).timestamp()
+                created = self.detection_watch.observe_incident(
+                    camera_id=str(event.get("camera_id") or ""),
+                    event_id=int(event.get("id") or 0),
+                    event_at=event_at,
+                    objects=eligible,
+                )
+                for watch in created:
+                    if self.events.route_watch_consumed(
+                        watch.target_camera_id,
+                        watch.source_event_id,
+                    ):
+                        self.detection_watch.consume(
+                            watch.target_camera_id,
+                            watch.source_event_id,
+                        )
+                    else:
+                        self._restored_detection_watches.append(watch)
+            except (TypeError, ValueError):
+                continue
+
+    def _consume_detection_watch(
+        self,
+        target_camera_id: str,
+        source_event_id: int,
+    ) -> bool:
+        self.events.mark_route_watch_consumed(target_camera_id, source_event_id)
+        return self.detection_watch.consume(target_camera_id, source_event_id)
+
+    def _replay_restored_detection_watches(self) -> None:
+        """Join restored route windows with durable EMA after workers exist."""
+        retry_lock = getattr(self, "_restored_watch_retry_lock", None)
+        if retry_lock is None:
+            retry_lock = threading.Lock()
+            self._restored_watch_retry_lock = retry_lock
+        with retry_lock:
+            pending = getattr(self, "_restored_detection_watches", None)
+            if not pending:
+                return
+            restored = tuple(pending)
+            pending.clear()
+        retry: list[Any] = []
+        now = time.time()
+        for watch in restored:
+            if float(getattr(watch, "expires_at", now + 1.0)) < now:
+                continue
+            target = self.workers.get(watch.target_camera_id)
+            if target is None:
+                retry.append(watch)
+                continue
+            try:
+                replayed = target.consider_route_detection_watch(watch)
+            except Exception:
+                retry.append(watch)
+                LOGGER.exception(
+                    "restored route detection replay failed for camera=%s event=%s",
+                    watch.target_camera_id,
+                    watch.source_event_id,
+                )
+            else:
+                if not replayed:
+                    retry.append(watch)
+        if retry:
+            with retry_lock:
+                known = {
+                    (item.target_camera_id, item.source_event_id)
+                    for item in pending
+                }
+                pending.extend(
+                    item
+                    for item in retry
+                    if (item.target_camera_id, item.source_event_id) not in known
+                )
+            self._schedule_restored_watch_retry()
+
+    def _schedule_restored_watch_retry(self) -> None:
+        if not getattr(self, "_started", False) or getattr(self, "_stopping", False):
+            return
+        with self._restored_watch_retry_lock:
+            timer = self._restored_watch_retry_timer
+            if timer is not None and timer.is_alive():
+                return
+            timer = threading.Timer(2.0, self._retry_restored_detection_watches)
+            timer.daemon = True
+            self._restored_watch_retry_timer = timer
+            timer.start()
+
+    def _retry_restored_detection_watches(self) -> None:
+        with self._restored_watch_retry_lock:
+            self._restored_watch_retry_timer = None
+        if getattr(self, "_stopping", False) or getattr(self, "_closed", False):
+            return
+        self._replay_restored_detection_watches()
+
     def _create_camera_worker(self, camera: CameraConfig) -> CameraWorker:
         motion_config = self.config.motion_qualification
         override = camera.motion_qualification
@@ -449,6 +583,10 @@ class AppManager:
                 onvif_cache_dir=self.database_dir / "onvif",
                 capture_backend=self.capture_backend,
                 media_storage=self.media_storage,
+                route_detection_watch=self.detection_watch.match,
+                consume_route_detection_watch=self._consume_detection_watch,
+                record_ema_route_candidate=self.events.record_ema_route_candidate,
+                load_ema_route_candidates=self.events.ema_route_candidates_between,
             )
         except BaseException:
             for pipeline in reversed(pipelines):
@@ -519,6 +657,7 @@ class AppManager:
                     detection_enabled=preferences["detection_enabled"],
                     recording_is_enabled=self.recording_enabled,
                 )
+                self._replay_restored_detection_watches()
                 self._startup_timings["recorder_services_seconds"] = round(
                     recording_timings.services_seconds, 3
                 )
@@ -564,6 +703,7 @@ class AppManager:
                 raise
 
     def _camera_startup_completed(self) -> None:
+        self._replay_restored_detection_watches()
         self._mark_running_if_startup_complete()
 
     def _mark_running_if_startup_complete(self) -> None:
@@ -620,6 +760,11 @@ class AppManager:
 
     def _shutdown_components(self) -> None:
         errors: list[tuple[str, Exception]] = []
+
+        retry_timer = getattr(self, "_restored_watch_retry_timer", None)
+        if retry_timer is not None:
+            retry_timer.cancel()
+            self._restored_watch_retry_timer = None
 
         def attempt(label: str, callback) -> None:
             try:
@@ -843,6 +988,7 @@ class AppManager:
         except OSError:
             load_1m = 0.0
         storage_free_percent = storage.get("free_percent")
+        route_watch = self.detection_watch.status(time.time())
         return {
             "state": {
                 "health": health,
@@ -877,6 +1023,12 @@ class AppManager:
                 "camera_startup_degraded": int(startup_counts.get("degraded") or 0),
                 "camera_startup_failed": int(startup_counts.get("failed") or 0),
                 "camera_startup_queued": int(startup_counts.get("queued") or 0),
+                "route_watches_active": int(route_watch.get("active") or 0),
+                "route_watches_opened": int(route_watch.get("opened") or 0),
+                "route_watches_matched": int(route_watch.get("matched") or 0),
+                "route_watches_consumed": int(route_watch.get("consumed") or 0),
+                "route_watches_expired": int(route_watch.get("expired") or 0),
+                "route_watches_overflowed": int(route_watch.get("overflowed") or 0),
             },
         }
 
@@ -1021,6 +1173,9 @@ class AppManager:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
             self.inference.reconfigure_tracking(config)
+            self.detection_watch.reconfigure(
+                config.tracking.camera_transition_routes
+            )
 
     def reconfigure_inference(
         self,
@@ -1038,6 +1193,10 @@ class AppManager:
                 roles,
                 refresh_tracking=refresh_tracking,
             )
+            if refresh_tracking:
+                self.detection_watch.reconfigure(
+                    config.tracking.camera_transition_routes
+                )
             if "object" in roles:
                 try:
                     self._mqtt_connected()
@@ -1121,6 +1280,41 @@ class AppManager:
                 incident_objects if isinstance(incident_objects, list) else objects
             )
             event_id = payload.get("event_id")
+            route_objects = [
+                item
+                for item in alert_objects
+                if isinstance(item, dict)
+                and item.get("label")
+                and item.get("incident_eligible") is not False
+            ]
+            if event_id and route_objects:
+                try:
+                    observed_at = datetime.fromisoformat(
+                        str(payload.get("timestamp") or "")
+                    ).timestamp()
+                    opened_watches = self.detection_watch.observe_incident(
+                        camera_id=camera_id,
+                        event_id=int(event_id),
+                        event_at=observed_at,
+                        objects=route_objects,
+                    )
+                    for watch in opened_watches:
+                        target = self.workers.get(watch.target_camera_id)
+                        if target is not None:
+                            try:
+                                target.consider_route_detection_watch(watch)
+                            except Exception:
+                                LOGGER.exception(
+                                    "route detection replay failed for camera=%s event=%s",
+                                    watch.target_camera_id,
+                                    event_id,
+                                )
+                except (TypeError, ValueError):
+                    LOGGER.warning(
+                        "could not open route detection watch for camera=%s event=%s",
+                        camera_id,
+                        event_id,
+                    )
             if event_id:
                 event = self.events.get(int(event_id))
                 if event:
