@@ -19,5 +19,8 @@ for (const control of [
 
 assert.match(styles, /\.media-surface-action:hover:not\(:disabled\)[\s\S]*?background-color:\s*transparent;/);
 assert.match(styles, /\.media-surface-action:focus-visible[\s\S]*?background-color:\s*transparent;/);
+assert.match(appSource, /className="live-activity-select" onClick=\{\(\) => onSelect\(incident\)\}/);
+assert.doesNotMatch(appSource, /showOpenAction|live-activity-actions/);
+assert.match(appSource, /className="nav-button tile-control-button"[\s\S]*?liveActivityIncidentHref\(viewerEvent\)[\s\S]*?<Siren size=\{16\} \/> Incident/);
 
 console.log("media surface interaction tests passed");

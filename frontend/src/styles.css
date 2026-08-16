@@ -1990,16 +1990,6 @@ p {
   padding: 2px 6px;
 }
 
-.live-activity-actions {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 5px;
-  border-top: 1px solid var(--line);
-  padding: 5px;
-}
-
-.live-activity-actions button,
-.live-activity-actions a,
 .live-activity-footer > a {
   display: inline-flex;
   min-height: 44px;
@@ -11037,8 +11027,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .live-activity-filters .incident-filter-selects { grid-template-columns: 1fr 1fr; }
   .live-activity-list { max-height: none; overflow: visible; }
   .live-activity-select { grid-template-columns: 112px minmax(0, 1fr); min-height: 78px; }
-  .live-activity-actions button,
-  .live-activity-actions a,
   .live-activity-footer > a,
   .live-activity-trigger { min-height: 44px; }
   .live-activity-trigger { top: 2px; right: 2px; }
@@ -13872,8 +13860,6 @@ a:focus-visible {
 .live-activity-kind strong { font-size: 10px; font-weight: 620; }
 .live-activity-copy time { font-size: 9px; }
 .live-activity-trigger { top: 7px; right: 7px; min-width: 40px; min-height: 26px; border-radius: 3px; font-weight: 620; }
-.live-activity-actions { border-top: 0; padding: 0 7px 7px 122px; }
-.live-activity-actions a { min-height: 34px; border-radius: 3px; }
 .live-activity-footer { gap: 7px; padding: 7px; }
 .live-activity-footer > a { border-radius: 3px; }
 
@@ -14381,7 +14367,6 @@ a.button { border-radius: 3px; }
 }
 .live-activity-trigger:hover,
 .live-activity-trigger:focus-visible { background: var(--control-muted); }
-.live-activity-actions { grid-column: 1 / -1; }
 .camera-tile .camera-tile-control-menu {
   width: min(168px, calc(100% - 8px));
   padding: 2px;
