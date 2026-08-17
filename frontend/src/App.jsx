@@ -2375,16 +2375,19 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
       >
         <div className="camera-tile-chrome">
           <span className="camera-tile-name"><i className={cameraConnected ? "online" : "offline"} aria-hidden="true" /><strong>{camera.name}</strong></span>
-          <span className="camera-tile-live-state">{cameraConnected ? "LIVE" : camera.running ? "WAIT" : "OFF"}</span>
-          <button
-            type="button"
-            ref={controlMenuButtonRef}
-            className="camera-tile-menu"
-            aria-label={`Open ${camera.name} controls`}
-            aria-expanded={controlMenuOpen}
-            aria-haspopup="true"
-            onClick={() => setControlMenuOpen((open) => !open)}
-          >⋮</button>
+          <time className="camera-tile-time">{formatTimeOnly(Date.now() / 1000, timeZone)}</time>
+          <span className="camera-tile-actions">
+            <span className="camera-tile-live-state">{cameraConnected ? "LIVE" : camera.running ? "WAIT" : "OFF"}</span>
+            <button
+              type="button"
+              ref={controlMenuButtonRef}
+              className="camera-tile-menu"
+              aria-label={`Open ${camera.name} controls`}
+              aria-expanded={controlMenuOpen}
+              aria-haspopup="true"
+              onClick={() => setControlMenuOpen((open) => !open)}
+            >⋮</button>
+          </span>
         </div>
         {!camera.running ? (
           <div className="camera-offline-state" role="img" aria-label={`${camera.name} is powered off`}>
@@ -2422,7 +2425,6 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
           </>
         )}
         <button type="button" className="camera-open-target media-surface-action" onClick={() => onOpen(camera)} aria-label={`Open ${camera.name} live view`} />
-        <time className="camera-tile-time">{formatTimeOnly(Date.now() / 1000, timeZone)}</time>
         <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
         {controlMenuOpen ? <div className="camera-tile-control-menu" role="group" aria-label={`${camera.name} controls`}>
           <div className="tile-controls">

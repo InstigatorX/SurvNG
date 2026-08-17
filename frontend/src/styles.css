@@ -2262,10 +2262,11 @@ p {
   right: 0;
   left: 0;
   z-index: 4;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   min-height: 24px;
   align-items: center;
-  gap: 7px;
+  gap: 5px;
   background: rgba(2, 5, 7, .9);
   color: #f4f7f8;
   padding: 0 6px;
@@ -2275,7 +2276,6 @@ p {
 .camera-tile-name {
   display: flex;
   min-width: 0;
-  flex: 1;
   align-items: center;
   gap: 6px;
 }
@@ -2291,20 +2291,17 @@ p {
 .camera-tile-name i.online { background: #46c82f; }
 .camera-tile-name strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .camera-tile-live-state { border-radius: 2px; background: rgba(255, 255, 255, .12); font-size: 9px; font-weight: 650; line-height: 16px; padding: 0 5px; }
+.camera-tile-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 3px; }
 .camera-tile-menu { color: rgba(255, 255, 255, .78); font-size: 16px; line-height: 1; }
 
 .camera-tile-time {
-  position: absolute;
-  bottom: 5px;
-  left: 5px;
-  z-index: 3;
-  border-radius: 2px;
-  background: rgba(2, 5, 7, .78);
+  min-width: 0;
   color: #fff;
   font-size: 9px;
   font-variant-numeric: tabular-nums;
-  line-height: 17px;
-  padding: 0 4px;
+  line-height: 16px;
+  text-align: center;
+  white-space: nowrap;
   pointer-events: none;
 }
 
