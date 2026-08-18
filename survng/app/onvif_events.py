@@ -77,6 +77,15 @@ class _PullMessagesResponseCapture:
             self._responses.append(OnvifEventListener._stringify_xml_static(envelope))
         return envelope, http_headers
 
+    @staticmethod
+    def egress(
+        envelope: Any,
+        http_headers: Any,
+        operation: Any,
+        binding_options: Any,
+    ):
+        return envelope, http_headers
+
     def take(self) -> str:
         with self._lock:
             return self._responses.popleft() if self._responses else ""

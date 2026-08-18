@@ -40,7 +40,7 @@ REOLINK_PULLMESSAGES_XML = """
             </wsnt:NotificationMessage>
             <wsnt:NotificationMessage>
                 <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/VehicleDetect</wsnt:Topic>
-                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="false" /></tt:Data></tt:Message></wsnt:Message>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="true" /></tt:Data></tt:Message></wsnt:Message>
             </wsnt:NotificationMessage>
             <wsnt:NotificationMessage>
                 <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/DogCatDetect</wsnt:Topic>
@@ -53,6 +53,42 @@ REOLINK_PULLMESSAGES_XML = """
             <wsnt:NotificationMessage>
                 <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/FaceDetect</wsnt:Topic>
                 <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="true" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:VideoSource/MotionAlarm</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="false" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/VehicleDetect</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="false" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/DogCatDetect</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="false" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/PeopleDetect</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="false" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/FaceDetect</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="false" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+        </tev:PullMessagesResponse>
+    </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>
+"""
+
+LEGACY_PULLMESSAGES_XML = """
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+        xmlns:tev="http://www.onvif.org/ver10/events/wsdl"
+        xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"
+        xmlns:tt="http://www.onvif.org/ver10/schema">
+    <SOAP-ENV:Body>
+        <tev:PullMessagesResponse>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic>tns1:RuleEngine/CellMotionDetector/Motion</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="IsMotion" Value="true" /></tt:Data></tt:Message></wsnt:Message>
             </wsnt:NotificationMessage>
         </tev:PullMessagesResponse>
     </SOAP-ENV:Body>
@@ -487,13 +523,28 @@ class CaptureProtocolTest(unittest.TestCase):
                 "tns1:RuleEngine/MyRuleDetector/DogCatDetect",
                 "tns1:RuleEngine/MyRuleDetector/PeopleDetect",
                 "tns1:RuleEngine/MyRuleDetector/FaceDetect",
+                "tns1:VideoSource/MotionAlarm",
+                "tns1:RuleEngine/MyRuleDetector/VehicleDetect",
+                "tns1:RuleEngine/MyRuleDetector/DogCatDetect",
+                "tns1:RuleEngine/MyRuleDetector/PeopleDetect",
+                "tns1:RuleEngine/MyRuleDetector/FaceDetect",
             ],
         )
         self.assertEqual(
             [listener._raw_notification_motion_state(item) for item in notifications],
-            [True, False, True, True, True],
+            [True, True, True, True, True, False, False, False, False, False],
         )
         self.assertIn("SimpleItem", notifications[0].message_xml)
+
+    def test_legacy_raw_notification_uses_text_parser_fallback(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        notification = listener._raw_pullmessages_notifications(
+            LEGACY_PULLMESSAGES_XML
+        )[0]
+        topic, message = listener._extract_event(SimpleNamespace(), notification)
+
+        self.assertIsNone(listener._raw_notification_motion_state(notification))
+        self.assertTrue(listener._motion_event_state(topic, message))
 
     def test_pullmessages_ingress_capture_keeps_only_pullmessages_response(self) -> None:
         capture = _PullMessagesResponseCapture()
@@ -501,11 +552,19 @@ class CaptureProtocolTest(unittest.TestCase):
 
         capture.ingress(envelope, {}, SimpleNamespace(name="PullMessages"))
         capture.ingress(envelope, {}, SimpleNamespace(name="Renew"))
+        sent_envelope, sent_headers = capture.egress(
+            envelope,
+            {"Content-Type": "application/soap+xml"},
+            SimpleNamespace(name="PullMessages"),
+            {},
+        )
 
         listener = OnvifEventListener(camera(onvif=True), Mock())
         captured = listener._raw_pullmessages_notifications(capture.take())
-        self.assertEqual(len(captured), 5)
+        self.assertEqual(len(captured), 10)
         self.assertEqual(capture.take(), "")
+        self.assertIs(sent_envelope, envelope)
+        self.assertEqual(sent_headers["Content-Type"], "application/soap+xml")
 
     def test_onvif_effectiveness_degrades_without_changing_transport_health(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
