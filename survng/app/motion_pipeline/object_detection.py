@@ -524,11 +524,11 @@ def _temporal_consensus(
         )
         raw_peak = max((_confidence(detected) for detected in sample.objects if _candidate_detection(detected)), default=0.0)
         return (
+            len(admitted_visible),
             int(bool(primary_visible)),
             fully_framed_primary,
             best_primary_area,
             best_primary_clearance,
-            len(admitted_visible),
             len(visible),
             face_quality,
             sum(track.aggregate_confidence for track in visible),
@@ -553,6 +553,7 @@ def _temporal_consensus(
         incident_confirmed = (
             id(track) in normally_confirmed_ids
             and label_confirmed_here
+            and _eligible_detection(detected)
             and not bool(detected.get("auxiliary_detection"))
         )
         rescue_candidate = id(track) in rescue_candidate_ids

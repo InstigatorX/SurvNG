@@ -227,7 +227,11 @@ def _admit_semantic_rescues(
     qualification: dict[str, Any],
     alignment: dict[str, Any],
 ) -> dict[str, Any]:
-    """Finalize below-threshold candidates after independent causal checks."""
+    """Reject below-threshold candidates after recording causal context.
+
+    The configured object confidence is the incident admission floor. Causal
+    motion may explain a candidate, but must not override that operator policy.
+    """
     candidates = [
         item for item in objects
         if item.get("label") and item.get("semantic_tier") == "rescue_candidate"
@@ -250,8 +254,10 @@ def _admit_semantic_rescues(
     for detected in candidates:
         activity_role = str(detected.get("activity_role") or "indeterminate")
         zone_allowed = detected.get("spatial_zone_eligible") is True
+        confidence_allowed = bool(detected.get("confidence_eligible") is True)
         eligible = bool(
-            id(detected) in admitted_ids
+            confidence_allowed
+            and id(detected) in admitted_ids
             and zone_allowed
             and activity_role != "scene_context"
         )
@@ -276,7 +282,9 @@ def _admit_semantic_rescues(
             detected["incident_admission_reason"] = "temporal_rescue_with_causal_motion"
         else:
             rejection = (
-                "stationary_scene_context"
+                "below_confidence_threshold"
+                if not confidence_allowed
+                else "stationary_scene_context"
                 if activity_role == "scene_context"
                 else "outside_incident_zone"
                 if not zone_allowed

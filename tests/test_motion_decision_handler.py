@@ -812,7 +812,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertTrue(outcome.object_detected)
         self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "temporal")
 
-    def test_low_confidence_rescue_requires_and_accepts_causal_movement(self) -> None:
+    def test_low_confidence_causal_movement_cannot_override_threshold(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 100, 3), dtype=np.uint8)
         handler = MotionDecisionHandler(
@@ -848,12 +848,9 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertEqual(outcome.event_id, 42)
-        self.assertTrue(outcome.detected_objects[0]["semantic_rescue_admitted"])
-        self.assertEqual(
-            outcome.detected_objects[0]["incident_admission_reason"],
-            "temporal_rescue_with_causal_motion",
-        )
+        self.assertIsNone(outcome.event_id)
+        self.assertFalse(outcome.object_detected)
+        self.assertEqual(outcome.detected_objects, ())
 
     def test_low_confidence_stable_appearance_is_not_rescued_when_alignment_is_untrusted(self) -> None:
         events = RecordingEventStore()
