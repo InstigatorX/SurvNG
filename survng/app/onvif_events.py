@@ -38,6 +38,14 @@ EFFECTIVENESS_MINIMUM_OBSERVATIONS = 3
 EFFECTIVENESS_DEGRADED_MISMATCH_RATIO = 0.8
 UNKNOWN_NOTIFICATION_SAMPLE_LIMIT = 5
 EFFECTIVENESS_OBSERVATION_LIMIT = 512
+PULLMESSAGES_CAPTURE_LIMIT = 2
+REOLINK_MOTION_TOPICS = frozenset({
+    "videosource/motionalarm",
+    "ruleengine/myruledetector/vehicledetect",
+    "ruleengine/myruledetector/dogcatdetect",
+    "ruleengine/myruledetector/peopledetect",
+    "ruleengine/myruledetector/facedetect",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +55,31 @@ class OnvifStopTicket:
     generation: int
     thread: threading.Thread | None
     stop_event: threading.Event
+
+
+@dataclass(frozen=True, slots=True)
+class _RawOnvifNotification:
+    topic: str
+    normalized_topic: str
+    message_xml: str
+    simple_items: tuple[tuple[str, str], ...]
+
+
+class _PullMessagesResponseCapture:
+    def __init__(self) -> None:
+        self._responses: deque[str] = deque(maxlen=PULLMESSAGES_CAPTURE_LIMIT)
+        self._lock = threading.Lock()
+
+    def ingress(self, envelope: Any, http_headers: Any, operation: Any):
+        if str(getattr(operation, "name", "")) != "PullMessages":
+            return envelope, http_headers
+        with self._lock:
+            self._responses.append(OnvifEventListener._stringify_xml_static(envelope))
+        return envelope, http_headers
+
+    def take(self) -> str:
+        with self._lock:
+            return self._responses.popleft() if self._responses else ""
 
 
 class OnvifEventListener:
@@ -69,6 +102,7 @@ class OnvifEventListener:
         self._transport_generation: int | None = None
         self._subscription_manager: Any = None
         self._subscription_generation: int | None = None
+        self._pullmessages_capture: _PullMessagesResponseCapture | None = None
         self.connected = False
         self.last_event_at = ""
         self.last_camera_event_at = ""
@@ -326,13 +360,27 @@ class OnvifEventListener:
                     )
                     if stop_event.is_set() or not self._generation_matches(generation):
                         return
+                    raw_notifications = self._raw_pullmessages_notifications(
+                        self._pullmessages_capture.take()
+                        if self._pullmessages_capture is not None
+                        else ""
+                    )
                     self._record_subscription_times(response)
                     failures = 0
                     self.connected = True
                     self.last_error = ""
                     self.last_poll_success_at = datetime.now(timezone.utc).isoformat()
-                    for notification in getattr(response, "NotificationMessage", []) or []:
-                        topic, message = self._extract_event(notification)
+                    for index, notification in enumerate(
+                        getattr(response, "NotificationMessage", []) or []
+                    ):
+                        raw_notification = (
+                            raw_notifications[index]
+                            if index < len(raw_notifications)
+                            else None
+                        )
+                        topic, message = self._extract_event(
+                            notification, raw_notification
+                        )
                         event_at = self._event_time(notification, message)
                         received_at = datetime.now(timezone.utc)
                         self.notifications_received += 1
@@ -340,7 +388,13 @@ class OnvifEventListener:
                         self.last_camera_event_at = event_at.isoformat() if event_at else ""
                         self.last_topic = topic
                         LOGGER.debug("ONVIF event %s: %s", topic, message[:300])
-                        motion_state = self._motion_event_state(topic, message)
+                        motion_state = (
+                            self._raw_notification_motion_state(raw_notification)
+                            if raw_notification is not None
+                            else None
+                        )
+                        if motion_state is None:
+                            motion_state = self._motion_event_state(topic, message)
                         if motion_state is True:
                             self.motion_events_received += 1
                             self.last_motion_event_at = received_at.isoformat()
@@ -474,6 +528,7 @@ class OnvifEventListener:
                 exc_info=True,
             )
         pullpoint = camera.create_pullpoint_service()
+        self._enable_pullmessages_capture(pullpoint)
         if stop_event.is_set() or not self._generation_matches(generation):
             self._unsubscribe(generation)
             self._close_transport(generation)
@@ -791,7 +846,118 @@ class OnvifEventListener:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
-    def _extract_event(self, notification: Any) -> tuple[str, str]:
+    def _enable_pullmessages_capture(self, pullpoint: Any) -> None:
+        if self._pullmessages_capture is not None:
+            return
+        plugins = getattr(getattr(pullpoint, "zeep_client", None), "plugins", None)
+        if not isinstance(plugins, list):
+            return
+        capture = _PullMessagesResponseCapture()
+        plugins.append(capture)
+        self._pullmessages_capture = capture
+
+    @staticmethod
+    def _normalized_topic(topic: str) -> str:
+        return "/".join(
+            segment.rsplit(":", 1)[-1].strip().lower()
+            for segment in str(topic or "").strip().split("/")
+            if segment.strip()
+        )
+
+    @staticmethod
+    def _xml_local_name(tag: str) -> str:
+        return str(tag).rsplit("}", 1)[-1]
+
+    @staticmethod
+    def _stringify_xml_static(element: Any) -> str:
+        try:
+            from lxml import etree
+
+            return etree.tostring(element, encoding="unicode")
+        except Exception:
+            try:
+                return ElementTree.tostring(element, encoding="unicode")
+            except Exception:
+                return str(element)
+
+    @classmethod
+    def _raw_pullmessages_notifications(
+        cls, raw_xml: str
+    ) -> list[_RawOnvifNotification]:
+        if not raw_xml:
+            return []
+        try:
+            root = ElementTree.fromstring(raw_xml)
+        except ElementTree.ParseError:
+            return []
+        notifications: list[_RawOnvifNotification] = []
+        for notification in root.iter():
+            if cls._xml_local_name(notification.tag) != "NotificationMessage":
+                continue
+            topic_element = next(
+                (
+                    child for child in notification
+                    if cls._xml_local_name(child.tag) == "Topic"
+                ),
+                None,
+            )
+            message_element = next(
+                (
+                    child for child in notification
+                    if cls._xml_local_name(child.tag) == "Message"
+                ),
+                None,
+            )
+            topic = str(topic_element.text or "").strip() if topic_element is not None else ""
+            message_xml = (
+                cls._stringify_xml_static(message_element)
+                if message_element is not None
+                else ""
+            )
+            simple_items = tuple(
+                (
+                    str(item.attrib.get("Name") or "").strip().lower(),
+                    str(item.attrib.get("Value") or "").strip().lower(),
+                )
+                for item in message_element.iter()
+                if cls._xml_local_name(item.tag) == "SimpleItem"
+                and str(item.attrib.get("Name") or "").strip()
+            ) if message_element is not None else ()
+            notifications.append(_RawOnvifNotification(
+                topic=topic,
+                normalized_topic=cls._normalized_topic(topic),
+                message_xml=message_xml,
+                simple_items=simple_items,
+            ))
+        return notifications
+
+    @staticmethod
+    def _raw_notification_motion_state(
+        notification: _RawOnvifNotification,
+    ) -> bool | None:
+        if notification.normalized_topic not in REOLINK_MOTION_TOPICS:
+            return None
+        state_values = [
+            value
+            for name, value in notification.simple_items
+            if name in {"ismotion", "motion", "state"}
+        ]
+        if state_values:
+            active = {"true", "1", "on", "active"}
+            inactive = {"false", "0", "off", "inactive"}
+            if any(value in active for value in state_values):
+                return True
+            if all(value in inactive for value in state_values):
+                return False
+        return True
+
+    def _extract_event(
+        self,
+        notification: Any,
+        raw_notification: _RawOnvifNotification | None = None,
+    ) -> tuple[str, str]:
+        if raw_notification is not None:
+            return raw_notification.topic, raw_notification.message_xml
         topic = str(getattr(notification, "Topic", ""))
         message = self._stringify_message(getattr(notification, "Message", ""))
         return topic, message
@@ -860,12 +1026,4 @@ class OnvifEventListener:
         return " ".join(part for part in parts if part)
 
     def _stringify_xml(self, element: Any) -> str:
-        try:
-            from lxml import etree
-
-            return etree.tostring(element, encoding="unicode")
-        except Exception:
-            try:
-                return ElementTree.tostring(element, encoding="unicode")
-            except Exception:
-                return str(element)
+        return self._stringify_xml_static(element)

@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from xml.etree import ElementTree
 
 from survng.app.baichuan_native import (
     BaichuanError,
@@ -22,7 +23,41 @@ from survng.app.onvif_events import (
     OnvifEventListener,
     STOP_FORCE_SECONDS,
     STOP_GRACE_SECONDS,
+    _PullMessagesResponseCapture,
 )
+
+
+REOLINK_PULLMESSAGES_XML = """
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+        xmlns:tev="http://www.onvif.org/ver10/events/wsdl"
+        xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"
+        xmlns:tt="http://www.onvif.org/ver10/schema">
+    <SOAP-ENV:Body>
+        <tev:PullMessagesResponse>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:VideoSource/MotionAlarm</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="true" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/VehicleDetect</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="false" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/DogCatDetect</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="true" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/PeopleDetect</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="true" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+            <wsnt:NotificationMessage>
+                <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/MyRuleDetector/FaceDetect</wsnt:Topic>
+                <wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="State" Value="true" /></tt:Data></tt:Message></wsnt:Message>
+            </wsnt:NotificationMessage>
+        </tev:PullMessagesResponse>
+    </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>
+"""
 
 
 def camera(*, onvif: bool = False) -> CameraConfig:
@@ -437,6 +472,40 @@ class CaptureProtocolTest(unittest.TestCase):
             )
         )
         self.assertIsNone(listener._motion_event_state("tns1:VideoSource", "signal ok"))
+
+    def test_reolink_pullmessages_parser_uses_raw_topic_and_simple_items(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        notifications = listener._raw_pullmessages_notifications(
+            REOLINK_PULLMESSAGES_XML
+        )
+
+        self.assertEqual(
+            [item.topic for item in notifications],
+            [
+                "tns1:VideoSource/MotionAlarm",
+                "tns1:RuleEngine/MyRuleDetector/VehicleDetect",
+                "tns1:RuleEngine/MyRuleDetector/DogCatDetect",
+                "tns1:RuleEngine/MyRuleDetector/PeopleDetect",
+                "tns1:RuleEngine/MyRuleDetector/FaceDetect",
+            ],
+        )
+        self.assertEqual(
+            [listener._raw_notification_motion_state(item) for item in notifications],
+            [True, False, True, True, True],
+        )
+        self.assertIn("SimpleItem", notifications[0].message_xml)
+
+    def test_pullmessages_ingress_capture_keeps_only_pullmessages_response(self) -> None:
+        capture = _PullMessagesResponseCapture()
+        envelope = ElementTree.fromstring(REOLINK_PULLMESSAGES_XML)
+
+        capture.ingress(envelope, {}, SimpleNamespace(name="PullMessages"))
+        capture.ingress(envelope, {}, SimpleNamespace(name="Renew"))
+
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        captured = listener._raw_pullmessages_notifications(capture.take())
+        self.assertEqual(len(captured), 5)
+        self.assertEqual(capture.take(), "")
 
     def test_onvif_effectiveness_degrades_without_changing_transport_health(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
