@@ -105,3 +105,4 @@ core*
 core.1326837
 openvino_model/metadata.yaml
 runtime/
+patches/
