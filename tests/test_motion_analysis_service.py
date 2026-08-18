@@ -673,8 +673,8 @@ def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:
         second_processed = np.zeros((90, 160), dtype=np.uint8)
         service.color_frames.extend(
             [
-                (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
-                (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
+                (99.5, np.full((90, 160, 3), 10, dtype=np.uint8)),
+                (100.0, np.full((90, 160, 3), 60, dtype=np.uint8)),
             ]
         )
         service.processed_frames.extend(
@@ -742,8 +742,8 @@ def test_adaptive_analysis_anchors_new_track_during_active_episode() -> None:
     service.events.episode_controller.minimum_followup_interval_seconds = 0.0
     with service.frame_lock:
         service.color_frames.extend([
-            (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
-            (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
+            (99.5, np.full((90, 160, 3), 15, dtype=np.uint8)),
+            (100.0, np.full((90, 160, 3), 80, dtype=np.uint8)),
         ])
 
     service.analyze_continuous(100.0)
@@ -883,8 +883,8 @@ def test_adaptive_enqueue_failure_releases_reservation() -> None:
     with service.frame_lock:
         service.color_frames.extend(
             [
-                (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
-                (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
+                (99.5, np.full((90, 160, 3), 18, dtype=np.uint8)),
+                (100.0, np.full((90, 160, 3), 90, dtype=np.uint8)),
             ]
         )
     service.events.enqueue = Mock(side_effect=RuntimeError("queue unavailable"))
@@ -897,6 +897,29 @@ def test_adaptive_enqueue_failure_releases_reservation() -> None:
         raise AssertionError("enqueue failure should remain visible to the worker")
 
     assert service.events.episode_controller.snapshot()["request_status"] == "aborted"
+
+
+def test_temporal_filter_skips_stable_scene() -> None:
+    accepted = MotionQualificationResult(True, 0.8, 0.48, "qualified", 3, {})
+    service = _service(
+        _hooks(
+            run_pipeline=Mock(return_value=accepted),
+            with_source_evidence=Mock(return_value=accepted),
+            trigger_mode="adaptive",
+        )
+    )
+    with service.frame_lock:
+        service.color_frames.extend(
+            [
+                (99.5, np.full((90, 160, 3), 45, dtype=np.uint8)),
+                (100.0, np.full((90, 160, 3), 45, dtype=np.uint8)),
+            ]
+        )
+
+    service.analyze_continuous(100.0)
+
+    assert list(service.events.queue.queue) == []
+    assert service.telemetry_snapshot()["temporal_filter_skips"] == 1
 
 
 def test_stop_requested_before_adaptive_admission_prevents_publication() -> None:
@@ -916,8 +939,8 @@ def test_stop_requested_before_adaptive_admission_prevents_publication() -> None
     with service.frame_lock:
         service.color_frames.extend(
             [
-                (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
-                (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
+                (99.5, np.full((90, 160, 3), 12, dtype=np.uint8)),
+                (100.0, np.full((90, 160, 3), 70, dtype=np.uint8)),
             ]
         )
 

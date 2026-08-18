@@ -163,6 +163,11 @@ class MotionAnalysisService:
         self.qualification = qualification
         self.media = media
         self.state = state
+        # Temporal filtering threshold: skip analysis if < this ratio of pixels changed
+        # Configurable in config.json as motion_qualification.temporal_filter_threshold
+        # Default: 0.005 (0.5% pixel change)
+        # Lower values = more aggressive skipping; Higher values = more analysis
+        self.temporal_filter_threshold = float(config.temporal_filter_threshold)
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
         self.evidence_frames: deque[MotionEvidenceFrame] = deque(
@@ -251,6 +256,7 @@ class MotionAnalysisService:
             "shared_reads_by_reason": {},
             "cached_derivative_reuse_count": 0,
             "cached_derivative_reuse_bytes": 0,
+            "temporal_filter_skips": 0,
         }
         self._timing_samples_ms: dict[str, deque[float]] = {
             "preprocess": deque(maxlen=600),
@@ -1018,6 +1024,38 @@ class MotionAnalysisService:
                     frame.setflags(write=False)
         if len(samples) < 2:
             return
+        
+        # Temporal filtering: skip analysis if frame is stable (no significant change)
+        if len(samples) >= 2:
+            prev_frame = samples[-2][1]
+            curr_frame = samples[-1][1]
+            
+            # Convert to grayscale if needed for comparison
+            if prev_frame.ndim == 3:
+                prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+                curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+            else:
+                prev_gray = prev_frame
+                curr_gray = curr_frame
+            
+            # Calculate pixel-wise difference
+            frame_diff = cv2.absdiff(prev_gray, curr_gray)
+
+            # Count pixels with significant change (> 5 value difference)
+            # Use NumPy here instead of cv2.countNonZero on a boolean mask, which
+            # OpenCV rejects with a type error.
+            changed_pixels = int(np.count_nonzero(frame_diff > 5))
+            total_pixels = frame_diff.size
+            pixel_change_ratio = changed_pixels / max(1, total_pixels)
+            
+            # If frame is stable, skip expensive analysis
+            if pixel_change_ratio < self.temporal_filter_threshold:
+                with self._telemetry_lock:
+                    self._telemetry["temporal_filter_skips"] = self._telemetry.get(
+                        "temporal_filter_skips", 0
+                    ) + 1
+                return
+        
         if cached_processed:
             with self._telemetry_lock:
                 self._telemetry["cached_derivative_reuse_count"] += len(

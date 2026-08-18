@@ -9012,7 +9012,7 @@ function TelemetryContinuity({ data }) {
   );
 }
 
-function TelemetryViewer({ data, cameraId, timeZone }) {
+function TelemetryViewer({ data, cameraId, timeZone, config }) {
   if (!data) return <div className="empty-state">Waiting for telemetry...</div>;
   const selected = cameraId ? data.cameras?.find((camera) => camera.id === cameraId) : null;
   const activity = selected?.activity || data.activity;
@@ -9274,6 +9274,12 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                   <div><dt>Performance gates</dt><dd>{(performance.checks || []).map((check) => `${check.label}: ${Number(check.value || 0).toFixed(check.unit === "%" ? 1 : 2)}${check.unit}`).join(" · ") || "Waiting for samples"}</dd></div>
                   <div><dt>Analyzed / stale skipped / deferred</dt><dd>{analyzed.toLocaleString()} / {superseded.toLocaleString()} / {Number(analysisRuntime.analysis_slot_deferrals || 0).toLocaleString()}</dd></div>
                   <div><dt>Motion passed / rejected / suppressed</dt><dd>{camera.motion?.passed || 0} / {camera.motion?.rejected || 0} / {camera.motion?.suppressed || 0}</dd></div>
+                  <div><dt>Temporal filter</dt><dd>{(() => {
+                    const threshold = Number(config?.motion_qualification?.temporal_filter_threshold ?? 0.005);
+                    return threshold > 0
+                      ? `Active · ${Number(camera.motion?.analysis_runtime?.temporal_filter_skips || 0).toLocaleString()} skips @ ${threshold.toFixed(3)}`
+                      : `Inactive · threshold ${threshold.toFixed(3)}`;
+                  })()}</dd></div>
                   <div><dt>Object admission / confidence / zone / confirmation / context</dt><dd>{Number(objectActivity.detector_admissions || 0).toLocaleString()} / {Number(objectActivity.confidence_rejections || 0).toLocaleString()} / {Number(objectActivity.zone_rejections || 0).toLocaleString()} / {Number(objectActivity.temporal_rejections || 0).toLocaleString()} / {Number(objectActivity.enforced_suppressions || 0).toLocaleString()}</dd></div>
                   <div><dt>Event queue peak / evicted / rejected / retry lost</dt><dd>{camera.motion?.event_runtime?.queue_high_water || 0} / {camera.motion?.event_runtime?.evicted || 0} / {camera.motion?.event_runtime?.rejected || 0} / {camera.motion?.event_runtime?.retries_dropped || 0}</dd></div>
                   <div><dt>EMA requests · admitted / merged / failed</dt><dd>{camera.motion?.event_runtime?.episode?.decision_counts?.request_admitted || 0} / {camera.motion?.event_runtime?.episode?.decision_counts?.merged_with_request || 0} / {camera.motion?.event_runtime?.episode?.decision_counts?.detector_failed || 0}</dd></div>
@@ -10689,7 +10695,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             </section>
             {(telemetry?.diagnostics?.recent || []).some((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()) ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent diagnostic reports</summary><div className="telemetry-diagnostic-list">{telemetry.diagnostics.recent.filter((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()).map((session) => <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? cameras.find((camera) => camera.id === session.camera_id)?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>{formatDateTime(session.started_at, timeZone)}</span></div><a className="button" href={appUrl(`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`)} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a></article>)}</div></details></section> : null}
             {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
-          </div> : <TelemetryViewer data={telemetry} cameraId={telemetrySection === "cameras" ? selectedTelemetryCamera : ""} timeZone={timeZone} />}</div>
+          </div> : <TelemetryViewer data={telemetry} cameraId={telemetrySection === "cameras" ? selectedTelemetryCamera : ""} timeZone={timeZone} config={config} />}</div>
         </section>
         </>
       ) : settingsTab === "maintenance" ? (
@@ -12810,6 +12816,7 @@ function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenS
           <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
           <label>Light and shadow filtering<select value={String(config.motion_qualification?.illumination_filter_enabled ?? false)} onChange={(event) => updateConfig(["motion_qualification", "illumination_filter_enabled"], event.target.value === "true")}><option value="false">Disabled</option><option value="true">Enabled</option></select><small>Ignores clear moving illumination while uncertain motion continues to object detection. Disabled still records evidence for evaluation.</small></label>
           <label>Analysis size<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select><small>Maximum image edge used by EMA; portrait cameras no longer expand beyond this size.</small></label>
+          <label>Frame stability filter<input type="number" min="0" max="1" step="0.001" value={config?.motion_qualification?.temporal_filter_threshold ?? 0.005} onChange={(event) => updateConfig(["motion_qualification", "temporal_filter_threshold"], Number(event.target.value))} /><small>Skip analysis if pixel change is below this ratio (0.005 = 0.5%). Lower = more skips, higher = more analysis. Skips: check telemetry for per-camera stats.</small></label>
           <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>
           <label>ONVIF background upkeep<select value={String(config.motion_qualification?.camera_mode_background_fps ?? 2)} onChange={(event) => updateConfig(["motion_qualification", "camera_mode_background_fps"], Number(event.target.value))}><option value="1">Low CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Faster adaptation (3 frames/sec)</option><option value="5">Maximum adaptation (5 frames/sec)</option></select><small>When camera alerts trigger motion, SurvNG maintains the visual background at this lower rate. Trigger validation still analyzes the full buffered window.</small></label>
           {config.motion_qualification?.mode === "camera_rescue" ? <>
