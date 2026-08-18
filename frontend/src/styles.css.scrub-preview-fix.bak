@@ -18890,7 +18890,6 @@ a.button {
     padding-inline: 6px;
   }
 }
-
 @media (max-width: 760px) {
   .live-camera-grid .camera-tile-chrome {
     min-height: 28px !important;
@@ -18946,7 +18945,6 @@ a.button {
 }
 
 @media (max-width: 760px) {
-
   .mobile-camera-picker,
   .recordings-v2-cameras {
     display: none !important;
@@ -18967,7 +18965,7 @@ a.button {
     padding-left: 8px;
   }
 
-  .mobile-camera-select>svg {
+  .mobile-camera-select > svg {
     width: 15px;
     height: 15px;
     pointer-events: none;
@@ -19152,7 +19150,7 @@ a.button {
     overflow: hidden !important;
   }
 
-  .recordings-v2-date>button {
+  .recordings-v2-date > button {
     display: none !important;
   }
 
@@ -19246,7 +19244,7 @@ a.button {
   }
 
   .recordings-v2-player.selected-camera-stage video,
-  .recordings-v2-player>video,
+  .recordings-v2-player > video,
   .recordings-v2-player.all-camera-grid video {
     inset: 0 !important;
     width: 100% !important;
@@ -19311,7 +19309,6 @@ a.button {
 
 /* SurvNG mobile final v1.0.1: hide Timeline evidence thumbnails */
 @media (max-width: 760px) {
-
   /*
    * RecordingTimeline renders its own event/evidence filmstrip inside the
    * scrubber when showThumbnails is true. This is the "Objects / Motion only"
@@ -19338,44 +19335,5 @@ a.button {
     height: 92px !important;
     min-height: 92px !important;
     overflow: hidden !important;
-  }
-}
-
-/* SurvNG mobile scrub preview stacking fix */
-@media (max-width: 760px) {
-  .recordings-v2-controls {
-    position: relative !important;
-    z-index: 30 !important;
-    overflow: visible !important;
-  }
-
-  .recordings-v2-timeline {
-    position: relative !important;
-    overflow: visible !important;
-  }
-
-  .recordings-v2-scrub-preview {
-    z-index: 100 !important;
-  }
-
-  .recordings-v2-player {
-    position: relative !important;
-    z-index: 1 !important;
-  }
-}
-
-@media (max-width: 760px) {
-
-  .recordings-v2-timeline,
-  .recordings-v2-track,
-  .recordings-v2-track input,
-  .recordings-v2-scrub-preview {
-    -webkit-user-select: none !important;
-    user-select: none !important;
-    -webkit-touch-callout: none !important;
-  }
-
-  .recordings-v2-track {
-    touch-action: none;
   }
 }

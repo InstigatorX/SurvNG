@@ -5334,13 +5334,20 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   );
 }
 
-function LiveCommandBar({ cameraCount, totalCameraCount, density, densityPage, densityPageCount, layoutMode, customAvailable, onDensityChange, onDensityPageChange, onLayoutModeChange, onResetLayout, onFullscreen }) {
+function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCameraChange = () => {}, cameraCount, totalCameraCount, density, densityPage, densityPageCount, layoutMode, customAvailable, onDensityChange, onDensityPageChange, onLayoutModeChange, onResetLayout, onFullscreen }) {
   return (
     <header className="live-command-bar">
       <div className="live-command-context">
         <span className="live-command-scope"><Grid2X2 size={15} /><strong>All cameras</strong><small>{cameraCount} of {totalCameraCount}</small></span>
         <strong className="live-command-mobile-title">Command Center</strong>
       </div>
+      <label className="mobile-camera-select live-mobile-camera-select">
+        <Camera size={15} aria-hidden="true" />
+        <span className="sr-only">Live camera</span>
+        <select value={focusedCameraId} onChange={(event) => onFocusedCameraChange(event.target.value)} aria-label="Live camera">
+          {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>)}
+        </select>
+      </label>
       <div className="live-density-control" role="group" aria-label="Visible camera density">
         {LIVE_DENSITY_OPTIONS.map((option) => <button type="button" key={option} className={density === option ? "active" : ""} aria-pressed={density === option} onClick={() => onDensityChange(option)}>{option === "fit" ? <Grid2X2 size={15} /> : option === "4" ? <><Grid2X2 size={13} /> 4</> : option}</button>)}
         {densityPageCount > 1 ? <span className="live-density-pages"><button type="button" onClick={() => onDensityPageChange(densityPage - 1)} disabled={densityPage === 0} aria-label="Previous camera page"><ChevronLeft size={15} /></button><small>{densityPage + 1}/{densityPageCount}</small><button type="button" onClick={() => onDensityPageChange(densityPage + 1)} disabled={densityPage >= densityPageCount - 1} aria-label="Next camera page"><ChevronRight size={15} /></button></span> : null}
@@ -5999,7 +6006,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
 
   return (
     <main ref={liveWorkspaceRef} className="bento-grid live-grid">
-      <LiveCommandBar cameraCount={visibleLiveCameras.length} totalCameraCount={orderedCameras.length} density={effectiveLiveDensity} densityPage={densitySelection.page} densityPageCount={densitySelection.pageCount} layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onDensityChange={changeLiveDensity} onDensityPageChange={setLiveDensityPageValue} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} onFullscreen={openLiveFullscreen} />
+      <LiveCommandBar cameras={orderedCameras} focusedCameraId={mobileFocusedCameraId} onFocusedCameraChange={setStoredMobileFocus} cameraCount={visibleLiveCameras.length} totalCameraCount={orderedCameras.length} density={effectiveLiveDensity} densityPage={densitySelection.page} densityPageCount={densitySelection.pageCount} layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onDensityChange={changeLiveDensity} onDensityPageChange={setLiveDensityPageValue} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} onFullscreen={openLiveFullscreen} />
       <div className="sr-only" role="status" aria-live="polite">{layoutAnnouncement}</div>
       <section className="bento-card camera-zone live-camera-zone">
         <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
@@ -7530,6 +7537,20 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           <strong>{isAllCameras ? "All cameras" : cameras.find((camera) => camera.id === activeCameraId)?.name || activeCameraId}</strong>
           <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
         </div>
+        <label className="mobile-camera-select timeline-mobile-camera-select">
+          <Camera size={15} aria-hidden="true" />
+          <span className="sr-only">Timeline camera</span>
+          <select
+            value={isAllCameras ? (cameras[0]?.id || "") : activeCameraId}
+            onChange={(event) => {
+              checkpointTimelineView();
+              setCameraId(event.target.value);
+            }}
+            aria-label="Timeline camera"
+          >
+            {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
+          </select>
+        </label>
         <div className="recordings-v2-date">
           <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={15} /></button>
           <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
