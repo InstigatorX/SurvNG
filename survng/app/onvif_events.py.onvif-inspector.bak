@@ -15,7 +15,6 @@ from xml.etree import ElementTree
 
 from .config import CameraConfig
 from .security import redact_secret_text
-from .onvif_inspector import ONVIF_INSPECTOR
 
 LOGGER = logging.getLogger("uvicorn.error")
 MOTION_WORDS = ("motion", "cellmotion", "person", "vehicle", "animal", "alarm")
@@ -154,7 +153,6 @@ class OnvifEventListener:
         self.subscription_lifetime_seconds: float | None = None
         self._subscription_granted_lifetime_seconds: float | None = None
         self._subscription_expires_monotonic: float | None = None
-        ONVIF_INSPECTOR.register_listener(self.camera.id, self)
 
     @property
     def running(self) -> bool:
@@ -406,35 +404,6 @@ class OnvifEventListener:
                         )
                         if motion_state is None:
                             motion_state = self._motion_event_state(topic, message)
-                        try:
-                            ONVIF_INSPECTOR.record(
-                                camera_id=self.camera.id,
-                                topic=topic,
-                                normalized_topic=(
-                                    raw_notification.normalized_topic
-                                    if raw_notification is not None
-                                    else self._normalized_topic(topic)
-                                ),
-                                active=motion_state,
-                                simple_items=(
-                                    raw_notification.simple_items
-                                    if raw_notification is not None
-                                    else ()
-                                ),
-                                message_xml=(
-                                    raw_notification.message_xml
-                                    if raw_notification is not None
-                                    else message
-                                ),
-                                received_at=received_at,
-                                event_at=event_at,
-                            )
-                        except Exception:
-                            LOGGER.debug(
-                                "ONVIF inspector observer failed for %s",
-                                self.camera.id,
-                                exc_info=True,
-                            )
                         if motion_state is True:
                             self.motion_events_received += 1
                             self.last_motion_event_at = received_at.isoformat()

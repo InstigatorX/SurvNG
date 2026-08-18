@@ -45,7 +45,6 @@ from .face_routes import (
     create_face_router,
 )
 from .frontend_routes import FrontendRouteDependencies, create_frontend_router
-from .onvif_inspector_routes import create_onvif_inspector_router
 from .manager import AppManager, validate_manager_configuration
 from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
@@ -794,7 +793,6 @@ _frontend_route_bundle = create_frontend_router(
     FrontendRouteDependencies(frontend_response=frontend_response)
 )
 app.include_router(_frontend_route_bundle.router)
-app.include_router(create_onvif_inspector_router())
 health = _frontend_route_bundle.handlers["health"]
 favicon = _frontend_route_bundle.handlers["favicon"]
 apple_touch_icon = _frontend_route_bundle.handlers["apple_touch_icon"]
@@ -811,7 +809,6 @@ incidents_page = _frontend_route_bundle.handlers["incidents_page"]
 faces_page = _frontend_route_bundle.handlers["faces_page"]
 people_page = _frontend_route_bundle.handlers["people_page"]
 live_page = _frontend_route_bundle.handlers["live_page"]
-onvif_page = _frontend_route_bundle.handlers["onvif_page"]
 
 _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(

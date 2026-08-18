@@ -13,7 +13,6 @@ export default defineConfig({
         main: resolve(__dirname, "index.html"),
         recordings: resolve(__dirname, "recordings.html"),
         config: resolve(__dirname, "config.html"),
-        onvif: resolve(__dirname, "onvif.html"),
       },
       output: {
         entryFileNames: "assets/[name]-[hash].js",

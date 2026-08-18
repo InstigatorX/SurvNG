@@ -54,7 +54,6 @@ def create_frontend_router(
         "faces_page": ("/faces", "index.html"),
         "people_page": ("/people", "index.html"),
         "live_page": ("/live", "index.html"),
-        "onvif_page": ("/onvif", "onvif.html"),
     }
     handlers: dict[str, Callable[..., Any]] = {
         "health": health,
