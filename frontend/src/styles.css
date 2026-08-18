@@ -2651,7 +2651,9 @@ button.status-pill.hud-toggle:disabled {
   padding: 8px;
 }
 
-.live-overlay-backdrop {
+button.live-overlay-backdrop,
+button.live-overlay-backdrop:hover:not(:disabled),
+button.live-overlay-backdrop:active {
   position: absolute;
   inset: 0;
   min-height: 0;
@@ -2659,6 +2661,7 @@ button.status-pill.hud-toggle:disabled {
   border-radius: 0;
   background: rgba(3, 10, 12, 0.76);
   backdrop-filter: blur(8px);
+  transition: none;
 }
 
 .live-overlay-panel {
