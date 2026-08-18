@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, nextTabId, preferredStoredValue, readAdminSubsection, readAdminWorkspace } from "../src/adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, nextTabId, preferredStoredValue, readAdminSubsection, readAdminWorkspace } from "../src/adminWorkspace.mjs";
+
+assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
+assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[0].items.slice(0, 4).map((item) => item.label), ["Cameras", "Detection", "Storage", "Integrations"]);
+assert.equal(adminDestination("general", { generalSection: "storage" }).id, "storage");
+assert.equal(adminDestination("telemetry", { telemetrySection: "diagnostics" }).id, "diagnostics");
+assert.equal(adminDestination("logs").id, "logs");
 
 assert.equal(adminWorkspaceId("telemetry"), "telemetry");
 assert.equal(adminWorkspaceId("invalid"), "general");

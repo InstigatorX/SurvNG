@@ -128,7 +128,7 @@ import { insertZonePointWithIndex } from "./zoneGeometry.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "./relatedIncidents.mjs";
 import { nextFaceReviewObservation } from "./faceReview.mjs";
 import { PEOPLE_REVIEW_FILTERS, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "./peopleWorkspace.mjs";
-import { ADMIN_WORKSPACES, GENERAL_SECTION_LABELS, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, nextTabId, preferredStoredValue, readAdminSubsection, readAdminWorkspace } from "./adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, nextTabId, preferredStoredValue, readAdminSubsection, readAdminWorkspace } from "./adminWorkspace.mjs";
 import {
   canonicalWorkspaceUrl,
   DESKTOP_PRIMARY_WORKSPACES,
@@ -148,14 +148,20 @@ const MEDIA_STORAGE_ROLES = [
   ["clips", "Clips"],
   ["exports", "Exports"],
 ];
-const ADMIN_WORKSPACE_ICONS = {
-  general: Cog,
+const ADMIN_DESTINATION_ICONS = {
   cameras: Camera,
+  detection: Cpu,
+  storage: HardDrive,
+  integrations: Radio,
+  preferences: Cog,
+  overview: Gauge,
+  health: ShieldCheck,
   audit: Activity,
-  calibration: Sparkles,
-  telemetry: Gauge,
-  maintenance: Wrench,
   logs: ListTree,
+  tuneup: Sparkles,
+  diagnostics: Wrench,
+  maintenance: HardDrive,
+  advisor: Sparkles,
 };
 const CAMERA_ADMIN_SECTIONS = ["settings", "motion", "zones", "info"];
 const TELEMETRY_ADMIN_SECTIONS = ["overview", "cameras", "diagnostics"];
@@ -9553,7 +9559,7 @@ function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
       </div>
       {activeRun ? <button type="button" className="tuneup-resume-card" onClick={() => { setSelectedRunId(activeRun.id); setSection("tuneup"); setWizardStep(3); }}><RefreshCcw className="spin" size={16} /><span><strong>Review in progress</strong><small>{tuneupHistoryTitle(activeRun, cameras)}</small></span></button> : null}
     </section>
-    <section id="admin-panel-calibration" className="bento-card config-editor settings-panel calibration-panel" role="tabpanel" aria-labelledby="admin-tab-calibration">
+    <section id="admin-panel-calibration" className="bento-card config-editor settings-panel calibration-panel" aria-labelledby="admin-destination-tuneup">
       <div className="section-head"><div><h2>{section === "tuneup" ? "Detection Tune-Up" : section === "monitoring" ? "Monitoring" : "Tune-Up History"}</h2><p>{section === "tuneup" ? "SurvNG reviews evidence; you approve every change" : section === "monitoring" ? "See how applied changes perform and undo them at any time" : "Past reviews, decisions, and results"}</p></div><button onClick={() => void loadCalibration()}><RefreshCcw size={16} /> Refresh</button></div>
       {error ? <div className="error-banner">{error}</div> : null}
       <div id="tuneup-section-panel" role="tabpanel" aria-labelledby={`tuneup-tab-${section}`}>
@@ -9635,6 +9641,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [diagnosticDuration, setDiagnosticDuration] = useState("3600");
   const [maintenance, setMaintenance] = useState(null);
   const [maintenanceError, setMaintenanceError] = useState("");
+  const [adminNavOpen, setAdminNavOpen] = useState(false);
   const [apiTokenSecretVisible, setApiTokenSecretVisible] = useState(false);
   const configLoadSequence = useRef(0);
   const adminHistoryWriteRef = useRef(true);
@@ -9705,19 +9712,39 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     return () => window.removeEventListener("popstate", restoreAdminWorkspace);
   }, [cameraSection, generalSection, selectedId, setSettingsTab, settingsTab, telemetryCamera, telemetrySection]);
 
-  function selectAdminWorkspace(nextTab) {
-    if (nextTab === settingsTab) return;
+  function selectAdminDestination(destination) {
+    const nextWorkspace = destination.workspace;
+    const nextSubsection = destination.subsection || "";
+    const alreadySelected = nextWorkspace === settingsTab && (
+      nextWorkspace === "general"
+        ? (nextSubsection || "general") === generalSection
+        : nextWorkspace === "telemetry"
+          ? (nextSubsection || "overview") === telemetrySection
+          : true
+    );
+    if (alreadySelected) {
+      setAdminNavOpen(false);
+      return;
+    }
     if (apiTokenSecretVisible && settingsTab === "general") {
       if (!window.confirm("The new API token secret is shown only once. Leave this section and discard the displayed secret?")) return;
       setApiTokenSecretVisible(false);
     }
     if (!confirmDiscardAdminChanges("Switch sections and discard unsaved changes?")) return;
-    const search = adminWorkspaceSearch(nextTab, window.location.search, adminLocationOptions(nextTab));
+    if (nextWorkspace === "general") setGeneralSection(nextSubsection || "general");
+    if (nextWorkspace === "telemetry") setTelemetrySection(nextSubsection || "overview");
+    const options = nextWorkspace === "general"
+      ? { subsection: nextSubsection === "general" ? "" : nextSubsection }
+      : nextWorkspace === "telemetry"
+        ? { subsection: nextSubsection === "overview" ? "" : nextSubsection, camera: nextSubsection === "cameras" ? telemetryCamera : "" }
+        : adminLocationOptions(nextWorkspace);
+    const search = adminWorkspaceSearch(nextWorkspace, window.location.search, options);
     const location = appUrl(`/admin${search}`);
-    window.history.pushState({ ...(window.history.state || {}), survngAdminSection: nextTab }, "", location);
+    window.history.pushState({ ...(window.history.state || {}), survngAdminSection: nextWorkspace }, "", location);
     acceptedAdminLocationRef.current = location;
     adminHistoryWriteRef.current = false;
-    setSettingsTab(nextTab);
+    setSettingsTab(nextWorkspace);
+    setAdminNavOpen(false);
   }
 
   function selectAdminSubsection(nextSubsection, setter, section = settingsTab, cameraOverride = "") {
@@ -10055,6 +10082,23 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     (baselineConfig.cameras || []).map((camera) => camera.id),
   );
   const adminDirty = generalDirty || cameraSettingsDirty || zonesDirty || cameraOrderDirty;
+  const activeAdminDestination = adminDestination(settingsTab, { generalSection, telemetrySection });
+  const currentAdminDirty = settingsTab === "general"
+    ? generalDirty
+    : settingsTab === "cameras"
+      ? selectedCameraSettingsDirty || selectedZonesDirty || cameraOrderDirty
+      : false;
+  const currentAdminSaving = generalSaving || cameraSaving || zonesSaving || cameraOrderSaving;
+  const adminSaveAvailable = settingsTab === "general" || settingsTab === "cameras";
+  const adminSaveImpact = settingsTab === "cameras"
+    ? selectedCameraSettingsDirty
+      ? "Camera settings save independently; only structural changes reload the affected camera worker."
+      : selectedZonesDirty
+        ? "Zone changes apply without restarting camera workers."
+        : cameraOrderDirty
+          ? "Camera order changes the interface only and does not restart camera workers."
+          : "Camera changes use scoped saves and avoid unnecessary worker restarts."
+    : "Settings apply selectively; the confirmation will identify any subsystem or camera worker that reloaded.";
   adminDirtyRef.current = adminDirty;
   apiTokenSecretVisibleRef.current = apiTokenSecretVisible;
   const selectedRuntimeStatus = runtimeStatus.find((camera) => camera.id === selectedCamera?.id);
@@ -10242,7 +10286,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   }
 
   async function saveCameraOrder() {
-    if (cameraOrderSaving) return;
+    if (cameraOrderSaving) return false;
     setCameraOrderSaving(true);
     setSaveNotice({ state: "saving", text: "Saving default camera order..." });
     try {
@@ -10260,8 +10304,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       }
       setCameraOrderEditing(false);
       setSaveNotice({ state: "saved", text: "Default live-view order saved." });
+      return true;
     } catch (error) {
       setSaveNotice({ state: "error", text: error.message || "Unable to save camera order." });
+      return false;
     } finally {
       setCameraOrderSaving(false);
       setDragConfigCameraId("");
@@ -10270,7 +10316,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   }
 
   async function save() {
-    if (generalSaving) return;
+    if (generalSaving) return false;
     const ids = new Set();
     const configToSave = {
       ...config,
@@ -10279,14 +10325,14 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     for (const camera of configToSave.cameras || []) {
       if (ids.has(camera.id)) {
         setSaveNotice({ state: "error", text: `Duplicate camera ID "${camera.id}". Fix duplicates before saving.` });
-        return;
+        return false;
       }
       ids.add(camera.id);
     }
     const mediaStorageError = mediaStorageConfigurationError(configToSave.media_storage);
     if (mediaStorageError) {
       setSaveNotice({ state: "error", text: mediaStorageError });
-      return;
+      return false;
     }
     setGeneralSaving(true);
     setSaveNotice({ state: "saving", text: "Saving settings..." });
@@ -10325,15 +10371,17 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
               : "Saved without interrupting cameras.",
         }
         : { state: "error", text: "Saved, but the refreshed configuration could not be loaded. Retry this page." });
+      return reloaded;
     } catch (error) {
       setSaveNotice({ state: "error", text: error.message || "Unable to save general settings." });
+      return false;
     } finally {
       setGeneralSaving(false);
     }
   }
 
   async function saveZones(camera) {
-    if (!camera || zonesSaving) return;
+    if (!camera || zonesSaving) return false;
     setZonesSaving(true);
     setSaveNotice({ state: "saving", text: "Saving zones..." });
     try {
@@ -10353,15 +10401,17 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       setSaveNotice({ state: "saved", text: "Zones saved without restarting cameras." });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
+      return true;
     } catch (error) {
       setSaveNotice({ state: "error", text: error.message || "Unable to save zones." });
+      return false;
     } finally {
       setZonesSaving(false);
     }
   }
 
   async function saveCamera(camera) {
-    if (!camera || cameraSaving) return;
+    if (!camera || cameraSaving) return false;
     setCameraSaving(true);
     setSaveNotice({ state: "saving", text: "Saving camera settings..." });
     try {
@@ -10400,11 +10450,24 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
+      return true;
     } catch (error) {
       setSaveNotice({ state: "error", text: error.message || "Unable to save camera settings." });
+      return false;
     } finally {
       setCameraSaving(false);
     }
+  }
+
+  async function saveCurrentAdminChanges() {
+    if (settingsTab === "general") {
+      if (generalDirty) await save();
+      return;
+    }
+    if (settingsTab !== "cameras" || !selectedCamera) return;
+    if (selectedCameraSettingsDirty && !await saveCamera(selectedCamera)) return;
+    if (selectedZonesDirty && !await saveZones(selectedCamera)) return;
+    if (cameraOrderDirty) await saveCameraOrder();
   }
 
   async function deleteCamera(camera) {
@@ -10476,16 +10539,30 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
 
   return (
     <main className="bento-grid config-grid settings-grid">
-      <div className="settings-tabs">
-        <div className="settings-context"><Cog size={18} /><span><strong>Admin</strong><small>Configure, understand, and maintain SurvNG</small></span></div>
-        <div id="admin-workspace-tabs" className="settings-tab-list" role="tablist" aria-label="Admin workspaces" onKeyDown={(event) => moveTabFocus(event, ADMIN_WORKSPACES.map((item) => item.id), settingsTab, selectAdminWorkspace)}>
-          {ADMIN_WORKSPACES.map((workspace) => {
-            const Icon = ADMIN_WORKSPACE_ICONS[workspace.id];
-            return <button id={`admin-tab-${workspace.id}`} data-tab-id={workspace.id} tabIndex={settingsTab === workspace.id ? 0 : -1} aria-controls={`admin-panel-${workspace.id}`} className={settingsTab === workspace.id ? "active" : ""} onClick={() => selectAdminWorkspace(workspace.id)} role="tab" aria-selected={settingsTab === workspace.id} key={workspace.id}><Icon size={16} /> {workspace.label}</button>;
-          })}
+      <button type="button" className={`admin-navigation-backdrop${adminNavOpen ? " open" : ""}`} aria-label="Close Admin menu" onClick={() => setAdminNavOpen(false)} />
+      <aside id="admin-navigation" className={`admin-navigation${adminNavOpen ? " open" : ""}`} aria-label="Admin navigation">
+        <div className="admin-navigation-head">
+          <span><Cog size={18} /><span><strong>Admin</strong><small>System administration</small></span></span>
+          <button type="button" className="admin-navigation-close" aria-label="Close Admin menu" onClick={() => setAdminNavOpen(false)}><X size={18} /></button>
         </div>
-        {adminDirty || saveNotice ? <div className="settings-status-stack">{adminDirty ? <span className="admin-dirty-indicator" role="status"><CircleDot size={14} />Unsaved changes<button type="button" onClick={discardAdminChanges}>Discard</button></span> : null}{saveNotice ? <span className={`camera-save-indicator settings-header-status ${saveNotice.state}`} role="status">{saveNotice.state === "saving" ? <RefreshCcw className="spin" size={14} /> : saveNotice.state === "error" ? <CircleAlert size={14} /> : <CircleDot size={14} />}{saveNotice.text}</span> : null}</div> : null}
-      </div>
+        <nav>
+          {ADMIN_RESPONSIBILITY_GROUPS.map((group) => <section key={group.id} aria-labelledby={`admin-group-${group.id}`}>
+            <h2 id={`admin-group-${group.id}`}>{group.label}</h2>
+            {group.items.map((destination) => {
+              const Icon = ADMIN_DESTINATION_ICONS[destination.id] || Cog;
+              const active = activeAdminDestination.id === destination.id;
+              return <button id={`admin-destination-${destination.id}`} type="button" className={`${active ? "active" : ""}${destination.secondary ? " secondary" : ""}`} aria-current={active ? "page" : undefined} onClick={() => selectAdminDestination(destination)} key={destination.id}><Icon size={16} /><span>{destination.label}</span></button>;
+            })}
+          </section>)}
+        </nav>
+      </aside>
+      <header className="admin-mobile-toolbar">
+        <button type="button" aria-controls="admin-navigation" aria-expanded={adminNavOpen} onClick={() => setAdminNavOpen(true)}><PanelLeftOpen size={18} />Menu</button>
+        <span><small>Admin</small><strong>{activeAdminDestination.label}</strong></span>
+        {currentAdminDirty ? <em>Unsaved</em> : null}
+      </header>
+
+      <div className={`admin-workspace-surface admin-workspace-${settingsTab}`}>
 
       {settingsTab === "general" ? (
         <>
@@ -10502,15 +10579,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             <button type="button" aria-current={generalSection === "motion-review" ? "page" : undefined} className={generalSection === "motion-review" ? "active" : ""} onClick={() => selectAdminSubsection("motion-review", setGeneralSection, "general")}><Sparkles size={16} /><span>Camera Advisor</span></button>
           </div>
         </section>
-        <section id="admin-panel-general" className="bento-card config-editor settings-panel" role="tabpanel" aria-labelledby="admin-tab-general">
+        <section id="admin-panel-general" className="bento-card config-editor settings-panel" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
           <div className="section-head">
             <div><h2>{GENERAL_SECTION_LABELS[generalSection] || "General"}</h2><p>{generalSection === "general" ? "Application preferences" : generalSection === "storage" ? "Media placement and retention" : generalSection === "mqtt" ? "API access and MQTT integration" : generalSection === "detection" ? "Models, inference, and object policy" : "Search, faces, tracking, and AI analysis"}</p></div>
-            {generalSection !== "motion-review" ? <div className="camera-command-area">
-              <button className="primary camera-save-button" onClick={save} disabled={generalSaving}>
-                {generalSaving ? <RefreshCcw className="spin" size={16} /> : <Save size={16} />}
-                {generalSaving ? "Saving..." : "Save settings"}
-              </button>
-            </div> : <span className="admin-action-kind">Advisor actions apply immediately</span>}
+            {generalSection === "motion-review" ? <span className="admin-action-kind">Advisor actions apply immediately</span> : null}
           </div>
           <GeneralSettings
             config={config}
@@ -10561,7 +10633,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             ))}
           </div>
         </section>
-        <section id="admin-panel-audit" className="bento-card config-editor settings-panel motion-audit-panel" role="tabpanel" aria-labelledby="admin-tab-audit">
+        <section id="admin-panel-audit" className="bento-card config-editor settings-panel motion-audit-panel" aria-labelledby="admin-destination-audit">
           <div className="section-head">
             <div><h2>{auditCategory === "visual_backup" ? "Visual Backup" : auditCategory === "active_followup" ? "Active-Event Follow-Up" : auditCategory === "qualification" ? "Filtered Motion" : "Motion Decisions"}</h2><p>Qualifier decisions, backup triggers, and detector outcomes</p></div>
             <button onClick={() => loadMotionAudit(auditPage)} disabled={auditLoading}><RefreshCcw className={auditLoading ? "spin" : ""} size={16} /> Refresh</button>
@@ -10589,7 +10661,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             {cameras.map((camera) => <button type="button" className={telemetrySection === "cameras" && selectedTelemetryCamera === camera.id ? "active" : ""} aria-pressed={telemetrySection === "cameras" && selectedTelemetryCamera === camera.id} key={camera.id} onClick={() => { setTelemetryCamera(camera.id); selectAdminSubsection("cameras", setTelemetrySection, "telemetry", camera.id); }}><Camera size={16} /><span>{camera.name || camera.id}</span></button>)}
           </div>
         </section> : null}
-        <section id="admin-panel-telemetry" className={`bento-card config-editor settings-panel telemetry-panel${telemetrySection === "cameras" ? "" : " settings-panel-wide"}`} role="tabpanel" aria-labelledby="admin-tab-telemetry">
+        <section id="admin-panel-telemetry" className={`bento-card config-editor settings-panel telemetry-panel${telemetrySection === "cameras" ? "" : " settings-panel-wide"}`} aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
           <div className="section-head telemetry-panel-head">
             <div><h2>Telemetry</h2><p>System, detection, event, and camera health</p></div>
             {telemetrySection === "overview" ? <TelemetryContinuity data={telemetry} /> : null}
@@ -10621,7 +10693,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         </section>
         </>
       ) : settingsTab === "maintenance" ? (
-        <section id="admin-panel-maintenance" className="bento-card config-editor settings-panel settings-panel-wide maintenance-panel" role="tabpanel" aria-labelledby="admin-tab-maintenance">
+        <section id="admin-panel-maintenance" className="bento-card config-editor settings-panel settings-panel-wide maintenance-panel" aria-labelledby="admin-destination-maintenance">
           <div className="section-head">
             <div><h2>Storage Reconciliation</h2><p>Find missing references, stale recording rows, and unlinked media</p></div>
             <div className="camera-command-area maintenance-actions">
@@ -10633,7 +10705,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           <MaintenanceViewer state={maintenance} />
         </section>
       ) : settingsTab === "logs" ? (
-        <section id="admin-panel-logs" className="bento-card config-editor settings-panel settings-panel-wide log-panel" role="tabpanel" aria-labelledby="admin-tab-logs">
+        <section id="admin-panel-logs" className="bento-card config-editor settings-panel settings-panel-wide log-panel" aria-labelledby="admin-destination-logs">
           <div className="section-head">
             <div><h2>Logs</h2><p>Live application log stream</p></div>
             <div className="log-command-controls"><label>Minimum severity<select value={logLevel} onChange={(event) => setLogLevel(event.target.value)}>{[["DEBUG", "Debug+"], ["INFO", "Info+"], ["WARNING", "Warning+"], ["ERROR", "Error+"], ["CRITICAL", "Critical"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><button onClick={loadLogs}><RefreshCcw size={16} /> Refresh</button></div>
@@ -10658,7 +10730,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                 <button type="button" onClick={() => moveSelectedCameraBy(-1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) <= 0}>Up</button>
                 <button type="button" onClick={() => moveSelectedCameraBy(1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) >= cameras.length - 1}>Down</button>
                 <button type="button" onClick={cancelCameraOrderEdit} disabled={cameraOrderSaving}>Cancel</button>
-                <button type="button" className="primary" onClick={saveCameraOrder} disabled={cameraOrderSaving}><Save size={14} /> {cameraOrderSaving ? "Saving" : "Save"}</button>
               </>
             ) : (
               <>
@@ -10721,7 +10792,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           ))}
         </div>
       </section>
-      <section id="admin-panel-cameras" className="bento-card config-editor" role="tabpanel" aria-labelledby="admin-tab-cameras">
+      <section id="admin-panel-cameras" className="bento-card config-editor" aria-labelledby="admin-destination-cameras">
         <div className="section-head">
           <div><h2>{selectedCamera ? selectedCamera.name : "Camera Config"}</h2><p>Changes save to config.json; only structural motion or camera changes interrupt the affected camera</p></div>
           {selectedCamera ? (
@@ -10730,10 +10801,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                 <button type="button" onClick={() => cloneCamera(selectedCamera)} disabled={cameraSaving}><Copy size={16} /> Clone</button>
                 <button type="button" onClick={() => probeCamera(selectedCamera)} disabled={cameraSaving}><Radar size={16} /> Auto-detect</button>
                 <button type="button" className="danger" onClick={() => deleteCamera(selectedCamera)} disabled={cameraSaving}><Trash2 size={16} /> Remove</button>
-                <button type="button" className="primary camera-save-button" onClick={() => saveCamera(selectedCamera)} disabled={cameraSaving}>
-                  {cameraSaving ? <RefreshCcw className="spin" size={16} /> : <Save size={16} />}
-                  {cameraSaving ? "Saving..." : "Save Camera"}
-                </button>
               </div>
             </div>
           ) : null}
@@ -10899,8 +10966,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                 camera={selectedCamera}
                 classOptions={zoneClassOptions}
                 onChange={(zones) => updateCamera(selectedCamera.id, ["zones"], zones)}
-                onSave={() => saveZones(selectedCamera)}
-                saving={zonesSaving}
               /> : null}
 
               {cameraSection === "info" ? <>
@@ -10916,6 +10981,17 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       </section>
         </>
       )}
+      </div>
+      {adminSaveAvailable ? <div className={`admin-save-bar${currentAdminDirty ? " dirty" : ""}`} role="region" aria-label="Save Admin changes">
+        <div className="admin-save-state" role="status" aria-live="polite">
+          {saveNotice?.state === "error" ? <CircleAlert size={17} /> : currentAdminSaving ? <RefreshCcw className="spin" size={17} /> : <CircleDot size={17} />}
+          <span><strong>{currentAdminSaving ? "Saving changes" : currentAdminDirty ? "Unsaved changes" : saveNotice?.state === "error" ? "Save failed" : "Changes saved"}</strong><small>{saveNotice?.state === "error" ? saveNotice.text : currentAdminDirty ? adminSaveImpact : saveNotice?.text || adminSaveImpact}</small></span>
+        </div>
+        <div className="admin-save-actions">
+          <button type="button" onClick={discardAdminChanges} disabled={!currentAdminDirty || currentAdminSaving}>Discard</button>
+          <button type="button" className="primary" onClick={() => void saveCurrentAdminChanges()} disabled={!currentAdminDirty || currentAdminSaving}>{currentAdminSaving ? <RefreshCcw className="spin" size={16} /> : <Save size={16} />}{currentAdminSaving ? "Saving…" : "Save changes"}</button>
+        </div>
+      </div> : null}
       {selectedAudit ? (
         <MotionAuditOverlay
           item={selectedAudit}
@@ -10929,7 +11005,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   );
 }
 
-function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = false }) {
+function ZoneEditor({ camera, classOptions = [], onChange }) {
   const zones = camera.zones || [];
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dragPoint, setDragPoint] = useState(null);
@@ -11081,7 +11157,6 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
         <div className="zone-settings-actions">
           <button type="button" onClick={undoPoint} disabled={!(pointAddHistory[selectedIndex]?.length)} title="Remove the last point added"><Undo2 size={15} /> Undo Point</button>
           <button type="button" onClick={addZone}><Plus size={15} /> Add Zone</button>
-          <button type="button" className="primary" onClick={onSave} disabled={saving}><Save size={15} /> {saving ? "Saving..." : "Save Zones"}</button>
         </div>
       </div>
       <div className="zone-editor-layout">

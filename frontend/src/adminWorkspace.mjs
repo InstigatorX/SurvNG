@@ -8,6 +8,52 @@ export const ADMIN_WORKSPACES = Object.freeze([
   { id: "logs", label: "Logs" },
 ]);
 
+export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
+  {
+    id: "configure",
+    label: "Configure",
+    items: [
+      { id: "cameras", label: "Cameras", workspace: "cameras" },
+      { id: "detection", label: "Detection", workspace: "general", subsection: "detection" },
+      { id: "storage", label: "Storage", workspace: "general", subsection: "storage" },
+      { id: "integrations", label: "Integrations", workspace: "general", subsection: "mqtt" },
+      { id: "preferences", label: "Preferences", workspace: "general", subsection: "general", secondary: true },
+    ],
+  },
+  {
+    id: "observe",
+    label: "Observe",
+    items: [
+      { id: "overview", label: "Overview", workspace: "telemetry", subsection: "overview" },
+      { id: "health", label: "Health", workspace: "telemetry", subsection: "cameras" },
+      { id: "audit", label: "Audit", workspace: "audit" },
+      { id: "logs", label: "Logs", workspace: "logs" },
+    ],
+  },
+  {
+    id: "act",
+    label: "Act",
+    items: [
+      { id: "tuneup", label: "Tune-Up", workspace: "calibration" },
+      { id: "diagnostics", label: "Diagnostics", workspace: "telemetry", subsection: "diagnostics" },
+      { id: "maintenance", label: "Maintenance", workspace: "maintenance" },
+      { id: "advisor", label: "Camera Advisor", workspace: "general", subsection: "motion-review", secondary: true },
+    ],
+  },
+]);
+
+export function adminDestination(workspace, { generalSection = "general", telemetrySection = "overview" } = {}) {
+  return ADMIN_RESPONSIBILITY_GROUPS
+    .flatMap((group) => group.items)
+    .find((item) => item.workspace === workspace && (
+      workspace === "general"
+        ? (item.subsection || "general") === generalSection
+        : workspace === "telemetry"
+          ? (item.subsection || "overview") === telemetrySection
+          : true
+    )) || ADMIN_RESPONSIBILITY_GROUPS[0].items[0];
+}
+
 export const GENERAL_SECTION_LABELS = Object.freeze({
   general: "General",
   storage: "Storage & Retention",

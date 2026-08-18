@@ -128,6 +128,23 @@ try {
   assert.equal(await page.locator(".faces-page").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length), 1);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
 
+  await page.goto("http://127.0.0.1:8088/survng/admin", { waitUntil: "networkidle", timeout: 30_000 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+  assert.equal(await page.getByRole("button", { name: "Save changes" }).isDisabled(), true);
+  const basePath = page.getByLabel("Web Base Path");
+  const savedBasePath = await basePath.inputValue();
+  await basePath.fill(`${savedBasePath}-unsaved`);
+  assert.equal(await page.getByRole("button", { name: "Save changes" }).isEnabled(), true);
+  await page.getByRole("button", { name: "Discard" }).click();
+  assert.equal(await basePath.inputValue(), savedBasePath);
+  await page.getByRole("button", { name: "Menu", exact: true }).click();
+  await page.locator(".admin-navigation.open").waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.querySelector(".admin-navigation")?.getBoundingClientRect().x >= -1);
+  assert.ok((await page.locator(".admin-navigation").boundingBox())?.x >= 0);
+  await page.getByRole("button", { name: "Detection", exact: true }).click();
+  assert.match(page.url(), /subsection=detection/);
+  assert.equal(await page.locator(".detection-subsection-tabs").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length), 2);
+
   await page.goto("http://127.0.0.1:8088/survng/timeline", { waitUntil: "domcontentloaded", timeout: 30_000 });
   assert.ok(await page.locator(".recordings-v2-page").evaluate((node) => node.scrollHeight > 800));
   assert.ok(await page.locator(".recording-grid-camera").first().evaluate((node) => node.getBoundingClientRect().height >= 44));
