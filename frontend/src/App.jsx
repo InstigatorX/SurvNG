@@ -6003,7 +6003,23 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
       <div className="sr-only" role="status" aria-live="polite">{layoutAnnouncement}</div>
       <section className="bento-card camera-zone live-camera-zone">
         <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
-          {orderedCameras.map((camera) => <button type="button" key={camera.id} className={camera.id === mobileFocusedCameraId ? "active" : ""} aria-pressed={camera.id === mobileFocusedCameraId} onClick={() => setStoredMobileFocus(camera.id)}>{camera.name || camera.id}</button>)}
+          {orderedCameras.map((camera) => {
+            const online = Boolean(camera.connected ?? camera.running);
+            const active = camera.id === mobileFocusedCameraId;
+            return (
+              <button
+                type="button"
+                key={camera.id}
+                className={active ? "active" : ""}
+                aria-pressed={active}
+                onClick={() => setStoredMobileFocus(camera.id)}
+              >
+                <Camera size={16} aria-hidden="true" />
+                <span>{camera.name || camera.id}</span>
+                <i className={online ? "online" : ""} aria-hidden="true" />
+              </button>
+            );
+          })}
         </div>
         <div
           ref={liveCameraGridRef}

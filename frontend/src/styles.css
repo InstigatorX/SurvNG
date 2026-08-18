@@ -18890,3 +18890,182 @@ a.button {
     padding-inline: 6px;
   }
 }
+
+/* SurvNG mobile Live compact + Timeline-style camera selector */
+@media (max-width: 760px) {
+  .mobile-camera-picker {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel-solid);
+    padding: 7px 8px;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mobile-camera-picker::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-camera-picker button {
+    display: grid;
+    grid-template-columns: 17px minmax(0, 1fr) 8px;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 8px;
+    min-width: 130px;
+    min-height: 44px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--control);
+    color: var(--ink);
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 560;
+    text-align: left;
+  }
+
+  .mobile-camera-picker button>svg {
+    width: 16px;
+    height: 16px;
+    color: var(--muted);
+  }
+
+  .mobile-camera-picker button>span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-camera-picker button>i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .mobile-camera-picker button>i.online {
+    background: #42ca66;
+  }
+
+  .mobile-camera-picker button.active {
+    border-color: var(--accent);
+    background: var(--active);
+    color: var(--active-ink);
+  }
+
+  .mobile-camera-picker button.active>svg {
+    color: var(--active-ink);
+  }
+
+  .topbar,
+  .app-shell>.topbar {
+    gap: 6px;
+    min-height: calc(46px + var(--safe-area-top));
+    padding: calc(4px + var(--safe-area-top)) 5px 4px;
+  }
+
+  .brand-block {
+    gap: 7px;
+  }
+
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    flex-basis: 28px;
+  }
+
+  .brand-title>strong {
+    font-size: 19px;
+  }
+
+  .live-grid {
+    padding-top: 4px;
+  }
+
+  .live-camera-grid,
+  .camera-grid.live-camera-grid {
+    gap: 4px;
+    column-gap: 4px;
+    row-gap: 4px;
+    padding: 4px;
+  }
+
+  .live-camera-grid .camera-tile,
+  .camera-grid.live-camera-grid .camera-tile {
+    margin: 0;
+    padding: 2px;
+    border-radius: 4px;
+  }
+
+  .live-camera-grid .tile-header {
+    gap: 4px;
+    padding: 0;
+  }
+
+  .live-camera-grid .camera-tile.mobile-primary .tile-control-button,
+  .live-camera-grid .camera-tile.mobile-primary button.status-pill {
+    min-height: 32px;
+  }
+
+  .live-camera-grid .camera-tile.mobile-primary .tile-header {
+    min-height: 36px;
+  }
+
+  .live-camera-grid .camera-tile:not(.mobile-primary) .tile-header {
+    min-height: 30px;
+  }
+}
+
+@media (max-width: 760px) {
+  .live-camera-grid .camera-tile-chrome {
+    min-height: 28px !important;
+    height: 28px !important;
+    padding: 0 4px !important;
+    gap: 4px !important;
+  }
+
+  .live-camera-grid .camera-tile-name {
+    gap: 4px;
+  }
+
+  .live-camera-grid .camera-tile-name i {
+    width: 7px;
+    height: 7px;
+    flex-basis: 7px;
+  }
+
+  .live-camera-grid .camera-tile-name strong {
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .live-camera-grid .camera-tile-time {
+    font-size: 9px;
+    line-height: 1;
+  }
+
+  .live-camera-grid .camera-tile-actions {
+    gap: 3px;
+  }
+
+  .live-camera-grid .camera-tile-live-state {
+    min-height: 20px !important;
+    height: 20px;
+    padding: 0 5px !important;
+    font-size: 9px;
+    line-height: 20px;
+  }
+
+  .live-camera-grid .camera-tile-menu {
+    width: 26px !important;
+    min-width: 26px !important;
+    height: 26px !important;
+    min-height: 26px !important;
+    padding: 0 !important;
+  }
+}
