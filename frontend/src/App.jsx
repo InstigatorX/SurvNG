@@ -3645,7 +3645,7 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
           return (
             <button type="button" className={selected ? "selected" : ""} key={eventId} onClick={() => onSelect(match)} disabled={pending} aria-pressed={selected} title={match.route_name ? `${match.route_name}: ${relatedEvidenceLabel(match)}` : `Preview related incident from ${cameraNameById.get(match.camera_id) || match.camera_id}`}>
               <img src={appUrl(relatedIncidentThumbnailPath(eventId))} alt={`${cameraNameById.get(match.camera_id) || match.camera_id} related incident`} loading="lazy" />
-              <span><strong>{cameraNameById.get(match.camera_id) || match.camera_id}</strong><b>{relatedEvidenceLabel(match)}</b></span>
+              <strong>{cameraNameById.get(match.camera_id) || match.camera_id}</strong>
               <small>{pending ? "Loading…" : formatDateTime(match.created_at, timeZone)}</small>
             </button>
           );

@@ -1250,34 +1250,22 @@ p {
   background: var(--thumb);
 }
 
-.incident-related-grid span {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-  min-width: 0;
-  padding: 4px 5px 1px;
-}
-
 .incident-related-grid strong {
   min-width: 0;
+  padding: 3px 5px 0;
   overflow: hidden;
   font-size: 9px;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.incident-related-grid b {
-  color: var(--active-ink);
-  font-size: 9px;
-  text-align: right;
 }
 
 .incident-related-grid small {
   overflow: hidden;
   color: var(--muted);
   font-size: 8px;
-  padding: 0 5px 5px;
+  line-height: 1;
+  padding: 0 5px 3px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

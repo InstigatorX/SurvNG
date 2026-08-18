@@ -6,16 +6,18 @@ assert.equal(relatedIncidentsPath(42, 48, 8), "/api/events/42/related-incidents?
 assert.equal(relatedIncidentThumbnailPath(42), "/api/events/42/thumbnail.jpg?width=360&quality=80");
 assert.equal(relatedIncidentThumbnailPath(42, 720, 92), "/api/events/42/thumbnail.jpg?width=720&quality=92");
 
-const matches = visibleRelatedAppearances({ matches: [
-  { event_id: 7, similarity: 1, visually_similar: true },
-  { event_id: 8, similarity: 0.82, visually_similar: true },
-  { event_id: 9, similarity: 0.95, visually_similar: false },
-  { event_id: 11, sequence_delta_seconds: 4.2, relation_type: "sequence_candidate", visually_similar: false },
-  { event_id: 12, sequence_delta_seconds: 3.8, relation_type: "expected_route", route_name: "Back yard to gate", visually_similar: false },
-  { event_id: 10, similarity: 0.91, visually_similar: true },
-  { event_id: 8, similarity: 0.89, visually_similar: true },
-  { event_id: "invalid", similarity: 0.99, visually_similar: true },
-] }, 7);
+const matches = visibleRelatedAppearances({
+  matches: [
+    { event_id: 7, similarity: 1, visually_similar: true },
+    { event_id: 8, similarity: 0.82, visually_similar: true },
+    { event_id: 9, similarity: 0.95, visually_similar: false },
+    { event_id: 11, sequence_delta_seconds: 4.2, relation_type: "sequence_candidate", visually_similar: false },
+    { event_id: 12, sequence_delta_seconds: 3.8, relation_type: "expected_route", route_name: "Back yard to gate", visually_similar: false },
+    { event_id: 10, similarity: 0.91, visually_similar: true },
+    { event_id: 8, similarity: 0.89, visually_similar: true },
+    { event_id: "invalid", similarity: 0.99, visually_similar: true },
+  ]
+}, 7);
 
 assert.deepEqual(matches.map((match) => match.event_id), [12, 10, 8, 11]);
 assert.deepEqual(visibleRelatedAppearances({ matches: [] }, 7), []);
