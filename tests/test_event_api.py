@@ -194,13 +194,84 @@ class EventApiSerializationTest(unittest.TestCase):
             config=app_config,
         )
 
-        with patch.object(main, "manager", active_manager):
+        with (
+            patch.object(main, "manager", active_manager),
+            patch.object(
+                main.INCIDENT_QUERIES,
+                "resolve_event",
+                return_value={"id": "incident-gate-8", "representative_event_id": 8},
+            ),
+        ):
             response = main.event_related_incidents(7)
 
         self.assertEqual(response["configured_routes"], 1)
         self.assertEqual(response["matches"][0]["relation_type"], "expected_route")
         self.assertEqual(response["matches"][0]["route_name"], "Back yard to gate")
         self.assertEqual(response["matches"][0]["sequence_delta_seconds"], 4.0)
+        self.assertEqual(response["matches"][0]["incident_id"], "incident-gate-8")
+
+    def test_related_incidents_collapses_duplicate_route_observations(self) -> None:
+        person_objects = json.dumps([{"label": "person", "incident_eligible": True}])
+        anchor = {
+            "id": 7,
+            "camera_id": "upper-garage",
+            "created_at": "2026-08-05T21:52:05+00:00",
+            "objects_json": person_objects,
+        }
+        candidates = [
+            {
+                "id": 8,
+                "camera_id": "front-door",
+                "created_at": "2026-08-05T21:52:08+00:00",
+                "objects_json": person_objects,
+                "recording_path": "/recordings/front-door/segment.mp4",
+            },
+            {
+                "id": 9,
+                "camera_id": "front-door",
+                "created_at": "2026-08-05T21:52:08.500000+00:00",
+                "objects_json": person_objects,
+                "recording_path": "/recordings/front-door/segment.mp4",
+            },
+        ]
+        app_config = AppConfig.model_validate({
+            "cameras": [
+                {"id": "upper-garage", "name": "Upper Garage", "stream_url": "rtsp://example.invalid/a"},
+                {"id": "front-door", "name": "Front Door", "stream_url": "rtsp://example.invalid/b"},
+            ],
+            "detector": {"tracking": {
+                "camera_transition_routes": [{
+                    "from_camera": "upper-garage",
+                    "to_camera": "front-door",
+                    "min_seconds": 0,
+                    "max_seconds": 30,
+                }],
+            }},
+        })
+        events = SimpleNamespace(
+            get=lambda event_id: anchor if event_id == 7 else None,
+            between=Mock(return_value=[*candidates, anchor]),
+        )
+        active_manager = SimpleNamespace(
+            events=events,
+            appearance_index=SimpleNamespace(matches=Mock(return_value=[])),
+            config=app_config,
+        )
+
+        def resolve_event(_manager, event_id: int):
+            return {
+                "id": "incident-front-door-8",
+                "representative_event_id": 8,
+            } if event_id in {8, 9} else None
+
+        with (
+            patch.object(main, "manager", active_manager),
+            patch.object(main.INCIDENT_QUERIES, "resolve_event", side_effect=resolve_event),
+        ):
+            response = main.event_related_incidents(7)
+
+        self.assertEqual([match["event_id"] for match in response["matches"]], [8])
+        self.assertEqual(response["matches"][0]["incident_id"], "incident-front-door-8")
 
     def test_incident_for_event_returns_complete_resolved_incident(self) -> None:
         expected = {

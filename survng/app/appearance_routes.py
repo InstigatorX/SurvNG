@@ -25,6 +25,7 @@ class AppearanceRouteDependencies:
     get_manager: Callable[[], AppManager]
     manager_lock: threading.RLock
     manager_access: ManagerAccessCoordinator | None = None
+    resolve_incident: Callable[[AppManager, int], dict[str, Any] | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,37 @@ def _appearance_family_labels(event: dict[str, Any], tracking: Any) -> set[str]:
     if labels & vehicle_labels:
         families.add("vehicle")
     return families
+
+
+def _collapse_related_route_observations(
+    matches: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    retained: list[dict[str, Any]] = []
+    seen: dict[tuple[str, str, str, str, str], datetime] = {}
+    for match in matches:
+        relation_type = str(match.get("relation_type") or "")
+        recording_path = str(match.get("_recording_path") or "")
+        created_at = match.get("_created_at")
+        if (
+            relation_type not in {"expected_route", "appearance_route"}
+            or not recording_path
+            or not isinstance(created_at, datetime)
+        ):
+            retained.append(match)
+            continue
+        key = (
+            str(match.get("camera_id") or ""),
+            str(match.get("model_kind") or ""),
+            str(match.get("route_from_camera") or ""),
+            str(match.get("route_to_camera") or ""),
+            recording_path,
+        )
+        previous_at = seen.get(key)
+        if previous_at is not None and abs((created_at - previous_at).total_seconds()) <= 2.0:
+            continue
+        seen[key] = created_at
+        retained.append(match)
+    return retained
 
 
 def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRouteBundle:
@@ -298,6 +330,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                     "event_id": candidate_id,
                     "camera_id": str(candidate.get("camera_id") or ""),
                     "created_at": str(candidate.get("created_at") or ""),
+                    "_created_at": candidate_at,
+                    "_recording_path": str(candidate.get("recording_path") or ""),
                     "model_kind": shared_families[0],
                     "sequence_delta_seconds": round(delta, 3),
                     "relation_type": relation_type,
@@ -319,7 +353,39 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                     float(item.get("sequence_delta_seconds") or 1e12),
                     -float(item.get("similarity") or 0.0),
                 ),
-            )[:bounded_limit]
+            )
+            resolved: dict[str, dict[str, Any]] = {}
+            for item in _collapse_related_route_observations(ordered):
+                candidate_id = int(item["event_id"])
+                incident = (
+                    deps.resolve_incident(active_manager, candidate_id)
+                    if deps.resolve_incident is not None
+                    else None
+                )
+                if incident is None:
+                    incident_id = f"event:{candidate_id}"
+                    representative_event_id = candidate_id
+                else:
+                    incident_id = str(incident.get("id") or f"event:{candidate_id}")
+                    representative_event_id = int(
+                        incident.get("representative_event_id") or candidate_id
+                    )
+                existing = resolved.get(incident_id)
+                if existing is not None:
+                    continue
+                resolved[incident_id] = {
+                    **item,
+                    "event_id": representative_event_id,
+                    "incident_id": incident_id,
+                }
+            ordered = [
+                {
+                    key: value
+                    for key, value in item.items()
+                    if not key.startswith("_")
+                }
+                for item in list(resolved.values())[:bounded_limit]
+            ]
             return {
                 "event_id": event_id,
                 "hours": bounded_hours,

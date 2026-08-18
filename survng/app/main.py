@@ -964,6 +964,9 @@ _appearance_route_bundle = create_appearance_router(
         get_manager=lambda: manager,
         manager_lock=MANAGER_RELOAD_LOCK,
         manager_access=MANAGER_ACCESS,
+        resolve_incident=lambda active, event_id: INCIDENT_QUERIES.resolve_event(
+            active, event_id
+        ),
     )
 )
 app.include_router(_appearance_route_bundle.router)
