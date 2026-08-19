@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -49,6 +49,9 @@ assert.deepEqual(timelineViewport(0, 24 * 3600, 12 * 3600, 2), { startEpoch: 11 
 assert.deepEqual(timelineViewport(0, 24 * 3600, 15 * 60, 2), { startEpoch: 0, endEpoch: 2 * 3600 });
 assert.deepEqual(timelineViewport(0, 24 * 3600, 23.75 * 3600, 2), { startEpoch: 22 * 3600, endEpoch: 24 * 3600 });
 assert.deepEqual(timelineViewport(0, 24 * 3600, 12 * 3600, 24), { startEpoch: 0, endEpoch: 24 * 3600 });
+assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, 1), { startEpoch: 12 * 3600, endEpoch: 14 * 3600 });
+assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 0, endEpoch: 2 * 3600 }, -1), { startEpoch: 0, endEpoch: 2 * 3600 });
+assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 22 * 3600, endEpoch: 24 * 3600 }, 1), { startEpoch: 22 * 3600, endEpoch: 24 * 3600 });
 const filteredEvidence = [
   { id: 1, incident_epoch: 10, has_objects: true, labels: ["person"] },
   { id: 2, incident_epoch: 11, has_objects: true, labels: ["car"] },

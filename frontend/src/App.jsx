@@ -119,7 +119,7 @@ import { recordingCameraAspect, recordingGridBestEpoch } from "./recordingGrid.m
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "./liveWorkspace.mjs";
 import { camerasWithLiveFraming, liveFramingStyle, normalizedLiveFraming } from "./liveFraming.mjs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, timelineViewport, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -6826,6 +6826,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [timelineInspectorOpen, setTimelineInspectorOpen] = useState(false);
   const [cameraQuery, setCameraQuery] = useState("");
   const [playbackRate, setPlaybackRate] = useState(initialView.speed);
+  const [timelineViewportAnchor, setTimelineViewportAnchor] = useState(initialView.at);
 
   useEffect(() => {
     if (!timelineInspectorOpen) return undefined;
@@ -6895,10 +6896,12 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     () => timelineViewport(
       dayStart,
       dayEnd,
-      Number.isFinite(playhead) ? playhead : desiredEpochRef.current,
+      Number.isFinite(timelineViewportAnchor)
+        ? timelineViewportAnchor
+        : Number.isFinite(playhead) ? playhead : desiredEpochRef.current,
       incidentRangeHours,
     ),
-    [dayEnd, dayStart, incidentRangeHours, playhead],
+    [dayEnd, dayStart, incidentRangeHours, playhead, timelineViewportAnchor],
   );
 
   const timelineEvents = useMemo(() => events
@@ -6920,6 +6923,16 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     if (!timelineEvents.length) return;
     if (selectedEvent?.id !== selectedEventId) setSelectedEventId(selectedEvent?.id ?? null);
   }, [selectedEvent?.id, selectedEventId, timelineEvents.length]);
+
+  useEffect(() => {
+    setTimelineViewportAnchor(null);
+  }, [activeCameraId, date, source]);
+
+  useEffect(() => {
+    if (!Number.isFinite(timelineViewportAnchor) && Number.isFinite(playhead)) {
+      setTimelineViewportAnchor(playhead);
+    }
+  }, [playhead, timelineViewportAnchor]);
   const selectedEventEnd = selectedEvent ? recordingIncidentEndEpoch(selectedEvent) : null;
   const selectedEventDuration = selectedEvent && Number.isFinite(selectedEventEnd)
     ? Math.max(0, selectedEventEnd - selectedEvent.incident_epoch)
@@ -7069,9 +7082,16 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     });
   }
 
-  function playAt(epoch, autoplay = true) {
+  function playAt(epoch, autoplay = true, preserveTimelineViewport = false) {
     const target = snapToRecording(epoch);
     if (target === null || !activeCameraId) return;
+    if (
+      !preserveTimelineViewport
+      && (
+      target < timelineView.startEpoch
+      || target > timelineView.endEpoch
+      )
+    ) setTimelineViewportAnchor(target);
     if (isAllCameras) {
       autoplayRef.current = autoplay;
       setGridPlaying(autoplay);
@@ -7111,6 +7131,24 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       setPlaybackNotice("Loading recording...");
       requestPlaybackWindow(nextWindow);
     }
+  }
+
+  function pageTimelineViewport(direction) {
+    const next = timelineViewportPage(
+      dayStart,
+      dayEnd,
+      timelineView,
+      direction,
+    );
+    if (next.startEpoch === timelineView.startEpoch) return;
+    setTimelineViewportAnchor((next.startEpoch + next.endEpoch) / 2);
+    const current = Number(playhead);
+    if (current >= next.startEpoch && current <= next.endEpoch) return;
+    const target = current < next.startEpoch
+      ? next.startEpoch
+      : Math.max(next.startEpoch, next.endEpoch - 0.01);
+    const autoplay = isAllCameras ? gridPlaying : !videoRef.current?.paused;
+    playAt(target, autoplay, true);
   }
 
   useEffect(() => {
@@ -7723,7 +7761,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               </div>
               <label className="recordings-v2-range">
                 <span>Window</span>
-                <select value={incidentRangeHours} onChange={(event) => { checkpointTimelineView(); setIncidentRangeHours(Number(event.target.value)); }} aria-label="Incident thumbnail time range">
+                <select value={incidentRangeHours} onChange={(event) => { checkpointTimelineView(); setTimelineViewportAnchor(playhead); setIncidentRangeHours(Number(event.target.value)); }} aria-label="Timeline time window">
                   <option value="1">1 hour</option><option value="2">2 hours</option><option value="4">4 hours</option><option value="8">8 hours</option><option value="12">12 hours</option><option value="24">Full day</option>
                 </select>
               </label>
@@ -7755,6 +7793,9 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             playhead={playhead ?? dayStart}
             timeZone={timeZone}
             onSeek={(epoch) => playAt(epoch, true)}
+            onPageViewport={pageTimelineViewport}
+            canPageBackward={timelineView.startEpoch > dayStart}
+            canPageForward={timelineView.endEpoch < dayEnd}
             exportRange={isAllCameras ? null : exportRange}
             onExportRangeChange={isAllCameras || exportJob ? null : setExportRange}
           />
@@ -8199,7 +8240,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, showThumbnails, selectedEventId, onEventSelect, playhead, timeZone, onSeek, exportRange, onExportRangeChange }) {
+function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, showThumbnails, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onPageViewport, canPageBackward, canPageForward, exportRange, onExportRangeChange }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const [draft, setDraft] = useState(offset);
@@ -8622,6 +8663,8 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
         <span className={evidenceFilter === "motion" ? "active motion" : "motion"}>Motion only ({eventMarkers.filter((event) => !event.hasObjects).length})</span>
       </div>
       <div className="recordings-v2-track">
+        {onPageViewport ? <button type="button" className="recordings-v2-timeline-page previous" onClick={() => onPageViewport(-1)} disabled={!canPageBackward} aria-label="Previous timeline window" title="Previous half-window"><ChevronLeft size={16} /></button> : null}
+        {onPageViewport ? <button type="button" className="recordings-v2-timeline-page next" onClick={() => onPageViewport(1)} disabled={!canPageForward} aria-label="Next timeline window" title="Next half-window"><ChevronRight size={16} /></button> : null}
         <div className="recordings-v2-ticks" aria-hidden="true">
           {ticks.map((tick) => (
             <span className={tick.kind} key={tick.epoch} style={{ left: `${((tick.epoch - startEpoch) / duration) * 100}%` }}>

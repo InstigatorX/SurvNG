@@ -92,6 +92,18 @@ export function timelineViewport(startEpoch, endEpoch, anchorEpoch, windowHours)
   return { startEpoch: viewportStart, endEpoch: viewportStart + span };
 }
 
+export function timelineViewportPage(startEpoch, endEpoch, viewport, direction) {
+  const start = Number(startEpoch);
+  const end = Number(endEpoch);
+  const currentStart = Number(viewport?.startEpoch);
+  const currentEnd = Number(viewport?.endEpoch);
+  const span = Math.max(1, currentEnd - currentStart);
+  const maximumStart = Math.max(start, end - span);
+  const shift = direction < 0 ? -span / 2 : span / 2;
+  const nextStart = Math.max(start, Math.min(maximumStart, currentStart + shift));
+  return { startEpoch: nextStart, endEpoch: nextStart + span };
+}
+
 export function parseTimelineView(search, today = "") {
   const params = search instanceof URLSearchParams ? search : new URLSearchParams(search || "");
   const rawDate = params.get("date") || today;

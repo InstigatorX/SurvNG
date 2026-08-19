@@ -15438,6 +15438,26 @@ a:focus-visible {
   background: color-mix(in srgb, var(--canvas) 78%, transparent);
 }
 
+.recordings-v2-timeline-page {
+  position: absolute;
+  z-index: 8;
+  top: 50%;
+  display: grid;
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  place-items: center;
+  transform: translateY(-50%);
+  border-color: color-mix(in srgb, var(--line) 76%, var(--canvas));
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--panel-solid) 84%, transparent);
+}
+
+.recordings-v2-timeline-page.previous { left: 4px; }
+.recordings-v2-timeline-page.next { right: 4px; }
+
 .recordings-v2-event-lane.hidden {
   display: none;
 }
