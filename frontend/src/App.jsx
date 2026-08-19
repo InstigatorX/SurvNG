@@ -3558,7 +3558,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
             highQualityZoom={desktopWorkspace && expanded && snapshotZoom.scale > 1}
             showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
             showTracking={false}
-            incidentEligibleOnly={!expanded}
+            incidentEligibleOnly
             thumbnail={!desktopWorkspace || !expanded}
             onImageSize={expanded && onImageSize ? (size) => onImageSize({
               ...size,
@@ -4483,6 +4483,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             onRequestFullResolution={() => setFullSnapshotRequested(true)}
             showAnnotations
             showTracking={trackingVisible && !manualDetection}
+            incidentEligibleOnly
             onImageSize={setMediaSize}
           />
           {videoActive && clipInfo && playback && !clipError ? (
