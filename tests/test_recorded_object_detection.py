@@ -131,6 +131,29 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(objects[0]["incident_eligible"])
         self.assertFalse(objects[0]["temporal_low_confidence_confirmation"])
 
+    def test_low_confidence_representative_cannot_use_stale_eligibility(self) -> None:
+        observations = []
+        for offset, confidence in ((-0.5, 0.8), (0.0, 0.49)):
+            candidate = detected("car", confidence, (2, 2, 20, 19))
+            candidate.update({
+                "confidence_threshold": 0.72,
+                "confidence_eligible": True,
+                "temporal_candidate_eligible": True,
+                "temporal_candidate_threshold": 0.25,
+                "spatial_zone_eligible": True,
+            })
+            objects = [candidate]
+            if offset == 0.0:
+                objects.append(detected("person", 0.8, (22, 2, 29, 19)))
+            observations.append(sample(offset, objects))
+
+        selected, objects = _temporal_consensus(observations, minimum_confirmations=2)
+
+        self.assertEqual(selected.offset, 0.0)
+        car = next(item for item in objects if item.get("label") == "car")
+        self.assertFalse(car["incident_eligible"])
+        self.assertEqual(car["temporal_incident_observations"], 1)
+
     def test_incompatible_labels_do_not_share_temporal_identity(self) -> None:
         _selected, objects = _temporal_consensus(
             [

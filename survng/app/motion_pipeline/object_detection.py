@@ -279,6 +279,18 @@ def _eligible_detection(detected: dict[str, Any]) -> bool:
     return bool(detected.get("label") and detected.get("incident_eligible") is not False)
 
 
+def _meets_configured_confidence_floor(detected: dict[str, Any]) -> bool:
+    threshold = detected.get("confidence_threshold")
+    if threshold is None:
+        return detected.get("confidence_eligible") is not False
+    try:
+        confidence = float(detected.get("confidence") or 0.0)
+        required = float(threshold)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(confidence) and math.isfinite(required) and confidence >= required
+
+
 def _semantic_rescue_threshold(detected: dict[str, Any]) -> float:
     candidate = float(detected.get("temporal_candidate_threshold") or 0.0)
     standard = float(detected.get("confidence_threshold") or 1.0)
@@ -429,7 +441,10 @@ def _temporal_consensus(
         id(track)
         for track in evidence
         if len(track.winning_observations) >= required_by_track[id(track)]
-        and any(_eligible_detection(item) for item in track.winning_observations)
+        and any(
+            _eligible_detection(item) and _meets_configured_confidence_floor(item)
+            for item in track.winning_observations
+        )
     }
     rescue_threshold_by_track = {
         id(track): min(
@@ -554,6 +569,7 @@ def _temporal_consensus(
             id(track) in normally_confirmed_ids
             and label_confirmed_here
             and _eligible_detection(detected)
+            and _meets_configured_confidence_floor(detected)
             and not bool(detected.get("auxiliary_detection"))
         )
         rescue_candidate = id(track) in rescue_candidate_ids
@@ -628,7 +644,10 @@ def _temporal_consensus(
             "temporal_observations": len(track.winning_observations),
             "temporal_track_observations": len(track.observations),
             "temporal_incident_observations": sum(
-                1 for item in track.winning_observations if _eligible_detection(item)
+                1
+                for item in track.winning_observations
+                if _eligible_detection(item)
+                and _meets_configured_confidence_floor(item)
             ),
             "temporal_required_observations": required_by_track[id(track)],
             "temporal_samples": len(samples),
