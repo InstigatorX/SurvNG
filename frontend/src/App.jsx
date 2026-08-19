@@ -4757,7 +4757,13 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
   const incidentRailReady = mobileView || (incidentRailSize.width > 0 && incidentRailSize.height > 0);
-  const incidentsPerPage = mobileView ? 12 : incidentThumbnailPageSize({ ...incidentRailSize, density: incidentDensity });
+  const incidentsPerPage = mobileView
+    ? 12
+    : incidentThumbnailPageSize({
+      ...incidentRailSize,
+      density: incidentDensity,
+      ...(incidentDensity === "comfortable" ? { columns: 2, gap: 6, horizontalPadding: 16 } : {}),
+    });
   const previousIncidentsPerPageRef = useRef(incidentsPerPage);
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
@@ -5280,8 +5286,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
               <div className="incident-rail-head">
                 <strong>Incidents</strong>
                 <div className="density-control" aria-label="Thumbnail density">
-                  <button type="button" className={incidentDensity === "compact" ? "active" : ""} aria-pressed={incidentDensity === "compact"} onClick={() => setIncidentDensity("compact")} title="Compact thumbnails" aria-label="Compact thumbnails"><Grid2X2 size={15} /></button>
-                  <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Comfortable thumbnails" aria-label="Comfortable thumbnails"><Rows3 size={15} /></button>
+                  <button type="button" className={incidentDensity === "compact" ? "active" : ""} aria-pressed={incidentDensity === "compact"} onClick={() => setIncidentDensity("compact")} title="List view" aria-label="List view"><Rows3 size={15} /></button>
+                  <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Grid view" aria-label="Grid view"><Grid2X2 size={15} /></button>
                 </div>
               </div>
               <div className="incident-rail-list" ref={incidentRailListRef}>

@@ -805,8 +805,39 @@ p {
 }
 
 .incident-rail.comfortable .incident-rail-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.incident-rail.comfortable .live-activity-item {
+  min-width: 0;
+}
+
+.incident-rail.comfortable .live-activity-select {
   grid-template-columns: 1fr;
-  gap: 9px;
+  gap: 5px;
+  min-height: 0;
+  padding: 4px;
+}
+
+.incident-rail.comfortable .live-activity-copy {
+  gap: 1px;
+  padding-right: 0;
+}
+
+.incident-rail.comfortable .live-activity-copy b,
+.incident-rail.comfortable .live-activity-copy time {
+  font-size: 9px;
+}
+
+.incident-rail.comfortable .live-activity-kind {
+  display: none;
+}
+
+.incident-rail.comfortable .live-activity-trigger {
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
 }
 
 .incident-rail .incident-pager.placeholder,
