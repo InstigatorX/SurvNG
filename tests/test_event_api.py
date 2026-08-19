@@ -30,6 +30,7 @@ from survng.app.incident_presenter import (
     _incident_row,
 )
 from survng.app.incident_queries import (
+    _filter_incidents_by_person,
     _filter_incidents_by_event_type,
     _motion_audit_row,
 )
@@ -39,6 +40,23 @@ from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_person_filter_matches_confirmed_face_observation(self) -> None:
+        incidents = [
+            {"id": "incident-gate-7", "events": [{"id": 7}]},
+            {"id": "incident-gate-8", "events": [{"id": 8}]},
+        ]
+        faces = SimpleNamespace(for_event_ids=Mock(return_value=[
+            {"event_id": 7, "person_id": 42},
+            {"event_id": 8, "person_id": None},
+        ]))
+
+        filtered = _filter_incidents_by_person(
+            SimpleNamespace(faces=faces), incidents, 42
+        )
+
+        self.assertEqual(filtered, [incidents[0]])
+        faces.for_event_ids.assert_called_once_with([7, 8])
+
     def test_semantic_search_deduplicates_evidence_by_event(self) -> None:
         hits = [
             SemanticSearchHit(7, "gate", "now", "object_crop", "car:0", "a.webp", "car", (1, 2, 3, 4), 0.91),

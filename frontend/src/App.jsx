@@ -4707,6 +4707,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
   const [incidentZoneFilter, setIncidentZoneFilter] = useState("all");
+  const [incidentPersonFilter, setIncidentPersonFilter] = useState("all");
+  const [incidentPeople, setIncidentPeople] = useState([]);
   const [incidentDensity, setIncidentDensity] = useStoredState("survng.incidentDensity.v1", "compact");
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const [incidentDay, setIncidentDay] = useState(today);
@@ -4762,7 +4764,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
   const semanticIncidentActive = Boolean(semanticIncidentActiveQuery);
-  const activeIncidentFilterCount = [incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length;
+  const activeIncidentFilterCount = [incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter].filter((value) => value !== "all").length;
   const incidentResultSource = semanticIncidentActive ? semanticIncidentResults : incidents;
   const displayedIncidentTotal = semanticIncidentActive ? semanticIncidentResults.length : incidentTotal;
   const displayedIncidentLoading = semanticIncidentActive ? semanticIncidentLoading : incidentLoading;
@@ -4960,6 +4962,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     setIncidentCameraFilter("all");
     setIncidentObjectFilter("all");
     setIncidentZoneFilter("all");
+    setIncidentPersonFilter("all");
   }
 
   useEffect(() => () => semanticIncidentRequestRef.current?.abort(), []);
@@ -5019,6 +5022,19 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   }, [incidentDay, setIncidentDay, today]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/faces/people", { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : [])
+      .then((people) => {
+        if (!controller.signal.aborted) setIncidentPeople(Array.isArray(people) ? people : []);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setIncidentPeople([]);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
     if (!incidentRailReady) return undefined;
     let cancelled = false;
     async function loadIncidentPage() {
@@ -5033,6 +5049,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
       if (incidentCameraFilter !== "all") query.set("camera_id", incidentCameraFilter);
       if (incidentObjectFilter !== "all") query.set("object_label", incidentObjectFilter);
       if (incidentZoneFilter !== "all") query.set("zone", incidentZoneFilter);
+      if (incidentPersonFilter !== "all") query.set("person_id", incidentPersonFilter);
       const queryKey = query.toString();
       const foregroundLoad = incidentLoadedQueryRef.current !== queryKey;
       if (foregroundLoad) {
@@ -5067,11 +5084,11 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     return () => {
       cancelled = true;
     };
-  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken, incidentRailReady]);
+  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentPage, incidentsPerPage, incidentRefreshToken, incidentRailReady]);
 
   useEffect(() => {
     setIncidentPage(0);
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentDay, incidentDensity]);
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentDay, incidentDensity]);
 
   useEffect(() => {
     const previousPageSize = previousIncidentsPerPageRef.current;
@@ -5243,14 +5260,16 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
             </div>
             <div className="incidents-command-filters">
               <div className="incident-filter-selects desktop">
-                <label><span>Camera</span><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)}><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
-                <label><span>Object</span><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)}><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
-                <label><span>Zone</span><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
+                <label><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera"><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
+                <label><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)} aria-label="Incident object"><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
+                <label><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone"><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
+                <label><select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person"><option value="all">All people</option>{incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</select></label>
               </div>
               <div className="incident-active-filters" aria-label={`${activeIncidentFilterCount} active filters`}>
                 {incidentCameraFilter !== "all" ? <span>Camera: {cameraNameById.get(incidentCameraFilter) || incidentCameraFilter}</span> : null}
                 {incidentObjectFilter !== "all" ? <span>Object: {incidentObjectFilter}</span> : null}
                 {incidentZoneFilter !== "all" ? <span>Zone: {incidentZoneFilter}</span> : null}
+                {incidentPersonFilter !== "all" ? <span>Person: {incidentPeople.find((person) => String(person.id) === incidentPersonFilter)?.name || incidentPersonFilter}</span> : null}
                 {activeIncidentFilterCount ? <button type="button" onClick={clearIncidentFilters}>Clear</button> : <small>All cameras, objects, and zones</small>}
               </div>
             </div>
@@ -5331,24 +5350,27 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
               <input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" />
             </label>
             <label>
-              <span>Camera</span>
-              <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)}>
+              <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera">
                 <option value="all">All cameras</option>
                 {incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}
               </select>
             </label>
             <label>
-              <span>Object</span>
-              <select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)}>
+              <select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)} aria-label="Incident object">
                 <option value="all">All objects</option>
                 {incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}
               </select>
             </label>
             <label>
-              <span>Zone</span>
-              <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}>
+              <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone">
                 <option value="all">All zones</option>
                 {incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}
+              </select>
+            </label>
+            <label>
+              <select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person">
+                <option value="all">All people</option>
+                {incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}
               </select>
             </label>
           </div>

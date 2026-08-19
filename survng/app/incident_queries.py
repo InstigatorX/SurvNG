@@ -77,6 +77,32 @@ def _filter_incident_summaries(
     return filtered
 
 
+def _filter_incidents_by_person(
+    manager: AppManager,
+    incidents: list[dict[str, Any]],
+    person_id: int,
+) -> list[dict[str, Any]]:
+    event_ids = [
+        int(event["id"])
+        for incident in incidents
+        for event in incident.get("events", [])
+        if str(event.get("id", "")).isdigit()
+    ]
+    matching_event_ids = {
+        int(observation["event_id"])
+        for observation in manager.faces.for_event_ids(event_ids)
+        if int(observation.get("person_id") or 0) == person_id
+    }
+    return [
+        incident
+        for incident in incidents
+        if any(
+            int(event.get("id") or 0) in matching_event_ids
+            for event in incident.get("events", [])
+        )
+    ]
+
+
 class IncidentQueryService:
     """Read, group, hydrate, and present incidents for one manager generation."""
 
@@ -401,6 +427,7 @@ class IncidentQueryService:
         event_type: str = "motion",
         object_label: str = "",
         zone: str = "",
+        person_id: int = 0,
         limit: int = 18,
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
@@ -466,6 +493,11 @@ class IncidentQueryService:
         filtered = _filter_incident_summaries(
             day_incidents, event_type, camera_id, object_label, zone
         )
+        selected_person_id = max(0, int(person_id))
+        if selected_person_id:
+            filtered = _filter_incidents_by_person(
+                manager, filtered, selected_person_id
+            )
         bounded_limit = max(1, min(limit, 100))
         bounded_offset = max(0, offset)
         page_summaries = filtered[bounded_offset : bounded_offset + bounded_limit]
@@ -594,6 +626,7 @@ def create_incident_query_router(
         event_type: str = "motion",
         object_label: str = "",
         zone: str = "",
+        person_id: int = 0,
         limit: int = 18,
         offset: int = 0,
         gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
@@ -607,6 +640,7 @@ def create_incident_query_router(
                 event_type=event_type,
                 object_label=object_label,
                 zone=zone,
+                person_id=person_id,
                 limit=limit,
                 offset=offset,
                 gap_seconds=gap_seconds,

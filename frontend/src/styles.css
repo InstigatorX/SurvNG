@@ -621,7 +621,7 @@ p {
 }
 
 .incidents-command-filters .incident-filter-selects {
-  grid-template-columns: repeat(3, minmax(130px, 190px));
+  grid-template-columns: repeat(4, minmax(112px, 170px));
   flex: 0 1 auto;
 }
 
