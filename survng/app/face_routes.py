@@ -28,6 +28,13 @@ class FaceAssignment(BaseModel):
     person_id: int | None = Field(default=None, gt=0)
 
 
+
+class FaceBulkReview(BaseModel):
+    observation_ids: list[int] = Field(min_length=1, max_length=500)
+    action: str = Field(pattern=r"^(assign|unassign)$")
+    person_id: int | None = Field(default=None, gt=0)
+
+
 class FaceReferenceUpdate(BaseModel):
     pinned: bool
 
@@ -154,6 +161,55 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
                 )
             ]
         )
+
+
+    @router.get("/api/faces/review/queue")
+    def face_review_queue(limit: int = 100) -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: [
+                _public_face_observation(item)
+                for item in active.faces.review_queue(limit=limit)
+            ]
+        )
+
+    @router.get("/api/faces/review/confirmed")
+    def face_confirmed_match_diagnostics(
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: active.faces.confirmed_match_diagnostics(limit=limit)
+        )
+
+    @router.post("/api/faces/review/bulk")
+    def face_bulk_review(payload: FaceBulkReview) -> dict[str, Any]:
+        def update(active_manager: AppManager) -> dict[str, Any]:
+            try:
+                return active_manager.faces.bulk_review(
+                    payload.observation_ids,
+                    action=payload.action,
+                    person_id=payload.person_id,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return with_manager(update)
+
+    @router.get("/api/faces/people/{person_id}/history")
+    def face_person_history(
+        person_id: int,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        deps.start_observation_sync()
+        def history(active_manager: AppManager) -> dict[str, Any]:
+            try:
+                return active_manager.faces.person_history(
+                    person_id,
+                    limit=limit,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return with_manager(history)
 
     @router.get("/api/faces/people")
     def face_people() -> list[dict[str, Any]]:

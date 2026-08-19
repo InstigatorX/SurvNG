@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -138,6 +138,7 @@ class FaceStore:
         self._gallery_generation = 0
         self._gallery_cache_key: tuple[str, tuple[int, ...], int, int] | None = None
         self._gallery_cache: list[dict[str, Any]] = []
+        self._identity_event_publisher: Callable[[dict[str, Any]], None] | None = None
         self._recognition_refill_needed = threading.Event()
         self._match_refresh_needed = threading.Event()
         self._recognition_stop = threading.Event()
@@ -979,7 +980,7 @@ class FaceStore:
                     ),
                 )
                 current = connection.execute(
-                    "select person_id from face_observations where id = ?",
+                    "select person_id, review_status from face_observations where id = ?",
                     (observation_id,),
                 ).fetchone()
                 track_id = str(row["candidate_track_id"] or "")
@@ -989,6 +990,17 @@ class FaceStore:
                         int(row["event_id"]),
                         track_id,
                     )
+            if (
+                row["person_id"] is None
+                and current is not None
+                and current["person_id"] is not None
+            ):
+                source = (
+                    "auto_recognition"
+                    if str(current["review_status"] or "") == "auto_identified"
+                    else "recognition"
+                )
+                self._emit_identity_update(observation_id, source=source)
             if row["person_id"] is not None:
                 self._invalidate_reference_gallery()
             return current is not None and current["person_id"] is not None
@@ -3140,6 +3152,382 @@ class FaceStore:
         self.request_match_refresh()
         return sorted(selected_ids)
 
+
+    def set_identity_event_publisher(
+        self,
+        publisher: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        self._identity_event_publisher = publisher
+
+    def _emit_identity_update(
+        self,
+        observation_id: int,
+        *,
+        source: str,
+    ) -> None:
+        publisher = getattr(self, "_identity_event_publisher", None)
+        if not callable(publisher):
+            return
+        observation = self.observation(observation_id)
+        if not observation or observation.get("person_id") is None:
+            return
+        payload = {
+            "type": "identity_update",
+            "source": str(source or "recognition"),
+            "observation_id": int(observation_id),
+            "event_id": int(observation.get("event_id") or 0),
+            "camera_id": str(observation.get("camera_id") or ""),
+            "person_id": int(observation["person_id"]),
+            "name": str(observation.get("person_name") or ""),
+            "confidence": (
+                round(float(observation["match_confidence"]), 4)
+                if observation.get("match_confidence") is not None
+                else None
+            ),
+            "review_status": str(observation.get("review_status") or ""),
+            "observed_at": str(observation.get("observed_at") or ""),
+        }
+        try:
+            publisher(payload)
+        except Exception:
+            LOGGER.exception(
+                "identity update publisher failed for observation %s",
+                observation_id,
+            )
+
+    def person_history(
+        self,
+        person_id: int,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        resolved_limit = max(1, min(int(limit), 500))
+        with self._connect() as connection:
+            person = connection.execute(
+                "select * from face_people where id = ?",
+                (int(person_id),),
+            ).fetchone()
+            if person is None:
+                raise ValueError("person not found")
+            summary = connection.execute(
+                """
+                select count(*) as observations,
+                    count(distinct camera_id) as camera_count,
+                    min(observed_at) as first_seen,
+                    max(observed_at) as last_seen,
+                    avg(quality_score) as average_quality,
+                    avg(match_confidence) as average_match_confidence,
+                    sum(case when reference_pinned = 1 then 1 else 0 end)
+                        as pinned_references,
+                    sum(case when auto_identified = 1 then 1 else 0 end)
+                        as auto_identified
+                from face_observations
+                where canonical = 1 and person_id = ?
+                """,
+                (int(person_id),),
+            ).fetchone()
+            cameras = connection.execute(
+                """
+                select camera_id, count(*) as observations,
+                    min(observed_at) as first_seen,
+                    max(observed_at) as last_seen,
+                    avg(quality_score) as average_quality,
+                    avg(match_confidence) as average_match_confidence
+                from face_observations
+                where canonical = 1 and person_id = ?
+                group by camera_id
+                order by observations desc, camera_id
+                """,
+                (int(person_id),),
+            ).fetchall()
+            recent = connection.execute(
+                """
+                select o.*, p.name as person_name,
+                    candidate.name as candidate_person_name
+                from face_observations o
+                left join face_people p on p.id = o.person_id
+                left join face_people candidate on candidate.id = o.candidate_person_id
+                where o.canonical = 1 and o.person_id = ?
+                order by o.observed_at desc, o.id desc
+                limit ?
+                """,
+                (int(person_id), resolved_limit),
+            ).fetchall()
+        return {
+            "person": dict(person),
+            "summary": dict(summary),
+            "cameras": [dict(row) for row in cameras],
+            "recent": [self._observation_row(row) for row in recent],
+        }
+
+    def review_queue(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Prioritize actionable unknowns and ambiguous suggestions."""
+        resolved_limit = max(1, min(int(limit), 500))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select o.*, candidate.name as candidate_person_name,
+                    m.cluster_id as unknown_cluster_id,
+                    coalesce(cluster_stats.cluster_size, 1) as cluster_size
+                from face_observations o
+                left join face_people candidate on candidate.id = o.candidate_person_id
+                left join face_unknown_members m on m.observation_id = o.id
+                left join (
+                    select cluster_id, count(*) as cluster_size
+                    from face_unknown_members
+                    group by cluster_id
+                ) cluster_stats on cluster_stats.cluster_id = m.cluster_id
+                where o.canonical = 1
+                    and o.person_id is null
+                    and o.recognition_pending = 0
+                    and o.recognition_outcome = ?
+                order by o.observed_at desc, o.id desc
+                limit ?
+                """,
+                (FACE_OUTCOME_EMBEDDED, max(resolved_limit * 4, 200)),
+            ).fetchall()
+
+        queue_rows = []
+        for row in rows:
+            item = self._observation_row(row)
+            quality = max(0.0, min(1.0, float(item.get("quality_score") or 0.0)))
+            candidate_confidence = max(
+                0.0,
+                min(1.0, float(item.get("candidate_confidence") or 0.0)),
+            )
+            cluster_size = max(1, int(item.get("cluster_size") or 1))
+            details = item.get("match_details") or {}
+            margin = float(details.get("margin") or 0.0)
+            ambiguity = (
+                max(0.0, min(1.0, (0.12 - margin) / 0.12))
+                if item.get("candidate_person_id") is not None
+                else 0.0
+            )
+            recurring = min(1.0, max(0, cluster_size - 1) / 4.0)
+            priority = (
+                0.40 * quality
+                + 0.25 * candidate_confidence
+                + 0.20 * recurring
+                + 0.15 * ambiguity
+            )
+            reasons = []
+            if cluster_size > 1:
+                reasons.append("recurring_unknown")
+            if item.get("candidate_person_id") is not None:
+                reasons.append("identity_suggestion")
+            if ambiguity >= 0.5:
+                reasons.append("ambiguous_match")
+            if quality >= 0.70:
+                reasons.append("high_quality")
+            item["review_priority"] = round(priority, 4)
+            item["review_reasons"] = reasons
+            queue_rows.append(item)
+
+        queue_rows.sort(
+            key=lambda item: (
+                float(item.get("review_priority") or 0.0),
+                str(item.get("observed_at") or ""),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return queue_rows[:resolved_limit]
+
+    def confirmed_match_diagnostics(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Find confirmed faces that fit another identity unusually well."""
+        recognizer = self.recognizer
+        if recognizer is None:
+            return []
+        status = recognizer.status()
+        model_fingerprint = str(status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            return []
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select o.id, o.person_id, p.name as person_name, o.camera_id,
+                    o.observed_at, o.quality_score, o.embedding_blob
+                from face_observations o
+                join face_people p on p.id = o.person_id
+                where o.canonical = 1
+                    and o.person_id is not null
+                    and o.review_status = 'confirmed'
+                    and o.embedding_model = ?
+                    and o.embedding_blob is not null
+                order by o.observed_at desc, o.id desc
+                """,
+                (model_fingerprint,),
+            ).fetchall()
+            if not rows:
+                return []
+            first_vector = np.frombuffer(rows[0]["embedding_blob"], dtype=np.float32)
+            gallery = self._reference_gallery(
+                connection,
+                model_fingerprint,
+                max(1, int(getattr(recognizer.config, "face_max_references", 20))),
+                first_vector.shape,
+            )
+
+        names = {
+            int(row["person_id"]): str(row["person_name"] or "")
+            for row in rows
+        }
+        diagnostics = []
+        for row in rows:
+            target = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(target))
+            if not target.size or not math.isfinite(norm) or norm <= 1e-9:
+                continue
+            target = target / norm
+            grouped = {}
+            for reference in gallery:
+                if int(reference["id"]) == int(row["id"]):
+                    continue
+                score = float(np.dot(target, reference["_embedding"]))
+                grouped.setdefault(int(reference["person_id"]), []).append(score)
+            true_person = int(row["person_id"])
+            if true_person not in grouped or len(grouped) < 2:
+                continue
+
+            scores = {
+                person_id: sum(sorted(values, reverse=True)[:3])
+                / min(3, len(values))
+                for person_id, values in grouped.items()
+            }
+            true_score = float(scores[true_person])
+            wrong_person, wrong_score = max(
+                (
+                    (person_id, score)
+                    for person_id, score in scores.items()
+                    if person_id != true_person
+                ),
+                key=lambda item: item[1],
+            )
+            margin = true_score - float(wrong_score)
+            flags = []
+            if margin < 0:
+                flags.append("wrong_identity_ranks_higher")
+            elif margin < 0.05:
+                flags.append("poor_separation")
+            if true_score < float(recognizer.config.face_match_threshold):
+                flags.append("below_match_threshold")
+            diagnostics.append({
+                "observation_id": int(row["id"]),
+                "person_id": true_person,
+                "name": str(row["person_name"] or ""),
+                "camera_id": str(row["camera_id"] or ""),
+                "observed_at": str(row["observed_at"] or ""),
+                "quality_score": (
+                    round(float(row["quality_score"]), 4)
+                    if row["quality_score"] is not None
+                    else None
+                ),
+                "true_score": round(true_score, 4),
+                "nearest_competing_person_id": int(wrong_person),
+                "nearest_competing_name": names.get(int(wrong_person), ""),
+                "nearest_competing_score": round(float(wrong_score), 4),
+                "margin": round(margin, 4),
+                "flags": flags,
+            })
+
+        diagnostics.sort(
+            key=lambda item: (
+                float(item["margin"]),
+                float(item["true_score"]),
+                int(item["observation_id"]),
+            )
+        )
+        return diagnostics[: max(1, min(int(limit), 500))]
+
+    def bulk_review(
+        self,
+        observation_ids: list[int],
+        *,
+        action: str,
+        person_id: int | None = None,
+    ) -> dict[str, Any]:
+        ids = sorted({int(value) for value in observation_ids if int(value) > 0})
+        if not ids:
+            raise ValueError("at least one observation is required")
+        if len(ids) > 500:
+            raise ValueError("bulk review is limited to 500 observations")
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"unassign", "assign"}:
+            raise ValueError("bulk review action must be assign or unassign")
+        if normalized_action == "assign" and person_id is None:
+            raise ValueError("person_id is required for assign")
+
+        changed = []
+        with self._lock, self._connect() as connection:
+            if person_id is not None:
+                exists = connection.execute(
+                    "select 1 from face_people where id = ?",
+                    (int(person_id),),
+                ).fetchone()
+                if exists is None:
+                    raise ValueError("person not found")
+
+            for observation_id in ids:
+                row = connection.execute(
+                    "select id from face_observations where id = ?",
+                    (observation_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                if normalized_action == "assign":
+                    connection.execute(
+                        """
+                        update face_observations
+                        set person_id = ?, review_status = 'confirmed',
+                            match_confidence = 1,
+                            candidate_person_id = null,
+                            candidate_confidence = null,
+                            rejected_person_id = null,
+                            auto_identified = 0,
+                            canonical = 1
+                        where id = ?
+                        """,
+                        (int(person_id), observation_id),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        update face_observations
+                        set person_id = null, review_status = 'unknown',
+                            match_confidence = null,
+                            candidate_person_id = null,
+                            candidate_confidence = null,
+                            rejected_person_id = null,
+                            auto_identified = 0,
+                            reference_pinned = 0,
+                            reference_auto_pinned = 0
+                        where id = ?
+                        """,
+                        (observation_id,),
+                    )
+                changed.append(observation_id)
+
+        self._invalidate_reference_gallery()
+        self.request_match_refresh()
+        if normalized_action == "assign":
+            for observation_id in changed:
+                self._emit_identity_update(observation_id, source="manual_bulk")
+        return {
+            "action": normalized_action,
+            "person_id": person_id,
+            "changed": len(changed),
+            "observation_ids": changed,
+        }
+
     def create_person(self, name: str, observation_id: int | None = None, notes: str = "") -> dict[str, Any]:
         name = name.strip()
         notes = notes.strip()
@@ -3185,6 +3573,8 @@ class FaceStore:
                 person_id,
                 seed_observation_id=observation_id,
             )
+        if observation_id is not None:
+            self._emit_identity_update(observation_id, source="manual")
         return next(person for person in self.people() if person["id"] == person_id)
 
     def assign(self, observation_id: int, person_id: int | None) -> dict[str, Any] | None:
@@ -3238,6 +3628,8 @@ class FaceStore:
             )
         else:
             self.request_match_refresh()
+        if person_id is not None:
+            self._emit_identity_update(observation_id, source="manual")
         return self.observation(observation_id)
 
     def set_reference_pinned(

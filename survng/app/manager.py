@@ -301,6 +301,9 @@ class AppManager:
                         redact_secret_text(error),
                     )
             raise
+        self.faces.set_identity_event_publisher(
+            self._publish_identity_update
+        )
         self._process_started_monotonic = time.monotonic()
         self._process_started_at = datetime.now(timezone.utc).isoformat()
         self._lifecycle_lock = threading.RLock()
@@ -376,6 +379,14 @@ class AppManager:
             state_path=self.database_dir / "runtime_state.json",
             legacy_state_paths=(self.storage_dir / "runtime_state.json",),
         )
+
+    def _publish_identity_update(self, payload: dict) -> None:
+        event = dict(payload)
+        event.setdefault(
+            "published_at", datetime.now(timezone.utc).isoformat()
+        )
+        self.state_events.publish("identity_update", event)
+        self.mqtt.publish("events/identity", event)
 
     def _tracking_burst_available(self) -> bool:
         """Allow the optional extra tracker only while inference and memory are healthy."""
