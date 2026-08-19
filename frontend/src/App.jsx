@@ -7794,7 +7794,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         <div className="recordings-v2-investigation">
           {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
             <header>Selected incident</header>
-            <a className="recordings-v2-selected-event-image" href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)} aria-label={`Open selected incident at ${formatTimeOnly(selectedEvent.incident_epoch, timeZone)}`}>
+            <a className="recordings-v2-selected-event-image" href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.representative_event_id || selectedEvent.id)}`)} aria-label={`Open selected incident at ${formatTimeOnly(selectedEvent.incident_epoch, timeZone)}`}>
               <Radar size={22} />
               {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 720, 95)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
               {selectedEventDuration > 0 ? <time>{formatDuration(selectedEventDuration)}</time> : null}
