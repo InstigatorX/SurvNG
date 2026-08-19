@@ -195,6 +195,80 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
         return with_manager(update)
 
+
+
+    @router.get("/api/faces/gallery-optimization")
+    def face_gallery_optimization(
+        max_references: int = 8,
+    ) -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: active.faces.optimize_all_galleries(
+                max_references=max_references,
+                apply=False,
+            )
+        )
+
+    @router.post("/api/faces/people/{person_id}/gallery/optimize")
+    def face_person_gallery_optimize(
+        person_id: int,
+        max_references: int = 8,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        deps.start_observation_sync()
+        def optimize(active_manager: AppManager) -> dict[str, Any]:
+            try:
+                return active_manager.faces.optimize_person_gallery(
+                    person_id,
+                    max_references=max_references,
+                    apply=apply,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return with_manager(optimize)
+
+    @router.get("/api/faces/people/representation-health")
+    def face_people_representation_health() -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        return with_manager(lambda active: active.faces.people_representation_health())
+
+    @router.get("/api/faces/people/{person_id}/representation")
+    def face_person_representation(person_id: int) -> dict[str, Any]:
+        deps.start_observation_sync()
+        def diagnostics(active_manager: AppManager) -> dict[str, Any]:
+            try:
+                return active_manager.faces.person_representation(person_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return with_manager(diagnostics)
+
+    @router.get("/api/faces/people/{person_id}/gallery-candidates")
+    def face_person_gallery_candidates(person_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        def candidates(active_manager: AppManager) -> list[dict[str, Any]]:
+            try:
+                return [
+                    _public_face_observation(item)
+                    for item in active_manager.faces.gallery_candidates(person_id, limit=limit)
+                ]
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return with_manager(candidates)
+
+    @router.post("/api/faces/people/{person_id}/gallery/enrich")
+    def face_person_gallery_enrich(person_id: int, target_count: int = 8) -> dict[str, Any]:
+        deps.start_observation_sync()
+        def enrich(active_manager: AppManager) -> dict[str, Any]:
+            try:
+                return active_manager.faces.enrich_person_gallery(person_id, target_count=target_count)
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return with_manager(enrich)
+
     @router.get("/api/faces/people/{person_id}/history")
     def face_person_history(
         person_id: int,

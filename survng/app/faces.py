@@ -3195,6 +3195,544 @@ class FaceStore:
                 observation_id,
             )
 
+
+
+    def optimize_person_gallery(
+        self,
+        person_id: int,
+        *,
+        max_references: int = 8,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Greedily choose confirmed references that improve held-out rank/margin."""
+        recognizer = self.recognizer
+        if recognizer is None:
+            raise RuntimeError("face recognizer is not configured")
+        status = recognizer.status()
+        model_fingerprint = str(status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            raise RuntimeError("face embedding model is not ready")
+
+        limit = max(2, min(int(max_references), 12))
+        with self._connect() as connection:
+            person = connection.execute(
+                "select id, name from face_people where id = ?",
+                (int(person_id),),
+            ).fetchone()
+            if person is None:
+                raise ValueError("person not found")
+
+            rows = connection.execute(
+                """
+                select o.id, o.camera_id, o.quality_score, o.embedding_blob,
+                    o.reference_pinned, o.reference_auto_pinned
+                from face_observations o
+                where o.canonical = 1
+                    and o.person_id = ?
+                    and o.review_status = 'confirmed'
+                    and o.embedding_model = ?
+                    and o.embedding_blob is not null
+                order by o.quality_score desc, o.id
+                """,
+                (int(person_id), model_fingerprint),
+            ).fetchall()
+
+            competitors = connection.execute(
+                """
+                select o.id, o.person_id, o.embedding_blob
+                from face_observations o
+                where o.canonical = 1
+                    and o.person_id is not null
+                    and o.person_id != ?
+                    and o.review_status = 'confirmed'
+                    and o.embedding_model = ?
+                    and o.embedding_blob is not null
+                """,
+                (int(person_id), model_fingerprint),
+            ).fetchall()
+
+        def normalized(row):
+            vector = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(vector))
+            if not vector.size or not math.isfinite(norm) or norm <= 1e-9:
+                return None
+            return vector / norm
+
+        samples = []
+        for row in rows:
+            vector = normalized(row)
+            if vector is not None:
+                samples.append((row, vector))
+        others = []
+        for row in competitors:
+            vector = normalized(row)
+            if vector is not None:
+                others.append((row, vector))
+
+        if len(samples) < 2:
+            return {
+                "person_id": int(person["id"]),
+                "name": str(person["name"] or ""),
+                "sample_count": len(samples),
+                "applied": False,
+                "reason": "not_enough_samples",
+            }
+
+        def aggregate(query, refs):
+            scores = sorted(
+                (float(np.dot(query, ref_vector)) for _ref_row, ref_vector in refs),
+                reverse=True,
+            )
+            if not scores:
+                return float("-inf")
+            top = scores[:3]
+            return sum(top) / len(top)
+
+        competitor_by_person = {}
+        for row, vector in others:
+            competitor_by_person.setdefault(int(row["person_id"]), []).append((row, vector))
+
+        def evaluate(reference_ids):
+            ref_set = set(reference_ids)
+            refs = [(row, vector) for row, vector in samples if int(row["id"]) in ref_set]
+            held_out = [(row, vector) for row, vector in samples if int(row["id"]) not in ref_set]
+            if not refs or not held_out:
+                return {
+                    "trials": 0,
+                    "rank_one_accuracy": 0.0,
+                    "median_margin": None,
+                    "median_true_score": None,
+                }
+
+            rank_one = 0
+            margins = []
+            true_scores = []
+            for _row, query in held_out:
+                true_score = aggregate(query, refs)
+                wrong_score = max(
+                    (
+                        aggregate(query, competitor_refs)
+                        for competitor_refs in competitor_by_person.values()
+                        if competitor_refs
+                    ),
+                    default=float("-inf"),
+                )
+                true_scores.append(true_score)
+                margins.append(true_score - wrong_score)
+                rank_one += int(true_score > wrong_score)
+
+            return {
+                "trials": len(held_out),
+                "rank_one_accuracy": round(rank_one / len(held_out), 4),
+                "median_margin": round(float(np.median(margins)), 4),
+                "median_true_score": round(float(np.median(true_scores)), 4),
+            }
+
+        current_ids = [
+            int(row["id"])
+            for row, _vector in samples
+            if bool(row["reference_pinned"])
+        ]
+        if not current_ids:
+            current_ids = [int(samples[0][0]["id"])]
+
+        current_ids = current_ids[:limit]
+        baseline = evaluate(current_ids)
+
+        selected = list(current_ids)
+        candidate_ids = [
+            int(row["id"])
+            for row, _vector in samples
+            if int(row["id"]) not in selected
+        ]
+
+        def objective(metrics):
+            return (
+                float(metrics["rank_one_accuracy"]),
+                float(metrics["median_margin"] if metrics["median_margin"] is not None else -999),
+                float(metrics["median_true_score"] if metrics["median_true_score"] is not None else -999),
+            )
+
+        best_metrics = baseline
+        while len(selected) < limit and candidate_ids:
+            best_candidate = None
+            best_candidate_metrics = None
+            for candidate_id in candidate_ids:
+                metrics = evaluate([*selected, candidate_id])
+                if best_candidate_metrics is None or objective(metrics) > objective(best_candidate_metrics):
+                    best_candidate = candidate_id
+                    best_candidate_metrics = metrics
+
+            if best_candidate is None or best_candidate_metrics is None:
+                break
+            if objective(best_candidate_metrics) <= objective(best_metrics):
+                break
+
+            selected.append(best_candidate)
+            candidate_ids.remove(best_candidate)
+            best_metrics = best_candidate_metrics
+
+        improved = objective(best_metrics) > objective(baseline)
+
+        if apply and improved:
+            with self._lock, self._connect() as connection:
+                connection.execute(
+                    """
+                    update face_observations
+                    set reference_pinned = 0,
+                        reference_auto_pinned = 0
+                    where person_id = ?
+                        and canonical = 1
+                        and review_status = 'confirmed'
+                        and reference_auto_pinned = 1
+                    """,
+                    (int(person_id),),
+                )
+                connection.executemany(
+                    """
+                    update face_observations
+                    set reference_pinned = 1,
+                        reference_auto_pinned = 1
+                    where id = ?
+                        and person_id = ?
+                        and canonical = 1
+                        and review_status = 'confirmed'
+                    """,
+                    ((observation_id, int(person_id)) for observation_id in selected),
+                )
+            self._invalidate_reference_gallery()
+            self.request_match_refresh()
+
+        return {
+            "person_id": int(person["id"]),
+            "name": str(person["name"] or ""),
+            "sample_count": len(samples),
+            "baseline_reference_ids": current_ids,
+            "optimized_reference_ids": selected,
+            "baseline": baseline,
+            "optimized": best_metrics,
+            "improved": improved,
+            "applied": bool(apply and improved),
+        }
+
+    def optimize_all_galleries(
+        self,
+        *,
+        max_references: int = 8,
+        apply: bool = False,
+    ) -> list[dict[str, Any]]:
+        return [
+            self.optimize_person_gallery(
+                int(person["id"]),
+                max_references=max_references,
+                apply=apply,
+            )
+            for person in self.people()
+        ]
+
+    def person_representation(
+        self,
+        person_id: int,
+    ) -> dict[str, Any]:
+        recognizer = self.recognizer
+        if recognizer is None:
+            raise RuntimeError("face recognizer is not configured")
+        status = recognizer.status()
+        model_fingerprint = str(status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            raise RuntimeError("face embedding model is not ready")
+
+        with self._connect() as connection:
+            person = connection.execute(
+                "select id, name from face_people where id = ?",
+                (int(person_id),),
+            ).fetchone()
+            if person is None:
+                raise ValueError("person not found")
+            rows = connection.execute(
+                """
+                select id, camera_id, observed_at, quality_score,
+                    reference_pinned, reference_auto_pinned,
+                    embedding_blob, match_details_json
+                from face_observations
+                where canonical = 1
+                    and person_id = ?
+                    and review_status = 'confirmed'
+                    and embedding_model = ?
+                    and embedding_blob is not null
+                order by observed_at asc, id asc
+                """,
+                (int(person_id), model_fingerprint),
+            ).fetchall()
+            other_rows = connection.execute(
+                """
+                select o.id, o.person_id, p.name as person_name,
+                    o.embedding_blob
+                from face_observations o
+                join face_people p on p.id = o.person_id
+                where o.canonical = 1
+                    and o.person_id is not null
+                    and o.person_id != ?
+                    and o.review_status = 'confirmed'
+                    and o.embedding_model = ?
+                    and o.embedding_blob is not null
+                """,
+                (int(person_id), model_fingerprint),
+            ).fetchall()
+
+        vectors = []
+        for row in rows:
+            vector = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(vector))
+            if vector.size and math.isfinite(norm) and norm > 1e-9:
+                vectors.append((row, vector / norm))
+
+        other_vectors = []
+        for row in other_rows:
+            vector = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(vector))
+            if vector.size and math.isfinite(norm) and norm > 1e-9:
+                other_vectors.append((row, vector / norm))
+
+        same_scores = []
+        for index, (_row, vector) in enumerate(vectors):
+            for _other_row, other in vectors[index + 1:]:
+                same_scores.append(float(np.dot(vector, other)))
+
+        competitor_scores = {}
+        competitor_names = {}
+        for _row, vector in vectors:
+            for other_row, other in other_vectors:
+                competitor_id = int(other_row["person_id"])
+                competitor_names[competitor_id] = str(other_row["person_name"] or "")
+                competitor_scores.setdefault(competitor_id, []).append(
+                    float(np.dot(vector, other))
+                )
+
+        def percentile(values, q):
+            if not values:
+                return None
+            return round(float(np.percentile(np.asarray(values, dtype=np.float32), q)), 4)
+
+        nearest_id = None
+        nearest_name = ""
+        nearest_score = None
+        if competitor_scores:
+            nearest_id, nearest_values = max(
+                competitor_scores.items(),
+                key=lambda item: max(item[1]),
+            )
+            nearest_name = competitor_names.get(nearest_id, "")
+            nearest_score = round(max(nearest_values), 4)
+
+        camera_counts = {}
+        pinned = 0
+        auto_pinned = 0
+        model_scores = []
+        for row, _vector in vectors:
+            camera = str(row["camera_id"] or "")
+            camera_counts[camera] = camera_counts.get(camera, 0) + 1
+            pinned += int(bool(row["reference_pinned"]))
+            auto_pinned += int(bool(row["reference_auto_pinned"]))
+            try:
+                details = json.loads(str(row["match_details_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                details = {}
+            if isinstance(details, dict):
+                try:
+                    score = float(details.get("score"))
+                except (TypeError, ValueError):
+                    score = float("nan")
+                if math.isfinite(score):
+                    model_scores.append(score)
+
+        same_median = percentile(same_scores, 50)
+        separation = None
+        if same_median is not None and nearest_score is not None:
+            separation = round(same_median - nearest_score, 4)
+
+        flags = []
+        if len(vectors) < 4:
+            flags.append("low_sample_count")
+        if len(camera_counts) < 2 and len(vectors) >= 4:
+            flags.append("single_camera_gallery")
+        if same_median is not None and same_median < 0.20:
+            flags.append("weak_within_identity_cohesion")
+        if separation is not None and separation < 0.05:
+            flags.append("weak_identity_separation")
+        if pinned < min(4, len(vectors)):
+            flags.append("under_pinned_gallery")
+
+        return {
+            "person_id": int(person["id"]),
+            "name": str(person["name"] or ""),
+            "sample_count": len(vectors),
+            "camera_count": len(camera_counts),
+            "camera_counts": dict(sorted(camera_counts.items())),
+            "pinned_references": pinned,
+            "auto_pinned_references": auto_pinned,
+            "same_person": {
+                "pairs": len(same_scores),
+                "p05": percentile(same_scores, 5),
+                "median": same_median,
+                "p95": percentile(same_scores, 95),
+            },
+            "nearest_competitor": (
+                {
+                    "person_id": int(nearest_id),
+                    "name": nearest_name,
+                    "maximum_similarity": nearest_score,
+                }
+                if nearest_id is not None
+                else None
+            ),
+            "separation": separation,
+            "model_score": {
+                "count": len(model_scores),
+                "p05": percentile(model_scores, 5),
+                "median": percentile(model_scores, 50),
+                "p95": percentile(model_scores, 95),
+            },
+            "flags": flags,
+        }
+
+    def gallery_candidates(self, person_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+        resolved_limit = max(1, min(int(limit), 100))
+        with self._connect() as connection:
+            person = connection.execute(
+                "select id from face_people where id = ?", (int(person_id),)
+            ).fetchone()
+            if person is None:
+                raise ValueError("person not found")
+            rows = connection.execute(
+                """
+                select o.*, p.name as person_name,
+                    candidate.name as candidate_person_name
+                from face_observations o
+                join face_people p on p.id = o.person_id
+                left join face_people candidate on candidate.id = o.candidate_person_id
+                where o.canonical = 1
+                    and o.person_id = ?
+                    and o.review_status = 'confirmed'
+                    and o.embedding_blob is not null
+                order by o.quality_score desc, o.observed_at desc, o.id desc
+                """,
+                (int(person_id),),
+            ).fetchall()
+
+        normalized = []
+        for row in rows:
+            vector = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(vector))
+            if vector.size and math.isfinite(norm) and norm > 1e-9:
+                normalized.append((row, vector / norm))
+
+        pinned = [(row, vector) for row, vector in normalized if bool(row["reference_pinned"])]
+        pinned_cameras = {str(row["camera_id"] or "") for row, _vector in pinned}
+        candidates = []
+        for row, vector in normalized:
+            if bool(row["reference_pinned"]):
+                continue
+            quality = max(0.0, min(1.0, float(row["quality_score"] or 0.0)))
+            camera = str(row["camera_id"] or "")
+            camera_novelty = 1.0 if camera and camera not in pinned_cameras else 0.0
+            max_similarity = 0.0
+            if pinned:
+                max_similarity = max(
+                    float(np.dot(vector, ref_vector))
+                    for _ref_row, ref_vector in pinned
+                )
+            diversity = 1.0 - max(-1.0, min(1.0, max_similarity)) if pinned else 1.0
+            diversity = max(0.0, min(1.0, diversity))
+            score = 0.55 * quality + 0.30 * camera_novelty + 0.15 * diversity
+            item = self._observation_row(row)
+            item["gallery_candidate_score"] = round(score, 4)
+            item["gallery_candidate_reasons"] = [
+                reason for reason, enabled in (
+                    ("high_quality", quality >= 0.70),
+                    ("new_camera", camera_novelty > 0),
+                    ("diverse_embedding", diversity >= 0.30),
+                ) if enabled
+            ]
+            item["max_similarity_to_pinned"] = round(max_similarity, 4) if pinned else None
+            candidates.append(item)
+
+        candidates.sort(
+            key=lambda item: (
+                float(item.get("gallery_candidate_score") or 0.0),
+                float(item.get("quality_score") or 0.0),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return candidates[:resolved_limit]
+
+    def enrich_person_gallery(self, person_id: int, *, target_count: int = 8) -> dict[str, Any]:
+        target = max(1, min(int(target_count), 20))
+        with self._connect() as connection:
+            exists = connection.execute(
+                "select 1 from face_people where id = ?", (int(person_id),)
+            ).fetchone()
+            if exists is None:
+                raise ValueError("person not found")
+            before = int(connection.execute(
+                """
+                select count(*) from face_observations
+                where person_id = ? and canonical = 1 and reference_pinned = 1
+                """,
+                (int(person_id),),
+            ).fetchone()[0])
+
+        if before >= target:
+            return {"person_id": int(person_id), "target_count": target, "before": before, "after": before, "added": 0}
+
+        candidates = self.gallery_candidates(int(person_id), limit=100)
+        selected_ids = [int(item["id"]) for item in candidates[: target - before]]
+        if selected_ids:
+            with self._lock, self._connect() as connection:
+                connection.executemany(
+                    """
+                    update face_observations
+                    set reference_pinned = 1, reference_auto_pinned = 1
+                    where id = ? and person_id = ? and canonical = 1
+                        and review_status = 'confirmed'
+                    """,
+                    ((observation_id, int(person_id)) for observation_id in selected_ids),
+                )
+            self._invalidate_reference_gallery()
+            self.request_match_refresh()
+
+        with self._connect() as connection:
+            after = int(connection.execute(
+                """
+                select count(*) from face_observations
+                where person_id = ? and canonical = 1 and reference_pinned = 1
+                """,
+                (int(person_id),),
+            ).fetchone()[0])
+        return {
+            "person_id": int(person_id),
+            "target_count": target,
+            "before": before,
+            "after": after,
+            "added": max(0, after - before),
+            "selected_observation_ids": selected_ids,
+        }
+
+    def people_representation_health(self) -> list[dict[str, Any]]:
+        results = []
+        for person in self.people():
+            results.append(self.person_representation(int(person["id"])))
+        results.sort(
+            key=lambda item: (
+                0 if item.get("flags") else 1,
+                int(item.get("sample_count") or 0),
+                str(item.get("name") or ""),
+            )
+        )
+        return results
+
+
     def person_history(
         self,
         person_id: int,
@@ -3253,9 +3791,30 @@ class FaceStore:
                 """,
                 (int(person_id), resolved_limit),
             ).fetchall()
+        model_scores = []
+        for row in recent:
+            try:
+                details = json.loads(str(row["match_details_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                details = {}
+            if not isinstance(details, dict):
+                continue
+            try:
+                score = float(details.get("score"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(score):
+                model_scores.append(score)
+        model_score = {
+            "count": len(model_scores),
+            "p05": round(float(np.percentile(model_scores, 5)), 4) if model_scores else None,
+            "median": round(float(np.percentile(model_scores, 50)), 4) if model_scores else None,
+            "p95": round(float(np.percentile(model_scores, 95)), 4) if model_scores else None,
+        }
         return {
             "person": dict(person),
             "summary": dict(summary),
+            "model_score": model_score,
             "cameras": [dict(row) for row in cameras],
             "recent": [self._observation_row(row) for row in recent],
         }
@@ -3415,7 +3974,7 @@ class FaceStore:
             margin = true_score - float(wrong_score)
             flags = []
             if margin < 0:
-                flags.append("wrong_identity_ranks_higher")
+                flags.append("assigned_identity_not_rank1")
             elif margin < 0.05:
                 flags.append("poor_separation")
             if true_score < float(recognizer.config.face_match_threshold):
