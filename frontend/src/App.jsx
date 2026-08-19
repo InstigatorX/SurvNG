@@ -119,7 +119,7 @@ import { recordingCameraAspect, recordingGridBestEpoch } from "./recordingGrid.m
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "./liveWorkspace.mjs";
 import { camerasWithLiveFraming, liveFramingStyle, normalizedLiveFraming } from "./liveFraming.mjs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, timelineViewport, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
@@ -6891,20 +6891,25 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     .filter((event) => Number.isFinite(event.incident_epoch))
     .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events]);
 
+  const timelineView = useMemo(
+    () => timelineViewport(
+      dayStart,
+      dayEnd,
+      Number.isFinite(playhead) ? playhead : desiredEpochRef.current,
+      incidentRangeHours,
+    ),
+    [dayEnd, dayStart, incidentRangeHours, playhead],
+  );
+
   const timelineEvents = useMemo(() => events
     .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
     .filter((event) => Number.isFinite(event.incident_epoch))
     .sort((left, right) => left.incident_epoch - right.incident_epoch), [events]);
 
-  const nearbyEvents = useMemo(() => {
-    if (!Number.isFinite(playhead)) return [];
-    if (incidentRangeHours >= 24) return filteredEvents;
-    const maximumDistance = incidentRangeHours * 30 * 60;
-    return filteredEvents
-      .map((event) => ({ ...event, distance: Math.abs(event.incident_epoch - playhead) }))
-      .filter((event) => event.distance <= maximumDistance)
-      .sort((left, right) => left.incident_epoch - right.incident_epoch)
-  }, [filteredEvents, incidentRangeHours, playhead]);
+  const nearbyEvents = useMemo(() => filteredEvents.filter((event) => (
+    event.incident_epoch >= timelineView.startEpoch
+    && event.incident_epoch <= timelineView.endEpoch
+  )), [filteredEvents, timelineView.endEpoch, timelineView.startEpoch]);
   const selectedEvent = nearbyEvents.find((event) => event.id === selectedEventId)
     || timelineEvents.find((event) => event.id === selectedEventId)
     || nearbyEvents.reduce((closest, event) => (
@@ -6923,9 +6928,13 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     ? Math.max(0, ...(selectedEvent.objects || []).map((object) => Number(object.confidence) || 0), Number(selectedEvent.confidence) || 0)
     : 0;
   const displayedTimelineEvents = useMemo(() => {
-    if (!selectedEvent || filteredEvents.some((event) => event.id === selectedEvent.id)) return filteredEvents;
-    return [...filteredEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
-  }, [filteredEvents, selectedEvent]);
+    if (!selectedEvent || nearbyEvents.some((event) => event.id === selectedEvent.id)) return nearbyEvents;
+    if (
+      selectedEvent.incident_epoch < timelineView.startEpoch
+      || selectedEvent.incident_epoch > timelineView.endEpoch
+    ) return nearbyEvents;
+    return [...nearbyEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
+  }, [nearbyEvents, selectedEvent, timelineView.endEpoch, timelineView.startEpoch]);
 
   useEffect(() => {
     if (!exportJob?.id || !["queued", "running", "cancelling"].includes(exportJob.status)) return undefined;
@@ -7734,8 +7743,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             previewManifestUrl={manifestUrl}
             previewStartTime={manifestStartTime}
             previewTimeline={playbackTimeline}
-            startEpoch={dayStart}
-            endEpoch={dayEnd}
+            startEpoch={timelineView.startEpoch}
+            endEpoch={timelineView.endEpoch}
             recordings={timeline}
             events={displayedTimelineEvents}
             evidenceFilter={eventFilter}

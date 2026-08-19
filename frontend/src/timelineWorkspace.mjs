@@ -78,6 +78,20 @@ export function timelineEvidenceWindow(events, playhead, limit = 12) {
     .sort((left, right) => left.incident_epoch - right.incident_epoch);
 }
 
+export function timelineViewport(startEpoch, endEpoch, anchorEpoch, windowHours) {
+  const start = Number(startEpoch);
+  const end = Number(endEpoch);
+  const duration = Math.max(1, end - start);
+  const hours = Number(windowHours);
+  if (!Number.isFinite(hours) || hours >= 24 || hours * 3600 >= duration) {
+    return { startEpoch: start, endEpoch: end };
+  }
+  const span = Math.max(1, hours * 3600);
+  const anchor = Math.max(start, Math.min(end, Number(anchorEpoch) || start));
+  const viewportStart = Math.max(start, Math.min(end - span, anchor - span / 2));
+  return { startEpoch: viewportStart, endEpoch: viewportStart + span };
+}
+
 export function parseTimelineView(search, today = "") {
   const params = search instanceof URLSearchParams ? search : new URLSearchParams(search || "");
   const rawDate = params.get("date") || today;
