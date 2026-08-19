@@ -2025,9 +2025,18 @@ p {
   background: var(--control);
 }
 
-.live-activity-item.selected {
-  border-color: var(--accent);
+.incident-rail .live-activity-item.selected {
+  border-bottom-color: var(--line);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel-solid));
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.incident-rail .live-activity-item.selected .live-activity-select {
+  background: transparent;
+}
+
+.incident-rail .live-activity-item.selected .live-activity-select:focus-visible {
+  outline: 0;
 }
 
 .live-activity-select {

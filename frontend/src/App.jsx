@@ -5252,7 +5252,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
             <div className="incidents-command-primary">
               <div className="incident-filter-toggle compact" role="group" aria-label="Incident type filter">
                 <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Objects</button>
-                <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion only</button>
+                <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
               </div>
               <label className="incident-day-field"><span>Day</span><input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" /></label>
               {semanticIncidentControl}
@@ -5338,7 +5338,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
           <div className="incident-head-actions">
             <div className="incident-filter-toggle compact" aria-label="Incident type filter">
               <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Object</button>
-              <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion only</button>
+              <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
             </div>
             <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
           </div>
@@ -7777,7 +7777,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               <div className="recordings-v2-event-filter" role="group" aria-label="Recording incident type">
                 <button type="button" className={eventFilter === "all" ? "active" : ""} aria-pressed={eventFilter === "all"} onClick={() => { checkpointTimelineView(); setEventFilter("all"); }}><Images size={14} />All events</button>
                 <button type="button" className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => { checkpointTimelineView(); setEventFilter("object"); }}><CircleDot size={14} />Objects</button>
-                <button type="button" className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { checkpointTimelineView(); setEventFilter("motion"); }}><Radar size={14} />Motion only</button>
+                <button type="button" className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { checkpointTimelineView(); setEventFilter("motion"); }}><Radar size={14} />Motion</button>
                 <button type="button" className={eventFilter === "people" ? "active" : ""} aria-pressed={eventFilter === "people"} onClick={() => { checkpointTimelineView(); setEventFilter("people"); }}><UserRound size={14} />People</button>
                 <button type="button" className={eventFilter === "vehicles" ? "active" : ""} aria-pressed={eventFilter === "vehicles"} onClick={() => { checkpointTimelineView(); setEventFilter("vehicles"); }}><CarFront size={14} />Vehicles</button>
               </div>
@@ -8682,7 +8682,7 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
       <div className="recordings-v2-lane-legend">
         <span className="visually-hidden">{eventMarkers.filter((event) => event.hasObjects).length} object incidents and {eventMarkers.filter((event) => !event.hasObjects).length} motion-only incidents on this day.</span>
         <span className={evidenceFilter === "object" ? "active object" : "object"}>Objects ({eventMarkers.filter((event) => event.hasObjects).length})</span>
-        <span className={evidenceFilter === "motion" ? "active motion" : "motion"}>Motion only ({eventMarkers.filter((event) => !event.hasObjects).length})</span>
+        <span className={evidenceFilter === "motion" ? "active motion" : "motion"}>Motion ({eventMarkers.filter((event) => !event.hasObjects).length})</span>
       </div>
       <div className="recordings-v2-track">
         {onPageViewport ? <button type="button" className="recordings-v2-timeline-page previous" onClick={() => onPageViewport(-1)} disabled={!canPageBackward} aria-label="Previous timeline window" title="Previous half-window"><ChevronLeft size={16} /></button> : null}
