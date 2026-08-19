@@ -116,6 +116,19 @@ def _validate_recording_range(
         raise HTTPException(status_code=400, detail=detail)
 
 
+
+def _identity_hydrated_recording_incidents(
+    active_manager: Any,
+    public_events: list[dict],
+) -> list[dict]:
+    incidents = _incident_rows(public_events)
+    face_store = getattr(active_manager, "faces", None)
+    if face_store is None or not hasattr(face_store, "for_event_ids"):
+        return incidents
+    from .incident_queries import IncidentQueryService
+    return IncidentQueryService.with_faces(active_manager, incidents)
+
+
 def _public_recording_row(row: dict) -> dict:
     payload = dict(row)
     payload.pop("path", None)
@@ -205,18 +218,10 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             limit=5000,
         )
         public_events = [_event_row(event) for event in events]
-        timeline_incidents = _incident_rows(public_events)
-        face_store = getattr(active_manager, "faces", None)
-        if face_store is not None and hasattr(face_store, "for_event_ids"):
-            # Timeline uses incident summaries rather than one authoritative event row.
-            # Hydrate the whole incident so a face recognized on any sibling event
-            # becomes the incident-level identity shown by the Timeline UI.
-            from .incident_queries import IncidentQueryService
-
-            timeline_incidents = IncidentQueryService.with_faces(
-                active_manager,
-                timeline_incidents,
-            )
+        timeline_incidents = _identity_hydrated_recording_incidents(
+            active_manager,
+            public_events,
+        )
         return {
             "camera_id": camera_id,
             "source": selected_source,
@@ -309,9 +314,13 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                     limit=5000,
                 )
             public_events = [_event_row(event) for event in event_rows]
+            hydrated_incidents = _identity_hydrated_recording_incidents(
+                active_manager,
+                public_events,
+            )
             incidents = [
                 _recording_grid_incident_payload(incident)
-                for incident in _incident_rows(public_events)
+                for incident in hydrated_incidents
             ]
             aggregate_incidents.extend(incidents)
             camera_payloads.append({
@@ -397,6 +406,10 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             if str(row.get("camera_id") or "") in camera_ids
         ]
         public_events = [_event_row(event) for event in event_rows]
+        hydrated_incidents = _identity_hydrated_recording_incidents(
+            active_manager,
+            public_events,
+        )
         aggregate_ranges.sort(key=lambda item: float(item.get("start_epoch") or 0))
         return {
             "view": "all_cameras",
@@ -406,7 +419,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "availability": aggregate_ranges,
             "incidents": [
                 _recording_grid_incident_payload(incident)
-                for incident in _incident_rows(public_events)
+                for incident in hydrated_incidents
             ],
         }
 
@@ -735,6 +748,10 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             limit=1000,
         )
         public_events = [_event_row(event) for event in events]
+        timeline_incidents = _identity_hydrated_recording_incidents(
+            active_manager,
+            public_events,
+        )
         return {
             "camera_id": camera_id,
             "source": selected_source,
@@ -744,7 +761,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "events": public_events,
             "incidents": [
                 _incident_list_payload(incident)
-                for incident in _incident_rows(public_events)
+                for incident in timeline_incidents
             ],
         }
 

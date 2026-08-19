@@ -263,11 +263,16 @@ class FaceStore:
                 "candidate_rank": "alter table face_observations add column candidate_rank integer not null default 1",
                 "candidate_offset_seconds": "alter table face_observations add column candidate_offset_seconds real not null default 0",
                 "canonical": "alter table face_observations add column canonical integer not null default 1",
+                "duplicate_of_observation_id": "alter table face_observations add column duplicate_of_observation_id integer",
                 "consensus_json": "alter table face_observations add column consensus_json text not null default '{}'",
             }
             for name, statement in migrations.items():
                 if name not in columns:
                     connection.execute(statement)
+            connection.execute(
+                "create index if not exists idx_face_duplicate_of "
+                "on face_observations(duplicate_of_observation_id)"
+            )
             connection.execute(
                 """
                 update face_observations
@@ -1011,6 +1016,206 @@ class FaceStore:
                     ),
                 )
             return False
+
+
+    def _mark_exact_embedding_duplicate_locked(
+        self,
+        connection: sqlite3.Connection,
+        observation_id: int,
+        *,
+        window_seconds: float = 60.0,
+    ) -> int | None:
+        row = connection.execute(
+            """
+            select id, camera_id, observed_at, embedding_blob, embedding_model,
+                person_id, review_status, reference_pinned
+            from face_observations
+            where id = ?
+            """,
+            (observation_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row["embedding_blob"] is None
+            or row["person_id"] is not None
+            or str(row["review_status"] or "") == "confirmed"
+            or bool(row["reference_pinned"])
+        ):
+            return None
+
+        duplicate = connection.execute(
+            """
+            select id from face_observations
+            where id != ?
+                and canonical = 1
+                and camera_id = ?
+                and embedding_model = ?
+                and embedding_blob = ?
+                and person_id is null
+                and review_status != 'confirmed'
+                and reference_pinned = 0
+                and abs((julianday(observed_at) - julianday(?)) * 86400.0) <= ?
+            order by observed_at asc, id asc
+            limit 1
+            """,
+            (
+                observation_id,
+                str(row["camera_id"] or ""),
+                str(row["embedding_model"] or ""),
+                row["embedding_blob"],
+                str(row["observed_at"] or ""),
+                max(0.0, float(window_seconds)),
+            ),
+        ).fetchone()
+        if duplicate is None:
+            return None
+
+        duplicate_id = int(duplicate["id"])
+        connection.execute(
+            """
+            update face_observations
+            set canonical = 0,
+                duplicate_of_observation_id = ?,
+                candidate_person_id = null,
+                candidate_confidence = null
+            where id = ?
+                and person_id is null
+                and review_status != 'confirmed'
+                and reference_pinned = 0
+            """,
+            (duplicate_id, observation_id),
+        )
+        return duplicate_id
+
+    def dedupe_exact_embeddings(
+        self,
+        *,
+        window_seconds: float = 60.0,
+    ) -> dict[str, Any]:
+        window = max(0.0, min(float(window_seconds), 3600.0))
+        marked = 0
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                select id from face_observations
+                where canonical = 1
+                    and embedding_blob is not null
+                    and person_id is null
+                    and review_status != 'confirmed'
+                    and reference_pinned = 0
+                order by observed_at asc, id asc
+                """
+            ).fetchall()
+            for row in rows:
+                marked += int(
+                    self._mark_exact_embedding_duplicate_locked(
+                        connection,
+                        int(row["id"]),
+                        window_seconds=window,
+                    )
+                    is not None
+                )
+        if marked:
+            self.request_match_refresh()
+        return {
+            "marked_duplicates": marked,
+            "window_seconds": window,
+            **self.duplicate_stats(),
+        }
+
+    def duplicate_stats(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            summary = connection.execute(
+                """
+                select count(*) as total_rows,
+                    sum(case when duplicate_of_observation_id is not null then 1 else 0 end)
+                        as duplicate_rows,
+                    sum(case when canonical = 1 then 1 else 0 end) as canonical_rows
+                from face_observations
+                """
+            ).fetchone()
+            groups = connection.execute(
+                """
+                select original.id as observation_id,
+                    original.camera_id,
+                    original.observed_at,
+                    count(duplicate.id) as duplicate_count
+                from face_observations original
+                join face_observations duplicate
+                    on duplicate.duplicate_of_observation_id = original.id
+                group by original.id
+                order by duplicate_count desc, original.id
+                limit 20
+                """
+            ).fetchall()
+        return {
+            "total_rows": int(summary["total_rows"] or 0),
+            "canonical_rows": int(summary["canonical_rows"] or 0),
+            "duplicate_rows": int(summary["duplicate_rows"] or 0),
+            "top_duplicate_groups": [dict(row) for row in groups],
+        }
+
+    def unknown_cluster_members(
+        self,
+        cluster_id: int,
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select o.*, p.name as person_name,
+                    candidate.name as candidate_person_name,
+                    m.cluster_id as unknown_cluster_id
+                from face_unknown_members m
+                join face_observations o on o.id = m.observation_id
+                left join face_people p on p.id = o.person_id
+                left join face_people candidate on candidate.id = o.candidate_person_id
+                where m.cluster_id = ?
+                    and o.canonical = 1
+                order by o.observed_at desc, o.id desc
+                limit ?
+                """,
+                (int(cluster_id), max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [self._observation_row(row) for row in rows]
+
+    def confirmed_quality_issues(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select o.*, p.name as person_name,
+                    candidate.name as candidate_person_name
+                from face_observations o
+                join face_people p on p.id = o.person_id
+                left join face_people candidate on candidate.id = o.candidate_person_id
+                where o.canonical = 1
+                    and o.person_id is not null
+                    and o.review_status = 'confirmed'
+                order by coalesce(o.quality_score, 0) asc,
+                    coalesce(o.match_confidence, 0) asc,
+                    o.observed_at desc
+                limit ?
+                """,
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = self._observation_row(row)
+            flags = []
+            if float(item.get("quality_score") or 0.0) < 0.45:
+                flags.append("low_quality")
+            if float(item.get("match_confidence") or 0.0) < 0.30:
+                flags.append("weak_match")
+            if item.get("reference_pinned"):
+                flags.append("reference")
+            item["diagnostic_flags"] = flags
+            result.append(item)
+        return result
 
     def _reconcile_candidate_track(
         self,

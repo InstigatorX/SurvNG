@@ -114,6 +114,47 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
         deps.start_observation_sync()
         return with_manager(lambda active: active.faces.unknown_clusters())
 
+
+    @router.get("/api/faces/diagnostics/duplicates")
+    def face_duplicate_diagnostics() -> dict[str, Any]:
+        deps.start_observation_sync()
+        return with_manager(lambda active: active.faces.duplicate_stats())
+
+    @router.post("/api/faces/maintenance/dedupe")
+    def face_dedupe(window_seconds: float = 60.0) -> dict[str, Any]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: active.faces.dedupe_exact_embeddings(
+                window_seconds=window_seconds
+            )
+        )
+
+    @router.get("/api/faces/diagnostics/confirmed-quality")
+    def face_confirmed_quality(limit: int = 100) -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: [
+                _public_face_observation(item)
+                for item in active.faces.confirmed_quality_issues(limit=limit)
+            ]
+        )
+
+    @router.get("/api/faces/unknown-clusters/{cluster_id}/members")
+    def face_unknown_cluster_members(
+        cluster_id: int,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: [
+                _public_face_observation(item)
+                for item in active.faces.unknown_cluster_members(
+                    cluster_id,
+                    limit=limit,
+                )
+            ]
+        )
+
     @router.get("/api/faces/people")
     def face_people() -> list[dict[str, Any]]:
         deps.start_observation_sync()

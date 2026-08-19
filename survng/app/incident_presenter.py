@@ -324,6 +324,8 @@ def _recording_grid_incident_payload(incident: dict) -> dict:
             "last_epoch",
             "has_objects",
             "labels",
+            "identities",
+            "primary_identity",
         )
         if key in incident
     }
