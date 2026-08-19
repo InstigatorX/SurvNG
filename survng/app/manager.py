@@ -38,6 +38,7 @@ from .go2rtc import Go2RtcAdapter
 from .inference_lifecycle import InferenceLifecycle
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
+from .identity_projection import apply_event_identity
 from .media_storage import MediaStorageRegistry
 from .mqtt import MqttService
 from .mqtt_lifecycle import MqttLifecycle
@@ -1280,6 +1281,27 @@ class AppManager:
             event = self.events.get(event_id) if event_id else None
             camera = self.camera(camera_id)
             if event is not None:
+                event = dict(event)
+                faces: list[dict] = []
+                for observation in self.faces.for_event_ids([event_id]):
+                    person_id = observation.get("person_id")
+                    if person_id is None:
+                        continue
+                    faces.append({
+                        "observation_id": int(observation.get("observation_id") or 0),
+                        "identity_id": int(person_id),
+                        "person_id": int(person_id),
+                        "name": str(
+                            observation.get("person_name")
+                            or f"Person {int(person_id)}"
+                        ),
+                        "status": "confirmed",
+                        "confidence": float(
+                            observation.get("match_confidence") or 0.0
+                        ),
+                    })
+                event["faces"] = faces
+                event = apply_event_identity(event)
                 self.mqtt.track_incident(
                     event,
                     camera.name if camera is not None else camera_id,

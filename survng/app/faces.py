@@ -19,6 +19,8 @@ from .inference import INFERENCE_REQUEST_TIMEOUT_SECONDS, InferenceUnavailable
 from .incident_utils import event_snapshot_path, portable_media_path
 from .media_storage import MediaStorageRegistry
 from .visual_quality import image_quality
+from .unknown_identity import cluster_unknown_embeddings, unknown_cluster_cohesion
+from .unknown_identity import DEFAULT_UNKNOWN_CLUSTER_THRESHOLD
 
 
 LOGGER = logging.getLogger(__name__)
@@ -221,6 +223,14 @@ class FaceStore:
                     on face_observations(observed_at desc);
                 create index if not exists idx_face_observations_person
                     on face_observations(person_id, observed_at desc);
+                create table if not exists face_unknown_members (
+                    observation_id integer primary key,
+                    cluster_id integer not null,
+                    updated_at text not null,
+                    foreign key(observation_id) references face_observations(id) on delete cascade
+                );
+                create index if not exists idx_face_unknown_members_cluster
+                    on face_unknown_members(cluster_id, observation_id);
                 create table if not exists face_rejections (
                     observation_id integer not null,
                     person_id integer not null,
@@ -246,6 +256,7 @@ class FaceStore:
                 "quality_json": "alter table face_observations add column quality_json text not null default '{}'",
                 "quality_version": "alter table face_observations add column quality_version integer not null default 0",
                 "reference_pinned": "alter table face_observations add column reference_pinned integer not null default 0",
+                "reference_auto_pinned": "alter table face_observations add column reference_auto_pinned integer not null default 0",
                 "auto_identified": "alter table face_observations add column auto_identified integer not null default 0",
                 "match_details_json": "alter table face_observations add column match_details_json text not null default '{}'",
                 "candidate_track_id": "alter table face_observations add column candidate_track_id text not null default ''",
@@ -1499,6 +1510,922 @@ class FaceStore:
             ) if track_rows else 0.0,
         }
 
+    def camera_suitability(self) -> list[dict[str, Any]]:
+        """Score how useful each camera is for face recognition."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select camera_id, recognition_outcome, person_id,
+                    quality_score, quality_json
+                from face_observations
+                where canonical = 1
+                order by camera_id, observed_at desc
+                """
+            ).fetchall()
+
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["camera_id"] or ""), []).append(row)
+
+        result: list[dict[str, Any]] = []
+        for camera_id, items in grouped.items():
+            total = len(items)
+            embedded = sum(
+                1 for row in items
+                if row["recognition_outcome"] == FACE_OUTCOME_EMBEDDED
+            )
+            too_small = sum(
+                1 for row in items
+                if row["recognition_outcome"] == FACE_OUTCOME_TOO_SMALL
+            )
+            failed = sum(
+                1 for row in items
+                if row["recognition_outcome"] == FACE_OUTCOME_FAILED
+            )
+            known = sum(1 for row in items if row["person_id"] is not None)
+            qualities = [
+                float(row["quality_score"])
+                for row in items
+                if row["quality_score"] is not None
+            ]
+            sizes: list[float] = []
+            for row in items:
+                try:
+                    quality = json.loads(row["quality_json"] or "{}")
+                    value = float(quality.get("size"))
+                    if math.isfinite(value):
+                        sizes.append(max(0.0, min(1.0, value)))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+
+            usable_rate = embedded / total if total else 0.0
+            avg_quality = sum(qualities) / len(qualities) if qualities else 0.0
+            avg_size = sum(sizes) / len(sizes) if sizes else 0.0
+            known_rate = known / embedded if embedded else 0.0
+            score = max(
+                0.0,
+                min(
+                    1.0,
+                    0.50 * usable_rate
+                    + 0.25 * avg_quality
+                    + 0.15 * avg_size
+                    + 0.10 * known_rate,
+                ),
+            )
+            if total < 5:
+                grade = "insufficient_data"
+            elif score >= 0.78:
+                grade = "excellent"
+            elif score >= 0.62:
+                grade = "good"
+            elif score >= 0.45:
+                grade = "marginal"
+            else:
+                grade = "poor"
+
+            result.append({
+                "camera_id": camera_id,
+                "score": round(score, 4),
+                "grade": grade,
+                "observations": total,
+                "embedded": embedded,
+                "known": known,
+                "too_small": too_small,
+                "processing_failed": failed,
+                "usable_rate": round(usable_rate, 4),
+                "too_small_rate": round(too_small / total, 4) if total else 0.0,
+                "failure_rate": round(failed / total, 4) if total else 0.0,
+                "average_quality": round(avg_quality, 4),
+                "average_face_size": round(avg_size, 4),
+                "identified_rate": round(known_rate, 4),
+            })
+
+        return sorted(
+            result,
+            key=lambda item: (-item["score"], item["camera_id"]),
+        )
+
+    def benchmark_production_matcher(self) -> dict[str, Any]:
+        """Emulate production gallery matching with leave-one-out evaluation."""
+        recognizer = self.recognizer
+        if recognizer is None:
+            return {"ready": False, "message": "Face recognition is not configured."}
+
+        status = recognizer.status()
+        model_fingerprint = str(status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            return {"ready": False, "message": "The face model is not ready."}
+
+        max_refs = max(
+            1,
+            int(getattr(recognizer.config, "face_max_references", 20)),
+        )
+        current_threshold = float(recognizer.config.face_match_threshold)
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select o.id, o.person_id, p.name as person_name,
+                    o.camera_id, o.quality_score, o.confidence,
+                    o.box_json, o.reference_pinned, o.observed_at,
+                    o.embedding_blob
+                from face_observations o
+                join face_people p on p.id = o.person_id
+                where o.canonical = 1
+                    and o.person_id is not null
+                    and o.review_status = 'confirmed'
+                    and o.embedding_model = ?
+                    and o.embedding_blob is not null
+                order by lower(p.name), o.observed_at desc, o.id desc
+                """,
+                (model_fingerprint,),
+            ).fetchall()
+
+        samples: list[dict[str, Any]] = []
+        for raw in rows:
+            vector = np.frombuffer(raw["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(vector))
+            if (
+                vector.size
+                and math.isfinite(norm)
+                and norm > 1e-9
+                and np.all(np.isfinite(vector))
+            ):
+                item = dict(raw)
+                item["_embedding"] = vector / norm
+                samples.append(item)
+
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        names: dict[int, str] = {}
+        for sample in samples:
+            person_id = int(sample["person_id"])
+            grouped.setdefault(person_id, []).append(sample)
+            names[person_id] = str(sample["person_name"] or "")
+
+        if len(grouped) < 2 or len(samples) < 6:
+            return {
+                "ready": False,
+                "message": (
+                    "Benchmarking needs at least two identities and six "
+                    "confirmed embedded observations."
+                ),
+                "identities": len(grouped),
+                "samples": len(samples),
+            }
+
+        per_identity: dict[int, dict[str, Any]] = {}
+        trials: list[dict[str, Any]] = []
+
+        for held_out in samples:
+            held_out_id = int(held_out["id"])
+            held_out_person_id = int(held_out["person_id"])
+            candidate_rows = [
+                row for row in samples
+                if int(row["id"]) != held_out_id
+            ]
+
+            gallery = self._select_reference_gallery(
+                candidate_rows,
+                max_refs,
+                held_out["_embedding"].shape,
+            )
+            if not gallery:
+                continue
+
+            by_person: dict[int, list[tuple[float, int]]] = {}
+            for reference in gallery:
+                reference_person_id = int(reference["person_id"])
+                score = float(
+                    np.dot(
+                        held_out["_embedding"],
+                        reference["_embedding"],
+                    )
+                )
+                by_person.setdefault(reference_person_id, []).append(
+                    (score, int(reference["id"]))
+                )
+
+            if held_out_person_id not in by_person or len(by_person) < 2:
+                continue
+
+            ranked: list[tuple[float, int, list[tuple[float, int]]]] = []
+            for person_id, values in by_person.items():
+                top = sorted(values, reverse=True)[:3]
+                aggregate = sum(item[0] for item in top) / len(top)
+                ranked.append((aggregate, person_id, top))
+            ranked.sort(reverse=True)
+
+            top_score, top_person_id, top_refs = ranked[0]
+            true_entry = next(
+                entry for entry in ranked
+                if entry[1] == held_out_person_id
+            )
+            true_score = float(true_entry[0])
+            best_wrong = max(
+                score for score, person_id, _refs in ranked
+                if person_id != held_out_person_id
+            )
+            rank_one = top_person_id == held_out_person_id
+
+            trials.append({
+                "observation_id": held_out_id,
+                "person_id": held_out_person_id,
+                "person_name": names[held_out_person_id],
+                "camera_id": str(held_out["camera_id"] or ""),
+                "true_score": true_score,
+                "best_wrong_score": float(best_wrong),
+                "rank_one": rank_one,
+                "predicted_person_id": int(top_person_id),
+                "predicted_person_name": names.get(int(top_person_id), ""),
+                "predicted_score": float(top_score),
+                "accepted_at_current": bool(
+                    rank_one and top_score >= current_threshold
+                ),
+                "top_reference_ids": [int(item[1]) for item in top_refs],
+            })
+
+        if not trials:
+            return {
+                "ready": False,
+                "message": "No leave-one-out trials could be formed.",
+            }
+
+        def q(values: list[float], quantile: float) -> float | None:
+            if not values:
+                return None
+            return round(float(np.quantile(values, quantile)), 4)
+
+        true_scores = [float(item["true_score"]) for item in trials]
+        wrong_scores = [float(item["best_wrong_score"]) for item in trials]
+        rank_one_accuracy = sum(
+            1 for item in trials if item["rank_one"]
+        ) / len(trials)
+
+        threshold_sweep: list[tuple[float, float, float, float]] = []
+        for raw in range(20, 71):
+            threshold = raw / 100.0
+            accepted_correct = sum(
+                1
+                for item in trials
+                if item["rank_one"]
+                and item["predicted_score"] >= threshold
+            )
+            accepted_wrong = sum(
+                1
+                for item in trials
+                if (not item["rank_one"])
+                and item["predicted_score"] >= threshold
+            )
+            true_accept_rate = accepted_correct / len(trials)
+            false_accept_rate = accepted_wrong / len(trials)
+            miss_rate = 1.0 - true_accept_rate
+            objective = false_accept_rate * 8.0 + miss_rate
+            threshold_sweep.append(
+                (
+                    threshold,
+                    true_accept_rate,
+                    false_accept_rate,
+                    objective,
+                )
+            )
+
+        constrained = [
+            item
+            for item in threshold_sweep
+            if item[2] <= 0.005
+        ]
+        best = min(
+            constrained or threshold_sweep,
+            key=lambda item: (
+                item[3],
+                -item[1],
+                item[2],
+                item[0],
+            ),
+        )
+
+        by_identity_trials: dict[int, list[dict[str, Any]]] = {}
+        for trial in trials:
+            by_identity_trials.setdefault(
+                int(trial["person_id"]),
+                [],
+            ).append(trial)
+
+        identity_rows: list[dict[str, Any]] = []
+        for person_id, person_trials in by_identity_trials.items():
+            person_true = [
+                float(item["true_score"])
+                for item in person_trials
+            ]
+            person_wrong = [
+                float(item["best_wrong_score"])
+                for item in person_trials
+            ]
+            person_rank_one = sum(
+                1 for item in person_trials if item["rank_one"]
+            ) / len(person_trials)
+            person_current_accept = sum(
+                1
+                for item in person_trials
+                if item["accepted_at_current"]
+            ) / len(person_trials)
+            worst_trial = min(
+                person_trials,
+                key=lambda item: (
+                    float(item["true_score"])
+                    - float(item["best_wrong_score"])
+                ),
+            )
+            identity_rows.append({
+                "person_id": person_id,
+                "name": names.get(person_id, ""),
+                "trials": len(person_trials),
+                "rank_one_accuracy": round(person_rank_one, 4),
+                "accepted_at_current_threshold": round(
+                    person_current_accept,
+                    4,
+                ),
+                "true_score": {
+                    "p05": q(person_true, 0.05),
+                    "median": q(person_true, 0.50),
+                    "p95": q(person_true, 0.95),
+                },
+                "best_wrong_score": {
+                    "p95": q(person_wrong, 0.95),
+                    "maximum": round(max(person_wrong), 4),
+                },
+                "worst_margin": round(
+                    float(worst_trial["true_score"])
+                    - float(worst_trial["best_wrong_score"]),
+                    4,
+                ),
+                "worst_case": {
+                    "observation_id": int(worst_trial["observation_id"]),
+                    "camera_id": str(worst_trial["camera_id"]),
+                    "true_score": round(
+                        float(worst_trial["true_score"]),
+                        4,
+                    ),
+                    "predicted_person_id": int(
+                        worst_trial["predicted_person_id"]
+                    ),
+                    "predicted_person_name": str(
+                        worst_trial["predicted_person_name"]
+                    ),
+                    "predicted_score": round(
+                        float(worst_trial["predicted_score"]),
+                        4,
+                    ),
+                },
+            })
+
+        identity_rows.sort(
+            key=lambda item: (
+                item["rank_one_accuracy"],
+                item["accepted_at_current_threshold"],
+                item["name"].lower(),
+            )
+        )
+
+        return {
+            "ready": True,
+            "model_fingerprint": model_fingerprint,
+            "identities": len(grouped),
+            "samples": len(samples),
+            "trials": len(trials),
+            "gallery_limit": max_refs,
+            "rank_one_accuracy": round(rank_one_accuracy, 4),
+            "true_score": {
+                "p05": q(true_scores, 0.05),
+                "median": q(true_scores, 0.50),
+                "p95": q(true_scores, 0.95),
+            },
+            "best_wrong_score": {
+                "p95": q(wrong_scores, 0.95),
+                "p99": q(wrong_scores, 0.99),
+                "maximum": round(max(wrong_scores), 4),
+            },
+            "current": {
+                "match_threshold": current_threshold,
+                "true_accept_rate": round(
+                    sum(
+                        1
+                        for item in trials
+                        if item["rank_one"]
+                        and item["predicted_score"] >= current_threshold
+                    )
+                    / len(trials),
+                    4,
+                ),
+                "false_accept_rate": round(
+                    sum(
+                        1
+                        for item in trials
+                        if (not item["rank_one"])
+                        and item["predicted_score"] >= current_threshold
+                    )
+                    / len(trials),
+                    4,
+                ),
+            },
+            "recommended": {
+                "match_threshold": round(best[0], 2),
+                "true_accept_rate": round(best[1], 4),
+                "false_accept_rate": round(best[2], 4),
+            },
+            "results": identity_rows,
+            "message": (
+                "This benchmark mirrors SurvNG gallery selection and top-three "
+                "reference aggregation more closely than raw pairwise similarity."
+            ),
+        }
+
+    def benchmark_camera_pairs(self) -> dict[str, Any]:
+        """Report same-person similarity by camera pair for confirmed identities."""
+        recognizer = self.recognizer
+        if recognizer is None:
+            return {"ready": False, "message": "Face recognition is not configured."}
+
+        status = recognizer.status()
+        model_fingerprint = str(status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            return {"ready": False, "message": "The face model is not ready."}
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select o.id, o.person_id, p.name as person_name,
+                    o.camera_id, o.embedding_blob
+                from face_observations o
+                join face_people p on p.id = o.person_id
+                where o.canonical = 1
+                    and o.person_id is not null
+                    and o.review_status = 'confirmed'
+                    and o.embedding_model = ?
+                    and o.embedding_blob is not null
+                    and o.camera_id != ''
+                order by lower(p.name), o.id
+                """,
+                (model_fingerprint,),
+            ).fetchall()
+
+        samples: list[dict[str, Any]] = []
+        for row in rows:
+            vector = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(vector))
+            if (
+                vector.size
+                and math.isfinite(norm)
+                and norm > 1e-9
+                and np.all(np.isfinite(vector))
+            ):
+                samples.append({
+                    "id": int(row["id"]),
+                    "person_id": int(row["person_id"]),
+                    "person_name": str(row["person_name"] or ""),
+                    "camera_id": str(row["camera_id"] or ""),
+                    "embedding": vector / norm,
+                })
+
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for sample in samples:
+            grouped.setdefault(sample["person_id"], []).append(sample)
+
+        pair_scores: dict[tuple[str, str], list[float]] = {}
+        person_pair_scores: dict[
+            tuple[int, str, str],
+            list[float],
+        ] = {}
+
+        for person_id, person_samples in grouped.items():
+            for index, left in enumerate(person_samples):
+                for right in person_samples[index + 1:]:
+                    camera_a, camera_b = sorted(
+                        [left["camera_id"], right["camera_id"]]
+                    )
+                    key = (camera_a, camera_b)
+                    score = float(
+                        np.dot(
+                            left["embedding"],
+                            right["embedding"],
+                        )
+                    )
+                    pair_scores.setdefault(key, []).append(score)
+                    person_pair_scores.setdefault(
+                        (person_id, camera_a, camera_b),
+                        [],
+                    ).append(score)
+
+        def summarize(values: list[float]) -> dict[str, Any]:
+            return {
+                "pairs": len(values),
+                "p05": round(float(np.quantile(values, 0.05)), 4),
+                "median": round(float(np.quantile(values, 0.50)), 4),
+                "p95": round(float(np.quantile(values, 0.95)), 4),
+            }
+
+        global_rows = [
+            {
+                "camera_a": camera_a,
+                "camera_b": camera_b,
+                **summarize(values),
+            }
+            for (camera_a, camera_b), values in pair_scores.items()
+            if values
+        ]
+        global_rows.sort(
+            key=lambda item: (
+                item["median"],
+                -item["pairs"],
+                item["camera_a"],
+                item["camera_b"],
+            )
+        )
+
+        names = {
+            int(sample["person_id"]): str(sample["person_name"])
+            for sample in samples
+        }
+        per_identity = [
+            {
+                "person_id": person_id,
+                "name": names.get(person_id, ""),
+                "camera_a": camera_a,
+                "camera_b": camera_b,
+                **summarize(values),
+            }
+            for (
+                person_id,
+                camera_a,
+                camera_b,
+            ), values in person_pair_scores.items()
+            if values
+        ]
+        per_identity.sort(
+            key=lambda item: (
+                item["median"],
+                -item["pairs"],
+                item["name"].lower(),
+                item["camera_a"],
+                item["camera_b"],
+            )
+        )
+
+        return {
+            "ready": True,
+            "model_fingerprint": model_fingerprint,
+            "samples": len(samples),
+            "camera_pairs": global_rows,
+            "identity_camera_pairs": per_identity,
+            "message": (
+                "Low medians identify camera transitions that produce weak "
+                "same-person embedding consistency."
+            ),
+        }
+
+    def benchmark_by_identity(self) -> dict[str, Any]:
+        """Return per-identity embedding cohesion and separation diagnostics."""
+        recognizer = self.recognizer
+        if recognizer is None:
+            return {"ready": False, "message": "Face recognition is not configured."}
+
+        status = recognizer.status()
+        model_fingerprint = str(status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            return {"ready": False, "message": "The face model is not ready."}
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select o.id, o.person_id, p.name as person_name,
+                    o.camera_id, o.quality_score, o.embedding_blob
+                from face_observations o
+                join face_people p on p.id = o.person_id
+                where o.canonical = 1
+                    and o.person_id is not null
+                    and o.review_status = 'confirmed'
+                    and o.embedding_model = ?
+                    and o.embedding_blob is not null
+                order by lower(p.name), o.id
+                """,
+                (model_fingerprint,),
+            ).fetchall()
+
+        samples: list[dict[str, Any]] = []
+        for row in rows:
+            vector = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(vector))
+            if (
+                vector.size
+                and math.isfinite(norm)
+                and norm > 1e-9
+                and np.all(np.isfinite(vector))
+            ):
+                samples.append({
+                    "id": int(row["id"]),
+                    "person_id": int(row["person_id"]),
+                    "person_name": str(row["person_name"] or ""),
+                    "camera_id": str(row["camera_id"] or ""),
+                    "quality_score": (
+                        float(row["quality_score"])
+                        if row["quality_score"] is not None
+                        else None
+                    ),
+                    "embedding": vector / norm,
+                })
+
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for sample in samples:
+            grouped.setdefault(sample["person_id"], []).append(sample)
+
+        if len(grouped) < 2:
+            return {
+                "ready": False,
+                "message": "At least two confirmed identities are required.",
+                "identities": len(grouped),
+                "samples": len(samples),
+            }
+
+        identities: list[dict[str, Any]] = []
+        for person_id, person_samples in grouped.items():
+            person_name = person_samples[0]["person_name"]
+            cameras = sorted({
+                str(sample["camera_id"])
+                for sample in person_samples
+                if sample["camera_id"]
+            })
+            qualities = [
+                float(sample["quality_score"])
+                for sample in person_samples
+                if sample["quality_score"] is not None
+                and math.isfinite(float(sample["quality_score"]))
+            ]
+
+            genuine_scores: list[float] = []
+            for index, sample_a in enumerate(person_samples):
+                for sample_b in person_samples[index + 1:]:
+                    genuine_scores.append(
+                        float(np.dot(sample_a["embedding"], sample_b["embedding"]))
+                    )
+
+            other_samples = [
+                sample
+                for other_id, items in grouped.items()
+                if other_id != person_id
+                for sample in items
+            ]
+            impostor_scores: list[float] = []
+            nearest_other_by_sample: list[float] = []
+            nearest_other_identity_by_sample: list[tuple[float, int, str]] = []
+
+            for sample in person_samples:
+                best_score = -1.0
+                best_id = 0
+                best_name = ""
+                for other in other_samples:
+                    score = float(np.dot(sample["embedding"], other["embedding"]))
+                    impostor_scores.append(score)
+                    if score > best_score:
+                        best_score = score
+                        best_id = int(other["person_id"])
+                        best_name = str(other["person_name"])
+                if best_score >= -1.0:
+                    nearest_other_by_sample.append(best_score)
+                    nearest_other_identity_by_sample.append(
+                        (best_score, best_id, best_name)
+                    )
+
+            def q(values: list[float], quantile: float) -> float | None:
+                if not values:
+                    return None
+                return round(float(np.quantile(values, quantile)), 4)
+
+            median_genuine = q(genuine_scores, 0.50)
+            p05_genuine = q(genuine_scores, 0.05)
+            p95_genuine = q(genuine_scores, 0.95)
+            maximum_impostor = (
+                round(max(impostor_scores), 4)
+                if impostor_scores
+                else None
+            )
+            p99_impostor = q(impostor_scores, 0.99)
+            nearest_other = (
+                max(nearest_other_identity_by_sample, key=lambda item: item[0])
+                if nearest_other_identity_by_sample
+                else None
+            )
+            nearest_other_score = (
+                round(float(nearest_other[0]), 4)
+                if nearest_other
+                else None
+            )
+
+            # A simple risk score intended for operator triage, not classification.
+            overlap_margin = None
+            if median_genuine is not None and nearest_other_score is not None:
+                overlap_margin = round(
+                    float(median_genuine) - float(nearest_other_score),
+                    4,
+                )
+
+            flags: list[str] = []
+            if len(person_samples) < 3:
+                flags.append("low_sample_count")
+            if median_genuine is not None and median_genuine < 0.20:
+                flags.append("weak_identity_cohesion")
+            if p05_genuine is not None and p05_genuine < 0.05:
+                flags.append("very_low_tail_similarity")
+            if maximum_impostor is not None and maximum_impostor >= 0.30:
+                flags.append("high_impostor_overlap")
+            if overlap_margin is not None and overlap_margin < 0.05:
+                flags.append("poor_separation")
+            if len(cameras) <= 1 and len(person_samples) >= 3:
+                flags.append("single_camera_gallery")
+
+            identities.append({
+                "person_id": person_id,
+                "name": person_name,
+                "samples": len(person_samples),
+                "camera_count": len(cameras),
+                "cameras": cameras,
+                "average_quality": (
+                    round(sum(qualities) / len(qualities), 4)
+                    if qualities
+                    else None
+                ),
+                "genuine_pairs": len(genuine_scores),
+                "same_person": {
+                    "p05": p05_genuine,
+                    "median": median_genuine,
+                    "p95": p95_genuine,
+                },
+                "different_person": {
+                    "p99": p99_impostor,
+                    "maximum": maximum_impostor,
+                    "nearest_identity_id": (
+                        int(nearest_other[1]) if nearest_other else None
+                    ),
+                    "nearest_identity_name": (
+                        str(nearest_other[2]) if nearest_other else None
+                    ),
+                    "nearest_identity_score": nearest_other_score,
+                },
+                "separation_margin": overlap_margin,
+                "flags": flags,
+            })
+
+        identities.sort(
+            key=lambda item: (
+                -len(item["flags"]),
+                item["separation_margin"]
+                if item["separation_margin"] is not None
+                else 999.0,
+                item["name"].lower(),
+            )
+        )
+
+        flagged = sum(1 for item in identities if item["flags"])
+        return {
+            "ready": True,
+            "model_fingerprint": model_fingerprint,
+            "identities": len(identities),
+            "samples": len(samples),
+            "flagged_identities": flagged,
+            "results": identities,
+            "message": (
+                "Flags are diagnostic only. Review weak identities and gallery "
+                "coverage before changing production thresholds."
+            ),
+        }
+
+    def benchmark(self) -> dict[str, Any]:
+        """Benchmark identity and clustering thresholds on reviewed embeddings."""
+        recognizer = self.recognizer
+        if recognizer is None:
+            return {"ready": False, "message": "Face recognition is not configured."}
+        status = recognizer.status()
+        model_fingerprint = str(status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            return {"ready": False, "message": "The face model is not ready."}
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select id, person_id, embedding_blob
+                from face_observations
+                where canonical = 1
+                    and person_id is not null
+                    and review_status = 'confirmed'
+                    and embedding_model = ?
+                    and embedding_blob is not null
+                order by person_id, id
+                """,
+                (model_fingerprint,),
+            ).fetchall()
+
+        samples: list[tuple[int, int, np.ndarray]] = []
+        for row in rows:
+            vector = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            norm = float(np.linalg.norm(vector))
+            if (
+                vector.size
+                and math.isfinite(norm)
+                and norm > 1e-9
+                and np.all(np.isfinite(vector))
+            ):
+                samples.append(
+                    (int(row["id"]), int(row["person_id"]), vector / norm)
+                )
+
+        identities = {person_id for _, person_id, _ in samples}
+        if len(identities) < 2 or len(samples) < 6:
+            return {
+                "ready": False,
+                "message": (
+                    "Benchmarking needs at least two identities and six "
+                    "confirmed embedded observations."
+                ),
+                "identities": len(identities),
+                "samples": len(samples),
+            }
+
+        genuine: list[float] = []
+        impostor: list[float] = []
+        for index, (_id_a, person_a, emb_a) in enumerate(samples):
+            for _id_b, person_b, emb_b in samples[index + 1:]:
+                score = float(np.dot(emb_a, emb_b))
+                if person_a == person_b:
+                    genuine.append(score)
+                else:
+                    impostor.append(score)
+
+        if not genuine or not impostor:
+            return {
+                "ready": False,
+                "message": "More varied confirmed samples are required.",
+            }
+
+        sweep = []
+        for raw in range(30, 91):
+            threshold = raw / 100.0
+            tar = sum(score >= threshold for score in genuine) / len(genuine)
+            far = sum(score >= threshold for score in impostor) / len(impostor)
+            balanced_error = ((1.0 - tar) + far) / 2.0
+            sweep.append((threshold, tar, far, balanced_error))
+
+        constrained = [item for item in sweep if item[2] <= 0.01]
+        best_match = min(
+            constrained or sweep,
+            key=lambda item: (item[3], -item[1], item[2], item[0]),
+        )
+        cluster_candidates = [
+            item
+            for item in sweep
+            if item[2] <= 0.005 and item[1] >= 0.80
+        ]
+        best_cluster = min(
+            cluster_candidates or constrained or sweep,
+            key=lambda item: (item[3], -item[1], item[2], item[0]),
+        )
+
+        def quantile(values, q):
+            return round(float(np.quantile(values, q)), 4)
+
+        return {
+            "ready": True,
+            "model_fingerprint": model_fingerprint,
+            "identities": len(identities),
+            "samples": len(samples),
+            "genuine_pairs": len(genuine),
+            "impostor_pairs": len(impostor),
+            "same_person": {
+                "p05": quantile(genuine, 0.05),
+                "median": quantile(genuine, 0.50),
+                "p95": quantile(genuine, 0.95),
+            },
+            "different_person": {
+                "p95": quantile(impostor, 0.95),
+                "p99": quantile(impostor, 0.99),
+                "maximum": round(max(impostor), 4),
+            },
+            "recommended": {
+                "match_threshold": round(best_match[0], 2),
+                "match_true_accept_rate": round(best_match[1], 4),
+                "match_false_accept_rate": round(best_match[2], 4),
+                "unknown_cluster_threshold": round(best_cluster[0], 2),
+                "cluster_true_link_rate": round(best_cluster[1], 4),
+                "cluster_false_link_rate": round(best_cluster[2], 4),
+            },
+            "current": {
+                "match_threshold": float(recognizer.config.face_match_threshold),
+                "unknown_cluster_threshold": 0.62,
+            },
+            "message": (
+                "Recommendations are empirical and should be reviewed before "
+                "changing production thresholds."
+            ),
+        }
+
     def calibration(self) -> dict[str, Any]:
         """Measure gallery separation using reviewed identities and rejections."""
         recognizer = self.recognizer
@@ -1729,7 +2656,165 @@ class FaceStore:
             ).fetchone()
         return self._observation_row(row) if row else None
 
+    def refresh_unknown_clusters(self, threshold: float | None = None) -> int:
+        if threshold is None:
+            config = getattr(self.recognizer, "config", None)
+            threshold = float(
+                getattr(
+                    config,
+                    "face_unknown_cluster_threshold",
+                    DEFAULT_UNKNOWN_CLUSTER_THRESHOLD,
+                )
+            )
+        recognizer_status = self.recognizer.status() if self.recognizer is not None else {}
+        fingerprint = str(recognizer_status.get("model_fingerprint") or "")
+        if not fingerprint:
+            return 0
+        with self._lock, self._connect() as connection:
+            rows = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    select id, embedding_blob, quality_score
+                    from face_observations
+                    where canonical = 1
+                        and person_id is null
+                        and recognition_pending = 0
+                        and recognition_outcome = ?
+                        and embedding_model = ?
+                        and embedding_blob is not null
+                    order by id
+                    """,
+                    (FACE_OUTCOME_EMBEDDED, fingerprint),
+                ).fetchall()
+            ]
+            membership = cluster_unknown_embeddings(rows, threshold=threshold)
+            now = datetime.now(timezone.utc).isoformat()
+            connection.execute("delete from face_unknown_members")
+            connection.executemany(
+                "insert into face_unknown_members (observation_id, cluster_id, updated_at) values (?, ?, ?)",
+                [(observation_id, cluster_id, now) for observation_id, cluster_id in membership.items()],
+            )
+        return len(set(membership.values()))
+
+    def unknown_cluster_health(self) -> dict[str, Any]:
+        """Summarize recurring-unknown clustering and effective thresholds."""
+        recognizer = self.recognizer
+        config = getattr(recognizer, "config", None)
+        match_threshold = float(getattr(config, "face_match_threshold", 0.30))
+        cluster_threshold = float(
+            getattr(
+                config,
+                "face_unknown_cluster_threshold",
+                DEFAULT_UNKNOWN_CLUSTER_THRESHOLD,
+            )
+        )
+
+        clusters = self.unknown_clusters()
+        counts = sorted(
+            (int(cluster.get("observation_count") or 0) for cluster in clusters),
+            reverse=True,
+        )
+        total_members = sum(counts)
+        singletons = sum(1 for count in counts if count == 1)
+        multi = sum(1 for count in counts if count > 1)
+
+        top = sorted(
+            clusters,
+            key=lambda item: (
+                int(item.get("observation_count") or 0),
+                int(item.get("camera_count") or 0),
+                str(item.get("last_seen") or ""),
+            ),
+            reverse=True,
+        )[:20]
+
+        with self._connect() as connection:
+            diagnostic_rows = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    select o.id, o.embedding_blob
+                    from face_observations o
+                    join face_unknown_members m on m.observation_id = o.id
+                    where o.embedding_blob is not null
+                    """
+                ).fetchall()
+            ]
+            membership = {
+                int(row["observation_id"]): int(row["cluster_id"])
+                for row in connection.execute(
+                    "select observation_id, cluster_id from face_unknown_members"
+                ).fetchall()
+            }
+
+        cohesion = unknown_cluster_cohesion(diagnostic_rows, membership)
+        enriched_top = []
+        suspicious_clusters = 0
+        radius_floor = max(0.0, cluster_threshold - 0.08)
+        for cluster in top:
+            item = dict(cluster)
+            metrics = cohesion.get(int(item.get("cluster_id") or 0), {})
+            item.update(metrics)
+            minimum_similarity = metrics.get("centroid_min_similarity")
+            suspicious = bool(
+                int(item.get("observation_count") or 0) >= 50
+                or (
+                    minimum_similarity is not None
+                    and float(minimum_similarity) < radius_floor
+                )
+            )
+            item["suspicious"] = suspicious
+            suspicious_clusters += int(suspicious)
+            enriched_top.append(item)
+
+        return {
+            "match_threshold": round(match_threshold, 4),
+            "unknown_cluster_threshold": round(cluster_threshold, 4),
+            "cluster_count": len(clusters),
+            "clustered_observations": total_members,
+            "singleton_clusters": singletons,
+            "multi_observation_clusters": multi,
+            "largest_cluster_size": counts[0] if counts else 0,
+            "median_cluster_size": float(np.median(counts)) if counts else 0.0,
+            "suspicious_top_clusters": suspicious_clusters,
+            "cohesion": {
+                "centroid_support_margin": 0.03,
+                "radius_margin": 0.08,
+                "large_cluster_growth_bonus": 0.03,
+            },
+            "top_clusters": enriched_top,
+        }
+
+    def unknown_clusters(self) -> list[dict[str, Any]]:
+        self.refresh_unknown_clusters()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select m.cluster_id, count(*) as observation_count,
+                    min(o.observed_at) as first_seen,
+                    max(o.observed_at) as last_seen,
+                    count(distinct o.camera_id) as camera_count
+                from face_unknown_members m
+                join face_observations o on o.id = m.observation_id
+                group by m.cluster_id
+                order by last_seen desc, m.cluster_id
+                """
+            ).fetchall()
+        return [
+            {
+                "cluster_id": int(row["cluster_id"]),
+                "name": f"Unknown Person {int(row['cluster_id'])}",
+                "observation_count": int(row["observation_count"] or 0),
+                "camera_count": int(row["camera_count"] or 0),
+                "first_seen": str(row["first_seen"] or ""),
+                "last_seen": str(row["last_seen"] or ""),
+            }
+            for row in rows
+        ]
+
     def for_event_ids(self, event_ids: list[int]) -> list[dict[str, Any]]:
+        self.refresh_unknown_clusters()
         unique_ids = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
         if not unique_ids:
             return []
@@ -1743,10 +2828,12 @@ class FaceStore:
                     select o.id as observation_id, o.event_id, o.person_id, o.confidence, o.match_confidence,
                         o.candidate_person_id, o.candidate_confidence,
                         o.candidate_track_id, o.consensus_json,
+                        unknowns.cluster_id as unknown_cluster_id,
                         p.name as person_name, candidate.name as candidate_person_name
                     from face_observations o
                     left join face_people p on p.id = o.person_id
                     left join face_people candidate on candidate.id = o.candidate_person_id
+                    left join face_unknown_members unknowns on unknowns.observation_id = o.id
                     where o.event_id in ({placeholders})
                         and o.canonical = 1
                     """,
@@ -1760,6 +2847,93 @@ class FaceStore:
                         item["consensus"] = {}
                     observations.append(item)
         return observations
+
+    def bootstrap_person_references(
+        self,
+        person_id: int,
+        *,
+        seed_observation_id: int | None = None,
+        target_count: int = 4,
+    ) -> list[int]:
+        """Auto-pin a small high-quality gallery from already confirmed faces."""
+        target = max(1, min(int(target_count), 8))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                select id, camera_id, quality_score, observed_at,
+                    reference_pinned, coalesce(reference_auto_pinned, 0) as reference_auto_pinned
+                from face_observations
+                where person_id = ? and review_status = 'confirmed' and canonical = 1
+                order by observed_at desc, id desc
+                """,
+                (person_id,),
+            ).fetchall()
+            if not rows:
+                return []
+
+            explicit = [
+                row for row in rows
+                if bool(row["reference_pinned"]) and not bool(row["reference_auto_pinned"])
+            ]
+            selected_ids = {int(row["id"]) for row in explicit}
+            seed = next(
+                (
+                    row for row in rows
+                    if seed_observation_id is not None
+                    and int(row["id"]) == int(seed_observation_id)
+                ),
+                None,
+            )
+            if seed is not None:
+                selected_ids.add(int(seed["id"]))
+
+            remaining = [row for row in rows if int(row["id"]) not in selected_ids]
+            selected_cameras = {
+                str(row["camera_id"] or "")
+                for row in rows
+                if int(row["id"]) in selected_ids
+            }
+            while remaining and len(selected_ids) < target:
+                def utility(row):
+                    quality = max(
+                        0.0,
+                        min(1.0, float(row["quality_score"] or 0.0)),
+                    )
+                    camera = str(row["camera_id"] or "")
+                    novelty = 1.0 if camera and camera not in selected_cameras else 0.0
+                    return (
+                        0.85 * quality + 0.15 * novelty,
+                        str(row["observed_at"] or ""),
+                        int(row["id"]),
+                    )
+
+                chosen = max(remaining, key=utility)
+                remaining.remove(chosen)
+                selected_ids.add(int(chosen["id"]))
+                selected_cameras.add(str(chosen["camera_id"] or ""))
+
+            connection.execute(
+                """
+                update face_observations
+                set reference_pinned = 0, reference_auto_pinned = 0
+                where person_id = ? and reference_auto_pinned = 1
+                """,
+                (person_id,),
+            )
+            explicit_ids = {int(row["id"]) for row in explicit}
+            for observation_id in sorted(selected_ids - explicit_ids):
+                connection.execute(
+                    """
+                    update face_observations
+                    set reference_pinned = 1, reference_auto_pinned = 1
+                    where id = ? and person_id = ? and review_status = 'confirmed'
+                    """,
+                    (observation_id, person_id),
+                )
+
+        self._invalidate_reference_gallery()
+        self.request_match_refresh()
+        return sorted(selected_ids)
 
     def create_person(self, name: str, observation_id: int | None = None, notes: str = "") -> dict[str, Any]:
         name = name.strip()
@@ -1802,7 +2976,10 @@ class FaceStore:
         if observation_id is not None:
             self._invalidate_reference_gallery()
             self._queue_recognition(observation_id)
-            self.request_match_refresh()
+            self.bootstrap_person_references(
+                person_id,
+                seed_observation_id=observation_id,
+            )
         return next(person for person in self.people() if person["id"] == person_id)
 
     def assign(self, observation_id: int, person_id: int | None) -> dict[str, Any] | None:
@@ -1850,7 +3027,12 @@ class FaceStore:
             self._invalidate_reference_gallery()
         if person_id is not None:
             self._queue_recognition(observation_id)
-        self.request_match_refresh()
+            self.bootstrap_person_references(
+                person_id,
+                seed_observation_id=observation_id,
+            )
+        else:
+            self.request_match_refresh()
         return self.observation(observation_id)
 
     def set_reference_pinned(
@@ -1877,7 +3059,7 @@ class FaceStore:
                 if deleting is not None:
                     raise RuntimeError("face snapshot is currently being removed")
             connection.execute(
-                "update face_observations set reference_pinned = ? where id = ?",
+                "update face_observations set reference_pinned = ?, reference_auto_pinned = 0 where id = ?",
                 (1 if pinned else 0, observation_id),
             )
         self._invalidate_reference_gallery()
@@ -1941,5 +3123,6 @@ class FaceStore:
             except (TypeError, json.JSONDecodeError):
                 item[target] = {}
         item["reference_pinned"] = bool(item.get("reference_pinned"))
+        item["reference_auto_pinned"] = bool(item.get("reference_auto_pinned"))
         item["auto_identified"] = bool(item.get("auto_identified"))
         return item

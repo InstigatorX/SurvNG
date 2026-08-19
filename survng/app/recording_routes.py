@@ -205,6 +205,18 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             limit=5000,
         )
         public_events = [_event_row(event) for event in events]
+        timeline_incidents = _incident_rows(public_events)
+        face_store = getattr(active_manager, "faces", None)
+        if face_store is not None and hasattr(face_store, "for_event_ids"):
+            # Timeline uses incident summaries rather than one authoritative event row.
+            # Hydrate the whole incident so a face recognized on any sibling event
+            # becomes the incident-level identity shown by the Timeline UI.
+            from .incident_queries import IncidentQueryService
+
+            timeline_incidents = IncidentQueryService.with_faces(
+                active_manager,
+                timeline_incidents,
+            )
         return {
             "camera_id": camera_id,
             "source": selected_source,
@@ -216,7 +228,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "events": public_events,
             "incidents": [
                 _incident_list_payload(incident)
-                for incident in _incident_rows(public_events)
+                for incident in timeline_incidents
             ],
             "available_sources": available_sources,
         }

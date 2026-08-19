@@ -859,6 +859,28 @@ class MqttService:
         incident_id = stable_incident_id(str(pending["camera_id"]), first_id)
         base_path = str(pending.get("base_path") or "").rstrip("/")
         representative_id = int(representative.get("id") or 0)
+        identity_by_id: dict[int, dict[str, Any]] = {}
+        for event in events:
+            for identity in event.get("identities", []) or []:
+                if not isinstance(identity, dict):
+                    continue
+                identity_id = int(identity.get("identity_id") or 0)
+                if identity_id <= 0:
+                    continue
+                previous = identity_by_id.get(identity_id)
+                if (
+                    previous is None
+                    or float(identity.get("confidence") or 0.0)
+                    > float(previous.get("confidence") or 0.0)
+                ):
+                    identity_by_id[identity_id] = dict(identity)
+        identities = sorted(
+            identity_by_id.values(),
+            key=lambda item: (
+                -float(item.get("confidence") or 0.0),
+                str(item.get("name") or "").lower(),
+            ),
+        )
         return {
             "schema_version": 1,
             "type": "incident",
@@ -877,6 +899,12 @@ class MqttService:
             "classes": [item["label"] for item in objects],
             "zones": sorted({zone for item in objects for zone in item["zones"]}),
             "objects": objects,
+            "identities": identities,
+            "people": [
+                str(item.get("name") or "")
+                for item in identities
+                if item.get("name")
+            ],
             "representative_event_id": representative_id,
             "snapshot_url": f"{base_path}/api/events/{representative_id}/snapshot.jpg",
             "incidents_url": f"{base_path}/incidents",

@@ -22,6 +22,7 @@ from .incident_presenter import (
     _incident_rows,
 )
 from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_snapshot_path
+from .identity_projection import apply_incident_identities
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator, manager_generation_lease
 
@@ -81,7 +82,14 @@ class IncidentQueryService:
 
     @staticmethod
     def events(manager: AppManager, limit: int = 100) -> list[dict[str, Any]]:
-        return [_event_row(row) for row in manager.events.recent(limit)]
+        events = [_event_row(row) for row in manager.events.recent(limit)]
+        wrapped = [{"events": [event]} for event in events]
+        IncidentQueryService.with_faces(manager, wrapped)
+        return [
+            incident["events"][0]
+            for incident in wrapped
+            if incident.get("events")
+        ]
 
     @staticmethod
     def recent_summaries(
@@ -217,8 +225,9 @@ class IncidentQueryService:
                     confidence = observation.get("candidate_confidence")
                 else:
                     status = "unknown"
-                    identity_id = 0
-                    name = "Unknown"
+                    unknown_cluster_id = int(observation.get("unknown_cluster_id") or 0)
+                    identity_id = -unknown_cluster_id if unknown_cluster_id > 0 else 0
+                    name = f"Unknown Person {unknown_cluster_id}" if unknown_cluster_id > 0 else "Unknown"
                     confidence = observation.get("candidate_confidence")
                     if confidence is None:
                         confidence = observation.get("confidence")
@@ -229,17 +238,19 @@ class IncidentQueryService:
                 if not math.isfinite(score):
                     score = 0.0
                 score = max(0.0, min(1.0, score))
+                unknown_cluster_id = int(observation.get("unknown_cluster_id") or 0)
                 key = (
                     status,
                     identity_id
                     if status != "unknown"
-                    else int(observation["observation_id"]),
+                    else (-unknown_cluster_id if unknown_cluster_id > 0 else int(observation["observation_id"])),
                 )
                 current = summaries.get(key)
                 if current is None or score > current["confidence"]:
                     summaries[key] = {
                         "observation_id": int(observation["observation_id"]),
                         "identity_id": identity_id,
+                        "unknown_cluster_id": observation.get("unknown_cluster_id"),
                         "name": name,
                         "status": status,
                         "confidence": round(score, 4),
@@ -270,7 +281,7 @@ class IncidentQueryService:
                 event["faces"] = summarize(event_observations)
                 incident_observations.extend(event_observations)
             incident["faces"] = summarize(incident_observations)
-        return incidents
+        return apply_incident_identities(incidents)
 
     def incidents(
         self, manager: AppManager, limit: int = 200, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS

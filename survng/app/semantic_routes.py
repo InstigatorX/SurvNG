@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .manager_access import ManagerAccessCoordinator, manager_generation_lease
+from .identity_projection import apply_event_identity
 
 
 class SemanticSearchRequest(BaseModel):
@@ -81,6 +82,41 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
                 }
                 for row in event_store.get_many(list(best_by_event))
             }
+            observations_by_event: dict[int, list[dict[str, Any]]] = {}
+            face_store = getattr(active_manager, "faces", None)
+            for_event_ids = getattr(face_store, "for_event_ids", None)
+            if callable(for_event_ids):
+                for observation in for_event_ids(list(best_by_event)):
+                    observations_by_event.setdefault(
+                        int(observation["event_id"]), []
+                    ).append(observation)
+
+            for event_id, event in event_rows.items():
+                observations = observations_by_event.get(event_id, [])
+                if not observations:
+                    continue
+                faces: list[dict[str, Any]] = []
+                for observation in observations:
+                    person_id = observation.get("person_id")
+                    if person_id is None:
+                        continue
+                    faces.append({
+                        "observation_id": int(observation.get("observation_id") or 0),
+                        "identity_id": int(person_id),
+                        "person_id": int(person_id),
+                        "name": str(
+                            observation.get("person_name")
+                            or f"Person {int(person_id)}"
+                        ),
+                        "status": "confirmed",
+                        "confidence": float(
+                            observation.get("match_confidence") or 0.0
+                        ),
+                    })
+                if faces:
+                    event["faces"] = faces
+                    apply_event_identity(event)
+
             results = []
             for event_id, hit in best_by_event.items():
                 event = event_rows.get(event_id)

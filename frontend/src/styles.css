@@ -19488,3 +19488,39 @@ a.button {
     --shadow: 0 10px 28px rgba(0, 0, 0, 0.34);
   }
 }
+
+/* SurvNG identity visibility patch 04 */
+.identity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--pill);
+  color: var(--pill-ink);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.identity-chip.unknown {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.recordings-v2-selected-event .identity-chip {
+  margin-top: 2px;
+}
+
+.recordings-v2-events .identity-chip,
+.semantic-result-identity {
+  margin-top: 3px;
+}

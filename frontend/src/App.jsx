@@ -227,6 +227,56 @@ function recordingsHref(context) {
   }));
 }
 
+function visibleIdentity(item) {
+  const identities = Array.isArray(item?.identities) ? item.identities : [];
+  const faces = Array.isArray(item?.faces) ? item.faces : [];
+  const candidates = identities.length ? identities : faces;
+
+  const confirmed = candidates.find((identity) => (
+    identity?.status === "confirmed"
+    && String(identity?.name || "").trim()
+  ));
+  if (confirmed) return {
+    name: String(confirmed.name).trim(),
+    unknown: false,
+    confidence: Number(confirmed.confidence) || 0,
+  };
+
+  const unknown = candidates.find((identity) => (
+    identity?.status === "unknown"
+    && (
+      Number(identity?.unknown_cluster_id) > 0
+      || /^Unknown Person \d+$/i.test(String(identity?.name || ""))
+    )
+  ));
+  if (!unknown) return null;
+
+  const clusterId = Number(unknown.unknown_cluster_id) || 0;
+  return {
+    name: clusterId > 0
+      ? `Unknown Person ${clusterId}`
+      : String(unknown.name || "Unknown person"),
+    unknown: true,
+    confidence: Number(unknown.confidence) || 0,
+  };
+}
+
+function IdentityChip({ item, className = "" }) {
+  const identity = visibleIdentity(item);
+  if (!identity) return null;
+  return (
+    <span
+      className={`identity-chip ${identity.unknown ? "unknown" : "known"} ${className}`.trim()}
+      title={identity.confidence > 0
+        ? `${identity.name} · ${Math.round(identity.confidence * 100)}% identity confidence`
+        : identity.name}
+    >
+      <UserRound size={12} />
+      {identity.name}
+    </span>
+  );
+}
+
 const fetch = (resource, options) => window.fetch(
   typeof resource === "string" ? appUrl(resource) : resource,
   options,
@@ -6711,7 +6761,7 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
           const matchLabel = ({ strong_match: "Strong match", possible_match: "Possible match" })[result.match_strength] || "Visually similar";
           const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
           const observedAt = formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone);
-          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><img src={mediaUrl(result.snapshot_url)} alt={`${cameraName} search result`} loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
+          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><img src={mediaUrl(result.snapshot_url)} alt={`${cameraName} search result`} loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small><IdentityChip item={item} className="semantic-result-identity" /></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
         })}
         {!loading && !error && !visibleResults.length ? <div className="semantic-search-empty"><Search size={28} /><strong>{results.length && cameraId ? "No matching results from this camera" : "Search indexed incidents by appearance"}</strong><span>{results.length && cameraId ? "Choose All cameras or another camera to widen the current results." : "Results link to the exact incident and recording time."}</span></div> : null}
       </div>
@@ -7751,6 +7801,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             <div>
               <strong>{formatTimeOnly(selectedEvent.incident_epoch, timeZone)}</strong>
               <small>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</small>
+              <IdentityChip item={selectedEvent} />
               <em>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion only"}</em>
               {selectedEventConfidence > 0 ? <span>Confidence {Math.round(selectedEventConfidence * 100)}%</span> : null}
             </div>

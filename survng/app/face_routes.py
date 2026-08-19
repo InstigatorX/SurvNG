@@ -94,10 +94,59 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
 
         return with_manager(status)
 
+    @router.get("/api/faces/unknown-cluster-health")
+    def face_unknown_cluster_health() -> dict[str, Any]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: active.faces.unknown_cluster_health()
+        )
+
+    @router.post("/api/faces/unknown-clusters/rebuild")
+    def rebuild_unknown_clusters() -> dict[str, Any]:
+        deps.start_observation_sync()
+        def rebuild(active_manager: AppManager) -> dict[str, Any]:
+            active_manager.faces.refresh_unknown_clusters()
+            return active_manager.faces.unknown_cluster_health()
+        return with_manager(rebuild)
+
+    @router.get("/api/faces/unknown-clusters")
+    def face_unknown_clusters() -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        return with_manager(lambda active: active.faces.unknown_clusters())
+
     @router.get("/api/faces/people")
     def face_people() -> list[dict[str, Any]]:
         deps.start_observation_sync()
         return with_manager(lambda active: active.faces.people())
+
+    @router.get("/api/faces/camera-suitability")
+    def face_camera_suitability() -> list[dict[str, Any]]:
+        deps.start_observation_sync()
+        return with_manager(lambda active: active.faces.camera_suitability())
+
+    @router.get("/api/faces/benchmark/production")
+    def face_benchmark_production() -> dict[str, Any]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: active.faces.benchmark_production_matcher()
+        )
+
+    @router.get("/api/faces/benchmark/camera-pairs")
+    def face_benchmark_camera_pairs() -> dict[str, Any]:
+        deps.start_observation_sync()
+        return with_manager(
+            lambda active: active.faces.benchmark_camera_pairs()
+        )
+
+    @router.get("/api/faces/benchmark/by-identity")
+    def face_benchmark_by_identity() -> dict[str, Any]:
+        deps.start_observation_sync()
+        return with_manager(lambda active: active.faces.benchmark_by_identity())
+
+    @router.get("/api/faces/benchmark")
+    def face_benchmark() -> dict[str, Any]:
+        deps.start_observation_sync()
+        return with_manager(lambda active: active.faces.benchmark())
 
     @router.get("/api/faces/calibration")
     def face_calibration() -> dict[str, Any]:
