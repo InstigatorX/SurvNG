@@ -1825,7 +1825,9 @@ function Shell({ page, theme, recordingContext, children }) {
   const topbarRef = useRef(null);
   const workspaceHeadingRef = useRef(null);
   const mobileMoreButtonRef = useRef(null);
+  const headerSearchRef = useRef(null);
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const [headerSearchQuery, setHeaderSearchQuery] = useState("");
   const [railCollapsedValue, setRailCollapsedValue] = useStoredState("survng.workspaceRailCollapsed.v1", "false");
   const railCollapsed = railCollapsedValue === "true";
   const workspaceLink = (id) => {
@@ -1845,6 +1847,24 @@ function Shell({ page, theme, recordingContext, children }) {
     document.title = label === "Live" ? "SurvNG" : `SurvNG · ${label}`;
     window.requestAnimationFrame(() => workspaceHeadingRef.current?.focus({ preventScroll: true }));
   }, [page]);
+
+  useEffect(() => {
+    function focusHeaderSearch(event) {
+      if (event.key !== "/" || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable=true]")) return;
+      event.preventDefault();
+      headerSearchRef.current?.focus();
+    }
+    window.addEventListener("keydown", focusHeaderSearch);
+    return () => window.removeEventListener("keydown", focusHeaderSearch);
+  }, []);
+
+  function submitHeaderSearch(event) {
+    event.preventDefault();
+    const query = headerSearchQuery.trim();
+    window.location.assign(appUrl(query ? `/search?q=${encodeURIComponent(query)}` : "/search"));
+  }
 
   useLayoutEffect(() => {
     const shell = shellRef.current;
@@ -1890,7 +1910,11 @@ function Shell({ page, theme, recordingContext, children }) {
             <strong>SurvNG</strong>
           </div>
         </a>
-        <a className="workspace-search-entry" href={appUrl("/search")} aria-label="Open Smart Search"><Search size={16} /><span>Search incidents…</span><kbd>/</kbd></a>
+        <form className="workspace-search-entry" onSubmit={submitHeaderSearch} role="search">
+          <Search size={16} aria-hidden="true" />
+          <input ref={headerSearchRef} value={headerSearchQuery} onChange={(event) => setHeaderSearchQuery(event.target.value)} placeholder="Search incidents..." aria-label="Search incidents semantically" />
+          <kbd>/</kbd>
+        </form>
         <div className="workspace-system-bar" aria-label="System status"><LiveHeaderStats /></div>
       </header>
       <div className="workspace-content"><h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>{children}</div>
