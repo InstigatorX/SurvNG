@@ -162,6 +162,18 @@ def make_worker(
     return worker
 
 
+def motion_frame_pair(
+    *,
+    shape: tuple[int, ...] = (90, 160),
+    start_at: float = 1.0,
+) -> list[tuple[float, np.ndarray]]:
+    """Two frames with enough pixel change to pass the stability skip."""
+    return [
+        (start_at, np.zeros(shape, dtype=np.uint8)),
+        (start_at + 1.0, np.full(shape, 255, dtype=np.uint8)),
+    ]
+
+
 def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
     stable = MotionQualificationResult(
         False,
@@ -856,27 +868,29 @@ class CameraWorkerTest(unittest.TestCase):
                 target=worker.motion_analysis.run, args=(worker._stop,)
             )
             thread.start()
-            worker.motion_analysis.remember_frame(
-                np.zeros((720, 1280, 3), dtype=np.uint8),
-                time.monotonic(),
-                worker._stop,
-            )
-            deadline = time.monotonic() + 1
-            while worker.motion_state._stats["continuous_frames"] == 0 and time.monotonic() < deadline:
-                time.sleep(0.01)
+            try:
+                worker.motion_analysis.remember_frame(
+                    np.zeros((720, 1280, 3), dtype=np.uint8),
+                    time.monotonic(),
+                    worker._stop,
+                )
+                deadline = time.monotonic() + 1
+                while worker.motion_state._stats["continuous_frames"] == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
 
-            self.assertEqual(worker.motion_qualification.settings(), ("camera_rescue", "balanced", 480))
-            self.assertEqual(worker.status()["motion_qualification"]["frame_width"], 480)
-            self.assertEqual(worker.status()["motion_qualification"]["frame_shape"], [270, 480])
-            self.assertEqual(
-                worker.status()["motion_qualification"]["color_frame_shape"],
-                [270, 480, 3],
-            )
-            self.assertEqual(worker.motion_analysis.frames[-1][1].ndim, 2)
-            self.assertEqual(worker.motion_analysis.color_frames[-1][1].ndim, 3)
-            worker._stop.set()
-            worker.motion_analysis.request_stop()
-            thread.join(timeout=1)
+                self.assertEqual(worker.motion_qualification.settings(), ("camera_rescue", "balanced", 480))
+                self.assertEqual(worker.status()["motion_qualification"]["frame_width"], 480)
+                self.assertEqual(worker.status()["motion_qualification"]["frame_shape"], [270, 480])
+                self.assertEqual(
+                    worker.status()["motion_qualification"]["color_frame_shape"],
+                    [270, 480, 3],
+                )
+                self.assertEqual(worker.motion_analysis.frames[-1][1].ndim, 2)
+                self.assertEqual(worker.motion_analysis.color_frames[-1][1].ndim, 3)
+            finally:
+                worker._stop.set()
+                worker.motion_analysis.request_stop()
+                thread.join(timeout=1)
 
     def test_no_visual_validators_skip_frame_motion_work(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -922,28 +936,27 @@ class CameraWorkerTest(unittest.TestCase):
                 target=worker.motion_analysis.run, args=(worker._stop,)
             )
             thread.start()
-            with (
-                patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted) as analyze,
-                patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
-            ):
-                worker.motion_analysis.remember_frame(
-                    np.zeros((180, 320, 3), dtype=np.uint8), 1.0, worker._stop
-                )
-                worker.motion_analysis.remember_frame(
-                    np.zeros((180, 320, 3), dtype=np.uint8), 2.0, worker._stop
-                )
-                deadline = time.monotonic() + 1
-                while worker.motion_events.queue.empty() and time.monotonic() < deadline:
-                    time.sleep(0.01)
+            try:
+                with (
+                    patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted) as analyze,
+                    patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
+                ):
+                    first, second = motion_frame_pair(shape=(180, 320, 3))
+                    worker.motion_analysis.remember_frame(first[1], first[0], worker._stop)
+                    worker.motion_analysis.remember_frame(second[1], second[0], worker._stop)
+                    deadline = time.monotonic() + 1
+                    while worker.motion_events.queue.empty() and time.monotonic() < deadline:
+                        time.sleep(0.01)
 
-            self.assertGreaterEqual(analyze.call_count, 1)
-            trigger = worker.motion_events.queue.get_nowait()
-            self.assertEqual(trigger.topic, "adaptive/motion")
-            self.assertTrue(trigger.prequalified.features["ema_v2"])
-            self.assertEqual(trigger.prequalified.score, accepted.score)
-            worker._stop.set()
-            worker.motion_analysis.request_stop()
-            thread.join(timeout=1)
+                self.assertGreaterEqual(analyze.call_count, 1)
+                trigger = worker.motion_events.queue.get_nowait()
+                self.assertEqual(trigger.topic, "adaptive/motion")
+                self.assertTrue(trigger.prequalified.features["ema_v2"])
+                self.assertEqual(trigger.prequalified.score, accepted.score)
+            finally:
+                worker._stop.set()
+                worker.motion_analysis.request_stop()
+                thread.join(timeout=1)
 
     def test_visual_backup_requires_persistent_strong_motion_without_onvif(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1359,10 +1372,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             with patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted):
                 with worker._frame_lock:
-                    worker.motion_analysis.frames.extend([
-                        (1.0, np.zeros((90, 160), dtype=np.uint8)),
-                        (2.0, np.zeros((90, 160), dtype=np.uint8)),
-                    ])
+                    worker.motion_analysis.frames.extend(motion_frame_pair())
                 worker.motion_analysis.analyze_continuous(2.0)
 
             self.assertTrue(worker.motion_events.queue.empty())
@@ -1404,20 +1414,18 @@ class CameraWorkerTest(unittest.TestCase):
             thread = worker.motion_analysis.thread = threading.Thread(
                 target=worker.motion_analysis.run, args=(worker._stop,)
             )
-            with patch.object(worker.motion_analysis, "analyze_continuous", side_effect=lambda _at: time.sleep(0.2)):
-                thread.start()
-                started = time.perf_counter()
-                worker.motion_analysis.remember_frame(
-                    np.zeros((180, 320, 3), dtype=np.uint8), 1.0, worker._stop
-                )
-                worker.motion_analysis.remember_frame(
-                    np.zeros((180, 320, 3), dtype=np.uint8), 2.0, worker._stop
-                )
-                elapsed = time.perf_counter() - started
-
-            worker._stop.set()
-            worker.motion_analysis.request_stop()
-            thread.join(timeout=1)
+            try:
+                with patch.object(worker.motion_analysis, "analyze_continuous", side_effect=lambda _at: time.sleep(0.2)):
+                    thread.start()
+                    started = time.perf_counter()
+                    first, second = motion_frame_pair(shape=(180, 320, 3))
+                    worker.motion_analysis.remember_frame(first[1], first[0], worker._stop)
+                    worker.motion_analysis.remember_frame(second[1], second[0], worker._stop)
+                    elapsed = time.perf_counter() - started
+            finally:
+                worker._stop.set()
+                worker.motion_analysis.request_stop()
+                thread.join(timeout=1)
             self.assertLess(elapsed, 0.1)
 
     def test_episode_controller_bounds_queue_during_chatter(self) -> None:
@@ -1431,10 +1439,7 @@ class CameraWorkerTest(unittest.TestCase):
             )
             worker._stop.clear()
             with worker._frame_lock:
-                worker.motion_analysis.frames.extend([
-                    (1.0, np.zeros((90, 160), dtype=np.uint8)),
-                    (2.0, np.zeros((90, 160), dtype=np.uint8)),
-                ])
+                worker.motion_analysis.frames.extend(motion_frame_pair())
             with (
                 patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted),
                 patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
@@ -1467,10 +1472,7 @@ class CameraWorkerTest(unittest.TestCase):
                     received_at=now.timestamp(),
                 ))
             with worker._frame_lock:
-                worker.motion_analysis.frames.extend([
-                    (1.0, np.zeros((90, 160), dtype=np.uint8)),
-                    (2.0, np.zeros((90, 160), dtype=np.uint8)),
-                ])
+                worker.motion_analysis.frames.extend(motion_frame_pair())
             with (
                 patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted),
                 patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
@@ -1494,10 +1496,7 @@ class CameraWorkerTest(unittest.TestCase):
             )
             worker._stop.clear()
             with worker._frame_lock:
-                worker.motion_analysis.frames.extend([
-                    (1.0, np.zeros((90, 160), dtype=np.uint8)),
-                    (2.0, np.zeros((90, 160), dtype=np.uint8)),
-                ])
+                worker.motion_analysis.frames.extend(motion_frame_pair())
             with (
                 patch.object(worker.motion_qualification, "run_pipeline", return_value=rejected),
                 patch.object(
@@ -1931,31 +1930,33 @@ class CameraWorkerTest(unittest.TestCase):
             thread = worker.motion_analysis.thread = threading.Thread(
                 target=worker.motion_analysis.run, args=(worker._stop,)
             )
-            with patch.object(
-                worker.motion_analysis,
-                "analyze_continuous",
-                side_effect=[RuntimeError("transient fusion failure"), None],
-            ) as analyze:
-                thread.start()
-                with worker._frame_lock:
-                    worker.motion_analysis.frames.append((1.0, np.zeros((90, 160), dtype=np.uint8)))
-                worker.motion_analysis.schedule(1.0, worker._stop)
-                deadline = time.monotonic() + 1
-                while worker.motion_state._stats["analysis_worker_errors"] == 0 and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                with worker._frame_lock:
-                    worker.motion_analysis.frames.append((2.0, np.zeros((90, 160), dtype=np.uint8)))
-                worker.motion_analysis.schedule(2.0, worker._stop)
-                deadline = time.monotonic() + 1
-                while analyze.call_count < 2 and time.monotonic() < deadline:
-                    time.sleep(0.01)
+            try:
+                with patch.object(
+                    worker.motion_analysis,
+                    "analyze_continuous",
+                    side_effect=[RuntimeError("transient fusion failure"), None],
+                ) as analyze:
+                    thread.start()
+                    with worker._frame_lock:
+                        worker.motion_analysis.frames.append((1.0, np.zeros((90, 160), dtype=np.uint8)))
+                    worker.motion_analysis.schedule(1.0, worker._stop)
+                    deadline = time.monotonic() + 1
+                    while worker.motion_state._stats["analysis_worker_errors"] == 0 and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    with worker._frame_lock:
+                        worker.motion_analysis.frames.append((2.0, np.zeros((90, 160), dtype=np.uint8)))
+                    worker.motion_analysis.schedule(2.0, worker._stop)
+                    deadline = time.monotonic() + 1
+                    while analyze.call_count < 2 and time.monotonic() < deadline:
+                        time.sleep(0.01)
 
-            self.assertTrue(thread.is_alive())
-            self.assertEqual(analyze.call_count, 2)
-            self.assertEqual(worker.motion_state._stats["analysis_worker_errors"], 1)
-            worker._stop.set()
-            worker.motion_analysis.request_stop()
-            thread.join(timeout=1)
+                self.assertTrue(thread.is_alive())
+                self.assertEqual(analyze.call_count, 2)
+                self.assertEqual(worker.motion_state._stats["analysis_worker_errors"], 1)
+            finally:
+                worker._stop.set()
+                worker.motion_analysis.request_stop()
+                thread.join(timeout=1)
 
     def test_event_worker_survives_a_transient_handler_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
