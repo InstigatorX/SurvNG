@@ -25,11 +25,12 @@ export function eventStreamUrl(eventId, before = 5, after = 5, source = "main") 
   const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
   return appUrl(`/api/events/${eventId}/stream.m3u8?${params.toString()}`);
 }
-export function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {
+export function recordingDayUrl(cameraId, startEpoch, endEpoch, source, includeIdentities = true) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),
     end_epoch: endEpoch.toFixed(3),
     source,
+    include_identities: includeIdentities ? "true" : "false",
   });
   return appUrl(`/api/cameras/${cameraId}/recordings/day?${params.toString()}`);
 }
@@ -43,12 +44,13 @@ export function recordingWindowUrl(cameraId, startEpoch, endEpoch, source) {
   return appUrl(`/api/cameras/${cameraId}/recordings/window?${params.toString()}`);
 }
 
-export function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, source) {
+export function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, source, includeIdentities = true) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),
     end_epoch: endEpoch.toFixed(3),
     after_epoch: afterEpoch.toFixed(3),
     source,
+    include_identities: includeIdentities ? "true" : "false",
   });
   return appUrl(`/api/cameras/${cameraId}/recordings/updates?${params.toString()}`);
 }
@@ -62,21 +64,23 @@ export function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
   return appUrl(`/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`);
 }
 
-export function recordingGridDayUrl(startEpoch, endEpoch, source) {
+export function recordingGridDayUrl(startEpoch, endEpoch, source, includeIdentities = true) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),
     end_epoch: endEpoch.toFixed(3),
     source,
+    include_identities: includeIdentities ? "true" : "false",
   });
   return appUrl(`/api/recordings/grid/day?${params.toString()}`);
 }
 
-export function recordingGridUpdatesUrl(startEpoch, endEpoch, afterEpoch, source) {
+export function recordingGridUpdatesUrl(startEpoch, endEpoch, afterEpoch, source, includeIdentities = true) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),
     end_epoch: endEpoch.toFixed(3),
     after_epoch: afterEpoch.toFixed(3),
     source,
+    include_identities: includeIdentities ? "true" : "false",
   });
   return appUrl(`/api/recordings/grid/updates?${params.toString()}`);
 }

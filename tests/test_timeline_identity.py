@@ -91,3 +91,19 @@ def test_recording_day_incident_preserves_projected_identity():
     assert incident["identities"][0]["status"] == "confirmed"
     assert incident["primary_identity"]["name"] == "Steve"
     assert "faces" not in incident
+
+
+def test_recording_day_can_skip_identity_hydration_for_timeline():
+    manager = _Manager()
+    bundle = create_recording_router(_dependencies(manager))
+
+    payload = bundle.handlers["recording_day"](
+        "gate",
+        100.0,
+        200.0,
+        "main",
+        include_identities=False,
+    )
+
+    assert len(payload["incidents"]) == 1
+    assert "identities" not in payload["incidents"][0]

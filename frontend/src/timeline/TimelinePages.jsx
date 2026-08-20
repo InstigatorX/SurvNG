@@ -1094,8 +1094,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
     playbackRetryRef.current = { attempts: 0, timer: null };
     const indexUrl = isAllCameras
-      ? recordingGridDayUrl(dayStart, dayEnd, source)
-      : recordingDayUrl(activeCameraId, dayStart, dayEnd, source);
+      ? recordingGridDayUrl(dayStart, dayEnd, source, false)
+      : recordingDayUrl(activeCameraId, dayStart, dayEnd, source, false);
     fetch(indexUrl, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Recording index failed (${response.status})`);
@@ -1140,7 +1140,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       const afterEpoch = Number.isFinite(latestAvailabilityRef.current)
         ? latestAvailabilityRef.current
         : dayStart;
-      const response = await fetch(recordingUpdatesUrl(activeCameraId, dayStart, dayEnd, afterEpoch, source), { signal });
+      const response = await fetch(recordingUpdatesUrl(activeCameraId, dayStart, dayEnd, afterEpoch, source, false), { signal });
       if (!response.ok) throw new Error(`Recording update failed (${response.status})`);
       const payload = await response.json();
       const additions = payload.availability || [];
@@ -1165,7 +1165,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       const afterEpoch = Number.isFinite(gridRefreshCursorRef.current)
         ? gridRefreshCursorRef.current
         : Math.max(dayStart, requestStartedAt - 120);
-      const response = await fetch(recordingGridUpdatesUrl(dayStart, dayEnd, afterEpoch, source), { signal });
+      const response = await fetch(recordingGridUpdatesUrl(dayStart, dayEnd, afterEpoch, source, false), { signal });
       if (!response.ok) return;
       const payload = await response.json();
       const additions = payload.availability || payload.recordings || [];

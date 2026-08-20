@@ -120,8 +120,12 @@ def _validate_recording_range(
 def _identity_hydrated_recording_incidents(
     active_manager: Any,
     public_events: list[dict],
+    *,
+    include_identities: bool = True,
 ) -> list[dict]:
     incidents = _incident_rows(public_events)
+    if not include_identities:
+        return incidents
     face_store = getattr(active_manager, "faces", None)
     if face_store is None or not hasattr(face_store, "for_event_ids"):
         return incidents
@@ -192,6 +196,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         start_epoch: float,
         end_epoch: float,
         source: str = "main",
+        include_identities: bool = True,
     ) -> dict:
         active_manager = _require_recording_camera(deps, camera_id)
         _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
@@ -221,6 +226,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         timeline_incidents = _identity_hydrated_recording_incidents(
             active_manager,
             public_events,
+            include_identities=include_identities,
         )
         return {
             "camera_id": camera_id,
@@ -245,6 +251,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         start_epoch: float,
         end_epoch: float,
         source: str = "live",
+        include_identities: bool = True,
     ) -> dict:
         """Return local-index history for the synchronized all-camera recording view."""
         _validate_recording_range(
@@ -317,6 +324,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             hydrated_incidents = _identity_hydrated_recording_incidents(
                 active_manager,
                 public_events,
+                include_identities=include_identities,
             )
             incidents = [
                 _recording_grid_incident_payload(incident)
@@ -355,6 +363,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         end_epoch: float,
         after_epoch: float,
         source: str = "live",
+        include_identities: bool = True,
     ) -> dict:
         """Return a bounded near-live delta for the synchronized camera grid."""
         _validate_recording_range(
@@ -409,6 +418,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         hydrated_incidents = _identity_hydrated_recording_incidents(
             active_manager,
             public_events,
+            include_identities=include_identities,
         )
         aggregate_ranges.sort(key=lambda item: float(item.get("start_epoch") or 0))
         return {
@@ -701,6 +711,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         end_epoch: float,
         after_epoch: float,
         source: str = "main",
+        include_identities: bool = True,
     ) -> dict:
         active_manager = _require_recording_camera(deps, camera_id)
         _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
@@ -751,6 +762,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         timeline_incidents = _identity_hydrated_recording_incidents(
             active_manager,
             public_events,
+            include_identities=include_identities,
         )
         return {
             "camera_id": camera_id,
