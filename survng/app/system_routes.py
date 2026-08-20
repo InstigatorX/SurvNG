@@ -97,10 +97,9 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
 
     @router.get("/api/events/stream")
     async def application_event_stream(request: Request) -> StreamingResponse:
-        active_manager = deps.get_manager()
-        subscriber = active_manager.state_events.subscribe()
-
         async def generate():
+            active_manager = deps.get_manager()
+            subscriber = active_manager.state_events.subscribe()
             try:
                 yield "retry: 3000\n\n"
                 query_params = getattr(request, "query_params", {})

@@ -64,6 +64,23 @@ def test_stream_resumes_from_query_cursor_without_full_snapshots() -> None:
     telemetry.system_status.assert_not_called()
 
 
+def test_unconsumed_stream_does_not_subscribe_to_the_broker() -> None:
+    async def create_without_consuming():
+        broker = StateEventBroker()
+        manager = SimpleNamespace(state_events=broker, statuses=Mock(return_value=[]))
+        telemetry = SimpleNamespace(system_status=Mock(return_value={}))
+        get_manager = Mock(return_value=manager)
+
+        response = await stream_handler(manager, telemetry, get_manager)(StreamRequest())
+
+        assert not broker._subscribers
+        get_manager.assert_not_called()
+        await response.body_iterator.aclose()
+        assert not broker._subscribers
+
+    asyncio.run(create_without_consuming())
+
+
 def test_native_last_event_id_takes_precedence_over_query_cursor() -> None:
     broker = StateEventBroker()
     first = broker.publish("camera_state", {"id": "gate", "running": False})

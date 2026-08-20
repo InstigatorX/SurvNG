@@ -62,23 +62,25 @@ def _public_face_observation(observation: dict[str, Any]) -> dict[str, Any]:
 
 
 def _etag_matches(if_none_match: str, etag: str) -> bool:
+    expected = etag[2:] if etag.startswith("W/") else etag
     for candidate in if_none_match.split(","):
         candidate = candidate.strip()
         if candidate == "*":
             return True
         if candidate.startswith("W/"):
             candidate = candidate[2:]
-        if candidate == etag:
+        if candidate == expected:
             return True
     return False
 
 
 def _conditional_json_response(request: Request, payload: Any) -> Response:
     response = JSONResponse(content=jsonable_encoder(payload))
-    etag = f'"{hashlib.sha256(response.body).hexdigest()}"'
+    etag = f'W/"{hashlib.sha256(response.body).hexdigest()}"'
     cache_headers = {
         "Cache-Control": "private, no-cache",
         "ETag": etag,
+        "Vary": "Accept-Encoding",
     }
     if _etag_matches(request.headers.get("if-none-match", ""), etag):
         return Response(status_code=304, headers=cache_headers)
@@ -88,7 +90,7 @@ def _conditional_json_response(request: Request, payload: Any) -> Response:
 
 def _revision_etag(namespace: str, revision: object) -> str:
     identity = f"{namespace}:{revision}".encode("utf-8")
-    return f'"{hashlib.sha256(identity).hexdigest()}"'
+    return f'W/"{hashlib.sha256(identity).hexdigest()}"'
 
 
 def _revisioned_json_response(
@@ -104,6 +106,7 @@ def _revisioned_json_response(
         cache_headers = {
             "Cache-Control": "private, no-cache",
             "ETag": etag,
+            "Vary": "Accept-Encoding",
         }
         if _etag_matches(request.headers.get("if-none-match", ""), etag):
             return Response(status_code=304, headers=cache_headers)

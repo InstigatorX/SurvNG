@@ -10,10 +10,13 @@ from fastapi.testclient import TestClient
 
 from survng.app.face_routes import FaceRouteDependencies, create_face_router
 from survng.app.faces import FaceStore
+from survng.app.main import JsonGZipMiddleware
 
 
-def face_client(faces):
+def face_client(faces, *, compress: bool = False):
     app = FastAPI()
+    if compress:
+        app.add_middleware(JsonGZipMiddleware, minimum_size=1, compresslevel=5)
     bundle = create_face_router(FaceRouteDependencies(
         get_manager=lambda: SimpleNamespace(faces=faces),
         manager_lock=threading.RLock(),
@@ -35,18 +38,20 @@ def test_people_directory_revalidates_and_preserves_direct_handler() -> None:
     assert first.status_code == 200
     assert first.json() == people
     assert first.headers["cache-control"] == "private, no-cache"
-    assert first.headers["etag"].startswith('"')
+    assert first.headers["etag"].startswith('W/"')
+    assert first.headers["vary"] == "Accept-Encoding"
     assert bundle.handlers["face_people"]() == people
 
     unchanged = client.get(
         "/api/faces/people",
-        headers={"If-None-Match": f'W/{first.headers["etag"]}, "other"'},
+        headers={"If-None-Match": f'{first.headers["etag"].removeprefix("W/")}, "other"'},
     )
 
     assert unchanged.status_code == 304
     assert unchanged.content == b""
     assert unchanged.headers["etag"] == first.headers["etag"]
     assert unchanged.headers["cache-control"] == "private, no-cache"
+    assert unchanged.headers["vary"] == "Accept-Encoding"
     # One materialization served the HTTP 200 and one served the legacy direct
     # handler; the conditional hit did not query the directory again.
     assert faces.people.call_count == 2
@@ -79,6 +84,42 @@ def test_people_mutation_changes_the_directory_validator() -> None:
     assert changed.status_code == 200
     assert changed.json() == people
     assert changed.headers["etag"] != first.headers["etag"]
+
+
+def test_people_validator_is_weak_and_shared_safely_across_content_encodings() -> None:
+    people = [{"id": index, "name": f"Person {index}"} for index in range(20)]
+    faces = Mock()
+    faces.people.return_value = people
+    faces.people_directory_revision.return_value = "people:1"
+    client, _bundle = face_client(faces, compress=True)
+
+    compressed = client.get(
+        "/api/faces/people",
+        headers={"Accept-Encoding": "gzip"},
+    )
+    identity = client.get(
+        "/api/faces/people",
+        headers={"Accept-Encoding": "identity"},
+    )
+    unchanged = client.get(
+        "/api/faces/people",
+        headers={
+            "Accept-Encoding": "identity",
+            "If-None-Match": compressed.headers["etag"],
+        },
+    )
+
+    assert compressed.headers["content-encoding"] == "gzip"
+    assert "content-encoding" not in identity.headers
+    assert compressed.headers["etag"] == identity.headers["etag"]
+    assert compressed.headers["etag"].startswith('W/"')
+    assert unchanged.status_code == 304
+    for response in (compressed, identity, unchanged):
+        vary_tokens = {
+            token.strip().lower()
+            for token in response.headers["vary"].split(",")
+        }
+        assert "accept-encoding" in vary_tokens
 
 
 def test_unknown_cluster_rebuild_changes_the_cluster_validator() -> None:
