@@ -1413,6 +1413,58 @@ class FaceStoreTest(unittest.TestCase):
 
             thread.join.assert_called_once_with(timeout=20.0)
 
+    def test_unknown_cluster_refresh_and_event_lookup_use_embedded_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                config=SimpleNamespace(face_unknown_cluster_threshold=0.55),
+                status=lambda: {"model_fingerprint": "model-v1"},
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            first = self.insert_observation(
+                store,
+                41,
+                observed_at="2026-08-20T04:16:00+00:00",
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="model-v1",
+                recognition_pending=0,
+            )
+            second = self.insert_observation(
+                store,
+                42,
+                observed_at="2026-08-20T04:16:01+00:00",
+                embedding=np.asarray([0.99, 0.01], dtype=np.float32),
+                embedding_model="model-v1",
+                recognition_pending=0,
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set quality_score = 0.8 where id in (?, ?)",
+                    (first, second),
+                )
+
+            clustered = store.refresh_unknown_clusters()
+            rows = store.for_event_ids([41, 42])
+
+            self.assertGreaterEqual(clustered, 1)
+            self.assertEqual({int(row["observation_id"]) for row in rows}, {first, second})
+            self.assertTrue(all(int(row["unknown_cluster_id"] or 0) > 0 for row in rows))
+
+    def test_review_queue_lists_embedded_unknowns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), start_recognition=False)
+            observation_id = self.insert_observation(
+                store,
+                7,
+                observed_at="2026-08-20T04:16:00+00:00",
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="model-v1",
+                recognition_pending=0,
+            )
+
+            queue = store.review_queue(limit=10)
+
+            self.assertEqual([int(item["id"]) for item in queue], [observation_id])
+
 
 if __name__ == "__main__":
     unittest.main()

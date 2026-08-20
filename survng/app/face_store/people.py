@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .quality import LOGGER
+from .quality import FACE_OUTCOME_EMBEDDED, LOGGER
 
 
 class FaceStorePeopleMixin:
