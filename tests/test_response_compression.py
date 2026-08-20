@@ -20,7 +20,13 @@ class JsonResponseCompressionTest(unittest.IsolatedAsyncioTestCase):
 
         return collect
 
-    async def _request(self, *, content_type: bytes, body: bytes) -> list[dict]:
+    async def _request(
+        self,
+        *,
+        content_type: bytes,
+        body: bytes,
+        accept_encoding: bytes = b"gzip",
+    ) -> list[dict]:
         async def inner(_scope, _receive, send) -> None:
             await send({
                 "type": "http.response.start",
@@ -33,7 +39,7 @@ class JsonResponseCompressionTest(unittest.IsolatedAsyncioTestCase):
         middleware = JsonGZipMiddleware(inner, minimum_size=64, compresslevel=5)
         await middleware({
             "type": "http", "method": "GET", "path": "/api/example",
-            "headers": [(b"accept-encoding", b"gzip")],
+            "headers": [(b"accept-encoding", accept_encoding)],
         }, self._receive, self._collector(messages))
         return messages
 
@@ -63,6 +69,38 @@ class JsonResponseCompressionTest(unittest.IsolatedAsyncioTestCase):
         headers = dict(messages[0]["headers"])
         self.assertNotIn(b"content-encoding", headers)
         self.assertNotIn(b"vary", headers)
+
+    async def test_gzip_quality_zero_and_substring_codings_are_not_accepted(self) -> None:
+        body = b'{"items":["' + (b"camera-event," * 40) + b'"]}'
+        for accept_encoding in (
+            b"gzip;q=0",
+            b"br, gzip; q=0.000",
+            b"x-gzipish",
+            b"*;q=1, gzip;q=0",
+            b"gzip;q=invalid",
+        ):
+            with self.subTest(accept_encoding=accept_encoding):
+                messages = await self._request(
+                    content_type=b"application/json",
+                    body=body,
+                    accept_encoding=accept_encoding,
+                )
+                headers = dict(messages[0]["headers"])
+                self.assertNotIn(b"content-encoding", headers)
+                self.assertEqual(messages[1]["body"], body)
+
+    async def test_positive_gzip_quality_and_wildcard_are_accepted(self) -> None:
+        body = b'{"items":["' + (b"camera-event," * 40) + b'"]}'
+        for accept_encoding in (b"br, GZip; q=0.25", b"br, *;q=0.5"):
+            with self.subTest(accept_encoding=accept_encoding):
+                messages = await self._request(
+                    content_type=b"application/json",
+                    body=body,
+                    accept_encoding=accept_encoding,
+                )
+                headers = dict(messages[0]["headers"])
+                self.assertEqual(headers[b"content-encoding"], b"gzip")
+                self.assertEqual(gzip.decompress(messages[1]["body"]), body)
 
 
 if __name__ == "__main__":

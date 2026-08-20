@@ -453,6 +453,41 @@ class JsonGZipResponder(GZipResponder):
 class JsonGZipMiddleware(GZipMiddleware):
     """Starlette gzip middleware with a JSON-only response boundary."""
 
+    @staticmethod
+    def _accepts_gzip(value: str) -> bool:
+        explicit_quality: float | None = None
+        wildcard_quality: float | None = None
+        for item in value.split(","):
+            parts = [part.strip() for part in item.split(";")]
+            coding = parts[0].lower()
+            if not coding:
+                continue
+            quality = 1.0
+            for parameter in parts[1:]:
+                name, separator, raw_value = parameter.partition("=")
+                if name.strip().lower() != "q":
+                    continue
+                if not separator:
+                    quality = 0.0
+                    break
+                try:
+                    quality = float(raw_value.strip())
+                except ValueError:
+                    quality = 0.0
+                if not 0.0 <= quality <= 1.0:
+                    quality = 0.0
+                break
+            if coding == "gzip":
+                explicit_quality = quality
+            elif coding == "*":
+                wildcard_quality = quality
+        accepted_quality = (
+            explicit_quality
+            if explicit_quality is not None
+            else wildcard_quality
+        )
+        return accepted_quality is not None and accepted_quality > 0.0
+
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -460,7 +495,7 @@ class JsonGZipMiddleware(GZipMiddleware):
         headers = Headers(scope=scope)
         responder = (
             JsonGZipResponder(self.app, self.minimum_size, compresslevel=self.compresslevel)
-            if "gzip" in headers.get("accept-encoding", "")
+            if self._accepts_gzip(headers.get("accept-encoding", ""))
             else IdentityResponder(self.app, self.minimum_size)
         )
         await responder(scope, receive, send)

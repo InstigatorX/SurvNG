@@ -86,6 +86,37 @@ def _conditional_json_response(request: Request, payload: Any) -> Response:
     return response
 
 
+def _revision_etag(namespace: str, revision: object) -> str:
+    identity = f"{namespace}:{revision}".encode("utf-8")
+    return f'"{hashlib.sha256(identity).hexdigest()}"'
+
+
+def _revisioned_json_response(
+    request: Request,
+    namespace: str,
+    revision_reader: Callable[[], object],
+    payload_reader: Callable[[], Any],
+) -> Response:
+    payload: Any = None
+    for _attempt in range(2):
+        revision = str(revision_reader())
+        etag = _revision_etag(namespace, revision)
+        cache_headers = {
+            "Cache-Control": "private, no-cache",
+            "ETag": etag,
+        }
+        if _etag_matches(request.headers.get("if-none-match", ""), etag):
+            return Response(status_code=304, headers=cache_headers)
+        payload = payload_reader()
+        if str(revision_reader()) == revision:
+            response = JSONResponse(content=jsonable_encoder(payload))
+            response.headers.update(cache_headers)
+            return response
+    # A continuously changing directory must never receive a validator for a
+    # different snapshot. Fall back to the exact response-body validator.
+    return _conditional_json_response(request, payload)
+
+
 def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
     router = APIRouter()
 
@@ -149,7 +180,13 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
 
     @router.get("/api/faces/unknown-clusters")
     def face_unknown_clusters(request: Request) -> Response:
-        return _conditional_json_response(request, face_unknown_clusters_payload())
+        deps.start_observation_sync()
+        return with_manager(lambda active: _revisioned_json_response(
+            request,
+            "unknown-clusters-v1",
+            active.faces.unknown_clusters_revision,
+            active.faces.unknown_clusters,
+        ))
 
 
     @router.get("/api/faces/diagnostics/duplicates")
@@ -321,7 +358,13 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
 
     @router.get("/api/faces/people")
     def face_people(request: Request) -> Response:
-        return _conditional_json_response(request, face_people_payload())
+        deps.start_observation_sync()
+        return with_manager(lambda active: _revisioned_json_response(
+            request,
+            "people-directory-v1",
+            active.faces.people_directory_revision,
+            active.faces.people,
+        ))
 
     @router.get("/api/faces/camera-suitability")
     def face_camera_suitability() -> list[dict[str, Any]]:

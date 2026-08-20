@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
 from queue import Queue
 from typing import Any, Callable
@@ -24,6 +25,10 @@ from .quality import (
 from .queries import FaceStoreQueryMixin
 from .recognition import FaceStoreRecognitionMixin
 from .unknown import FaceStoreUnknownMixin
+
+
+_PEOPLE_DIRECTORY_REVISION_KEY = "face_people_directory_revision_v1"
+_UNKNOWN_CLUSTERS_REVISION_KEY = "face_unknown_clusters_revision_v1"
 
 
 class FaceStore(
@@ -59,6 +64,7 @@ class FaceStore(
         self._gallery_generation = 0
         self._gallery_cache_key: tuple[str, tuple[int, ...], int, int] | None = None
         self._gallery_cache: list[dict[str, Any]] = []
+        self._directory_revision_instance = uuid.uuid4().hex
         self._identity_event_publisher: Callable[[dict[str, Any]], None] | None = None
         self._recognition_refill_needed = threading.Event()
         self._match_refresh_needed = threading.Event()
@@ -314,6 +320,97 @@ class FaceStore(
                     (storage_root,),
                 )
             self._prune_locked(connection)
+            for key in (
+                _PEOPLE_DIRECTORY_REVISION_KEY,
+                _UNKNOWN_CLUSTERS_REVISION_KEY,
+            ):
+                connection.execute(
+                    "insert or ignore into survng_metadata (key, value) values (?, '0')",
+                    (key,),
+                )
+            connection.executescript(
+                f"""
+                create trigger if not exists face_people_directory_insert_revision
+                after insert on face_people begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key = '{_PEOPLE_DIRECTORY_REVISION_KEY}';
+                end;
+                create trigger if not exists face_people_directory_update_revision
+                after update on face_people begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key = '{_PEOPLE_DIRECTORY_REVISION_KEY}';
+                end;
+                create trigger if not exists face_people_directory_delete_revision
+                after delete on face_people begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key = '{_PEOPLE_DIRECTORY_REVISION_KEY}';
+                end;
+
+                create trigger if not exists face_observation_insert_directory_revisions
+                after insert on face_observations begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key in (
+                        '{_PEOPLE_DIRECTORY_REVISION_KEY}',
+                        '{_UNKNOWN_CLUSTERS_REVISION_KEY}'
+                    );
+                end;
+                create trigger if not exists face_observation_update_directory_revisions
+                after update on face_observations begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key in (
+                        '{_PEOPLE_DIRECTORY_REVISION_KEY}',
+                        '{_UNKNOWN_CLUSTERS_REVISION_KEY}'
+                    );
+                end;
+                create trigger if not exists face_observation_delete_directory_revisions
+                after delete on face_observations begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key in (
+                        '{_PEOPLE_DIRECTORY_REVISION_KEY}',
+                        '{_UNKNOWN_CLUSTERS_REVISION_KEY}'
+                    );
+                end;
+
+                create trigger if not exists face_unknown_member_insert_revision
+                after insert on face_unknown_members begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key = '{_UNKNOWN_CLUSTERS_REVISION_KEY}';
+                end;
+                create trigger if not exists face_unknown_member_update_revision
+                after update on face_unknown_members begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key = '{_UNKNOWN_CLUSTERS_REVISION_KEY}';
+                end;
+                create trigger if not exists face_unknown_member_delete_revision
+                after delete on face_unknown_members begin
+                    update survng_metadata set value = cast(value as integer) + 1
+                    where key = '{_UNKNOWN_CLUSTERS_REVISION_KEY}';
+                end;
+                """
+            )
+
+    def _directory_revision(self, key: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "select value from survng_metadata where key = ?",
+                (key,),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def people_directory_revision(self) -> str:
+        status_reader = getattr(self.recognizer, "status", None)
+        status = status_reader() if callable(status_reader) else {}
+        fingerprint = str(status.get("model_fingerprint") or "")
+        revision = self._directory_revision(_PEOPLE_DIRECTORY_REVISION_KEY)
+        return f"{self._directory_revision_instance}:people:{revision}:{fingerprint}"
+
+    def unknown_clusters_revision(self) -> str:
+        fingerprint, threshold = self._unknown_cluster_policy()
+        revision = self._directory_revision(_UNKNOWN_CLUSTERS_REVISION_KEY)
+        return (
+            f"{self._directory_revision_instance}:unknown:{revision}:"
+            f"{fingerprint}:{threshold:.6f}"
+        )
 
     def close(self) -> None:
         with self._lifecycle_lock:
