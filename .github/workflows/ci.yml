@@ -31,7 +31,12 @@ jobs:
             tests/test_recorder.py \
             tests/test_face_store.py \
             tests/test_calibration.py \
-            tests/test_live_delivery.py
+            tests/test_live_delivery.py \
+            tests/test_inference.py \
+            tests/test_inference_lifecycle.py \
+            tests/test_object_tracking.py \
+            tests/test_camera_worker.py \
+            tests/test_config_reload.py
       - name: Run frontend unit tests
         run: |
           npm --prefix frontend ci
