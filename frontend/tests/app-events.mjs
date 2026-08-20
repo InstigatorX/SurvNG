@@ -98,11 +98,11 @@ assert.deepEqual(received.at(-1), {
 unsubscribe();
 assert.equal(documentListeners.has("visibilitychange"), false);
 assert.equal(pendingTimers.size, 1);
-pendingTimers.values().next().value();
-assert.equal(resumedSource.closed, true);
 
 document.visibilityState = "hidden";
 const hiddenUnsubscribe = subscribeAppEvents(() => {});
+assert.equal(pendingTimers.size, 0);
+assert.equal(resumedSource.closed, true);
 assert.equal(FakeEventSource.instances.length, 2);
 document.visibilityState = "visible";
 documentListeners.get("visibilitychange")();
@@ -112,5 +112,8 @@ assert.equal(
   "/survng/api/events/stream?last_event_id=abc%3A9",
 );
 hiddenUnsubscribe();
+assert.equal(pendingTimers.size, 1);
+pendingTimers.values().next().value();
+assert.equal(FakeEventSource.instances[2].closed, true);
 
 console.log("application event stream tests passed");

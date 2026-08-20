@@ -29,7 +29,12 @@ function rememberEventId(event) {
 }
 
 function connectAppEventSource() {
-  if (appEventSource || !appEventListeners.size || documentIsHidden()) return;
+  if (!appEventListeners.size) return;
+  if (documentIsHidden()) {
+    closeAppEventSource();
+    return;
+  }
+  if (appEventSource) return;
   const source = new EventSource(streamUrl());
   appEventSource = source;
   source.addEventListener("connected", (event) => {
