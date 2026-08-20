@@ -473,6 +473,17 @@ class IncidentQueryService:
                 query_start.isoformat(), query_end.isoformat(), camera_id
             )
         ]
+        # Result rows may be camera-constrained, but facets intentionally retain
+        # the full day's choices so changing the camera selector does not make
+        # other cameras/labels/zones disappear from the filter UI.
+        facet_rows = compact_rows
+        if camera_id:
+            facet_rows = [
+                _event_row(row)
+                for row in manager.events.between_compact(
+                    query_start.isoformat(), query_end.isoformat()
+                )
+            ]
         day_start_epoch = day_start.timestamp()
         day_end_epoch = day_end.timestamp()
         day_incidents = [
@@ -481,18 +492,24 @@ class IncidentQueryService:
             if incident["last_epoch"] >= day_start_epoch
             and incident["start_epoch"] < day_end_epoch
         ]
+        facet_incidents = [
+            incident
+            for incident in _incident_rows(facet_rows, gap_seconds=bounded_gap)
+            if incident["last_epoch"] >= day_start_epoch
+            and incident["start_epoch"] < day_end_epoch
+        ]
         facets = {
             "camera_ids": sorted(
                 {
                     str(item.get("camera_id") or "")
-                    for item in day_incidents
+                    for item in facet_incidents
                     if item.get("camera_id")
                 }
             ),
             "labels": sorted(
                 {
                     str(label)
-                    for item in day_incidents
+                    for item in facet_incidents
                     for label in item.get("labels", [])
                     if label
                 }
@@ -500,7 +517,7 @@ class IncidentQueryService:
             "zones": sorted(
                 {
                     str(item_zone)
-                    for item in day_incidents
+                    for item in facet_incidents
                     for item_zone in item.get("zones", [])
                     if item_zone
                 }

@@ -17,6 +17,52 @@ from survng.app.manager_access import ManagerAccessCoordinator
 
 
 class IncidentQueryRouterTest(unittest.TestCase):
+    def test_search_keeps_full_day_facets_when_results_are_camera_filtered(self) -> None:
+        rows = [
+            {
+                "id": 1,
+                "camera_id": "gate",
+                "kind": "object",
+                "created_at": "2026-01-01T12:00:00+00:00",
+                "snapshot_path": "gate.jpg",
+                "recording_path": "",
+                "objects_json": '[{"label":"person","confidence":0.9,"zones":["front"]}]',
+            },
+            {
+                "id": 2,
+                "camera_id": "garage",
+                "kind": "object",
+                "created_at": "2026-01-01T12:01:00+00:00",
+                "snapshot_path": "garage.jpg",
+                "recording_path": "",
+                "objects_json": '[{"label":"vehicle","confidence":0.9,"zones":["drive"]}]',
+            },
+        ]
+        calls: list[str] = []
+
+        def between_compact(_start: str, _end: str, camera_id: str = ""):
+            calls.append(camera_id)
+            return [row for row in rows if not camera_id or row["camera_id"] == camera_id]
+
+        manager = SimpleNamespace(
+            events=SimpleNamespace(between_compact=between_compact),
+            faces=SimpleNamespace(for_event_ids=lambda _ids: []),
+        )
+
+        result = IncidentQueryService.search(
+            manager,
+            day="2026-01-01",
+            time_zone="UTC",
+            camera_id="gate",
+            event_type="all",
+        )
+
+        self.assertEqual([item["camera_id"] for item in result["items"]], ["gate"])
+        self.assertEqual(result["facets"]["camera_ids"], ["garage", "gate"])
+        self.assertEqual(result["facets"]["labels"], ["person", "vehicle"])
+        self.assertEqual(result["facets"]["zones"], ["drive", "front"])
+        self.assertEqual(calls, ["gate", ""])
+
     def test_confirmed_identity_wins_over_automatic_duplicate(self) -> None:
         identities = identity_summaries([
             {
