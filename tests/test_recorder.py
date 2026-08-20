@@ -899,7 +899,7 @@ class RecorderTest(unittest.TestCase):
                 index_dir=index_dir,
             )
 
-            with patch("survng.app.recording_process.recorder.RECORDING_PATH_REBASE_BATCH_SIZE", 1):
+            with patch("survng.app.recording_process.index.RECORDING_PATH_REBASE_BATCH_SIZE", 1):
                 new_recorder._rebase_recording_index_paths()
 
             with new_recorder._index_connection() as connection:
@@ -1026,7 +1026,7 @@ class RecorderTest(unittest.TestCase):
             process.poll.return_value = None
             recorder.processes[("front-door", "live")] = (process, None, Mock(), Mock())
 
-            with patch("survng.app.recording_process.recorder.time.time", return_value=now_epoch):
+            with patch("survng.app.recording_process.index.time.time", return_value=now_epoch):
                 rows = recorder._recording_rows_for_files("front-door", "live", [clip])
 
         self.assertEqual(rows, [])
@@ -1177,7 +1177,7 @@ class RecorderTest(unittest.TestCase):
             recorder._index_thread = index_thread
             maintenance_thread = Mock(name="replacement-maintenance-thread")
             with patch(
-                "survng.app.recording_process.recorder.threading.Thread",
+                "survng.app.recording_process.index.threading.Thread",
                 return_value=maintenance_thread,
             ) as thread_factory:
                 recorder.start_indexer([])
@@ -1404,7 +1404,7 @@ class RecorderTest(unittest.TestCase):
             recorder.queue_recording_validation([row])
 
             with (
-                patch("survng.app.recording_process.recorder.time.time", return_value=now_epoch),
+                patch("survng.app.recording_process.index.time.time", return_value=now_epoch),
                 patch.object(recorder, "_probe_recording") as probe,
             ):
                 validated = recorder._validate_index_batch(limit=1)
@@ -1418,7 +1418,7 @@ class RecorderTest(unittest.TestCase):
             old_epoch = now_epoch - 30
             os.utime(clip, (old_epoch, old_epoch))
             with (
-                patch("survng.app.recording_process.recorder.time.time", return_value=now_epoch + 15),
+                patch("survng.app.recording_process.index.time.time", return_value=now_epoch + 15),
                 patch.object(recorder, "_probe_recording", return_value=(10.0, "")) as retry_probe,
             ):
                 retried = recorder._validate_index_batch(limit=1)
@@ -1477,7 +1477,7 @@ class RecorderTest(unittest.TestCase):
                 row["end_epoch"] + 1,
             ))
 
-            with patch("survng.app.recording_process.recorder.mp4_stream_fingerprint", return_value="stream-v1"):
+            with patch("survng.app.recording_process.index.mp4_stream_fingerprint", return_value="stream-v1"):
                 updated = recorder._backfill_stream_fingerprints(limit=1)
             with recorder._index_connection() as connection:
                 indexed = dict(connection.execute(
@@ -1515,7 +1515,7 @@ class RecorderTest(unittest.TestCase):
 
             with (
                 patch.object(recorder, "_probe_recording", return_value=(9.0, "")),
-                patch("survng.app.recording_process.recorder.mp4_stream_fingerprint", return_value="stream-v2"),
+                patch("survng.app.recording_process.index.mp4_stream_fingerprint", return_value="stream-v2"),
             ):
                 self.assertEqual(
                     recorder._validate_index_batch(limit=1, discover_unqueued=True),
@@ -1540,7 +1540,7 @@ class RecorderTest(unittest.TestCase):
             row["validated"] = True
             recorder._store_recording_rows("front-door", "main", [row])
 
-            with patch("survng.app.recording_process.recorder.mp4_stream_fingerprint") as fingerprint:
+            with patch("survng.app.recording_process.index.mp4_stream_fingerprint") as fingerprint:
                 updated = recorder._backfill_stream_fingerprints(limit=1)
 
         self.assertEqual(updated, 0)
@@ -1555,7 +1555,7 @@ class RecorderTest(unittest.TestCase):
             row["validated"] = True
             recorder._store_recording_rows("front-door", "main", [row])
 
-            with patch("survng.app.recording_process.recorder.mp4_stream_fingerprint", return_value="stream-v3"):
+            with patch("survng.app.recording_process.index.mp4_stream_fingerprint", return_value="stream-v3"):
                 self.assertEqual(
                     recorder._backfill_stream_fingerprints(
                         limit=1,
