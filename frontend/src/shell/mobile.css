@@ -1,0 +1,584 @@
+/* SurvNG mobile final: unified selectors + single-camera Timeline */
+.mobile-camera-select {
+  display: none;
+}
+
+@media (max-width: 760px) {
+
+  .mobile-camera-picker,
+  .recordings-v2-cameras {
+    display: none !important;
+  }
+
+  .mobile-camera-select {
+    display: grid !important;
+    grid-template-columns: 18px minmax(0, 1fr);
+    align-items: center;
+    min-width: 0;
+    height: 38px;
+    min-height: 38px !important;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--control);
+    color: var(--muted);
+    padding-left: 8px;
+  }
+
+  .mobile-camera-select>svg {
+    width: 15px;
+    height: 15px;
+    pointer-events: none;
+  }
+
+  .mobile-camera-select select {
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+    min-height: 36px !important;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 620;
+    padding: 0 24px 0 5px;
+  }
+
+  /* LIVE */
+  .live-grid {
+    gap: 0 !important;
+    padding: 0 !important;
+  }
+
+  .live-command-bar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px !important;
+    min-height: 46px !important;
+    height: 46px !important;
+    border-width: 0 0 1px !important;
+    border-radius: 0 !important;
+    padding: 4px 6px !important;
+  }
+
+  .live-command-context,
+  .live-density-control,
+  .live-layout-control {
+    display: none !important;
+  }
+
+  .live-mobile-camera-select {
+    grid-column: 1 !important;
+    width: min(210px, 66vw);
+  }
+
+  .live-camera-grid,
+  .camera-grid.live-camera-grid {
+    gap: 4px !important;
+    column-gap: 4px !important;
+    row-gap: 4px !important;
+    padding: 4px !important;
+  }
+
+  .live-camera-grid .camera-tile,
+  .camera-grid.live-camera-grid .camera-tile {
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 3px !important;
+  }
+
+  .live-camera-grid .camera-tile-chrome {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto auto !important;
+    align-items: center !important;
+    min-height: 28px !important;
+    height: 28px !important;
+    gap: 4px !important;
+    padding: 0 4px !important;
+  }
+
+  .live-camera-grid .camera-tile-name {
+    min-width: 0 !important;
+    gap: 4px !important;
+    line-height: 1 !important;
+  }
+
+  .live-camera-grid .camera-tile-name i {
+    width: 7px !important;
+    height: 7px !important;
+    flex: 0 0 7px !important;
+  }
+
+  .live-camera-grid .camera-tile-name strong {
+    font-size: 11px !important;
+    line-height: 1 !important;
+  }
+
+  .live-camera-grid .camera-tile-time {
+    margin: 0 !important;
+    font-size: 9px !important;
+    line-height: 1 !important;
+    white-space: nowrap;
+  }
+
+  .live-camera-grid .camera-tile-actions {
+    display: flex !important;
+    align-items: center !important;
+    gap: 2px !important;
+    min-height: 0 !important;
+    height: 28px !important;
+  }
+
+  .live-camera-grid .camera-tile-live-state {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    min-height: 19px !important;
+    height: 19px !important;
+    margin: 0 !important;
+    padding: 0 5px !important;
+    font-size: 9px !important;
+    line-height: 19px !important;
+  }
+
+  .live-camera-grid .camera-tile-menu {
+    display: grid !important;
+    place-items: center !important;
+    width: 26px !important;
+    min-width: 26px !important;
+    max-width: 26px !important;
+    height: 26px !important;
+    min-height: 26px !important;
+    max-height: 26px !important;
+    margin: 0 !important;
+    border: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* TIMELINE */
+  .recordings-v2-page {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: 46px minmax(0, 1fr) !important;
+    width: 100% !important;
+    height: var(--workspace-available-height) !important;
+    min-height: 0 !important;
+    max-height: var(--workspace-available-height) !important;
+    gap: 0 !important;
+    overflow: hidden !important;
+    background: var(--bg);
+    padding: 0 !important;
+  }
+
+  .recordings-tabs.recordings-commandbar {
+    position: static !important;
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    display: grid !important;
+    grid-template-columns: minmax(112px, 1fr) 108px auto !important;
+    align-items: center !important;
+    gap: 4px !important;
+    min-height: 46px !important;
+    height: 46px !important;
+    overflow: hidden !important;
+    border: 0 !important;
+    border-bottom: 1px solid var(--line) !important;
+    border-radius: 0 !important;
+    padding: 4px 5px !important;
+  }
+
+  .recordings-commandbar-scope,
+  .recordings-section-switcher,
+  .recordings-playback-rate,
+  .recordings-commandbar-export {
+    display: none !important;
+  }
+
+  .timeline-mobile-camera-select {
+    grid-column: 1 !important;
+    width: 100%;
+    max-width: 210px;
+  }
+
+  .recordings-v2-date {
+    grid-column: 2 !important;
+    display: flex !important;
+    min-width: 0;
+    height: 38px;
+    overflow: hidden !important;
+  }
+
+  .recordings-v2-date>button {
+    display: none !important;
+  }
+
+  .recordings-v2-date input {
+    width: 108px !important;
+    min-width: 0 !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    border: 0 !important;
+    padding: 0 4px !important;
+    font-size: 11px !important;
+  }
+
+  .recordings-commandbar .recordings-v2-player-source {
+    grid-column: 3 !important;
+    display: flex !important;
+    height: 38px !important;
+    min-height: 38px !important;
+  }
+
+  .recordings-commandbar .recordings-v2-player-source button {
+    min-width: 44px !important;
+    min-height: 36px !important;
+    height: 36px !important;
+    padding: 2px 6px !important;
+    font-size: 10px !important;
+  }
+
+  .recordings-commandbar .recordings-v2-player-source button small {
+    display: none !important;
+  }
+
+  .recordings-v2-workspace {
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+    display: grid !important;
+    grid-template-rows: minmax(0, 1fr) 104px !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+  }
+
+  .recordings-v2-incidents,
+  .recordings-v2-investigation,
+  .recordings-v2-selected-event,
+  .recordings-related-events,
+  .recordings-v2-events,
+  .recordings-event-inspector,
+  .recordings-inspector-toggle,
+  .recordings-v2-thumbnail-rail,
+  .recordings-v2-thumbnails,
+  .recordings-thumbnail-rail,
+  .recording-grid-companions,
+  .recording-selected-companions,
+  .recording-stage-pagination,
+  [class*="recordings"][class*="thumbnail-rail"] {
+    display: none !important;
+  }
+
+  .recordings-v2-player.all-camera-grid .recording-grid-tile:not(:first-child),
+  .recording-camera-grid.stage-layout .recording-grid-tile:not(.primary) {
+    display: none !important;
+  }
+
+  .recordings-v2-player.all-camera-grid .recording-grid-tile:first-child,
+  .recording-camera-grid.stage-layout .recording-grid-tile.primary {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  .recording-camera-grid.stage-layout {
+    display: block !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+  }
+
+  .recordings-v2-player {
+    position: relative !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    border: 0 !important;
+  }
+
+  .recordings-v2-player.selected-camera-stage video,
+  .recordings-v2-player>video,
+  .recordings-v2-player.all-camera-grid video {
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    max-height: none !important;
+    object-fit: contain !important;
+  }
+
+  .recordings-v2-timeline-toolbar,
+  .recordings-timeline-display-controls {
+    display: none !important;
+  }
+
+  .recordings-v2-controls {
+    height: 104px !important;
+    min-height: 104px !important;
+    overflow: hidden !important;
+    border-top: 1px solid var(--line) !important;
+    border-bottom: 0 !important;
+  }
+
+  .recordings-v2-timeline {
+    height: 104px !important;
+    min-height: 104px !important;
+    padding: 3px 6px !important;
+  }
+
+  .recordings-v2-track {
+    height: 66px !important;
+  }
+
+  .recordings-v2-event-lane.object {
+    top: 28px !important;
+  }
+
+  .recordings-v2-event-lane.motion {
+    top: 46px !important;
+  }
+
+  body:has(.recordings-v2-page) {
+    overflow: hidden !important;
+  }
+}
+
+@media (max-width: 430px) {
+  .timeline-mobile-camera-select {
+    max-width: 148px;
+  }
+
+  .recordings-tabs.recordings-commandbar {
+    grid-template-columns: minmax(104px, 1fr) 104px auto !important;
+  }
+
+  .recordings-v2-date input {
+    width: 104px !important;
+  }
+
+  .live-mobile-camera-select {
+    width: min(190px, 66vw);
+  }
+}
+
+/* SurvNG mobile final v1.0.1: hide Timeline evidence thumbnails */
+@media (max-width: 760px) {
+
+  /*
+   * RecordingTimeline renders its own event/evidence filmstrip inside the
+   * scrubber when showThumbnails is true. This is the "Objects / Motion only"
+   * legend plus thumbnail row visible at the bottom of mobile Timeline.
+   */
+  .recordings-timeline-evidence {
+    display: none !important;
+  }
+
+  /*
+   * Reclaim the space that evidence thumbnails previously occupied.
+   * The authoritative 24-hour track remains visible and touch-scrubbable.
+   */
+  .recordings-v2-controls {
+    height: 92px !important;
+    min-height: 92px !important;
+  }
+
+  .recordings-v2-workspace {
+    grid-template-rows: minmax(0, 1fr) 92px !important;
+  }
+
+  .recordings-v2-timeline {
+    height: 92px !important;
+    min-height: 92px !important;
+    overflow: hidden !important;
+  }
+}
+
+/* SurvNG mobile scrub preview stacking fix */
+@media (max-width: 760px) {
+  .recordings-v2-controls {
+    position: relative !important;
+    z-index: 30 !important;
+    overflow: visible !important;
+  }
+
+  .recordings-v2-timeline {
+    position: relative !important;
+    overflow: visible !important;
+  }
+
+  .recordings-v2-scrub-preview {
+    z-index: 100 !important;
+  }
+
+  .recordings-v2-player {
+    position: relative !important;
+    z-index: 1 !important;
+  }
+}
+
+@media (max-width: 760px) {
+
+  .recordings-v2-timeline,
+  .recordings-v2-track,
+  .recordings-v2-track input,
+  .recordings-v2-scrub-preview {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+    -webkit-touch-callout: none !important;
+  }
+
+  .recordings-v2-track {
+    touch-action: none;
+  }
+}
+
+/* SurvNG dark mode graphite-blue override */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0b0d10;
+  --canvas: #101318;
+
+  --ink: #f3f4f6;
+  --text: #f3f4f6;
+  --muted: #9aa3ad;
+
+  --line: #262b32;
+  --line-strong: #343b44;
+
+  --panel: rgba(18, 21, 26, 0.96);
+  --panel-solid: #12151a;
+  --panel-soft: #171b21;
+
+  --control: #181c22;
+  --control-muted: #20252c;
+
+  --topbar: rgba(12, 14, 17, 0.96);
+  --thumb: #20252b;
+
+  --active: #1c2633;
+  --active-ink: #8dbcf5;
+
+  --pill: #1d2733;
+  --pill-ink: #b8d4f4;
+
+  --subtle: #0f1216;
+
+  --ok-bg: #153329;
+  --ok-ink: #72d7a5;
+
+  --bad-bg: #3a211d;
+  --bad-ink: #f59a86;
+
+  --warn-bg: #352b18;
+  --hot-bg: #381c27;
+
+  --video-bg: #030405;
+
+  --accent: #4f8fd8;
+  --accent-2: #6ba6e8;
+
+  --good: #4fc58b;
+  --danger: #ef6a75;
+  --warn: #e7b75d;
+  --hot: #ef6d8e;
+
+  --shadow: 0 10px 28px rgba(0, 0, 0, 0.34);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    color-scheme: dark;
+
+    --bg: #0b0d10;
+    --canvas: #101318;
+
+    --ink: #f3f4f6;
+    --text: #f3f4f6;
+    --muted: #9aa3ad;
+
+    --line: #262b32;
+    --line-strong: #343b44;
+
+    --panel: rgba(18, 21, 26, 0.96);
+    --panel-solid: #12151a;
+    --panel-soft: #171b21;
+
+    --control: #181c22;
+    --control-muted: #20252c;
+
+    --topbar: rgba(12, 14, 17, 0.96);
+    --thumb: #20252b;
+
+    --active: #1c2633;
+    --active-ink: #8dbcf5;
+
+    --pill: #1d2733;
+    --pill-ink: #b8d4f4;
+
+    --subtle: #0f1216;
+
+    --ok-bg: #153329;
+    --ok-ink: #72d7a5;
+
+    --bad-bg: #3a211d;
+    --bad-ink: #f59a86;
+
+    --warn-bg: #352b18;
+    --hot-bg: #381c27;
+
+    --video-bg: #030405;
+
+    --accent: #4f8fd8;
+    --accent-2: #6ba6e8;
+
+    --good: #4fc58b;
+    --danger: #ef6a75;
+    --warn: #e7b75d;
+    --hot: #ef6d8e;
+
+    --shadow: 0 10px 28px rgba(0, 0, 0, 0.34);
+  }
+}
+
+/* SurvNG identity visibility patch 04 */
+.identity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--pill);
+  color: var(--pill-ink);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.identity-chip.unknown {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.recordings-v2-selected-event .identity-chip {
+  margin-top: 2px;
+}
+
+.recordings-v2-events .identity-chip,
+.semantic-result-identity {
+  margin-top: 3px;
+}

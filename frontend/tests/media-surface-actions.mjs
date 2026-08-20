@@ -4,8 +4,18 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const directory = dirname(fileURLToPath(import.meta.url));
-const appSource = readFileSync(join(directory, "../src/App.jsx"), "utf8");
-const styles = readFileSync(join(directory, "../src/styles.css"), "utf8");
+const appSource = [
+  readFileSync(join(directory, "../src/live/LivePage.jsx"), "utf8"),
+  readFileSync(join(directory, "../src/shared/evidence.jsx"), "utf8"),
+  readFileSync(join(directory, "../src/incidents/IncidentsPage.jsx"), "utf8"),
+  readFileSync(join(directory, "../src/timeline/TimelinePages.jsx"), "utf8"),
+].join("\n");
+const styles = [
+  readFileSync(join(directory, "../src/styles.css"), "utf8"),
+  readFileSync(join(directory, "../src/admin/admin.css"), "utf8"),
+  readFileSync(join(directory, "../src/live/live.css"), "utf8"),
+  readFileSync(join(directory, "../src/incidents/incidents.css"), "utf8"),
+].join("\n");
 
 for (const control of [
   "camera-open-target",

@@ -1,0 +1,416 @@
+/* Live Command Center */
+.live-grid {
+  grid-template-columns: minmax(0, 1fr) var(--live-activity-width);
+  grid-template-rows: var(--live-command-height) minmax(0, 1fr);
+  gap: 0;
+  background: var(--canvas);
+  padding: 0;
+}
+
+.live-command-bar {
+  min-height: var(--live-command-height);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--topbar);
+  box-shadow: none;
+  padding: 6px 12px;
+}
+
+.live-command-context {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.live-command-mobile-title {
+  display: none;
+}
+
+.live-command-scope {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--workspace-control-radius);
+  background: var(--control);
+  color: var(--ink);
+  padding: 0 10px;
+}
+
+.live-command-scope strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.live-command-scope small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 520;
+}
+
+.live-density-control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--workspace-control-radius);
+}
+
+.live-density-control>button {
+  min-width: 42px;
+  min-height: 38px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  font-size: 11px;
+  padding: 0 9px;
+}
+
+.live-density-control>button:first-child {
+  border-left: 0;
+}
+
+.live-density-control>button.active {
+  background: color-mix(in srgb, var(--accent) 22%, var(--control));
+  color: var(--active-ink);
+}
+
+.live-density-pages {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  border-left: 1px solid var(--line);
+}
+
+.live-density-pages button {
+  width: 38px;
+  min-width: 38px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.live-density-pages small {
+  min-width: 30px;
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
+}
+
+.live-layout-control {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--workspace-control-radius);
+}
+
+.live-layout-control>span {
+  min-height: 38px;
+  margin: 0;
+  align-content: center;
+  border-right: 1px solid var(--line);
+  padding: 0 9px;
+  font-size: 9px;
+  font-weight: 580;
+  text-transform: none;
+}
+
+.live-layout-control button {
+  min-height: 38px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 560;
+  padding-inline: 12px;
+}
+
+.live-layout-control>span+button {
+  border-left: 0;
+}
+
+.live-layout-control button.active {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--accent) 19%, var(--control));
+}
+
+.live-layout-control .live-fullscreen {
+  width: 40px;
+  min-width: 40px;
+  padding: 0;
+}
+
+.live-grid:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  background: var(--canvas);
+}
+
+.live-grid>.camera-zone,
+.live-grid>.events-zone {
+  border: 0;
+  border-radius: 0;
+  background: var(--panel-solid);
+  box-shadow: none;
+}
+
+.live-grid>.camera-zone {
+  border-right: 1px solid var(--line);
+}
+
+.live-camera-grid.viewport-layout .camera-tile.viewport-layout .video-frame,
+.live-camera-grid .camera-tile .video-frame {
+  border-radius: 2px;
+}
+
+.live-camera-grid.viewport-layout .camera-tile-poster,
+.live-camera-grid.viewport-layout .camera-live-layer .live-stack>video,
+.live-camera-grid.viewport-layout .camera-live-layer .live-stack>img {
+  object-fit: var(--live-object-fit, cover);
+  object-position: var(--live-object-position, 50% 50%);
+}
+
+.events-zone .section-head {
+  min-height: 58px;
+  border-bottom: 1px solid var(--line);
+  padding: 9px 10px;
+}
+
+.events-zone .section-head h2 {
+  font-size: 16px;
+  font-weight: 620;
+}
+
+.incident-head-actions {
+  gap: 5px;
+}
+
+.incident-filter-toggle {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.incident-filter-toggle button {
+  min-height: 36px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 550;
+}
+
+.incident-filter-toggle button:first-child {
+  border-left: 0;
+}
+
+.incident-filter-toggle button.active {
+  background: color-mix(in srgb, var(--accent) 19%, var(--control));
+}
+
+.live-quick-filters {
+  flex: 1;
+}
+
+.live-quick-filters button {
+  flex: 1;
+  min-width: 0;
+}
+
+.shown-bubble {
+  border-radius: 4px;
+  background: var(--panel-soft);
+  font-size: 9px;
+  font-weight: 560;
+  padding: 6px 8px;
+}
+
+.live-activity-filters {
+  background: var(--panel-solid);
+}
+
+.live-activity-filters>summary {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 6px;
+  line-height: 38px;
+  font-weight: 560;
+  text-transform: none;
+}
+
+.live-activity-list {
+  gap: 0;
+  padding: 0;
+}
+
+.live-activity-item {
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.live-activity-item.selected {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.live-activity-select {
+  grid-template-columns: 106px minmax(0, 1fr);
+  min-height: 88px;
+  gap: 9px;
+  padding: 7px;
+}
+
+.live-activity-thumb {
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+.live-activity-copy {
+  gap: 2px;
+  padding-right: 46px;
+}
+
+.live-activity-copy b {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-activity-kind {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.live-activity-kind .pill-row {
+  flex: 0 0 auto;
+}
+
+.live-activity-kind strong {
+  font-size: 10px;
+  font-weight: 620;
+}
+
+.live-activity-copy time {
+  font-size: 9px;
+}
+
+.live-activity-trigger {
+  top: 7px;
+  right: 7px;
+  min-width: 40px;
+  min-height: 26px;
+  border-radius: 3px;
+  font-weight: 620;
+}
+
+.live-activity-footer {
+  gap: 7px;
+  padding: 7px;
+}
+
+.live-activity-footer>a {
+  border-radius: 3px;
+}
+
+@media (max-width: 1050px) {
+  .live-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .live-command-bar {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+
+  .live-grid>.camera-zone {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+
+  .live-grid>.events-zone {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+
+  .live-density-control {
+    display: none;
+  }
+}
+
+@media (max-width: 1200px) and (min-width: 761px) {
+  .workspace-search-entry {
+    width: min(250px, 27vw);
+  }
+
+  .workspace-system-bar .header-stat:nth-last-child(n + 4) {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .live-grid {
+    gap: 0;
+    padding: 0;
+  }
+
+  .live-command-bar {
+    min-height: 48px;
+    border-width: 0 0 1px;
+    border-radius: 0;
+    padding: 5px 8px;
+  }
+
+  .live-command-context>span:last-child,
+  .live-command-scope small,
+  .live-layout-control {
+    display: none;
+  }
+
+  .live-command-scope {
+    display: none;
+  }
+
+  .live-command-mobile-title {
+    display: block;
+    font-size: 13px;
+  }
+
+  .live-grid>.camera-zone,
+  .live-grid>.events-zone {
+    border-width: 0 0 1px;
+    border-radius: 0;
+  }
+
+  .live-activity-select {
+    grid-template-columns: 112px minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .live-camera-grid .camera-tile,
+  .camera-tile-time {
+    transition: none !important;
+  }
+}
+

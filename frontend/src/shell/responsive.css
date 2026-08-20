@@ -1,0 +1,278 @@
+/* Phone ownership layer. These rules intentionally remain last: desktop visual
+   alignment rules above must never put separate mobile workspaces in the same
+   grid cell or restore desktop intrinsic widths inside the clipped shell. */
+@media (max-width: 760px) {
+  .live-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    width: 100%;
+  }
+
+  .live-grid>.live-command-bar {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .live-grid>.camera-zone {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+    margin: 0;
+  }
+
+  .live-grid>.events-zone {
+    grid-column: 1;
+    grid-row: 3;
+    min-width: 0;
+    margin: 0;
+  }
+
+  .live-camera-zone,
+  .live-camera-grid,
+  .camera-grid.live-camera-grid {
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    overflow: visible;
+  }
+
+  .live-camera-grid .camera-tile,
+  .live-camera-grid .camera-tile.viewport-layout {
+    position: relative;
+    inset: auto !important;
+    display: block;
+    width: 100% !important;
+    height: auto !important;
+    min-width: 0;
+  }
+
+  .live-camera-grid .camera-tile .video-frame {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+
+  .live-activity-filters>summary {
+    min-height: 44px;
+    line-height: 44px;
+  }
+
+  .incidents-page-zone,
+  .incidents-page-zone .incident-filter-panel,
+  .incidents-page-zone .incident-filter-selects,
+  .incidents-page-zone .incident-semantic-search,
+  .incidents-page-zone .incident-semantic-search form {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .incidents-page-zone .incident-filter-panel {
+    overflow: hidden;
+  }
+
+  .incidents-page-zone .incident-filter-selects {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+  }
+
+  .incidents-page-zone .incident-filter-selects label,
+  .incidents-page-zone .incident-filter-selects select,
+  .incidents-page-zone .incident-filter-selects input {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .incidents-page-zone .incident-semantic-search form {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .incidents-page-zone .incident-semantic-search button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .incidents-page-zone .event-count.incident-source-dot {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding: 0;
+    background: transparent;
+  }
+
+  .faces-page {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    min-height: var(--workspace-available-height);
+    overflow: visible;
+  }
+
+  .faces-commandbar,
+  .faces-review-panel,
+  .faces-toolbar,
+  .face-messages,
+  .face-calibration,
+  .face-observation-grid {
+    grid-column: 1;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .faces-review-panel {
+    overflow: visible;
+  }
+
+  .faces-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .faces-filter-group {
+    max-width: 100%;
+  }
+
+  .faces-toolbar select,
+  .faces-mobile-person-filter {
+    min-height: 44px;
+  }
+
+  .recordings-v2-date button,
+  .recordings-commandbar .recordings-v2-player-source button,
+  .recordings-v2-range select,
+  .recordings-event-inspector-tabs button,
+  .recording-grid-tile.primary .recording-grid-camera,
+  .recording-grid-tile.companion .recording-grid-camera,
+  .search-camera-list button,
+  .settings-section-tree .tree-list button,
+  .settings-tab-list button {
+    min-height: 44px;
+  }
+
+  .recordings-v2-page {
+    height: auto;
+    min-height: var(--workspace-available-height);
+    overflow: visible;
+  }
+
+  .recordings-v2-incidents {
+    min-height: 510px;
+    overflow: visible;
+  }
+
+  .recordings-v2-investigation {
+    min-height: 510px;
+  }
+
+  .recordings-v2-selected-event {
+    min-height: 156px;
+  }
+
+  .recordings-v2-selected-event>a.recordings-v2-selected-event-image {
+    height: auto;
+    min-height: 128px;
+  }
+}
+
+/* Compact tablet and phone-landscape ownership. At these dimensions the
+   previous desktop rows compete for the same grid area and become unusable. */
+@media (max-width: 1050px) {
+  .live-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+  }
+
+  .live-grid>.live-command-bar {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .live-grid>.camera-zone {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+  }
+
+  .live-grid>.events-zone {
+    grid-column: 1;
+    grid-row: 3;
+    min-width: 0;
+  }
+
+  .workspace-search-entry,
+  .live-layout-control button,
+  .live-layout-control .live-fullscreen,
+  .live-fullscreen,
+  .live-activity-filters>summary,
+  .incident-filter-toggle button,
+  .incident-filter-toggle.compact button,
+  .incident-semantic-search button,
+  .incident-filter-selects select,
+  .density-control button,
+  .incident-focus-nav .incident-inspector-toggle,
+  .incident-workspace-view-toggle button,
+  .faces-filter-group button,
+  .faces-toolbar select,
+  .settings-tabs button,
+  .settings-section-tree .tree-list button {
+    min-height: 44px;
+  }
+
+  .live-layout-control .live-fullscreen,
+  .density-control button {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .recordings-camera-header select {
+    min-height: 44px;
+  }
+
+  .recording-grid-tile.primary .recording-grid-camera,
+  .recording-grid-tile.companion .recording-grid-camera {
+    min-height: 44px;
+    height: 44px;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 1050px) {
+
+  .live-camera-grid,
+  .live-camera-grid.custom-layout {
+    display: grid;
+    width: 100%;
+    height: auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--live-tile-gap);
+    overflow: visible;
+  }
+
+  .live-camera-grid .camera-tile.viewport-layout {
+    position: relative;
+    width: 100% !important;
+    height: auto !important;
+    aspect-ratio: 16 / 9;
+  }
+}
+
+@media (max-width: 900px) and (max-height: 500px) {
+  .recordings-v2-page {
+    height: auto;
+    min-height: var(--workspace-available-height);
+    grid-template-rows: var(--timeline-command-height) minmax(360px, auto) minmax(270px, auto);
+    overflow: visible;
+  }
+
+  .recordings-v2-workspace {
+    min-height: 360px;
+  }
+
+  .recordings-v2-incidents {
+    min-height: 270px;
+    overflow: visible;
+  }
+}
+

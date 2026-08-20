@@ -1,0 +1,2144 @@
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+  Activity,
+  ArrowLeft,
+  ArrowRight,
+  Bike,
+  Bot,
+  BusFront,
+  Camera,
+  CarFront,
+  Cat,
+  ChevronLeft,
+  ChevronRight,
+  CircleDot,
+  Crop,
+  Download,
+  Dog,
+  Gauge,
+  Grid2X2,
+  Images,
+  Search,
+  ListTree,
+  Play,
+  Radar,
+  ScanFace,
+  Siren,
+  Truck,
+  UserRound,
+  Video,
+  X,
+} from "lucide-react";
+import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
+import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
+import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
+import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
+import { appUrl, fetch } from "./api.js";
+import { formatDateTime, formatTimeOnly, formatDuration } from "./format.js";
+import { useStoredState, useModalFocus } from "./hooks.js";
+import { eventSnapshotUrl, eventSnapshotDownloadUrl, eventThumbnailUrl, eventClipUrl, eventStreamUrl } from "./mediaUrls.js";
+import { ShakaVideo } from "./media.jsx";
+
+export function eventObjects(event) {
+  return event.objects || [];
+}
+
+export function eventEpoch(event) {
+  const explicit = Number(event?.created_epoch);
+  if (Number.isFinite(explicit)) return explicit;
+  const parsed = new Date(event?.created_at || 0).getTime() / 1000;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function incidentClipWindow(event, before, after) {
+  const anchor = eventEpoch(event);
+  const children = event?.events || [];
+  const childEpochs = children.map(eventEpoch).filter(Number.isFinite);
+  const explicitStart = Number(event?.start_epoch);
+  const explicitEnd = Number(event?.last_epoch);
+  const start = Number.isFinite(explicitStart) ? explicitStart : childEpochs.length ? Math.min(...childEpochs) : anchor;
+  const end = Number.isFinite(explicitEnd) ? explicitEnd : childEpochs.length ? Math.max(...childEpochs) : anchor;
+  return {
+    before: Math.max(0, before + (Number.isFinite(anchor) && Number.isFinite(start) ? anchor - start : 0)),
+    after: Math.max(0, after + (Number.isFinite(anchor) && Number.isFinite(end) ? end - anchor : 0)),
+  };
+}
+
+export function incidentLabels(incident) {
+  const labels = Array.isArray(incident.labels)
+    ? incident.labels
+    : eventObjects(incident).filter((object) => object.incident_eligible !== false).map((object) => object.label).filter(Boolean);
+  return Array.from(new Set(labels.filter(Boolean)));
+}
+
+export function IncidentObjectIcon({ label, size = 14 }) {
+  const icons = {
+    person: UserRound,
+    face: ScanFace,
+    car: CarFront,
+    truck: Truck,
+    bus: BusFront,
+    bike: Bike,
+    cat: Cat,
+    dog: Dog,
+    mower: Bot,
+    object: CircleDot,
+  };
+  const Icon = icons[incidentObjectIconName(label)] || CircleDot;
+  return <Icon size={size} strokeWidth={2.2} aria-hidden="true" />;
+}
+
+export function IncidentObjectBadges({ labels }) {
+  if (!labels.length) {
+    return <span className="pill quiet object-icon-pill" aria-label="Motion only" title="Motion only"><Radar size={14} strokeWidth={2.2} aria-hidden="true" /></span>;
+  }
+  return labels.slice(0, 3).map((label) => (
+    <span className="pill object-icon-pill" key={label} aria-label={label} title={label}>
+      <IncidentObjectIcon label={label} />
+    </span>
+  ));
+}
+
+export function IncidentSourceDot({ trigger, className = "", onClick = null, ariaLabel = "", title = "" }) {
+  const source = String(trigger || "Camera").toUpperCase() === "EMA" ? "EMA" : "Camera";
+  const classes = `incident-source-dot source-${source.toLowerCase()} ${className}`.trim();
+  const label = ariaLabel || `${source} trigger`;
+  if (onClick) {
+    return <button type="button" className={classes} onClick={onClick} aria-label={label} title={title || label}><span className="sr-only">{source}</span></button>;
+  }
+  return <span className={classes} role="img" aria-label={label} title={title || label} />;
+}
+
+export function hasDetectedObjects(event) {
+  if (typeof event.has_objects === "boolean") return event.has_objects;
+  return eventObjects(event).some((object) => object.label && object.incident_eligible !== false) || incidentLabels(event).length > 0;
+}
+
+export function incidentZones(incident) {
+  const zones = Array.isArray(incident.zones)
+    ? incident.zones
+    : eventObjects(incident).filter((object) => object.incident_eligible !== false).flatMap((object) => object.zones || []);
+  return Array.from(new Set(zones.filter(Boolean)));
+}
+
+
+export function objectBoxes(event, incidentEligibleOnly = false) {
+  return eventObjects(event)
+    .map((object) => ({ object, box: object?.box }))
+    .filter(({ object, box }) => object?.label && object.snapshot_visible !== false && (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
+    .map(({ object, box }) => ({
+      label: object.label,
+      confidence: object.confidence,
+      maskPolygon: Array.isArray(object.mask_polygon)
+        ? object.mask_polygon.filter((point) => Array.isArray(point) && point.length >= 2).map((point) => [Number(point[0]), Number(point[1])])
+        : [],
+      x1: Number(box.x1),
+      y1: Number(box.y1),
+      x2: Number(box.x2),
+      y2: Number(box.y2),
+    }))
+    .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
+}
+
+export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
+  const boxes = objectBoxes(event, incidentEligibleOnly);
+  const tracks = storedObjectTracks(event);
+  const boxCoordinateSize = incidentDetectionFrameSize(event);
+  const trackCoordinateSize = incidentTrackingFrameSize(event);
+  const coordinateSize = showTracking ? trackCoordinateSize : boxCoordinateSize;
+  const progressiveImageKey = `${event?.representative_event_id || event?.id || "none"}:${event?.snapshot_path || "none"}:${event?.snapshot_url || "stored"}`;
+  const frameRef = useRef(null);
+  const [imageSize, setImageSize] = useState(() => coordinateSize);
+  const [loadedImageKey, setLoadedImageKey] = useState("");
+  const [frameSize, setFrameSize] = useState(null);
+  const [objectFocused, setObjectFocused] = useState(false);
+  const [progressiveState, setProgressiveState] = useState({ key: "", base: false, intermediate: false, full: false });
+  const progressiveReady = progressiveState.key === progressiveImageKey ? progressiveState : { base: false, intermediate: false, full: false };
+  const imageReady = loadedImageKey === progressiveImageKey;
+  const devicePixelRatio = Math.max(1, Math.min(4, Number(window.devicePixelRatio) || 1));
+  const displayPixelWidth = (frameSize?.width || 0) * devicePixelRatio;
+  const progressiveWidth = incidentProgressiveImageWidth(frameSize?.width, devicePixelRatio);
+  const progressiveQuality = progressiveWidth > 1280 ? 90 : 86;
+  const shouldLoadFullResolution = fullResolution || highQualityZoom || displayPixelWidth > 2560;
+  const zoomLayout = useMemo(() => incidentZoomLayout(frameSize, zoom), [frameSize, zoom?.scale, zoom?.x, zoom?.y]);
+  const renderingFrameSize = zoomLayout
+    ? { width: zoomLayout.width, height: zoomLayout.height }
+    : frameSize;
+  const renderedImage = useMemo(() => {
+    if (!imageSize?.width || !imageSize?.height || !renderingFrameSize?.width || !renderingFrameSize?.height) return null;
+    const scale = Math.min(renderingFrameSize.width / imageSize.width, renderingFrameSize.height / imageSize.height);
+    const width = imageSize.width * scale;
+    const height = imageSize.height * scale;
+    return {
+      x: (renderingFrameSize.width - width) / 2,
+      y: (renderingFrameSize.height - height) / 2,
+      width,
+      height,
+      scale,
+    };
+  }, [imageSize, renderingFrameSize?.height, renderingFrameSize?.width]);
+  const canFocus = allowObjectFocus && showAnnotations && boxes.length > 0 && renderedImage;
+
+  useLayoutEffect(() => {
+    setObjectFocused(false);
+    setImageSize(coordinateSize);
+  }, [progressiveImageKey]);
+
+  useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return undefined;
+    function updateFrameSize() {
+      const rect = frame.getBoundingClientRect();
+      if (rect.width && rect.height) setFrameSize({ width: rect.width, height: rect.height });
+    }
+    updateFrameSize();
+    const observer = new ResizeObserver(updateFrameSize);
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!coordinateSize || imageReady) return;
+    setImageSize(coordinateSize);
+  }, [coordinateSize?.height, coordinateSize?.width, imageReady]);
+
+  function recordImageLoad(image, imageKey = progressiveImageKey) {
+    if (image.naturalWidth && image.naturalHeight) {
+      const size = { width: image.naturalWidth, height: image.naturalHeight };
+      setImageSize(size);
+      setLoadedImageKey(imageKey);
+      onImageSize?.(size);
+    }
+  }
+
+  function onImageLoad(loadEvent, imageKey = progressiveImageKey) {
+    recordImageLoad(loadEvent.currentTarget, imageKey);
+  }
+
+  function markProgressiveReady(stage, loadEvent) {
+    const image = loadEvent.currentTarget;
+    if (!image.isConnected) return;
+    recordImageLoad(image, progressiveImageKey);
+    setProgressiveState((current) => ({
+      ...(current.key === progressiveImageKey ? current : { key: progressiveImageKey, base: false, intermediate: false, full: false }),
+      key: progressiveImageKey,
+      [stage]: true,
+    }));
+  }
+
+  const renderedBoxes = useMemo(() => {
+    if (!renderedImage || !frameSize) return [];
+    const sourceWidth = boxCoordinateSize?.width || imageSize?.width;
+    const sourceHeight = boxCoordinateSize?.height || imageSize?.height;
+    if (!sourceWidth || !sourceHeight) return [];
+    const scaleX = renderedImage.width / sourceWidth;
+    const scaleY = renderedImage.height / sourceHeight;
+    return boxes.map((box) => ({
+      ...box,
+      left: renderedImage.x + box.x1 * scaleX,
+      top: renderedImage.y + box.y1 * scaleY,
+      width: (box.x2 - box.x1) * scaleX,
+      height: (box.y2 - box.y1) * scaleY,
+      maskPoints: box.maskPolygon.map(([x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
+    })).filter((box) => box.width > 0 && box.height > 0);
+  }, [boxes, boxCoordinateSize?.height, boxCoordinateSize?.width, frameSize, imageSize, renderedImage]);
+
+  const renderedTracks = useMemo(() => {
+    if (!renderedImage || !frameSize) return [];
+    const sourceWidth = trackCoordinateSize?.width || imageSize?.width;
+    const sourceHeight = trackCoordinateSize?.height || imageSize?.height;
+    if (!sourceWidth || !sourceHeight) return [];
+    const scaleX = renderedImage.width / sourceWidth;
+    const scaleY = renderedImage.height / sourceHeight;
+    return tracks.map((track) => ({
+      ...track,
+      left: renderedImage.x + track.x1 * scaleX,
+      top: renderedImage.y + track.y1 * scaleY,
+      width: (track.x2 - track.x1) * scaleX,
+      height: (track.y2 - track.y1) * scaleY,
+      pathPoints: track.trajectory.map(([, x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
+    })).filter((track) => track.width > 0 && track.height > 0);
+  }, [frameSize, imageSize, renderedImage, trackCoordinateSize?.height, trackCoordinateSize?.width, tracks]);
+
+  const focusStyle = useMemo(() => {
+    if (!canFocus || !frameSize || !renderedBoxes.length) return null;
+    const minX = Math.max(0, Math.min(...renderedBoxes.map((box) => box.left)));
+    const minY = Math.max(0, Math.min(...renderedBoxes.map((box) => box.top)));
+    const maxX = Math.min(frameSize.width, Math.max(...renderedBoxes.map((box) => box.left + box.width)));
+    const maxY = Math.min(frameSize.height, Math.max(...renderedBoxes.map((box) => box.top + box.height)));
+    const boxWidth = Math.max(1, maxX - minX);
+    const boxHeight = Math.max(1, maxY - minY);
+    const padX = Math.max(frameSize.width * 0.04, boxWidth * 0.35);
+    const padY = Math.max(frameSize.height * 0.04, boxHeight * 0.35);
+    const cropX1 = Math.max(0, minX - padX);
+    const cropY1 = Math.max(0, minY - padY);
+    const cropX2 = Math.min(frameSize.width, maxX + padX);
+    const cropY2 = Math.min(frameSize.height, maxY + padY);
+    const cropWidth = Math.max(1, cropX2 - cropX1);
+    const cropHeight = Math.max(1, cropY2 - cropY1);
+    const centerX = cropX1 + cropWidth / 2;
+    const centerY = cropY1 + cropHeight / 2;
+    const scale = Math.min(5.5, Math.max(1, Math.min((frameSize.width * 0.82) / cropWidth, (frameSize.height * 0.82) / cropHeight)));
+    return {
+      transform: `translate3d(${frameSize.width / 2 - centerX * scale}px, ${frameSize.height / 2 - centerY * scale}px, 0) scale(${scale})`,
+      transformOrigin: "0 0",
+    };
+  }, [canFocus, frameSize, renderedBoxes]);
+
+  const zoomLayerStyle = zoomLayout ? {
+    inset: "auto",
+    left: `${zoomLayout.left}px`,
+    top: `${zoomLayout.top}px`,
+    width: `${zoomLayout.width}px`,
+    height: `${zoomLayout.height}px`,
+  } : null;
+  const activeLayerStyle = objectFocused && focusStyle ? focusStyle : zoomLayerStyle || layerStyle;
+  const aspect = imageSize ? `${imageSize.width} / ${imageSize.height}` : undefined;
+  const prefersHighQualityRaster = highQualityZoom || objectFocused;
+
+  return (
+    <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${prefersHighQualityRaster ? "high-quality-zoom" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
+      <div className="snapshot-layer" style={activeLayerStyle || undefined}>
+        {event?.snapshot_path && eventSnapshotUrl(event) ? (
+          progressive ? (
+            <div className={`snapshot-progressive-stack ${progressiveReady.full ? "full-resolution-ready" : ""}`}>
+              <img
+                key={`${progressiveImageKey}-base`}
+                className="snapshot-progressive-base"
+                src={eventThumbnailUrl(event)}
+                alt={alt}
+                decoding="async"
+                onLoad={(loadEvent) => markProgressiveReady("base", loadEvent)}
+              />
+              {progressiveReady.base ? (
+                <img
+                  key={`${progressiveImageKey}-intermediate`}
+                  className={`snapshot-progressive-image snapshot-intermediate-image ${progressiveReady.intermediate ? "ready" : ""}`}
+                  src={eventThumbnailUrl(event, progressiveWidth, progressiveQuality)}
+                  alt=""
+                  aria-hidden="true"
+                  decoding="async"
+                  onLoad={(loadEvent) => markProgressiveReady("intermediate", loadEvent)}
+                />
+              ) : null}
+              {shouldLoadFullResolution ? (
+                <img
+                  key={`${progressiveImageKey}-full`}
+                  className={`snapshot-progressive-image snapshot-full-resolution-image ${progressiveReady.full ? "ready" : ""}`}
+                  src={eventSnapshotUrl(event)}
+                  alt=""
+                  aria-hidden="true"
+                  decoding="sync"
+                  fetchPriority="high"
+                  onLoad={(loadEvent) => markProgressiveReady("full", loadEvent)}
+                />
+              ) : null}
+            </div>
+          ) : <img className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, progressiveImageKey)} />
+        ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
+        {imageReady && showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
+          <div className="object-box-layer" aria-hidden="true">
+            <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
+              {renderedBoxes.filter((box) => box.maskPoints).map((box, index) => (
+                <polygon key={`mask-${box.label}-${index}`} points={box.maskPoints} />
+              ))}
+            </svg>
+            {renderedBoxes.map((box, index) => (
+              <span
+                className="object-box"
+                key={`${box.label}-${index}-${box.x1}-${box.y1}`}
+                style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
+              >
+                <strong>{box.label}{box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}</strong>
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {imageReady && showTracking && renderedTracks.length ? (
+          <div className="object-track-layer" aria-hidden="true">
+            <svg viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none" aria-hidden="true">
+              {renderedTracks.map((track) => (
+                <g className={`object-track-color-${Math.abs(track.trackId) % 6}`} key={`trail-${track.trackId}`}>
+                  {track.pathPoints ? <polyline className="object-track-trail" points={track.pathPoints} vectorEffect="non-scaling-stroke" /> : null}
+                  <circle className="object-track-end" cx={track.left + track.width / 2} cy={track.top + track.height / 2} r="4" vectorEffect="non-scaling-stroke" />
+                </g>
+              ))}
+            </svg>
+            {renderedTracks.map((track) => (
+              <span
+                className={`object-track-box object-track-color-${Math.abs(track.trackId) % 6}`}
+                key={`track-${track.trackId}`}
+                style={{ left: `${track.left}px`, top: `${track.top}px`, width: `${track.width}px`, height: `${track.height}px` }}
+              >
+                <strong>#{track.trackId} {track.label}</strong>
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {canFocus ? (
+        <button
+          type="button"
+          className={`snapshot-focus-button ${objectFocused ? "active" : ""}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (!objectFocused) onRequestFullResolution?.();
+            setObjectFocused((focused) => !focused);
+          }}
+          title={objectFocused ? "Show full snapshot" : "Focus detected objects"}
+          aria-label={objectFocused ? "Show full snapshot" : "Focus detected objects"}
+        >
+          <Crop size={14} />
+        </button>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
+export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps, lostTimeoutSeconds }) {
+  const layerRef = useRef(null);
+  const [playbackEpoch, setPlaybackEpoch] = useState(null);
+  const [layerSize, setLayerSize] = useState(null);
+
+  useEffect(() => {
+    const layer = layerRef.current;
+    if (!layer) return undefined;
+    function updateLayerSize() {
+      const rect = layer.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) setLayerSize({ width: rect.width, height: rect.height });
+    }
+    updateLayerSize();
+    const observer = new ResizeObserver(updateLayerSize);
+    observer.observe(layer);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(windowStartEpoch) || !Number.isFinite(mediaStartTime)) return undefined;
+    let timer = null;
+    let stopped = false;
+
+    function update() {
+      const epoch = playbackEpochAt(windowStartEpoch, video.currentTime, mediaStartTime);
+      if (epoch !== null) setPlaybackEpoch(epoch);
+    }
+
+    function schedule() {
+      if (stopped) return;
+      update();
+      if (!video.paused && !video.ended) timer = window.setTimeout(schedule, 100);
+    }
+
+    function onPlaying() {
+      if (timer !== null) window.clearTimeout(timer);
+      schedule();
+    }
+
+    function onSeeked() {
+      update();
+    }
+
+    video.addEventListener("playing", onPlaying);
+    video.addEventListener("seeked", onSeeked);
+    video.addEventListener("timeupdate", update);
+    if (!video.paused) onPlaying();
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+      video.removeEventListener("playing", onPlaying);
+      video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("timeupdate", update);
+    };
+  }, [videoRef, windowStartEpoch, mediaStartTime, mediaKey]);
+
+  const visibleTracks = useMemo(() => {
+    if (!Number.isFinite(playbackEpoch)) return [];
+    const holdSeconds = Math.max(0.5, Number(lostTimeoutSeconds) || 3);
+    return tracks.flatMap((track) => {
+      const frame = trackFrameAt(track, playbackEpoch, { holdSeconds, sampleFps });
+      return frame ? [{ ...track, ...frame }] : [];
+    });
+  }, [lostTimeoutSeconds, playbackEpoch, sampleFps, tracks]);
+
+  const secondsUntilTracking = useMemo(() => {
+    if (!Number.isFinite(playbackEpoch) || visibleTracks.length) return null;
+    const nextEpoch = tracks
+      .flatMap((track) => track.boxHistory.length ? [track.boxHistory[0][0]] : [])
+      .filter((epoch) => epoch > playbackEpoch)
+      .sort((left, right) => left - right)[0];
+    return Number.isFinite(nextEpoch) ? Math.max(1, Math.ceil(nextEpoch - playbackEpoch)) : null;
+  }, [playbackEpoch, tracks, visibleTracks.length]);
+
+  const coordinateTransform = useMemo(
+    () => containedFrameTransform(layerSize, coordinateSize),
+    [coordinateSize?.height, coordinateSize?.width, layerSize],
+  );
+  const renderedTracks = useMemo(() => {
+    if (!coordinateTransform) return [];
+    const { x, y, scale } = coordinateTransform;
+    return visibleTracks.map((track) => ({
+      ...track,
+      renderedBox: [
+        x + track.box[0] * scale,
+        y + track.box[1] * scale,
+        x + track.box[2] * scale,
+        y + track.box[3] * scale,
+      ],
+      renderedPath: track.path.map(([pathX, pathY]) => [x + pathX * scale, y + pathY * scale]),
+    }));
+  }, [coordinateTransform, visibleTracks]);
+
+  if (!coordinateSize?.width || !coordinateSize?.height || !tracks.some((track) => track.boxHistory.length)) return null;
+  return (
+    <div ref={layerRef} className="object-track-video-layer" aria-hidden="true">
+      {layerSize ? <svg viewBox={`0 0 ${layerSize.width} ${layerSize.height}`} preserveAspectRatio="none" aria-hidden="true">
+        {renderedTracks.map((track) => (
+          <g className={`object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`} key={`video-path-${track.trackId}`}>
+            {track.renderedPath.length > 1 ? <polyline className="object-track-trail" points={track.renderedPath.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" /> : null}
+            <rect className="object-track-video-box" x={track.renderedBox[0]} y={track.renderedBox[1]} width={track.renderedBox[2] - track.renderedBox[0]} height={track.renderedBox[3] - track.renderedBox[1]} vectorEffect="non-scaling-stroke" />
+          </g>
+        ))}
+      </svg> : null}
+      {renderedTracks.map((track) => (
+        <span
+          className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`}
+          key={`video-label-${track.trackId}`}
+          style={{ left: `${track.renderedBox[0]}px`, top: `${track.renderedBox[1]}px` }}
+        >
+          #{track.trackId} {track.label}{track.estimated ? " · estimated" : ""}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
+        </span>
+      ))}
+      {secondsUntilTracking ? <span className="object-track-video-waiting">Tracking begins in {secondsUntilTracking}s</span> : null}
+    </div>
+  );
+}
+
+
+export function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean", onAnalysisStats, onEnded }) {
+  const videoRef = useRef(null);
+  const [clipInfo, setClipInfo] = useState(null);
+  const [clipLoading, setClipLoading] = useState(false);
+  const [clipError, setClipError] = useState("");
+  const [playback, setPlayback] = useState(null);
+  const [playbackOriginTime, setPlaybackOriginTime] = useState(null);
+  const storedTracks = storedObjectTracks(trackingEvent || event);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadClipSettings() {
+      const eventId = Number(event?.representative_event_id || event?.id);
+      if (!active || !Number.isFinite(eventId)) {
+        setClipInfo(null);
+        setPlayback(null);
+        setPlaybackOriginTime(null);
+        setClipLoading(false);
+        setClipError(active ? "No event video available" : "");
+        return;
+      }
+      setClipInfo(null);
+      setPlayback(null);
+      setPlaybackOriginTime(null);
+      setClipLoading(true);
+      setClipError("");
+      const info = await loadIncidentClipInfo(event, () => cancelled);
+      if (!info) return;
+      setClipInfo(info);
+      setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
+    }
+    loadClipSettings();
+    return () => { cancelled = true; };
+  }, [active, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch]);
+
+  if (!active) return null;
+  return (
+    <div className="incident-video-layer" onClick={(event) => event.stopPropagation()}>
+      {clipInfo && playback && !clipError ? (
+        <>
+          <ShakaVideo
+            ref={videoRef}
+            src={playback.url}
+            mimeType={playback.mimeType}
+            autoPlay
+            controls
+            playsInline
+            preload="metadata"
+            onReady={(_player, video) => {
+              setPlaybackOriginTime(0);
+              if (clipInfo.playbackStartOffset > 0 && video) {
+                const seekToIncident = () => {
+                  const targetTime = clipInfo.playbackStartOffset;
+                  video.currentTime = Number.isFinite(video.duration)
+                    ? Math.min(targetTime, Math.max(0, video.duration - 0.25))
+                    : targetTime;
+                };
+                if (video.paused) video.addEventListener("playing", seekToIncident, { once: true });
+                else seekToIncident();
+              }
+              setClipLoading(false);
+              setClipError("");
+            }}
+            onError={() => {
+              if (playback.url !== clipInfo.downloadUrl) {
+                setClipLoading(true);
+                setPlaybackOriginTime(null);
+                setClipInfo((current) => current ? {
+                  ...current,
+                  windowStartEpoch: current.requestedWindowStartEpoch,
+                  playbackStartOffset: current.initialPlaybackOffset,
+                } : current);
+                setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
+              } else {
+                setClipLoading(false);
+                setClipError("No recording window found");
+              }
+            }}
+            onEnded={onEnded}
+          />
+          {analysisMode === "tracks" && storedTracks.length ? (
+            <StoredTrackVideoOverlay
+              videoRef={videoRef}
+              tracks={storedTracks}
+              coordinateSize={{
+                width: Number(trackingEvent?.object_tracking?.frame_width),
+                height: Number(trackingEvent?.object_tracking?.frame_height),
+              }}
+              windowStartEpoch={clipInfo.windowStartEpoch}
+              mediaStartTime={playbackOriginTime}
+              mediaKey={playback.url}
+              sampleFps={trackingEvent?.object_tracking?.sample_fps}
+              lostTimeoutSeconds={trackingEvent?.object_tracking?.lost_timeout_seconds}
+            />
+          ) : null}
+          <DebugDetectionOverlay videoRef={videoRef} active={analysisMode === "ai"} confidence={0.35} onStats={onAnalysisStats} />
+          {clipLoading ? <div className="incident-video-status preparing">Preparing incident video...</div> : null}
+        </>
+      ) : (
+        <div className="incident-video-status">{clipLoading ? "Preparing video..." : clipError || "No event video available"}</div>
+      )}
+    </div>
+  );
+}
+
+export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect, onOpenOverlay }) {
+  const labels = incidentLabels(incident);
+  const trigger = incidentTriggerLabel(incident);
+  const eventId = liveActivityEventId(incident);
+  const time = incident.start_at || incident.created_at;
+  const activityLabel = labels.length ? labels.join(", ") : "Motion only";
+  return (
+    <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
+      <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={`Open ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
+        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
+        <span className="live-activity-copy">
+          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><span className="sr-only">{activityLabel}</span></span>
+          <b>{cameraName}</b>
+          <time>{formatDateTime(time, timeZone)}</time>
+        </span>
+      </button>
+      <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} />
+      {!eventId ? <span className="sr-only">No exact event link is available.</span> : null}
+    </article>
+  );
+}
+
+export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+  const rawEvents = incident.events || [];
+  const motionObservations = incident.motion_observations || [];
+  const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
+  const [selectedPreview, setSelectedPreview] = useState(null);
+  const [workspaceView, setWorkspaceView] = useState(() => {
+    try {
+      const stored = window.sessionStorage.getItem("survng.incidentWorkspaceView.v1");
+      return ["mosaic", "evidence"].includes(stored) ? stored : "focus";
+    } catch { return "focus"; }
+  });
+  const [selectedEvidence, setSelectedEvidence] = useState(null);
+  const [mosaicPageIndex, setMosaicPageIndex] = useState(0);
+  const [subEventsOpen, setSubEventsOpen] = useState(false);
+  const [inlineVideoActive, setInlineVideoActive] = useState(false);
+  const [snapshotZoom, setSnapshotZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const previewRef = useRef(null);
+  const snapshotZoomRef = useRef(snapshotZoom);
+  const panGestureRef = useRef({ pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false });
+  const replayRequestRef = useRef(replayRequest);
+  const evidenceSource = selectedPreview || incident;
+  const evidenceFrames = useMemo(() => incidentEvidenceFrames(evidenceSource), [evidenceSource]);
+  const evidenceItems = useMemo(() => evidenceFrames.map((frame) => {
+    if (frame.kind === "snapshot") return {
+      ...frame,
+      event: {
+        ...evidenceSource,
+        created_at: new Date(frame.epoch * 1000).toISOString(),
+      },
+    };
+    const snapshotUrl = `/api/cameras/${encodeURIComponent(incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
+    return {
+      ...frame,
+      event: {
+        ...evidenceSource,
+        snapshot_path: "recording-evidence",
+        snapshot_url: snapshotUrl,
+        created_at: new Date(frame.epoch * 1000).toISOString(),
+        objects: [],
+        object_tracking: null,
+      },
+    };
+  }), [evidenceFrames, evidenceSource, incident.camera_id]);
+  const preview = selectedEvidence?.event || selectedPreview || incident;
+  const mosaicEvents = useMemo(() => incidentMosaicEvents(incident), [incident]);
+  const mosaic = useMemo(() => incidentMosaicPage(mosaicEvents, mosaicPageIndex), [mosaicEvents, mosaicPageIndex]);
+  const canShowMosaic = desktopWorkspace && expanded && mosaicEvents.length > 1;
+  const canShowEvidence = desktopWorkspace && expanded && evidenceItems.length > 0;
+  const activeWorkspaceView = workspaceView === "mosaic" && !canShowMosaic
+    ? "focus"
+    : workspaceView === "evidence" && !canShowEvidence ? "focus" : workspaceView;
+  const trackingPreview = incidentTrackingSource(preview, incident) || preview;
+  const labels = incidentLabels(incident);
+  const eventCount = incident.event_count || rawEvents.length || 1;
+  const observationCount = Number(incident.motion_observation_count || motionObservations.length || 0);
+  const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}${observationCount ? ` · ${observationCount} additional motion update${observationCount === 1 ? "" : "s"}` : ""}`;
+  const triggerLabel = incidentTriggerLabel(incident);
+  const triggerTitle = triggerLabel === "EMA" ? "EMA visual backup trigger" : "Camera motion trigger";
+  const incidentTimeline = [
+    ...rawEvents.map((event) => ({ kind: "event", item: event })),
+    ...motionObservations.map((observation) => ({ kind: "activity", item: observation })),
+  ].sort((left, right) => Date.parse(right.item.created_at || 0) - Date.parse(left.item.created_at || 0));
+  const timeText = incident.start_at && incident.end_at && incident.start_at !== incident.end_at
+    ? `${formatDateTime(incident.start_at, timeZone)} - ${formatDuration(incident.duration_seconds)}`
+    : formatDateTime(incident.created_at, timeZone);
+  const previewTimeText = preview.created_at ? formatDateTime(preview.created_at, timeZone) : timeText;
+
+  useEffect(() => {
+    if (!expanded) {
+      setSelectedPreview(null);
+      setSubEventsOpen(false);
+      setInlineVideoActive(false);
+    }
+  }, [expanded]);
+
+  useEffect(() => {
+    setSelectedPreview(null);
+    setSelectedEvidence(null);
+    setMosaicPageIndex(0);
+    setSubEventsOpen(false);
+    setInlineVideoActive(false);
+    replayRequestRef.current = replayRequest;
+  }, [incident.id]);
+
+  useEffect(() => {
+    try { window.sessionStorage.setItem("survng.incidentWorkspaceView.v1", workspaceView); } catch { /* Session preference is optional. */ }
+  }, [workspaceView]);
+
+  useEffect(() => {
+    setInlineVideoActive(false);
+    resetSnapshotZoom();
+  }, [preview.id, preview.created_at]);
+
+  useEffect(() => {
+    const previousRequest = replayRequestRef.current;
+    replayRequestRef.current = replayRequest;
+    if (expanded && replayRequest > previousRequest) setInlineVideoActive(true);
+  }, [expanded, replayRequest]);
+
+  useEffect(() => {
+    if (activeWorkspaceView !== "focus") setInlineVideoActive(false);
+  }, [activeWorkspaceView]);
+
+  useEffect(() => {
+    if (!expanded || !onPreviewChange) return;
+    const representative = rawEvents.find((event) => Number(event.id) === Number(incident.representative_event_id));
+    onPreviewChange(Number((selectedPreview || representative || incident).id));
+  }, [expanded, incident, onPreviewChange, rawEvents, selectedPreview]);
+
+  function toggle() {
+    onToggle(incident.id);
+  }
+
+  function openPreview(pointerEvent) {
+    pointerEvent.stopPropagation();
+    if (panGestureRef.current.moved) {
+      panGestureRef.current.moved = false;
+      return;
+    }
+    if (desktopWorkspace && expanded && snapshotZoomRef.current.scale > 1) return;
+    if (expanded) setInlineVideoActive(true);
+    else toggle();
+  }
+
+  function clampSnapshotZoom(nextZoom) {
+    const scale = Math.max(1, Math.min(6, nextZoom.scale));
+    if (scale === 1) return { scale: 1, x: 0, y: 0 };
+    const box = previewRef.current?.getBoundingClientRect();
+    const limitX = box ? box.width * (scale - 1) / 2 : 0;
+    const limitY = box ? box.height * (scale - 1) / 2 : 0;
+    return {
+      scale,
+      x: Math.max(-limitX, Math.min(limitX, nextZoom.x || 0)),
+      y: Math.max(-limitY, Math.min(limitY, nextZoom.y || 0)),
+    };
+  }
+
+  function updateSnapshotZoom(updater) {
+    setSnapshotZoom((current) => {
+      const candidate = typeof updater === "function" ? updater(current) : updater;
+      const next = clampSnapshotZoom(candidate);
+      snapshotZoomRef.current = next;
+      return next;
+    });
+  }
+
+  function resetSnapshotZoom() {
+    const reset = { scale: 1, x: 0, y: 0 };
+    snapshotZoomRef.current = reset;
+    setSnapshotZoom(reset);
+  }
+
+  function onPreviewWheel(wheelEvent) {
+    if (!desktopWorkspace || !expanded) return;
+    wheelEvent.preventDefault();
+    const box = previewRef.current?.getBoundingClientRect();
+    if (!box) return;
+    const delta = Math.max(-120, Math.min(120, wheelEvent.deltaY));
+    const factor = Math.exp(-delta * 0.0017);
+    setInlineVideoActive(false);
+    updateSnapshotZoom((current) => {
+      const nextScale = Math.max(1, Math.min(6, current.scale * factor));
+      if (nextScale === 1) return { scale: 1, x: 0, y: 0 };
+      const anchorX = wheelEvent.clientX - box.left - box.width / 2;
+      const anchorY = wheelEvent.clientY - box.top - box.height / 2;
+      const scaleRatio = nextScale / current.scale;
+      return {
+        scale: nextScale,
+        x: anchorX - (anchorX - current.x) * scaleRatio,
+        y: anchorY - (anchorY - current.y) * scaleRatio,
+      };
+    });
+  }
+
+  function onPreviewPointerDown(pointerEvent) {
+    if (!desktopWorkspace || !expanded || pointerEvent.pointerType === "touch" || snapshotZoomRef.current.scale <= 1) return;
+    pointerEvent.preventDefault();
+    pointerEvent.currentTarget.setPointerCapture(pointerEvent.pointerId);
+    const current = snapshotZoomRef.current;
+    panGestureRef.current = { pointerId: pointerEvent.pointerId, startX: pointerEvent.clientX, startY: pointerEvent.clientY, panX: current.x, panY: current.y, moved: false };
+  }
+
+  function onPreviewPointerMove(pointerEvent) {
+    const gesture = panGestureRef.current;
+    if (gesture.pointerId !== pointerEvent.pointerId || snapshotZoomRef.current.scale <= 1) return;
+    pointerEvent.preventDefault();
+    const dx = pointerEvent.clientX - gesture.startX;
+    const dy = pointerEvent.clientY - gesture.startY;
+    if (Math.abs(dx) + Math.abs(dy) > 4) gesture.moved = true;
+    updateSnapshotZoom({ scale: snapshotZoomRef.current.scale, x: gesture.panX + dx, y: gesture.panY + dy });
+  }
+
+  function onPreviewPointerUp(pointerEvent) {
+    if (panGestureRef.current.pointerId !== pointerEvent.pointerId) return;
+    panGestureRef.current.pointerId = null;
+  }
+
+  function openOverlay(pointerEvent) {
+    pointerEvent.stopPropagation();
+    if (!onSelect) return;
+    onSelect({
+      ...preview,
+      start_epoch: incident.start_epoch,
+      last_epoch: incident.last_epoch,
+      start_at: incident.start_at,
+      end_at: incident.end_at,
+      event_count: eventCount,
+      events: rawEvents,
+    });
+  }
+
+  function selectWorkspaceView(view) {
+    setWorkspaceView(view);
+    if (view !== "focus") {
+      setInlineVideoActive(false);
+      resetSnapshotZoom();
+    }
+  }
+
+  function selectMosaicEvent(event) {
+    setSelectedPreview(event);
+    setSelectedEvidence(null);
+    setInlineVideoActive(false);
+    setWorkspaceView("focus");
+  }
+
+  function selectEvidenceItem(item) {
+    setSelectedEvidence(item);
+    setInlineVideoActive(false);
+    setWorkspaceView("focus");
+  }
+
+  return (
+    <article
+      className={`incident-card ${hasDetectedObjects(incident) ? "has-objects" : ""} ${expanded ? "expanded" : ""} ${selected ? "selected" : ""}`}
+      aria-current={selected ? "true" : undefined}
+      title={`${incident.camera_id} ${timeText}`}
+    >
+      <div
+        ref={previewRef}
+        className={`incident-preview ${activeWorkspaceView !== "focus" ? "mosaic-view" : ""} ${desktopWorkspace && expanded && activeWorkspaceView === "focus" ? "zoomable" : ""} ${snapshotZoom.scale > 1 ? "zoomed" : ""}`}
+        onDoubleClick={(pointerEvent) => {
+          if (!desktopWorkspace || !expanded) return;
+          pointerEvent.preventDefault();
+          pointerEvent.stopPropagation();
+          resetSnapshotZoom();
+        }}
+        onWheel={activeWorkspaceView === "focus" ? onPreviewWheel : undefined}
+        onPointerDown={activeWorkspaceView === "focus" ? onPreviewPointerDown : undefined}
+        onPointerMove={activeWorkspaceView === "focus" ? onPreviewPointerMove : undefined}
+        onPointerUp={activeWorkspaceView === "focus" ? onPreviewPointerUp : undefined}
+        onPointerCancel={activeWorkspaceView === "focus" ? onPreviewPointerUp : undefined}
+        title={desktopWorkspace && expanded && activeWorkspaceView === "focus" ? (snapshotZoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : "Scroll to zoom. Click to play event video.") : undefined}
+      >
+        {activeWorkspaceView === "mosaic" ? (
+          <div className={`incident-mosaic incident-mosaic-${mosaic.items.length}`} role="group" aria-label={`Events ${mosaic.page * 6 + 1} through ${mosaic.page * 6 + mosaic.items.length} of ${mosaicEvents.length}`}>
+            {mosaic.items.map((event, index) => {
+              const eventLabels = incidentLabels(event);
+              const eventTrigger = incidentTriggerLabel(event);
+              return (
+                <button
+                  type="button"
+                  className="incident-mosaic-tile"
+                  key={`${event.id || "event"}-${index}`}
+                  onClick={(clickEvent) => { clickEvent.stopPropagation(); selectMosaicEvent(event); }}
+                  aria-label={`Focus event at ${formatTimeOnly(event.created_at || incident.created_at, timeZone)}`}
+                >
+                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail allowObjectFocus={false} showAnnotations showTracking={false}>
+                    <IncidentSourceDot trigger={eventTrigger} className="incident-mosaic-source" />
+                    <div className="incident-mosaic-hud">
+                      <time>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</time>
+                      <div className="pill-row compact"><IncidentObjectBadges labels={eventLabels} /></div>
+                    </div>
+                  </SnapshotImage>
+                </button>
+              );
+            })}
+            {mosaic.pageCount > 1 ? (
+              <div className="incident-mosaic-pager" onClick={(event) => event.stopPropagation()}>
+                <button type="button" onClick={() => setMosaicPageIndex((page) => Math.max(0, page - 1))} disabled={mosaic.page === 0} aria-label="Previous mosaic events"><ChevronLeft size={15} /></button>
+                <span>{mosaic.page + 1} / {mosaic.pageCount}</span>
+                <button type="button" onClick={() => setMosaicPageIndex((page) => Math.min(mosaic.pageCount - 1, page + 1))} disabled={mosaic.page >= mosaic.pageCount - 1} aria-label="Next mosaic events"><ChevronRight size={15} /></button>
+              </div>
+            ) : null}
+          </div>
+        ) : activeWorkspaceView === "evidence" ? (
+          <div className={`incident-evidence incident-evidence-${evidenceItems.length}`} role="group" aria-label="Incident evidence frames">
+            {evidenceItems.map((item) => (
+              <button type="button" className="incident-evidence-tile" key={item.key} onClick={(event) => { event.stopPropagation(); selectEvidenceItem(item); }} aria-label={`Focus ${item.label.toLowerCase()} frame`}>
+                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail allowObjectFocus={false} showAnnotations={item.kind === "snapshot"} showTracking={false}>
+                  <div className="incident-evidence-hud">
+                    <strong>{item.label}</strong>
+                    <time>{formatTimeOnly(item.event.created_at, timeZone)}</time>
+                    {item.confidence > 0 ? <span>{Math.round(item.confidence * 100)}%</span> : null}
+                  </div>
+                </SnapshotImage>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <SnapshotImage
+            event={preview}
+            alt="incident snapshot"
+            zoom={desktopWorkspace && expanded ? snapshotZoom : null}
+            highQualityZoom={desktopWorkspace && expanded && snapshotZoom.scale > 1}
+            showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
+            showTracking={false}
+            incidentEligibleOnly
+            thumbnail={!desktopWorkspace || !expanded}
+            onImageSize={expanded && onImageSize ? (size) => onImageSize({
+              ...size,
+              eventId: Number(preview.representative_event_id || preview.id),
+            }) : undefined}
+          >
+            {!desktopWorkspace || !expanded ? (
+              <div className="incident-snapshot-hud">
+                <div className="incident-snapshot-main">
+                  <strong>{incident.camera_id}</strong>
+                  <time>{expanded ? previewTimeText : timeText}</time>
+                </div>
+                <div className="pill-row compact incident-labels">
+                  <IncidentObjectBadges labels={labels} />
+                </div>
+              </div>
+            ) : null}
+            <IncidentClipLayer
+              event={incident}
+              trackingEvent={trackingPreview}
+              active={expanded && inlineVideoActive}
+              analysisMode={analysisMode}
+              onAnalysisStats={onAnalysisStats}
+              onEnded={() => setInlineVideoActive(false)}
+            />
+            {desktopWorkspace
+              ? (!expanded ? <IncidentSourceDot trigger={triggerLabel} className="event-count" ariaLabel={`${triggerTitle}. ${countText}`} title={`${triggerTitle} · ${countText}`} /> : null)
+              : <IncidentSourceDot trigger={triggerLabel} className="event-count" onClick={openOverlay} ariaLabel={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`} />}
+          </SnapshotImage>
+        )}
+        {!expanded ? <button type="button" className="incident-card-open media-surface-action" onClick={toggle} aria-label={`Open ${incident.camera_id} incident at ${timeText}`} /> : null}
+        {expanded && activeWorkspaceView === "focus" && !inlineVideoActive && snapshotZoom.scale <= 1 ? (
+          <button type="button" className="incident-preview-media-action media-surface-action" onClick={openPreview} aria-label="Play selected event video" />
+        ) : null}
+        {canShowMosaic || canShowEvidence ? (
+          <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout" onClick={(event) => event.stopPropagation()}>
+            <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button>
+            {canShowMosaic ? <button type="button" className={activeWorkspaceView === "mosaic" ? "active" : ""} onClick={() => selectWorkspaceView("mosaic")} aria-pressed={activeWorkspaceView === "mosaic"} title="Show all incident events"><Grid2X2 size={14} /><span>Mosaic</span></button> : null}
+            {canShowEvidence ? <button type="button" className={activeWorkspaceView === "evidence" ? "active" : ""} onClick={() => selectWorkspaceView("evidence")} aria-pressed={activeWorkspaceView === "evidence"} title="Compare trigger, detection, selected, and tracking frames"><Images size={14} /><span>Evidence</span></button> : null}
+          </div>
+        ) : null}
+      </div>
+      {expanded && showSubEvents ? (
+        <div className="incident-meta">
+          <div className="incident-detail" onClick={(event) => event.stopPropagation()}>
+            <button
+              className="incident-events-toggle"
+              type="button"
+              onClick={() => setSubEventsOpen((open) => !open)}
+              aria-expanded={subEventsOpen}
+            >
+              <span>{countText}</span>
+              <strong>{subEventsOpen ? "Hide" : "Show"}</strong>
+            </button>
+            {subEventsOpen ? (
+              <div className="incident-events">
+                {incidentTimeline.map(({ kind, item }, index) => {
+                  if (kind === "activity") {
+                    const activityLabel = item.reason === "event_state_cooldown" ? "motion during cooldown" : "continued motion";
+                    return (
+                      <div className="incident-activity-row" key={`activity-${item.id || index}`}>
+                        <span>{formatTimeOnly(item.created_at || incident.created_at, timeZone)}</span>
+                        <strong>{activityLabel}</strong>
+                      </div>
+                    );
+                  }
+                  const event = item;
+                  const eventLabels = incidentLabels(event);
+                  const eventLabelText = eventLabels.length ? eventLabels.join(", ") : "motion";
+                  const isActive = (preview.id || incident.id) === event.id && (preview.created_at || incident.created_at) === event.created_at;
+                  return (
+                    <button type="button" key={`${event.id || "event"}-${index}`} className={isActive ? "active" : ""} onClick={() => { setSelectedPreview(event); setSelectedEvidence(null); setInlineVideoActive(false); }}>
+                      <span>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</span>
+                      <strong>{eventLabelText}</strong>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEventId, cameraNameById, timeZone, onSelect, onReturn }) {
+  const [matches, setMatches] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
+      setMatches([]);
+      return undefined;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    fetch(appUrl(relatedIncidentsPath(anchorEventId)), {
+      signal: controller.signal,
+    })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Related incidents unavailable")))
+      .then((payload) => {
+        if (!cancelled) setMatches(visibleRelatedAppearances(payload, anchorEventId, 8));
+      })
+      .catch((requestError) => {
+        if (!cancelled && requestError?.name !== "AbortError") {
+          setMatches([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [anchorEventId]);
+
+  if (!loading && !matches.length) return null;
+
+  return (
+    <section className="incident-related">
+      <div className="incident-related-head">
+        <h3>Related incidents</h3>
+        {selectedEventId ? <button type="button" onClick={onReturn}>Selected incident</button> : null}
+      </div>
+      {loading ? <p>Finding related incidents…</p> : null}
+      {matches.length ? <div className="incident-related-grid">
+        {matches.map((match) => {
+          const eventId = Number(match.event_id);
+          const selected = eventId === Number(selectedEventId);
+          const pending = eventId === Number(loadingEventId);
+          return (
+            <button type="button" className={selected ? "selected" : ""} key={eventId} onClick={() => onSelect(match)} disabled={pending} aria-pressed={selected} title={match.route_name ? `${match.route_name}: ${relatedEvidenceLabel(match)}` : `Preview related incident from ${cameraNameById.get(match.camera_id) || match.camera_id}`}>
+              <img src={appUrl(relatedIncidentThumbnailPath(eventId))} alt={`${cameraNameById.get(match.camera_id) || match.camera_id} related incident`} loading="lazy" />
+              <strong>{cameraNameById.get(match.camera_id) || match.camera_id}</strong>
+              <small>{pending ? "Loading…" : formatDateTime(match.created_at, timeZone)}</small>
+            </button>
+          );
+        })}
+      </div> : null}
+    </section>
+  );
+}
+
+export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose }) {
+  const inspectorRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const inspector = inspectorRef.current;
+    const focusable = () => [...(inspector?.querySelectorAll('button:not([disabled]), a[href], summary, [tabindex]:not([tabindex="-1"])') || [])]
+      .filter((element) => element.offsetParent !== null);
+    window.requestAnimationFrame(() => focusable()[0]?.focus());
+    function containFocus(event) {
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    inspector?.addEventListener("keydown", containFocus);
+    return () => inspector?.removeEventListener("keydown", containFocus);
+  }, [open]);
+  if (!incident) return <aside id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`}><div className="empty-state">Select an incident.</div></aside>;
+  const inspectedEvent = faceEvent || incident;
+  const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
+  const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
+  const objectTracks = incidentTracking?.tracks || [];
+  const faces = faceEvent?.faces || [];
+  const zones = incidentZones(inspectedEvent);
+  const eventId = Number(inspectedEvent.representative_event_id || inspectedEvent.id);
+  const before = Number(appConfig?.event_clip_before_seconds ?? 5);
+  const after = Number(appConfig?.event_clip_after_seconds ?? 5);
+  const window = incidentClipWindow(incident, before, after);
+  const clipUrl = Number.isFinite(eventId) ? eventClipUrl(eventId, window.before, window.after) : "";
+
+  return (
+    <aside ref={inspectorRef} id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`} role={open ? "dialog" : undefined} aria-modal={open ? "true" : undefined} aria-labelledby={open ? "incident-inspector-title" : undefined}>
+      <div className="incident-inspector-head">
+        <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(inspectedEvent.created_at || incident.created_at, timeZone)}</time></div>
+        {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
+      </div>
+      <section className="incident-current-summary">
+        <h3>Current incident</h3>
+        <div className="incident-summary-objects">
+          {objects.length ? objects.map((object, index) => <div className="inspector-detection summary" key={`${object.label}-${index}`}><div><strong>{object.label}</strong><span>{Math.round(Number(object.confidence || 0) * 100)}%</span></div></div>) : <p>No eligible object detections.</p>}
+        </div>
+        <dl>
+          <div><dt>Trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
+          <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
+          <div><dt>Zones</dt><dd>{zones.length ? zones.join(", ") : "None"}</dd></div>
+        </dl>
+      </section>
+      <section className="incident-replay-analysis">
+        <h3>Replay analysis</h3>
+        <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
+          <button type="button" className={analysisMode === "clean" ? "active" : ""} aria-pressed={analysisMode === "clean"} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
+          <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
+          <button type="button" className={analysisMode === "ai" ? "active" : ""} aria-pressed={analysisMode === "ai"} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
+        </div>
+        {analysisMode === "tracks" ? <small>{objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
+        {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
+      </section>
+      <section>
+        <h3>Faces</h3>
+        {faces.length ? faces.map((face, index) => (
+          <button type="button" className={`inspector-face ${face.status || "unknown"}`} key={`${face.status}-${face.name}-${index}`} onClick={() => onFaceOpen(face)}>
+            <strong>{face.name || "Unknown"}</strong>
+            <span>{Math.round(Number(face.confidence || 0) * 100)}%{Number(face.candidate_count || 0) > 1 ? ` · ${face.candidate_count} frames` : ""}</span>
+          </button>
+        )) : <p>No recognized faces.</p>}
+      </section>
+      <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
+      <details className="incident-technical-details">
+        <summary>Technical details</summary>
+        <div className="incident-technical-body">
+          {objects.length ? <div className="incident-technical-objects">{objects.map((object, index) => {
+            const box = object.box || {};
+            return <code key={`${object.label}-${index}`}>{object.label}: {Math.round(Number(box.x1 || 0))}, {Math.round(Number(box.y1 || 0))} → {Math.round(Number(box.x2 || 0))}, {Math.round(Number(box.y2 || 0))}</code>;
+          })}</div> : null}
+          <dl>
+            <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
+            <div><dt>Selected trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
+            <div><dt>Additional motion</dt><dd>{incident.motion_observation_count || incident.motion_observations?.length || 0}</dd></div>
+            <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
+            <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
+            <div><dt>End</dt><dd>{formatTimeOnly(incident.end_at || incident.created_at, timeZone)}</dd></div>
+            <div><dt>Loaded image</dt><dd>{imageSize?.width && imageSize?.height ? `${imageSize.width} × ${imageSize.height} px` : "—"}</dd></div>
+          </dl>
+        </div>
+      </details>
+      <div className="incident-inspector-actions">
+        {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
+        {inspectedEvent.snapshot_path && eventSnapshotDownloadUrl(inspectedEvent) ? <a href={eventSnapshotDownloadUrl(inspectedEvent)}><Download size={15} /> Snapshot</a> : null}
+      </div>
+    </aside>
+  );
+}
+
+export function detectionIou(left, right) {
+  const x1 = Math.max(Number(left.x1), Number(right.x1));
+  const y1 = Math.max(Number(left.y1), Number(right.y1));
+  const x2 = Math.min(Number(left.x2), Number(right.x2));
+  const y2 = Math.min(Number(left.y2), Number(right.y2));
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const leftArea = Math.max(0, left.x2 - left.x1) * Math.max(0, left.y2 - left.y1);
+  const rightArea = Math.max(0, right.x2 - right.x1) * Math.max(0, right.y2 - right.y1);
+  return intersection / Math.max(1, leftArea + rightArea - intersection);
+}
+
+export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats }) {
+  const canvasRef = useRef(null);
+  const captureRef = useRef(document.createElement("canvas"));
+  const tracksRef = useRef([]);
+  const nextTrackIdRef = useRef(1);
+
+  useEffect(() => {
+    if (!active) {
+      tracksRef.current = [];
+      const canvas = canvasRef.current;
+      canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+      return undefined;
+    }
+    let disposed = false;
+    let timer = null;
+    let controller = null;
+
+    function updateTracks(detections) {
+      const now = performance.now();
+      const available = [...tracksRef.current];
+      const next = detections.map((object) => {
+        let bestIndex = -1;
+        let bestScore = 0.25;
+        available.forEach((track, index) => {
+          if (!track || track.label !== object.label) return;
+          const score = detectionIou(track.box, object.box);
+          if (score > bestScore) {
+            bestScore = score;
+            bestIndex = index;
+          }
+        });
+        const previous = bestIndex >= 0 ? available.splice(bestIndex, 1)[0] : null;
+        return {
+          id: previous?.id || nextTrackIdRef.current++,
+          label: object.label,
+          confidence: Number(object.confidence) || 0,
+          box: object.box,
+          seenAt: now,
+        };
+      });
+      tracksRef.current = [...next, ...available.filter((track) => now - track.seenAt < 1200)].slice(0, 40);
+      return next;
+    }
+
+    function draw(tracks, frameWidth, frameHeight) {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas) return;
+      const width = Math.max(1, video.clientWidth);
+      const height = Math.max(1, video.clientHeight);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      const context = canvas.getContext("2d");
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      context.clearRect(0, 0, width, height);
+      const scale = Math.min(width / frameWidth, height / frameHeight);
+      const offsetX = (width - frameWidth * scale) / 2;
+      const offsetY = (height - frameHeight * scale) / 2;
+      context.font = "700 12px system-ui, sans-serif";
+      context.lineWidth = 2;
+      tracks.forEach((track) => {
+        const x = offsetX + track.box.x1 * scale;
+        const y = offsetY + track.box.y1 * scale;
+        const boxWidth = (track.box.x2 - track.box.x1) * scale;
+        const boxHeight = (track.box.y2 - track.box.y1) * scale;
+        const label = `#${track.id} ${track.label} ${Math.round(track.confidence * 100)}%`;
+        const labelWidth = context.measureText(label).width + 10;
+        context.strokeStyle = "#2dd4bf";
+        context.fillStyle = "rgba(13, 148, 136, 0.88)";
+        context.strokeRect(x, y, boxWidth, boxHeight);
+        context.fillRect(x, Math.max(0, y - 20), labelWidth, 20);
+        context.fillStyle = "#ffffff";
+        context.fillText(label, x + 5, Math.max(14, y - 6));
+      });
+    }
+
+    async function sample() {
+      const video = videoRef.current;
+      if (disposed) return;
+      if (!video || video.readyState < 2 || video.paused || document.hidden) {
+        timer = window.setTimeout(sample, 350);
+        return;
+      }
+      const capture = captureRef.current;
+      const width = Math.min(960, video.videoWidth || 960);
+      const height = Math.max(1, Math.round(width * (video.videoHeight || 540) / (video.videoWidth || 960)));
+      capture.width = width;
+      capture.height = height;
+      capture.getContext("2d").drawImage(video, 0, 0, width, height);
+      try {
+        const blob = await new Promise((resolve) => capture.toBlob(resolve, "image/jpeg", 0.78));
+        if (!blob || disposed) return;
+        controller = new AbortController();
+        const response = await fetch(`/api/detector/frame?confidence=${Number(confidence).toFixed(2)}`, {
+          method: "POST",
+          headers: { "Content-Type": "image/jpeg" },
+          body: blob,
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        if (disposed) return;
+        const tracks = updateTracks(payload.objects || []);
+        draw(tracks, payload.width || width, payload.height || height);
+        onStats?.({ inferenceMs: payload.elapsed_ms, objects: tracks.length, tracks: tracks.map((track) => track.id) });
+      } catch (error) {
+        if (!disposed && error.name !== "AbortError") onStats?.({ error: error.message || "Detection failed" });
+      }
+      if (!disposed) timer = window.setTimeout(sample, 500);
+    }
+
+    sample();
+    return () => {
+      disposed = true;
+      controller?.abort();
+      window.clearTimeout(timer);
+    };
+  }, [active, confidence, videoRef, onStats]);
+
+  return <canvas ref={canvasRef} className="event-detection-canvas" aria-hidden="true" />;
+}
+
+export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh }) {
+  const modalRef = useModalFocus(onClose);
+  const clipVideoRef = useRef(null);
+  const mediaRef = useRef(null);
+  const comparisonPanelRef = useRef(null);
+  const gestureRef = useRef({ mode: null, pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false, pinchDistance: 0, scale: 1 });
+  const [clipInfo, setClipInfo] = useState(null);
+  const [clipLoading, setClipLoading] = useState(false);
+  const [clipError, setClipError] = useState("");
+  const [playback, setPlayback] = useState(null);
+  const [playbackOriginTime, setPlaybackOriginTime] = useState(null);
+  const [videoActive, setVideoActive] = useState(false);
+  const [detectionDebug, setDetectionDebug] = useState(false);
+  const [detectionDebugStats, setDetectionDebugStats] = useState(null);
+  const [trackingVisible, setTrackingVisible] = useState(false);
+  const [trackingComparison, setTrackingComparison] = useState(null);
+  const [trackingComparisonEngine, setTrackingComparisonEngine] = useState(null);
+  const [trackingComparisonLoading, setTrackingComparisonLoading] = useState(false);
+  const [trackingComparisonError, setTrackingComparisonError] = useState("");
+  const [trackingComparisonHistory, setTrackingComparisonHistory] = useState({ items: [], summary: null });
+  const [trackingVerdictLoading, setTrackingVerdictLoading] = useState(false);
+  const [analysisToolsOpen, setAnalysisToolsOpen] = useState(false);
+  const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const [mediaSize, setMediaSize] = useState(() => incidentTrackingFrameSize(event));
+  const [fullSnapshotRequested, setFullSnapshotRequested] = useState(false);
+  const zoomRef = useRef(zoom);
+  const [manualConfidence, setManualConfidence] = useStoredState("survng.manualDetectionConfidence.v1", "0.35");
+  const [manualDetection, setManualDetection] = useState(null);
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualError, setManualError] = useState("");
+  const trackingSource = incidentTrackingSource(event);
+  const incidentTrackingEvent = trackingSource && trackingSource !== event ? trackingSource : null;
+  const viewerEvent = incidentTrackingEvent ? {
+    ...incidentTrackingEvent,
+    start_epoch: event.start_epoch,
+    last_epoch: event.last_epoch,
+    start_at: event.start_at,
+    end_at: event.end_at,
+    event_count: event.event_count,
+    events: event.events || [],
+  } : event;
+  const displayedEvent = manualDetection ? { ...viewerEvent, objects: manualDetection.objects || [] } : viewerEvent;
+  const comparisonTracking = trackingComparisonEngine ? trackingComparison?.engines?.[trackingComparisonEngine] : null;
+  const trackingEvent = comparisonTracking
+    ? {
+      ...displayedEvent, object_tracking: {
+        ...comparisonTracking,
+        sample_fps: trackingComparison.sample_fps,
+        lost_timeout_seconds: trackingComparison.lost_timeout_seconds,
+        frame_width: trackingComparison.frame_width,
+        frame_height: trackingComparison.frame_height,
+      }
+    }
+    : displayedEvent;
+  const storedTracks = storedObjectTracks(trackingEvent);
+  const reidDiagnostics = trackingEvent.object_tracking?.reid_diagnostics || {};
+  const reidAttemptReasons = reidDiagnostics.inference_attempts_by_reason || {};
+  const replayTrackCount = storedTracks.filter((track) => track.boxHistory.length).length;
+  const manualConfidenceNumber = Number(manualConfidence);
+  const safeManualConfidence = Number.isFinite(manualConfidenceNumber) ? Math.max(0.01, Math.min(0.99, manualConfidenceNumber)) : 0.35;
+  const manualEventId = Number(viewerEvent.representative_event_id || viewerEvent.id);
+  const downloadName = `survng-${String(viewerEvent.camera_id || "camera")}-${String(viewerEvent.created_at || viewerEvent.id || "event").replace(/[^0-9A-Za-z_-]+/g, "-")}.mp4`;
+
+  useEffect(() => {
+    setTrackingVisible(false);
+  }, [event.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadClipSettings() {
+      const eventId = Number(viewerEvent.representative_event_id || viewerEvent.id);
+      if (!Number.isFinite(eventId)) {
+        setClipInfo(null);
+        setClipLoading(false);
+        setClipError("No event video available");
+        return;
+      }
+      setClipInfo(null);
+      setPlayback(null);
+      setPlaybackOriginTime(null);
+      setClipLoading(true);
+      setClipError("");
+      setVideoActive(false);
+      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled);
+      if (!info) return;
+      setClipInfo(info);
+      setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
+    }
+    loadClipSettings();
+    return () => { cancelled = true; };
+  }, [viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cameraId = String(event.camera_id || "");
+    setTrackingComparisonHistory({ items: [], summary: null });
+    if (!cameraId) return undefined;
+    fetch(`/api/tracking-comparisons?camera_id=${encodeURIComponent(cameraId)}&limit=10`)
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || "Comparison history unavailable");
+        if (!cancelled) setTrackingComparisonHistory(payload);
+      })
+      .catch(() => { });
+    return () => { cancelled = true; };
+  }, [event.camera_id]);
+
+  function playEventClip() {
+    if (!clipInfo || clipError) return;
+    setVideoActive(true);
+    const video = clipVideoRef.current;
+    if (!video) return;
+    if (video.ended || video.currentTime >= Math.max(0, video.duration - 0.1)) video.currentTime = 0;
+    video.play().catch(() => { });
+  }
+
+
+  function clampZoom(nextZoom) {
+    const scale = Math.max(1, Math.min(6, nextZoom.scale));
+    if (scale === 1) return { scale: 1, x: 0, y: 0 };
+    const box = mediaRef.current?.getBoundingClientRect();
+    const limitX = box ? box.width * (scale - 1) / 2 : 0;
+    const limitY = box ? box.height * (scale - 1) / 2 : 0;
+    return {
+      scale,
+      x: Math.max(-limitX, Math.min(limitX, nextZoom.x || 0)),
+      y: Math.max(-limitY, Math.min(limitY, nextZoom.y || 0)),
+    };
+  }
+
+  function updateZoom(updater) {
+    setZoom((current) => {
+      const candidate = typeof updater === "function" ? updater(current) : updater;
+      const next = clampZoom(candidate);
+      zoomRef.current = next;
+      return next;
+    });
+  }
+
+  function zoomAround(clientX, clientY, factor) {
+    const box = mediaRef.current?.getBoundingClientRect();
+    if (!box) return;
+    setVideoActive(false);
+    setFullSnapshotRequested(true);
+    updateZoom((current) => {
+      const nextScale = Math.max(1, Math.min(6, current.scale * factor));
+      if (nextScale === 1) return { scale: 1, x: 0, y: 0 };
+      const anchorX = clientX - box.left - box.width / 2;
+      const anchorY = clientY - box.top - box.height / 2;
+      const scaleRatio = nextScale / current.scale;
+      return {
+        scale: nextScale,
+        x: anchorX - (anchorX - current.x) * scaleRatio,
+        y: anchorY - (anchorY - current.y) * scaleRatio,
+      };
+    });
+  }
+
+  function onMediaWheel(wheelEvent) {
+    if (videoActive) return;
+    wheelEvent.preventDefault();
+    const delta = Math.max(-120, Math.min(120, wheelEvent.deltaY));
+    zoomAround(wheelEvent.clientX, wheelEvent.clientY, Math.exp(-delta * 0.0017));
+  }
+
+  function touchDistance(touches) {
+    if (touches.length < 2) return 0;
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.hypot(dx, dy);
+  }
+
+  function touchCenter(touches) {
+    return {
+      x: (touches[0].clientX + touches[1].clientX) / 2,
+      y: (touches[0].clientY + touches[1].clientY) / 2,
+    };
+  }
+
+  function onMediaTouchStart(touchEvent) {
+    if (videoActive) return;
+    if (touchEvent.touches.length === 2) {
+      touchEvent.preventDefault();
+      setFullSnapshotRequested(true);
+      const center = touchCenter(touchEvent.touches);
+      const current = zoomRef.current;
+      gestureRef.current = { mode: "pinch", pointerId: null, pinchDistance: touchDistance(touchEvent.touches), scale: current.scale, startX: center.x, startY: center.y, panX: current.x, panY: current.y, moved: true };
+    } else if (touchEvent.touches.length === 1 && zoomRef.current.scale > 1) {
+      touchEvent.preventDefault();
+      const touch = touchEvent.touches[0];
+      const current = zoomRef.current;
+      gestureRef.current = { mode: "touch-pan", pointerId: null, pinchDistance: 0, scale: current.scale, startX: touch.clientX, startY: touch.clientY, panX: current.x, panY: current.y, moved: false };
+    }
+  }
+
+  function onMediaTouchMove(touchEvent) {
+    if (videoActive) return;
+    const gesture = gestureRef.current;
+    if (touchEvent.touches.length === 2 && gesture.mode === "pinch" && gesture.pinchDistance) {
+      touchEvent.preventDefault();
+      const box = mediaRef.current?.getBoundingClientRect();
+      if (!box) return;
+      const distance = touchDistance(touchEvent.touches);
+      const center = touchCenter(touchEvent.touches);
+      const nextScale = Math.max(1, Math.min(6, gesture.scale * (distance / gesture.pinchDistance)));
+      const scaleRatio = nextScale / gesture.scale;
+      const anchorX = gesture.startX - box.left - box.width / 2;
+      const anchorY = gesture.startY - box.top - box.height / 2;
+      updateZoom({
+        scale: nextScale,
+        x: anchorX - (anchorX - gesture.panX) * scaleRatio + center.x - gesture.startX,
+        y: anchorY - (anchorY - gesture.panY) * scaleRatio + center.y - gesture.startY,
+      });
+      return;
+    }
+    if (touchEvent.touches.length === 1 && gesture.mode === "touch-pan" && zoomRef.current.scale > 1) {
+      touchEvent.preventDefault();
+      const touch = touchEvent.touches[0];
+      const dx = touch.clientX - gesture.startX;
+      const dy = touch.clientY - gesture.startY;
+      if (Math.abs(dx) + Math.abs(dy) > 4) gesture.moved = true;
+      updateZoom({ scale: zoomRef.current.scale, x: gesture.panX + dx, y: gesture.panY + dy });
+    }
+  }
+
+  function onMediaTouchEnd(touchEvent) {
+    if (touchEvent.touches.length === 1 && zoomRef.current.scale > 1) {
+      const touch = touchEvent.touches[0];
+      const current = zoomRef.current;
+      gestureRef.current = { mode: "touch-pan", pointerId: null, pinchDistance: 0, scale: current.scale, startX: touch.clientX, startY: touch.clientY, panX: current.x, panY: current.y, moved: true };
+      return;
+    }
+    gestureRef.current.mode = null;
+    gestureRef.current.pinchDistance = 0;
+  }
+
+  function onMediaPointerDown(pointerEvent) {
+    if (videoActive || pointerEvent.pointerType === "touch" || zoomRef.current.scale <= 1) return;
+    pointerEvent.preventDefault();
+    pointerEvent.currentTarget.setPointerCapture(pointerEvent.pointerId);
+    const current = zoomRef.current;
+    gestureRef.current = { mode: "pointer-pan", pointerId: pointerEvent.pointerId, startX: pointerEvent.clientX, startY: pointerEvent.clientY, panX: current.x, panY: current.y, moved: false, pinchDistance: 0, scale: current.scale };
+  }
+
+  function onMediaPointerMove(pointerEvent) {
+    const gesture = gestureRef.current;
+    if (gesture.pointerId !== pointerEvent.pointerId || zoomRef.current.scale <= 1) return;
+    pointerEvent.preventDefault();
+    const dx = pointerEvent.clientX - gesture.startX;
+    const dy = pointerEvent.clientY - gesture.startY;
+    if (Math.abs(dx) + Math.abs(dy) > 4) gesture.moved = true;
+    updateZoom({ scale: zoomRef.current.scale, x: gesture.panX + dx, y: gesture.panY + dy });
+  }
+
+  function onMediaPointerUp(pointerEvent) {
+    if (gestureRef.current.pointerId === pointerEvent.pointerId) {
+      gestureRef.current.pointerId = null;
+      gestureRef.current.mode = null;
+    }
+  }
+
+  function onMediaClick() {
+    if (gestureRef.current.moved) {
+      gestureRef.current.moved = false;
+      return;
+    }
+    if (zoom.scale > 1 || videoActive) return;
+    if (clipInfo && !clipError) playEventClip();
+  }
+
+  function resetZoom() {
+    const reset = { scale: 1, x: 0, y: 0 };
+    zoomRef.current = reset;
+    setZoom(reset);
+  }
+
+  useLayoutEffect(() => {
+    resetZoom();
+    setMediaSize(incidentTrackingFrameSize(trackingEvent));
+    setFullSnapshotRequested(false);
+    setDetectionDebug(false);
+    setDetectionDebugStats(null);
+    setTrackingVisible(false);
+    setAnalysisToolsOpen(false);
+    setTrackingComparison(null);
+    setTrackingComparisonEngine(null);
+    setTrackingComparisonLoading(false);
+    setTrackingComparisonError("");
+    setManualDetection(null);
+    setManualError("");
+    setManualLoading(false);
+  }, [event.id]);
+
+  useEffect(() => {
+    if (!trackingComparison || !comparisonPanelRef.current) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      comparisonPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [trackingComparison]);
+
+  const mediaStyle = useMemo(() => {
+    if (!mediaSize?.width || !mediaSize?.height) return undefined;
+    const ratio = mediaSize.width / mediaSize.height;
+    return {
+      "--snapshot-aspect": `${mediaSize.width} / ${mediaSize.height}`,
+      "--event-media-fit-width": `${ratio * 72}vh`,
+      "--event-media-mobile-fit-width": `${ratio * 70}dvh`,
+      "--event-panel-fit-width": `calc(${ratio * 72}vh + 24px)`,
+    };
+  }, [mediaSize]);
+
+  async function runManualDetection() {
+    if (!Number.isFinite(manualEventId)) {
+      setManualError("No event id available");
+      return;
+    }
+    setManualLoading(true);
+    setManualError("");
+    try {
+      const response = await fetch(`/api/events/${manualEventId}/detect?confidence=${safeManualConfidence.toFixed(2)}`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Manual detection failed");
+      setManualDetection(payload);
+      if (onRefresh) onRefresh();
+      setVideoActive(false);
+      resetZoom();
+    } catch (error) {
+      setManualError(error.message || "Manual detection failed");
+    } finally {
+      setManualLoading(false);
+    }
+  }
+
+  async function runTrackingComparison() {
+    if (!Number.isFinite(manualEventId) || trackingComparisonLoading) return;
+    setAnalysisToolsOpen(true);
+    setTrackingComparisonLoading(true);
+    setTrackingComparisonError("");
+    setTrackingComparisonEngine(null);
+    try {
+      const response = await fetch(`/api/events/${manualEventId}/tracking-comparison?duration_seconds=30`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Tracking comparison failed");
+      setTrackingComparison(payload);
+      setTrackingComparisonHistory((current) => ({
+        items: payload.comparison
+          ? [payload.comparison, ...current.items.filter((item) => Number(item.id) !== Number(payload.comparison.id))].slice(0, 10)
+          : current.items,
+        summary: payload.evidence_summary || current.summary,
+      }));
+    } catch (error) {
+      setTrackingComparisonError(error.message || "Tracking comparison failed");
+    } finally {
+      setTrackingComparisonLoading(false);
+    }
+  }
+
+  async function saveTrackingVerdict(verdict) {
+    const comparisonId = Number(trackingComparison?.comparison_id);
+    if (!Number.isFinite(comparisonId) || trackingVerdictLoading) return;
+    setTrackingVerdictLoading(true);
+    setTrackingComparisonError("");
+    try {
+      const response = await fetch(`/api/tracking-comparisons/${comparisonId}/verdict`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verdict }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not save comparison verdict");
+      setTrackingComparison((current) => ({ ...current, verdict }));
+      setTrackingComparisonHistory((current) => {
+        const comparison = payload.comparison;
+        const items = comparison
+          ? [comparison, ...current.items.filter((item) => Number(item.id) !== Number(comparison.id))].slice(0, 10)
+          : current.items;
+        return { items, summary: payload.summary || current.summary };
+      });
+    } catch (error) {
+      setTrackingComparisonError(error.message || "Could not save comparison verdict");
+    } finally {
+      setTrackingVerdictLoading(false);
+    }
+  }
+
+  async function replayTrackingComparison(implementation) {
+    const engine = trackingComparison?.engines?.[implementation];
+    if (!engine || !clipInfo) return;
+    const after = Math.max(0.1, Number(trackingComparison.requested_duration_seconds || trackingComparison.duration_seconds || 0));
+    const anchorEpoch = eventEpoch(viewerEvent);
+    const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch : null;
+    const streamUrl = eventStreamUrl(manualEventId, 0, after);
+    const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
+      ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
+      : null;
+    const nextClip = {
+      ...clipInfo,
+      before: 0,
+      after,
+      duration: after,
+      streamUrl,
+      downloadUrl: eventClipUrl(manualEventId, 0, after),
+      windowStartEpoch: timelineStartEpoch,
+      requestedWindowStartEpoch,
+      initialPlaybackOffset: 0,
+      playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, 0),
+    };
+    setTrackingComparisonEngine(implementation);
+    setTrackingVisible(true);
+    setDetectionDebug(false);
+    setClipError("");
+    setClipLoading(true);
+    setPlaybackOriginTime(null);
+    setClipInfo(nextClip);
+    setPlayback({
+      url: nextClip.streamUrl,
+      mimeType: "application/vnd.apple.mpegurl",
+      key: `comparison-${implementation}-${Date.now()}`,
+    });
+    setVideoActive(true);
+  }
+
+  useEffect(() => {
+    function onKey(keyEvent) {
+      if (keyEvent.key !== "ArrowLeft" && keyEvent.key !== "ArrowRight") return;
+      if (!incidentArrowNavigationAllowed(keyEvent.target)) return;
+      const direction = keyEvent.key === "ArrowRight" ? 1 : -1;
+      const nextIncident = adjacentIncident(events, event, direction);
+      if (!nextIncident) return;
+      keyEvent.preventDefault();
+      onSelect(nextIncident);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [event.id, events, onClose, onSelect]);
+
+  return createPortal((
+    <div ref={modalRef} className="event-overlay" role="dialog" aria-modal="true" aria-label="Event image">
+      <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close event image" />
+      <section className="event-overlay-panel" style={mediaStyle}>
+        <div className="event-detail-head">
+          <div>
+            <h2>{viewerEvent.camera_id}</h2>
+            <time>{formatDateTime(viewerEvent.created_at, timeZone)}</time>
+          </div>
+          <div className="overlay-actions">
+            <a
+              className="nav-button tile-control-button"
+              href={appUrl(liveActivityIncidentHref(viewerEvent))}
+              aria-label="Open this event in Incidents"
+              title="Open this event in Incidents"
+            >
+              <Siren size={16} /> Incident
+            </a>
+            <button
+              type="button"
+              className="tile-control-button"
+              onClick={runTrackingComparison}
+              disabled={trackingComparisonLoading || !Number.isFinite(manualEventId)}
+              title="Run Hybrid and FastTrack on the same 30-second recording window"
+            >
+              <Gauge size={16} /> {trackingComparisonLoading ? "Comparing" : "Compare"}
+            </button>
+            <button
+              type="button"
+              className={`tile-control-button tracking-trail-toggle ${trackingVisible ? "active" : ""}`}
+              onClick={() => setTrackingVisible((visible) => !visible)}
+              disabled={!storedTracks.length}
+              title={storedTracks.length ? `${trackingVisible ? "Hide" : "Show"} stored object tracking${replayTrackCount ? " on the snapshot and video" : " on the event snapshot"}` : "No stored tracks for this event; run Compare to generate an offline replay"}
+              aria-label={storedTracks.length ? `${trackingVisible ? "Hide" : "Show"} stored object tracks` : "Stored object tracks unavailable"}
+              aria-pressed={trackingVisible}
+            >
+              <ListTree size={16} /> Tracks
+            </button>
+            <button
+              type="button"
+              className={`tile-control-button debug-detection-toggle ${detectionDebug ? "active" : ""}`}
+              onClick={() => {
+                if (!videoActive) playEventClip();
+                setDetectionDebug((enabled) => {
+                  if (!enabled) setTrackingVisible(false);
+                  return !enabled;
+                });
+              }}
+              disabled={!clipInfo || Boolean(clipError)}
+              title="Toggle real-time OpenVINO detection and tracking"
+              aria-pressed={detectionDebug}
+            >
+              <Activity size={16} /> AI
+            </button>
+            {clipInfo && !clipError ? (
+              <a className="tile-control-button icon-only" href={clipInfo.downloadUrl} download={downloadName} title="Download event video" aria-label="Download event video">
+                <Download size={18} />
+              </a>
+            ) : (
+              <span className="tile-control-button icon-only disabled" title={clipError || "Event video not ready"} aria-label="Event video not ready">
+                <Download size={18} />
+              </span>
+            )}
+            <button type="button" className="tile-control-button icon-only" data-modal-initial onClick={onClose} aria-label="Close event image">
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+        <div
+          ref={mediaRef}
+          className={`event-detail-media event-detail-play-target ${zoom.scale > 1 ? "zoomed" : ""}`}
+          role="button"
+          tabIndex={0}
+          onClick={onMediaClick}
+          onDoubleClick={resetZoom}
+          onWheel={onMediaWheel}
+          onTouchStart={onMediaTouchStart}
+          onTouchMove={onMediaTouchMove}
+          onTouchEnd={onMediaTouchEnd}
+          onTouchCancel={onMediaTouchEnd}
+          onPointerDown={onMediaPointerDown}
+          onPointerMove={onMediaPointerMove}
+          onPointerUp={onMediaPointerUp}
+          onPointerCancel={onMediaPointerUp}
+          onKeyDown={(keyEvent) => {
+            if (keyEvent.key === "0") resetZoom();
+            if ((keyEvent.key === "Enter" || keyEvent.key === " ") && clipInfo && !clipError && zoom.scale === 1) {
+              keyEvent.preventDefault();
+              playEventClip();
+            }
+          }}
+          title={zoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : clipError || (clipLoading ? "Preparing event clip" : "Scroll or pinch to zoom. Click to play event video.")}
+        >
+          <SnapshotImage
+            event={trackingEvent}
+            alt="selected event snapshot"
+            iconSize={42}
+            className="event-snapshot-frame"
+            zoom={zoom}
+            allowObjectFocus={zoom.scale === 1 && !videoActive}
+            progressive
+            fullResolution={fullSnapshotRequested}
+            highQualityZoom={zoom.scale > 1}
+            onRequestFullResolution={() => setFullSnapshotRequested(true)}
+            showAnnotations
+            showTracking={trackingVisible && !manualDetection}
+            incidentEligibleOnly
+            onImageSize={setMediaSize}
+          />
+          {videoActive && clipInfo && playback && !clipError ? (
+            <>
+              <ShakaVideo
+                key={playback.key || playback.url}
+                className="event-video-layer"
+                ref={clipVideoRef}
+                src={playback.url}
+                mimeType={playback.mimeType}
+                autoPlay
+                controls
+                playsInline
+                preload="metadata"
+                onReady={(_player, video) => {
+                  setPlaybackOriginTime(0);
+                  const playbackStartOffset = Math.max(0, Number(clipInfo.playbackStartOffset) || 0);
+                  if (playbackStartOffset > 0 && video) {
+                    const seekToSelectedEvent = () => {
+                      const targetTime = playbackStartOffset;
+                      video.currentTime = Number.isFinite(video.duration)
+                        ? Math.min(targetTime, Math.max(0, video.duration - 0.25))
+                        : targetTime;
+                    };
+                    if (video.paused) video.addEventListener("playing", seekToSelectedEvent, { once: true });
+                    else seekToSelectedEvent();
+                  }
+                  setClipLoading(false);
+                  setClipError("");
+                }}
+                onError={() => {
+                  if (playback.url !== clipInfo.downloadUrl) {
+                    setClipLoading(true);
+                    setPlaybackOriginTime(null);
+                    setClipInfo((current) => current ? {
+                      ...current,
+                      windowStartEpoch: current.requestedWindowStartEpoch,
+                      playbackStartOffset: current.initialPlaybackOffset,
+                    } : current);
+                    setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
+                  } else {
+                    setClipLoading(false);
+                    setVideoActive(false);
+                    setClipError("No recording window found");
+                  }
+                }}
+                onClick={(event) => event.stopPropagation()}
+              />
+              <DebugDetectionOverlay
+                videoRef={clipVideoRef}
+                active={detectionDebug}
+                confidence={safeManualConfidence}
+                onStats={setDetectionDebugStats}
+              />
+              {trackingVisible ? (
+                <StoredTrackVideoOverlay
+                  videoRef={clipVideoRef}
+                  tracks={storedTracks}
+                  coordinateSize={{
+                    width: Number(trackingEvent.object_tracking?.frame_width) || mediaSize?.width,
+                    height: Number(trackingEvent.object_tracking?.frame_height) || mediaSize?.height,
+                  }}
+                  windowStartEpoch={clipInfo.windowStartEpoch}
+                  mediaStartTime={playbackOriginTime}
+                  mediaKey={playback.key || playback.url}
+                  sampleFps={trackingEvent.object_tracking?.sample_fps}
+                  lostTimeoutSeconds={trackingEvent.object_tracking?.lost_timeout_seconds}
+                />
+              ) : null}
+              {clipLoading ? <div className="event-video-preparing">Preparing incident video...</div> : null}
+            </>
+          ) : null}
+          {videoActive && detectionDebug && detectionDebugStats ? (
+            <div className={`event-detection-stats ${detectionDebugStats.error ? "error" : ""}`}>
+              {detectionDebugStats.error
+                ? detectionDebugStats.error
+                : `${detectionDebugStats.inferenceMs ?? "--"} ms · ${detectionDebugStats.objects ?? 0} objects`}
+            </div>
+          ) : null}
+        </div>
+        <div className="event-detail-body">
+          <details
+            className="event-analysis-details"
+            open={analysisToolsOpen}
+            onToggle={(toggleEvent) => setAnalysisToolsOpen(toggleEvent.currentTarget.open)}
+          >
+            <summary>Analysis tools &amp; diagnostics</summary>
+            <div className="event-analysis-details-body">
+              {storedTracks.length ? (
+                <div className="event-track-summary">
+                  <span className="muted">{trackingComparisonEngine ? "Comparison replay" : "Stored tracking"}</span>
+                  <strong>{storedTracks.length} track{storedTracks.length === 1 ? "" : "s"} · {String(trackingEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} · {Number(trackingEvent.object_tracking?.sample_fps || 0) || "?"} FPS</strong>
+                  <small>{replayTrackCount ? `${replayTrackCount} track${replayTrackCount === 1 ? "" : "s"} can replay over video. Dashed, faded boxes are estimated positions during the configured lost-object grace period. Snapshot boxes mark each track's last stored position.` : "Paths show sampled object centers over time. The box marks each track's last stored position."}</small>
+                  {Number(reidDiagnostics.inference_attempts || 0) || Number(reidDiagnostics.reid_avoided_geometry_matches || 0) ? (
+                    <div className="tracking-comparison-shared">
+                      <span>Appearance checks <strong>{Number(reidDiagnostics.inference_attempts || 0)}</strong></span>
+                      <span>Checks avoided <strong>{Number(reidDiagnostics.reid_avoided_geometry_matches || 0)}</strong></span>
+                      {Object.entries(reidAttemptReasons).map(([reason, count]) => <span key={reason}>{String(reason).replaceAll("_", " ")} <strong>{count}</strong></span>)}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {trackingComparisonError ? <div className="tracking-comparison-error">{trackingComparisonError}</div> : null}
+              {trackingComparison ? (
+                <div className="tracking-comparison-panel" ref={comparisonPanelRef}>
+                  <div className="tracking-comparison-head">
+                    <div><span className="muted">Same-frame comparison</span><strong>{trackingComparison.frames_processed} frames · {Number(trackingComparison.duration_seconds || 0).toFixed(1)}s · {trackingComparison.sample_fps} FPS · {(Number(trackingComparison.elapsed_ms || 0) / 1000).toFixed(1)}s analysis</strong></div>
+                    <small>Detection and appearance extraction are shared by both engines. Extra track IDs are a comparison signal, not ground-truth identity accuracy.</small>
+                  </div>
+                  <div className="tracking-comparison-shared"><span>Recording decode <strong>{trackingComparison.average_frame_decode_ms} ms/frame</strong></span><span>OpenVINO detection <strong>{trackingComparison.average_detection_ms_per_frame} ms/frame</strong></span>{Number(trackingComparison.appearance_ms || 0) > 0 ? <span>Appearance extraction <strong>{trackingComparison.average_appearance_ms_per_frame} ms/frame</strong></span> : null}{trackingComparison.appearance_failures ? <span>Appearance failures <strong>{trackingComparison.appearance_failures}</strong></span> : null}<span>Clip preparation <strong>{(Number(trackingComparison.clip_preparation_ms || 0) / 1000).toFixed(1)}s</strong></span></div>
+                  <div className="tracking-comparison-grid">
+                    {["survng_hybrid", "ultralytics_fasttrack"].map((implementation) => {
+                      const engine = trackingComparison.engines?.[implementation];
+                      if (!engine) return null;
+                      const comparisonEvent = {
+                        ...viewerEvent, object_tracking: {
+                          ...engine,
+                          sample_fps: trackingComparison.sample_fps,
+                          frame_width: trackingComparison.frame_width,
+                          frame_height: trackingComparison.frame_height,
+                        }
+                      };
+                      return (
+                        <article className={`tracking-comparison-card ${trackingComparisonEngine === implementation ? "active" : ""}`} key={implementation}>
+                          <header><strong>{implementation === "survng_hybrid" ? "SurvNG Hybrid" : "FastTrack"}</strong><span>{engine.average_ms_per_frame} ms/frame · {engine.initialization_ms} ms init</span></header>
+                          <SnapshotImage event={comparisonEvent} alt={`${implementation} tracking result`} allowObjectFocus={false} showAnnotations={false} showTracking />
+                          <dl>
+                            <div><dt>Tracks</dt><dd>{engine.track_count}</dd></div>
+                            <div><dt>Extra track IDs</dt><dd>{engine.fragmentation_proxy}</dd></div>
+                            <div><dt>Observations</dt><dd>{engine.observations}</dd></div>
+                            <div><dt>ReID recoveries</dt><dd>{engine.reid_recoveries}</dd></div>
+                            <div><dt>Geometry matches</dt><dd>{engine.reid_diagnostics?.association_counts?.geometry || 0}</dd></div>
+                          </dl>
+                          <button type="button" className="tile-control-button" onClick={() => replayTrackingComparison(implementation)}><Play size={15} /> Replay this result</button>
+                        </article>
+                      );
+                    })}
+                  </div>
+                  <div className="tracking-comparison-verdict">
+                    <div><span className="muted">Your visual review</span><strong>Which replay kept identities most accurately?</strong></div>
+                    <div className="tracking-comparison-verdict-actions">
+                      {[
+                        ["survng_hybrid", "Hybrid looked better"],
+                        ["ultralytics_fasttrack", "FastTrack looked better"],
+                        ["inconclusive", "No clear winner"],
+                      ].map(([verdict, label]) => (
+                        <button type="button" className={`tile-control-button ${trackingComparison.verdict === verdict ? "active" : ""}`} disabled={trackingVerdictLoading} onClick={() => saveTrackingVerdict(verdict)} key={verdict}>{label}</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              {trackingComparisonHistory.summary?.total ? (
+                <div className="tracking-comparison-history">
+                  <div className="tracking-comparison-head">
+                    <div><span className="muted">{event.camera_id} comparison evidence</span><strong>{trackingComparisonHistory.summary.reviewed} reviewed · {trackingComparisonHistory.summary.verdicts?.unreviewed || 0} awaiting review</strong></div>
+                    <small>SurvNG records your judgment but never changes the configured tracker automatically.</small>
+                  </div>
+                  <div className="tracking-comparison-shared">
+                    <span>Hybrid better <strong>{trackingComparisonHistory.summary.verdicts?.survng_hybrid || 0}</strong></span>
+                    <span>FastTrack better <strong>{trackingComparisonHistory.summary.verdicts?.ultralytics_fasttrack || 0}</strong></span>
+                    {trackingComparisonHistory.summary.verdicts?.ultralytics_botsort ? <span>BoT-SORT better (historic) <strong>{trackingComparisonHistory.summary.verdicts.ultralytics_botsort}</strong></span> : null}
+                    <span>No clear winner <strong>{trackingComparisonHistory.summary.verdicts?.inconclusive || 0}</strong></span>
+                  </div>
+                  {trackingComparisonHistory.items.some((item) => item.verdict) ? (
+                    <div className="tracking-comparison-history-list">
+                      {trackingComparisonHistory.items.filter((item) => item.verdict).slice(0, 5).map((item) => (
+                        <div key={item.id}>
+                          <time>{formatDateTime(item.event_created_at || item.created_at, timeZone)}</time>
+                          <strong>{item.verdict === "survng_hybrid" ? "Hybrid" : item.verdict === "ultralytics_fasttrack" ? "FastTrack" : item.verdict === "ultralytics_deepocsort" ? "Deep OC-SORT (historic)" : item.verdict === "ultralytics_botsort" ? "BoT-SORT (historic)" : "No clear winner"}</strong>
+                          <span>{item.result?.frames_processed || 0} frames</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="manual-detect-panel" onClick={(event) => event.stopPropagation()}>
+                <div className="manual-detect-head">
+                  <div>
+                    <span className="muted">Manual OpenVINO</span>
+                    <strong>{Math.round(safeManualConfidence * 100)}% confidence</strong>
+                  </div>
+                  <button type="button" className="tile-control-button" onClick={runManualDetection} disabled={manualLoading || !Number.isFinite(manualEventId)}>
+                    <Search size={15} /> {manualLoading ? "Running" : "Run"}
+                  </button>
+                </div>
+                <input
+                  type="range"
+                  min="0.05"
+                  max="0.95"
+                  step="0.01"
+                  value={safeManualConfidence}
+                  onChange={(event) => setManualConfidence(event.target.value)}
+                  aria-label="Manual detection confidence"
+                />
+                {manualError ? <span className="manual-debug error">{manualError}</span> : null}
+                {manualDetection ? (
+                  <div className="manual-debug">
+                    <span>{manualDetection.object_count} objects</span>
+                    <span>{manualDetection.elapsed_ms} ms</span>
+                    <span>{manualDetection.detector?.loaded_backend || "detector"}</span>
+                    <span>{manualDetection.detector?.loaded_device || manualDetection.detector?.configured_device || "device"}</span>
+                    <span>{manualDetection.snapshot_width}x{manualDetection.snapshot_height}</span>
+                    {manualDetection.labels?.length ? <code>{manualDetection.labels.join(", ")}</code> : <code>no labels</code>}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </details>
+        </div>
+      </section>
+    </div>
+  ), document.body);
+}
+
+export async function eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch) {
+  try {
+    const response = await fetch(streamUrl);
+    if (!response.ok) return requestedWindowStartEpoch;
+    return hlsProgramStartEpoch(await response.text()) ?? requestedWindowStartEpoch;
+  } catch {
+    return requestedWindowStartEpoch;
+  }
+}
+
+export async function loadIncidentClipInfo(event, isCancelled = () => false) {
+  const eventId = Number(event?.representative_event_id || event?.id);
+  if (!Number.isFinite(eventId)) return null;
+  let before = 5;
+  let after = 5;
+  try {
+    const response = await fetch("/api/event-clip/settings");
+    if (response.ok) {
+      const settings = await response.json();
+      before = Number(settings.before_seconds ?? before);
+      after = Number(settings.after_seconds ?? after);
+    }
+  } catch {
+    // Defaults keep incident playback useful if settings are temporarily unavailable.
+  }
+  if (isCancelled()) return null;
+  const safeBefore = Number.isFinite(before) ? before : 5;
+  const safeAfter = Number.isFinite(after) ? after : 5;
+  const window = incidentClipWindow(event, safeBefore, safeAfter);
+  const anchorEpoch = eventEpoch(event);
+  const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
+  const streamUrl = eventStreamUrl(eventId, window.before, window.after);
+  const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
+    ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
+    : null;
+  if (isCancelled()) return null;
+  const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
+  return {
+    streamUrl,
+    downloadUrl: eventClipUrl(eventId, window.before, window.after),
+    before: window.before,
+    after: window.after,
+    duration: window.before + window.after,
+    windowStartEpoch: timelineStartEpoch,
+    requestedWindowStartEpoch,
+    initialPlaybackOffset,
+    playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, initialPlaybackOffset),
+  };
+}

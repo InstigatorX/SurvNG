@@ -1,0 +1,626 @@
+/* Unified Admin workspace */
+.settings-grid {
+  --admin-navigation-width: 224px;
+  position: relative;
+  display: grid;
+  height: calc(100dvh - var(--topbar-height, 58px));
+  min-height: 0;
+  grid-template-columns: var(--admin-navigation-width) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0;
+  overflow: hidden;
+  background: var(--canvas);
+  padding: 0;
+}
+
+.admin-navigation {
+  z-index: 6;
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  background: var(--panel-solid);
+  flex-direction: column;
+}
+
+.admin-navigation-head {
+  display: flex;
+  min-height: 66px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 14px;
+}
+
+.admin-navigation-head>span,
+.admin-navigation-head>span>span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.admin-navigation-head>span>span {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.admin-navigation-head strong {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+.admin-navigation-head small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.admin-navigation-close {
+  display: none;
+  width: 40px;
+  min-width: 40px;
+  padding: 0;
+  place-items: center;
+}
+
+.admin-navigation>nav {
+  display: grid;
+  gap: 18px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 10px 90px;
+}
+
+.admin-navigation nav section {
+  display: grid;
+  gap: 3px;
+}
+
+.admin-navigation nav h2 {
+  margin: 0 8px 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .085em;
+  text-transform: uppercase;
+}
+
+.admin-navigation nav button {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 570;
+  text-align: left;
+}
+
+.admin-navigation nav button:hover {
+  background: var(--control-muted);
+  color: var(--ink);
+}
+
+.admin-navigation nav button.active {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--control));
+  color: var(--ink);
+}
+
+.admin-navigation nav button.secondary {
+  min-height: 36px;
+  font-size: 11px;
+}
+
+.admin-navigation-backdrop,
+.admin-mobile-toolbar {
+  display: none;
+}
+
+.admin-workspace-surface {
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: 244px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+  padding-bottom: 74px;
+}
+
+.admin-workspace-surface>.config-tree {
+  grid-column: 1;
+  grid-row: 1;
+  height: 100%;
+  max-height: none;
+}
+
+.admin-workspace-surface>.config-editor,
+.admin-workspace-surface>.settings-panel {
+  grid-column: 2;
+  grid-row: 1;
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.admin-workspace-surface>.settings-panel-wide {
+  grid-column: 1 / -1;
+}
+
+.admin-workspace-general {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.admin-workspace-general>.settings-section-tree {
+  display: none;
+}
+
+.admin-workspace-general>.settings-panel {
+  grid-column: 1;
+}
+
+.settings-grid .section-head {
+  min-height: 66px;
+  padding: 12px 18px;
+}
+
+.settings-grid .section-head h2 {
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -.015em;
+}
+
+.settings-grid .section-head p {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.settings-grid .config-form label {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.settings-grid .config-form label>small {
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.settings-grid .config-form input,
+.settings-grid .config-form select,
+.settings-grid .config-form textarea {
+  font-size: 13px;
+}
+
+.settings-grid .general-settings-content {
+  gap: 14px;
+  padding: 18px;
+}
+
+.settings-grid .sub-panel {
+  padding: 16px;
+}
+
+.settings-grid .sub-panel>h3 {
+  margin-bottom: 13px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.admin-save-bar {
+  z-index: 12;
+  grid-column: 2;
+  grid-row: 1;
+  align-self: end;
+  display: flex;
+  min-width: 0;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel-solid) 96%, transparent);
+  padding: 9px 16px;
+  box-shadow: 0 -10px 28px rgba(0, 0, 0, .12);
+  backdrop-filter: blur(14px);
+}
+
+.admin-save-bar.dirty {
+  border-top-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+}
+
+.admin-save-state,
+.admin-save-state>span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-save-state>span {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.admin-save-state>svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.admin-save-bar.dirty .admin-save-state>svg {
+  color: var(--warn);
+}
+
+.admin-save-state strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.admin-save-state small {
+  overflow: hidden;
+  max-width: 720px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-save-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.admin-save-actions {
+  margin-right: 54px;
+}
+
+.admin-save-actions button {
+  min-width: 104px;
+  min-height: 42px;
+}
+
+.admin-save-actions button:disabled {
+  opacity: .5;
+}
+
+.settings-grid .preference-action>span {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-grid .preference-action>span>strong,
+.settings-grid .preference-action>span>small {
+  display: block;
+}
+
+@media (max-width: 900px) {
+  .settings-grid {
+    display: block;
+    height: auto;
+    min-height: var(--workspace-available-height);
+    overflow: visible;
+    padding-bottom: 78px;
+  }
+
+  .admin-mobile-toolbar {
+    position: sticky;
+    z-index: 8;
+    top: 0;
+    display: grid;
+    min-height: 56px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--topbar) 96%, transparent);
+    padding: 6px 9px;
+    backdrop-filter: blur(14px);
+  }
+
+  .admin-mobile-toolbar>button {
+    min-height: 44px;
+    gap: 7px;
+  }
+
+  .admin-mobile-toolbar>span {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+  }
+
+  .admin-mobile-toolbar small {
+    color: var(--muted);
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+
+  .admin-mobile-toolbar strong {
+    overflow: hidden;
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .admin-mobile-toolbar em {
+    color: var(--warn);
+    font-size: 10px;
+    font-style: normal;
+    font-weight: 650;
+  }
+
+  .admin-navigation {
+    position: fixed;
+    z-index: 61;
+    top: var(--topbar-height, 50px);
+    bottom: var(--mobile-nav-height, 62px);
+    left: 0;
+    width: min(88vw, 330px);
+    transform: translateX(-102%);
+    transition: transform .18s ease;
+    box-shadow: 18px 0 44px rgba(0, 0, 0, .32);
+  }
+
+  .admin-navigation.open {
+    transform: translateX(0);
+  }
+
+  .admin-navigation-close {
+    display: grid;
+  }
+
+  .admin-navigation>nav {
+    padding-bottom: 20px;
+  }
+
+  .admin-navigation nav button {
+    min-height: 46px;
+    font-size: 13px;
+  }
+
+  .admin-navigation-backdrop {
+    position: fixed;
+    z-index: 60;
+    inset: var(--topbar-height, 50px) 0 var(--mobile-nav-height, 62px);
+    display: block;
+    visibility: hidden;
+    border: 0;
+    border-radius: 0;
+    background: rgba(2, 8, 9, .52);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease, visibility .18s ease;
+  }
+
+  .admin-navigation-backdrop.open {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .admin-workspace-surface {
+    display: block;
+    min-height: 0;
+    overflow: visible;
+    padding-bottom: 0;
+  }
+
+  .admin-workspace-surface>.config-tree,
+  .admin-workspace-surface>.config-editor,
+  .admin-workspace-surface>.settings-panel {
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .admin-workspace-surface>.config-tree {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .admin-workspace-surface>.config-tree .tree-list {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 7px;
+    scrollbar-width: none;
+  }
+
+  .admin-workspace-surface>.config-tree .tree-list::-webkit-scrollbar {
+    display: none;
+  }
+
+  .admin-workspace-surface>.config-tree .tree-list button {
+    flex: 0 0 auto;
+    min-width: 132px;
+    border: 1px solid var(--line);
+    border-left-width: 1px;
+    border-radius: 4px;
+  }
+
+  .admin-workspace-surface>.config-tree .tree-list button.active {
+    border-color: var(--accent);
+  }
+
+  .admin-workspace-surface>.config-tree .tree-group-label {
+    display: none;
+  }
+
+  .admin-workspace-surface>.config-tree .section-head {
+    min-height: 58px;
+  }
+
+  .settings-grid .section-head {
+    padding: 11px 12px;
+  }
+
+  .settings-grid .section-head>.camera-command-area {
+    width: 100%;
+  }
+
+  .settings-grid .camera-command-bar {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .settings-grid .camera-command-bar button {
+    min-width: 0;
+  }
+
+  .settings-grid .general-settings-content {
+    padding: 10px;
+  }
+
+  .settings-grid .sub-panel {
+    padding: 12px;
+  }
+
+  .camera-section-tabs,
+  .detection-subsection-tabs,
+  .telemetry-section-tabs {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .camera-section-tabs button,
+  .detection-subsection-tabs button,
+  .telemetry-section-tabs button {
+    flex: 0 0 auto;
+    min-width: max-content;
+  }
+
+  .admin-save-bar {
+    position: fixed;
+    z-index: 55;
+    right: 0;
+    bottom: var(--mobile-nav-height, 62px);
+    left: 0;
+    min-height: 70px;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .admin-save-state small {
+    max-width: 42vw;
+    white-space: normal;
+  }
+
+  .admin-save-actions button {
+    min-width: 82px;
+    padding-inline: 10px;
+  }
+}
+
+@media (max-width: 520px) {
+  .admin-save-state small {
+    display: none;
+  }
+
+  .admin-save-actions button:first-child {
+    min-width: 72px;
+  }
+
+  .admin-save-actions button:last-child {
+    min-width: 124px;
+  }
+
+  .settings-grid .camera-command-bar {
+    grid-template-columns: 1fr;
+  }
+
+  #admin-panel-cameras>.camera-section-tabs,
+  .detection-subsection-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: visible;
+  }
+
+  #admin-panel-cameras>.camera-section-tabs button,
+  .detection-subsection-tabs button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .telemetry-section-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow: visible;
+  }
+
+  .telemetry-section-tabs button {
+    width: 100%;
+    min-width: 0;
+    padding-inline: 6px;
+  }
+}
+
+@media (max-width: 760px) {
+  .live-camera-grid .camera-tile-chrome {
+    min-height: 28px !important;
+    height: 28px !important;
+    padding: 0 4px !important;
+    gap: 4px !important;
+  }
+
+  .live-camera-grid .camera-tile-name {
+    gap: 4px;
+  }
+
+  .live-camera-grid .camera-tile-name i {
+    width: 7px;
+    height: 7px;
+    flex-basis: 7px;
+  }
+
+  .live-camera-grid .camera-tile-name strong {
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .live-camera-grid .camera-tile-time {
+    font-size: 9px;
+    line-height: 1;
+  }
+
+  .live-camera-grid .camera-tile-actions {
+    gap: 3px;
+  }
+
+  .live-camera-grid .camera-tile-live-state {
+    min-height: 20px !important;
+    height: 20px;
+    padding: 0 5px !important;
+    font-size: 9px;
+    line-height: 20px;
+  }
+
+  .live-camera-grid .camera-tile-menu {
+    width: 26px !important;
+    min-width: 26px !important;
+    height: 26px !important;
+    min-height: 26px !important;
+    padding: 0 !important;
+  }
+}
+

@@ -62,8 +62,11 @@ assert.deepEqual(parseTimelineView("?camera=gate&date=2026-08-15&source=main&at=
   cameraId: "gate", date: "2026-08-15", source: "main", at: 123.5, eventFilter: "vehicles", eventId: 44101,
   inspector: "ai", windowHours: 4, lanes: { object: false, motion: true }, thumbnails: false, speed: 2,
 });
-const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
-const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
+const stylesSource = [
+  readFileSync(new URL("../src/styles.css", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/timeline/timeline.css", import.meta.url), "utf8"),
+].join("\n");
 const recordingsSource = appSource.slice(appSource.indexOf("function RecordingsPage"), appSource.indexOf("function exportStatusLabel"));
 assert.match(recordingsSource, /const timelineInspectorTriggerRef = useRef\(null\)/);
 assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);

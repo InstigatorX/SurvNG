@@ -1,0 +1,90 @@
+import { appUrl } from "./api.js";
+
+export function eventSnapshotUrl(event) {
+  if (event?.snapshot_url) return appUrl(event.snapshot_url);
+  const eventId = Number(event?.representative_event_id || event?.id);
+  return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/snapshot.jpg`) : "";
+}
+
+export function eventSnapshotDownloadUrl(event) {
+  const snapshotUrl = eventSnapshotUrl(event);
+  return snapshotUrl ? `${snapshotUrl}?download=true` : "";
+}
+
+export function eventThumbnailUrl(event, width = 720, quality = 82) {
+  if (event?.snapshot_url) return appUrl(event.snapshot_url);
+  const eventId = Number(event?.representative_event_id || event?.id);
+  return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/thumbnail.jpg?width=${width}&quality=${quality}`) : "";
+}
+export function eventClipUrl(eventId, before = 5, after = 5, source = "main") {
+  const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
+  return appUrl(`/api/events/${eventId}/clip.mp4?${params.toString()}`);
+}
+
+export function eventStreamUrl(eventId, before = 5, after = 5, source = "main") {
+  const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
+  return appUrl(`/api/events/${eventId}/stream.m3u8?${params.toString()}`);
+}
+export function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/day?${params.toString()}`);
+}
+
+export function recordingWindowUrl(cameraId, startEpoch, endEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/window?${params.toString()}`);
+}
+
+export function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    after_epoch: afterEpoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/updates?${params.toString()}`);
+}
+
+export function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`);
+}
+
+export function recordingGridDayUrl(startEpoch, endEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/recordings/grid/day?${params.toString()}`);
+}
+
+export function recordingGridUpdatesUrl(startEpoch, endEpoch, afterEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    after_epoch: afterEpoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/recordings/grid/updates?${params.toString()}`);
+}
+
+export function recordingPreviewUrl(cameraId, epoch, source) {
+  const params = new URLSearchParams({
+    epoch: epoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/preview.jpg?${params.toString()}`);
+}

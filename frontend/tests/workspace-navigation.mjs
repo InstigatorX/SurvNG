@@ -73,7 +73,10 @@ assert.deepEqual(
   { healthy: false, severity: "attention", label: "Needs attention" },
 );
 
-const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const stylesSource = [
+  readFileSync(new URL("../src/styles.css", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/shell/shell.css", import.meta.url), "utf8"),
+].join("\n");
 assert.equal(stylesSource.includes("grid-template-columns: 176px minmax(0, 1fr)"), false);
 assert.match(stylesSource, /\.app-shell\.workspace-rail-collapsed\s*\{\s*--workspace-rail-width:\s*68px;/);
 

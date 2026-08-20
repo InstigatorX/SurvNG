@@ -1,0 +1,1120 @@
+/* Timeline workspace */
+.recordings-v2-page {
+  grid-template-columns: var(--timeline-camera-rail-width) minmax(0, 1fr);
+  grid-template-rows: var(--timeline-command-height) minmax(0, 1fr) clamp(210px, 24dvh, 280px);
+  gap: 0;
+  height: calc(100dvh - 58px);
+  min-height: calc(100dvh - 58px);
+  border-top: 0;
+  background: var(--canvas);
+  padding: 0;
+}
+
+.recordings-commandbar {
+  grid-column: 2;
+  grid-row: 1;
+  grid-template-columns: minmax(170px, 1fr) auto auto auto auto;
+  gap: 10px;
+  min-height: var(--timeline-command-height);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--topbar);
+  box-shadow: none;
+  padding: 6px 14px;
+}
+
+.recordings-section-switcher {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.recordings-section-switcher a {
+  min-height: 38px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 560;
+  padding: 0 12px;
+}
+
+.recordings-section-switcher a:first-child {
+  border-left: 0;
+}
+
+.recordings-section-switcher a.active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--control));
+  color: var(--active-ink);
+}
+
+.recordings-commandbar-scope {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding-left: 4px;
+}
+
+.recordings-commandbar-scope strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recordings-commandbar-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.recordings-commandbar-live i,
+.recordings-camera-list i.online {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #42ca66;
+  box-shadow: none;
+}
+
+.recordings-v2-date {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.recordings-v2-date input,
+.recordings-v2-date button {
+  min-height: 38px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  font-size: 12px;
+}
+
+.recordings-v2-date button:first-child {
+  border-left: 0;
+}
+
+.recordings-commandbar .recordings-v2-player-source {
+  position: static;
+  z-index: auto;
+  display: flex;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+  backdrop-filter: none;
+}
+
+.recordings-commandbar .recordings-v2-player-source button {
+  display: grid;
+  min-width: 70px;
+  min-height: 38px;
+  gap: 0;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.05;
+  padding: 4px 12px;
+}
+
+.recordings-commandbar .recordings-v2-player-source button:first-child {
+  border-left: 0;
+}
+
+.recordings-commandbar .recordings-v2-player-source button.active {
+  background: color-mix(in srgb, var(--accent) 20%, var(--control));
+  color: var(--active-ink);
+}
+
+.recordings-v2-player-source button small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.recordings-playback-rate select {
+  width: 68px;
+  min-height: 38px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.recordings-commandbar-export {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.recordings-commandbar-export button,
+.recordings-commandbar-export a {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--accent) 22%, var(--control));
+  color: var(--active-ink);
+}
+
+.recordings-commandbar-export button {
+  min-width: 76px;
+  font-weight: 620;
+}
+
+.recordings-commandbar-export a {
+  width: 36px;
+  border-left: 1px solid var(--line);
+}
+
+.recordings-v2-cameras {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--panel-solid);
+  box-shadow: none;
+}
+
+.recordings-camera-header {
+  display: grid;
+  min-height: 104px;
+  gap: 7px;
+  padding: 10px;
+}
+
+.recordings-camera-header select,
+.recordings-camera-header input {
+  width: 100%;
+  min-height: 38px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.recordings-camera-search {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  padding: 0 9px;
+}
+
+.recordings-camera-search input {
+  min-height: 34px;
+  border: 0;
+  background: transparent;
+  padding-inline: 0;
+}
+
+.recordings-camera-list {
+  gap: 0;
+  padding: 4px 0 12px;
+}
+
+.recordings-camera-list button {
+  grid-template-columns: 17px minmax(0, 1fr) 8px;
+  min-height: 42px;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 520;
+  padding: 0 13px;
+}
+
+.recordings-camera-list button:hover:not(.active) {
+  border-color: transparent;
+  background: var(--control);
+}
+
+.recordings-camera-list button.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 17%, transparent);
+  color: var(--ink);
+}
+
+.recordings-v2-workspace {
+  grid-column: 2;
+  grid-row: 2;
+  grid-template-rows: minmax(280px, 1fr) auto;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel-solid);
+  box-shadow: none;
+  padding: 0;
+}
+
+.recordings-v2-player {
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: #020608;
+}
+
+.recordings-v2-controls {
+  gap: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-solid);
+  padding: 0;
+}
+
+.recordings-v2-timeline-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 42px;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 4px 10px;
+}
+
+.recordings-timeline-display-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.recordings-timeline-display-controls button {
+  min-height: 32px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.recordings-timeline-display-controls button::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.recordings-timeline-display-controls button.object {
+  color: #4b82ff;
+}
+
+.recordings-timeline-display-controls button.motion {
+  color: #f4a019;
+}
+
+.recordings-timeline-display-controls button:not(.active) {
+  opacity: .45;
+}
+
+.recordings-v2-timeline-toolbar>span {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.recordings-v2-incidents-tools {
+  gap: 0;
+}
+
+.recordings-v2-filter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 8px;
+  font-size: 10px;
+  font-weight: 580;
+}
+
+.recordings-v2-event-filter {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.recordings-v2-event-filter button {
+  min-height: 32px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 540;
+}
+
+.recordings-v2-event-filter button:first-child {
+  border-left: 0;
+}
+
+.recordings-v2-event-filter button.active {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--accent) 18%, var(--control));
+}
+
+.recordings-v2-range {
+  margin-left: 8px;
+  font-weight: 540;
+}
+
+.recordings-v2-range select {
+  min-height: 32px;
+  border-radius: 4px;
+  font-weight: 540;
+}
+
+.recordings-v2-export-toggle {
+  min-height: 32px;
+  border-radius: 4px;
+}
+
+.recordings-v2-timeline {
+  height: var(--timeline-evidence-height);
+  padding: 4px 10px 8px;
+}
+
+.recordings-v2-lane-legend {
+  height: 20px;
+  font-size: 9px;
+  font-weight: 560;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.recordings-v2-lane-legend span::before {
+  border-radius: 50%;
+}
+
+.recordings-v2-track {
+  height: 76px;
+  border-color: var(--line);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--canvas) 78%, transparent);
+}
+
+.recordings-v2-timeline-page {
+  position: absolute;
+  z-index: 8;
+  top: 50%;
+  display: grid;
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  place-items: center;
+  transform: translateY(-50%);
+  border-color: color-mix(in srgb, var(--line) 76%, var(--canvas));
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--panel-solid) 84%, transparent);
+}
+
+.recordings-v2-timeline-page.previous { left: 4px; }
+.recordings-v2-timeline-page.next { right: 4px; }
+
+.recordings-v2-event-lane.hidden {
+  display: none;
+}
+
+.recordings-timeline-evidence {
+  display: flex;
+  height: 76px;
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 2px 0;
+  scrollbar-width: thin;
+}
+
+.recordings-timeline-evidence button {
+  position: relative;
+  display: grid;
+  grid-template-columns: 78px;
+  grid-template-rows: minmax(0, 1fr) 18px;
+  flex: 0 0 78px;
+  min-height: 0;
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--control);
+  padding: 0;
+}
+
+.recordings-timeline-evidence button>i {
+  position: absolute;
+  z-index: 2;
+  top: -7px;
+  left: 50%;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: #326ada;
+  color: white;
+}
+
+.recordings-timeline-evidence button.motion>i {
+  background: #d77b07;
+}
+
+.recordings-timeline-evidence button.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.recordings-timeline-evidence button>span {
+  display: grid;
+  min-height: 0;
+  overflow: hidden;
+  place-items: center;
+}
+
+.recordings-timeline-evidence img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.recordings-timeline-evidence time {
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 18px;
+}
+
+.recordings-v2-ticks small {
+  color: color-mix(in srgb, var(--muted) 86%, var(--ink));
+  font-size: 8px;
+  font-weight: 520;
+}
+
+.recordings-v2-track>i {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.recordings-v2-track output {
+  top: -27px;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: #087f7c;
+  color: #fff;
+  font-weight: 620;
+}
+
+.recordings-v2-incidents {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  grid-template-rows: minmax(0, 1fr);
+  border: 0;
+  background: var(--panel-solid);
+}
+
+.recordings-v2-investigation {
+  grid-template-columns: 340px minmax(0, 1fr) var(--timeline-inspector-width);
+}
+
+.recordings-v2-selected-event {
+  grid-template-columns: minmax(220px, 70%) minmax(0, 1fr);
+  grid-template-rows: 20px minmax(0, 1fr);
+  order: initial;
+  min-height: 0;
+  gap: 6px 9px;
+  overflow: hidden;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel-soft) 72%, transparent);
+  padding: 8px;
+}
+
+.recordings-v2-selected-event>header {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.recordings-v2-selected-event>a.recordings-v2-selected-event-image {
+  position: relative;
+  display: grid;
+  grid-row: 2;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+  align-self: start;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #030708;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 0;
+}
+
+.recordings-v2-selected-event-image img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.recordings-v2-selected-event-image time {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  z-index: 2;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, .8);
+  color: #fff;
+  padding: 1px 4px;
+}
+
+.recordings-v2-selected-event>div {
+  min-height: 0;
+  align-content: start;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.recordings-v2-selected-event span,
+.recordings-v2-selected-event small {
+  font-size: 10px;
+  font-weight: 520;
+}
+
+.recordings-v2-selected-event strong {
+  font-size: 16px;
+  font-weight: 620;
+}
+
+.recordings-v2-selected-event em {
+  width: fit-content;
+  margin-top: 5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--active-ink);
+  font-size: 10px;
+  font-style: normal;
+  padding: 2px 6px;
+}
+
+.recordings-v2-selected-event>div>span {
+  color: var(--muted);
+}
+
+.recordings-v2-selected-event>a.recordings-v2-selected-event-image:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.recordings-v2-selected-event.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.recordings-related-events {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: 32px minmax(0, 1fr);
+  border-right: 1px solid var(--line);
+}
+
+.recordings-related-events>header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.recordings-inspector-toggle,
+.recordings-inspector-close {
+  display: none;
+}
+
+.recordings-v2-events {
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.recordings-v2-events button {
+  width: 138px;
+  height: 132px;
+  aspect-ratio: auto;
+  border-radius: 3px;
+  background: var(--panel-soft);
+}
+
+.recordings-v2-event-image {
+  inset: 0 0 44px;
+}
+
+.recordings-v2-event-caption {
+  top: auto;
+  height: 44px;
+  align-items: flex-start;
+  justify-content: center;
+  flex-direction: column;
+  gap: 0;
+  background: var(--panel-soft);
+  color: var(--ink);
+  padding: 5px 7px;
+  text-shadow: none;
+}
+
+.recordings-v2-event-caption time,
+.recordings-v2-event-caption b {
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 560;
+}
+
+.recordings-v2-event-caption b {
+  color: var(--muted);
+}
+
+.recordings-event-inspector {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: 34px minmax(0, 1fr);
+  background: color-mix(in srgb, var(--panel-soft) 72%, transparent);
+  padding: 0 10px 10px;
+}
+
+.recordings-event-inspector-tabs {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-bottom: 1px solid var(--line);
+}
+
+.recordings-event-inspector-tabs button {
+  min-height: 34px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.recordings-event-inspector-tabs button.active {
+  border-bottom-color: var(--accent);
+  color: var(--active-ink);
+}
+
+.recordings-event-inspector>[role="tabpanel"] {
+  min-height: 0;
+  overflow: auto;
+}
+
+.recordings-event-inspector dl {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  margin: 10px 0;
+}
+
+.recordings-event-inspector dl>div {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 6px;
+  font-size: 10px;
+}
+
+.recordings-event-inspector dt {
+  color: var(--muted);
+}
+
+.recordings-event-inspector dd {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recordings-event-inspector>a {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+.recordings-inspector-message {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  padding: 14px 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.recordings-inspector-message strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .recordings-v2-page {
+    grid-template-columns: 190px minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) clamp(210px, 26dvh, 270px);
+  }
+
+  .recordings-commandbar {
+    grid-template-columns: minmax(140px, 1fr) auto auto auto;
+    grid-template-rows: auto auto;
+  }
+
+  .recordings-commandbar-scope {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .recordings-commandbar .recordings-v2-player-source {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .recordings-commandbar .recordings-v2-date {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: start;
+    overflow: visible;
+  }
+
+  .recordings-commandbar-time {
+    display: none;
+  }
+
+  .recordings-v2-investigation {
+    position: relative;
+    grid-template-columns: 300px minmax(0, 1fr);
+  }
+
+  .recordings-event-inspector {
+    position: absolute;
+    z-index: 10;
+    inset: 0 0 0 auto;
+    display: none;
+    width: min(360px, 56vw);
+    min-height: 0;
+    border-left: 1px solid var(--line);
+    box-shadow: -12px 0 30px rgba(0, 0, 0, .4);
+  }
+
+  .recordings-event-inspector.open {
+    display: grid;
+  }
+
+  .recordings-inspector-toggle {
+    display: inline-flex;
+    min-height: 44px;
+    align-items: center;
+    margin-left: auto;
+  }
+
+  .recordings-related-events>header>span {
+    display: none;
+  }
+
+  .recordings-inspector-close {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: grid;
+    width: 44px;
+    min-height: 44px;
+    place-items: center;
+    border: 0;
+    background: transparent;
+  }
+
+  .recordings-event-inspector-tabs {
+    padding-right: 44px;
+  }
+
+  .recordings-v2-selected-event {
+    grid-template-columns: minmax(150px, 58%) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1279px) and (min-width: 761px) {
+
+  .recordings-section-switcher a,
+  .recordings-v2-date input,
+  .recordings-v2-date button,
+  .recordings-commandbar .recordings-v2-player-source button,
+  .recordings-camera-list button,
+  .recordings-v2-event-filter button,
+  .recordings-v2-range select,
+  .recordings-v2-export-toggle,
+  .recordings-v2-selected-event a {
+    min-height: 44px;
+  }
+
+  .recordings-playback-rate select,
+  .recordings-commandbar-export button,
+  .recordings-commandbar-export a,
+  .recordings-timeline-display-controls button,
+  .recordings-event-inspector-tabs button {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    background: var(--bg);
+  }
+
+  .app-shell>.topbar {
+    background: var(--topbar);
+  }
+
+  .recordings-v2-page {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto;
+    width: 100%;
+    gap: 0;
+    padding: 0;
+    background: var(--bg);
+  }
+
+  .recordings-tabs {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .recordings-v2-cameras {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .recordings-v2-workspace {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .recordings-v2-incidents {
+    grid-column: 1;
+    grid-row: 4;
+  }
+
+  .recordings-commandbar {
+    position: sticky;
+    top: var(--topbar-height, 50px);
+    z-index: 8;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 6px 8px;
+  }
+
+  .recordings-commandbar-scope,
+  .recordings-playback-rate {
+    display: none;
+  }
+
+  .recordings-v2-date {
+    min-width: 0;
+  }
+
+  .recordings-v2-date input {
+    width: min(126px, 34vw);
+  }
+
+  .recordings-commandbar .recordings-v2-player-source button {
+    min-width: 62px;
+    padding-inline: 8px;
+  }
+
+  .recordings-v2-cameras {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel-solid);
+  }
+
+  .recordings-camera-header {
+    display: none;
+  }
+
+  .recordings-camera-list {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 7px 8px;
+  }
+
+  .recordings-camera-list button {
+    flex: 0 0 auto;
+    min-width: 130px;
+    min-height: 44px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding-inline: 10px;
+  }
+
+  .recordings-camera-list button.active {
+    border-color: var(--accent);
+  }
+
+  .recordings-v2-workspace {
+    grid-template-rows: minmax(330px, 56svh) auto;
+  }
+
+  .recordings-v2-player {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .recording-camera-grid.stage-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(230px, 1fr) 86px;
+  }
+
+  .recording-grid-companions {
+    display: flex;
+    gap: 5px;
+    overflow-x: auto;
+  }
+
+  .recording-grid-companions .recording-grid-tile {
+    flex: 0 0 118px;
+  }
+
+  .recordings-v2-player.selected-camera-stage video {
+    width: 100%;
+    height: calc(100% - 86px);
+  }
+
+  .recording-selected-companions {
+    inset: auto 0 0;
+    display: flex;
+    width: 100%;
+    height: 86px;
+    gap: 5px;
+    overflow-x: auto;
+  }
+
+  .recording-selected-companions button {
+    flex: 0 0 118px;
+  }
+
+  .recordings-v2-timeline-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px;
+    overflow-x: auto;
+  }
+
+  .recordings-v2-timeline-toolbar>span,
+  .recordings-v2-filter-label,
+  .recordings-v2-range span {
+    display: none;
+  }
+
+  .recordings-v2-incidents-tools {
+    min-width: max-content;
+  }
+
+  .recordings-v2-timeline {
+    height: 184px;
+    padding-inline: 8px;
+  }
+
+  .recordings-v2-track {
+    height: 78px;
+  }
+
+  .recordings-v2-event-lane.object {
+    top: 34px;
+  }
+
+  .recordings-v2-event-lane.motion {
+    top: 52px;
+  }
+
+  .recordings-v2-investigation {
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+  }
+
+  .recordings-related-events {
+    order: 2;
+    min-height: 178px;
+    border-right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .recordings-v2-events {
+    min-height: 146px;
+  }
+
+  .recordings-v2-selected-event {
+    order: 1;
+    grid-template-columns: minmax(150px, 44%) minmax(0, 1fr);
+    grid-template-rows: 1fr;
+    border-right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .recordings-v2-selected-event>header {
+    display: none;
+  }
+
+  .recordings-v2-selected-event-image {
+    grid-row: 1;
+    width: 100%;
+    min-height: 110px;
+  }
+
+  .recordings-event-inspector {
+    order: 3;
+    min-height: 190px;
+    grid-template-rows: 44px minmax(100px, 1fr);
+    border-top: 1px solid var(--line);
+  }
+
+  .recordings-inspector-toggle {
+    display: none;
+  }
+
+  .recordings-event-inspector-tabs button,
+  .recordings-timeline-display-controls button,
+  .recordings-v2-event-filter button,
+  .recordings-commandbar-export button,
+  .recordings-commandbar-export a {
+    min-height: 44px;
+  }
+}
+
