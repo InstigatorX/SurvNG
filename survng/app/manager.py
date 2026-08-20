@@ -1382,7 +1382,23 @@ class AppManager:
                             observation.get("person_name")
                             or f"Person {int(person_id)}"
                         ),
-                        "status": "confirmed",
+                        "status": (
+                            "automatic"
+                            if bool(observation.get("auto_identified"))
+                            or str(observation.get("review_status") or "")
+                            == "auto_identified"
+                            else "confirmed"
+                        ),
+                        "review_status": str(
+                            observation.get("review_status") or "confirmed"
+                        ),
+                        "source": (
+                            "automatic"
+                            if bool(observation.get("auto_identified"))
+                            or str(observation.get("review_status") or "")
+                            == "auto_identified"
+                            else "operator"
+                        ),
                         "confidence": float(
                             observation.get("match_confidence") or 0.0
                         ),

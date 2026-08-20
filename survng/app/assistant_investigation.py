@@ -52,9 +52,11 @@ def correlate_incident_timeline(
     target_labels = {wanted_label} if wanted_label else _labels(anchor)
     wanted_face = face_name.strip().lower()
     anchor_confirmed = _face_keys(anchor, {"confirmed"})
+    anchor_automatic = _face_keys(anchor, {"automatic"})
     anchor_possible = _face_keys(anchor, {"possible"})
     if wanted_face:
         anchor_confirmed = {(0, wanted_face)}
+        anchor_automatic = set()
         anchor_possible = set()
 
     ranked: list[tuple[float, dict[str, Any]]] = []
@@ -63,15 +65,24 @@ def correlate_incident_timeline(
         if event_id <= 0 or event_id == anchor_event_id:
             continue
         confirmed = _face_keys(incident, {"confirmed"})
+        automatic = _face_keys(incident, {"automatic"})
         possible = _face_keys(incident, {"possible"})
         if wanted_face:
             confirmed = {(0, name) for _identity_id, name in confirmed if name == wanted_face}
+            automatic = {(0, name) for _identity_id, name in automatic if name == wanted_face}
             possible = {(0, name) for _identity_id, name in possible if name == wanted_face}
         common_confirmed = anchor_confirmed & confirmed
+        common_automatic = (
+            anchor_confirmed & automatic
+            or anchor_automatic & confirmed
+            or anchor_automatic & automatic
+        )
         common_possible = (
             anchor_confirmed & possible
             or anchor_possible & confirmed
             or anchor_possible & possible
+            or anchor_automatic & possible
+            or anchor_possible & automatic
         )
         common_labels = target_labels & _labels(incident)
         delta_seconds = abs(_epoch(incident.get("start_at")) - anchor_epoch)
@@ -80,6 +91,12 @@ def correlate_incident_timeline(
             score = 1.0
             reasons = [
                 f"Confirmed face match: {sorted(common_confirmed)[0][1]}"
+            ]
+        elif common_automatic:
+            strength = "automatic_identity"
+            score = 0.9
+            reasons = [
+                f"Automatic face match: {sorted(common_automatic)[0][1]}"
             ]
         elif common_possible:
             strength = "possible_identity"

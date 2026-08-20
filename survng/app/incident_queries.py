@@ -232,7 +232,7 @@ class IncidentQueryService:
                 int(observation["event_id"]), []
             ).append(observation)
 
-        status_rank = {"confirmed": 0, "possible": 1, "unknown": 2}
+        status_rank = {"confirmed": 0, "automatic": 1, "possible": 2, "unknown": 3}
 
         def summarize(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
             summaries: dict[tuple[str, int], dict[str, Any]] = {}
@@ -240,7 +240,12 @@ class IncidentQueryService:
                 person_id = observation.get("person_id")
                 candidate_id = observation.get("candidate_person_id")
                 if person_id is not None:
-                    status = "confirmed"
+                    review_status = str(observation.get("review_status") or "")
+                    automatic = bool(
+                        observation.get("auto_identified")
+                        or review_status == "auto_identified"
+                    )
+                    status = "automatic" if automatic else "confirmed"
                     identity_id = int(person_id)
                     name = str(observation.get("person_name") or "Unknown")
                     confidence = observation.get("match_confidence")
@@ -279,6 +284,17 @@ class IncidentQueryService:
                         "unknown_cluster_id": observation.get("unknown_cluster_id"),
                         "name": name,
                         "status": status,
+                        "review_status": (
+                            review_status
+                            if person_id is not None
+                            else "suggested" if candidate_id is not None else "unknown"
+                        ),
+                        "source": (
+                            "automatic" if status == "automatic"
+                            else "operator" if status == "confirmed"
+                            else "recognition" if status == "possible"
+                            else "cluster"
+                        ),
                         "confidence": round(score, 4),
                         "candidate_count": max(
                             1,

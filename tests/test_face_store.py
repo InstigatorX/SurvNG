@@ -1074,7 +1074,14 @@ class FaceStoreTest(unittest.TestCase):
                     "select count(*) from face_rejections where observation_id = ?",
                     (observation_id,),
                 ).fetchone()[0]
-            self.assertEqual(remaining, 0)
+            self.assertEqual(remaining, 1)
+            with store._connect() as connection:
+                retained = connection.execute(
+                    """select person_id from face_rejections
+                    where observation_id = ?""",
+                    (observation_id,),
+                ).fetchone()
+            self.assertEqual(int(retained["person_id"]), int(bob["id"]))
 
     def test_matching_skips_corrupt_reference_embeddings(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1443,11 +1450,17 @@ class FaceStoreTest(unittest.TestCase):
                 )
 
             clustered = store.refresh_unknown_clusters()
+            store.refresh_unknown_clusters = Mock(  # type: ignore[method-assign]
+                side_effect=AssertionError("event lookup must not rebuild clusters")
+            )
             rows = store.for_event_ids([41, 42])
+            clusters = store.unknown_clusters()
 
             self.assertGreaterEqual(clustered, 1)
             self.assertEqual({int(row["observation_id"]) for row in rows}, {first, second})
             self.assertTrue(all(int(row["unknown_cluster_id"] or 0) > 0 for row in rows))
+            self.assertEqual(len(clusters), 1)
+            self.assertEqual(clusters[0]["preview_observation_id"], second)
 
     def test_review_queue_lists_embedded_unknowns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

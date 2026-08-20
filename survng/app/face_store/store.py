@@ -149,6 +149,9 @@ class FaceStore(
                     observation_id integer primary key,
                     cluster_id integer not null,
                     updated_at text not null,
+                    model_fingerprint text not null default '',
+                    policy_threshold real not null default 0,
+                    generation integer not null default 0,
                     foreign key(observation_id) references face_observations(id) on delete cascade
                 );
                 create index if not exists idx_face_unknown_members_cluster
@@ -164,6 +167,18 @@ class FaceStore(
                 """
             )
             columns = {str(row[1]) for row in connection.execute("pragma table_info(face_observations)")}
+            unknown_member_columns = {
+                str(row[1])
+                for row in connection.execute("pragma table_info(face_unknown_members)")
+            }
+            unknown_member_migrations = {
+                "model_fingerprint": "alter table face_unknown_members add column model_fingerprint text not null default ''",
+                "policy_threshold": "alter table face_unknown_members add column policy_threshold real not null default 0",
+                "generation": "alter table face_unknown_members add column generation integer not null default 0",
+            }
+            for name, statement in unknown_member_migrations.items():
+                if name not in unknown_member_columns:
+                    connection.execute(statement)
             migrations = {
                 "embedding_blob": "alter table face_observations add column embedding_blob blob",
                 "embedding_model": "alter table face_observations add column embedding_model text not null default ''",

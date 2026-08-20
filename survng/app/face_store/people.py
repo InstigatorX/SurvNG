@@ -109,27 +109,70 @@ class FaceStorePeopleMixin:
         observation_id: int,
         *,
         source: str,
+        previous_person_id: int | None = None,
+        previous_person_name: str = "",
+        previous_review_status: str = "",
     ) -> None:
         publisher = getattr(self, "_identity_event_publisher", None)
         if not callable(publisher):
             return
         observation = self.observation(observation_id)
-        if not observation or observation.get("person_id") is None:
+        if not observation:
             return
+        current_person_id = (
+            int(observation["person_id"])
+            if observation.get("person_id") is not None
+            else None
+        )
+        previous_person_id = (
+            int(previous_person_id) if previous_person_id is not None else None
+        )
+        if current_person_id is None and previous_person_id is None:
+            return
+        review_status = str(
+            observation.get("review_status")
+            if current_person_id is not None
+            else previous_review_status
+            or "unknown"
+        )
+        identity_status = (
+            "automatic" if review_status == "auto_identified" else "confirmed"
+        )
+        action = (
+            "cleared"
+            if current_person_id is None
+            else "corrected"
+            if previous_person_id is not None
+            and previous_person_id != current_person_id
+            else "assigned"
+        )
+        person_id = current_person_id or previous_person_id
+        name = (
+            str(observation.get("person_name") or "")
+            if current_person_id is not None
+            else str(previous_person_name or "")
+        )
         payload = {
             "type": "identity_update",
+            "action": action,
+            "active": current_person_id is not None,
             "source": str(source or "recognition"),
             "observation_id": int(observation_id),
             "event_id": int(observation.get("event_id") or 0),
             "camera_id": str(observation.get("camera_id") or ""),
-            "person_id": int(observation["person_id"]),
-            "name": str(observation.get("person_name") or ""),
+            "person_id": person_id,
+            "name": name,
+            "current_person_id": current_person_id,
+            "previous_person_id": previous_person_id,
+            "previous_person_name": str(previous_person_name or ""),
             "confidence": (
                 round(float(observation["match_confidence"]), 4)
-                if observation.get("match_confidence") is not None
+                if current_person_id is not None
+                and observation.get("match_confidence") is not None
                 else None
             ),
-            "review_status": str(observation.get("review_status") or ""),
+            "identity_status": identity_status,
+            "review_status": review_status,
             "observed_at": str(observation.get("observed_at") or ""),
         }
         try:
@@ -486,7 +529,10 @@ class FaceStorePeopleMixin:
                     score = float(details.get("score"))
                 except (TypeError, ValueError):
                     score = float("nan")
-                if math.isfinite(score):
+                if (
+                    int(details.get("person_id") or 0) == int(person_id)
+                    and math.isfinite(score)
+                ):
                     model_scores.append(score)
 
         same_median = percentile(same_scores, 50)
@@ -745,7 +791,10 @@ class FaceStorePeopleMixin:
                 score = float(details.get("score"))
             except (TypeError, ValueError):
                 continue
-            if math.isfinite(score):
+            if (
+                int(details.get("person_id") or 0) == int(person_id)
+                and math.isfinite(score)
+            ):
                 model_scores.append(score)
         model_score = {
             "count": len(model_scores),
@@ -768,6 +817,7 @@ class FaceStorePeopleMixin:
     ) -> list[dict[str, Any]]:
         """Prioritize actionable unknowns and ambiguous suggestions."""
         resolved_limit = max(1, min(int(limit), 500))
+        fingerprint, threshold = self._unknown_cluster_policy()
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -776,10 +826,29 @@ class FaceStorePeopleMixin:
                     coalesce(cluster_stats.cluster_size, 1) as cluster_size
                 from face_observations o
                 left join face_people candidate on candidate.id = o.candidate_person_id
-                left join face_unknown_members m on m.observation_id = o.id
+                left join face_unknown_members m
+                    on m.observation_id = o.id
+                    and m.model_fingerprint != ''
+                    and m.model_fingerprint = ?
+                    and abs(m.policy_threshold - ?) < 0.000001
+                    and m.generation = (
+                        select coalesce(max(current_members.generation), 0)
+                        from face_unknown_members current_members
+                        where current_members.model_fingerprint = ?
+                            and abs(current_members.policy_threshold - ?) < 0.000001
+                    )
                 left join (
                     select cluster_id, count(*) as cluster_size
                     from face_unknown_members
+                    where model_fingerprint != ''
+                        and model_fingerprint = ?
+                        and abs(policy_threshold - ?) < 0.000001
+                        and generation = (
+                            select coalesce(max(current_members.generation), 0)
+                            from face_unknown_members current_members
+                            where current_members.model_fingerprint = ?
+                                and abs(current_members.policy_threshold - ?) < 0.000001
+                        )
                     group by cluster_id
                 ) cluster_stats on cluster_stats.cluster_id = m.cluster_id
                 where o.canonical = 1
@@ -789,7 +858,11 @@ class FaceStorePeopleMixin:
                 order by o.observed_at desc, o.id desc
                 limit ?
                 """,
-                (FACE_OUTCOME_EMBEDDED, max(resolved_limit * 4, 200)),
+                (
+                    fingerprint, threshold, fingerprint, threshold,
+                    fingerprint, threshold, fingerprint, threshold,
+                    FACE_OUTCOME_EMBEDDED, max(resolved_limit * 4, 200),
+                ),
             ).fetchall()
 
         queue_rows = []
@@ -968,6 +1041,7 @@ class FaceStorePeopleMixin:
             raise ValueError("person_id is required for assign")
 
         changed = []
+        identity_changes: list[tuple[int, int | None, str, str]] = []
         with self._lock, self._connect() as connection:
             if person_id is not None:
                 exists = connection.execute(
@@ -979,12 +1053,38 @@ class FaceStorePeopleMixin:
 
             for observation_id in ids:
                 row = connection.execute(
-                    "select id from face_observations where id = ?",
+                    """select o.id, o.person_id, o.candidate_person_id,
+                        o.review_status, p.name as person_name
+                    from face_observations o
+                    left join face_people p on p.id = o.person_id
+                    where o.id = ?""",
                     (observation_id,),
                 ).fetchone()
                 if row is None:
                     continue
                 if normalized_action == "assign":
+                    previous_person_id = (
+                        int(row["person_id"])
+                        if row["person_id"] is not None
+                        else None
+                    )
+                    if (
+                        previous_person_id is not None
+                        and previous_person_id != int(person_id)
+                    ):
+                        connection.execute(
+                            """insert or ignore into face_rejections
+                            (observation_id, person_id, created_at) values (?, ?, ?)""",
+                            (
+                                observation_id,
+                                previous_person_id,
+                                datetime.now(timezone.utc).isoformat(),
+                            ),
+                        )
+                    connection.execute(
+                        "delete from face_rejections where observation_id = ? and person_id = ?",
+                        (observation_id, int(person_id)),
+                    )
                     connection.execute(
                         """
                         update face_observations
@@ -994,34 +1094,63 @@ class FaceStorePeopleMixin:
                             candidate_confidence = null,
                             rejected_person_id = null,
                             auto_identified = 0,
+                            reference_pinned = 0,
+                            reference_auto_pinned = 0,
+                            match_details_json = '{}',
                             canonical = 1
                         where id = ?
                         """,
                         (int(person_id), observation_id),
                     )
                 else:
+                    rejected_person_id = (
+                        int(row["candidate_person_id"])
+                        if row["candidate_person_id"] is not None
+                        else int(row["person_id"])
+                        if row["person_id"] is not None
+                        and str(row["review_status"] or "") == "auto_identified"
+                        else None
+                    )
+                    if rejected_person_id is not None:
+                        connection.execute(
+                            """insert or ignore into face_rejections
+                            (observation_id, person_id, created_at) values (?, ?, ?)""",
+                            (observation_id, rejected_person_id, datetime.now(timezone.utc).isoformat()),
+                        )
                     connection.execute(
                         """
                         update face_observations
-                        set person_id = null, review_status = 'unknown',
+                        set person_id = null,
+                            review_status = case when ? is not null then 'rejected' else 'unknown' end,
                             match_confidence = null,
                             candidate_person_id = null,
                             candidate_confidence = null,
-                            rejected_person_id = null,
+                            rejected_person_id = ?,
                             auto_identified = 0,
                             reference_pinned = 0,
                             reference_auto_pinned = 0
                         where id = ?
                         """,
-                        (observation_id,),
+                        (rejected_person_id, rejected_person_id, observation_id),
                     )
                 changed.append(observation_id)
+                identity_changes.append((
+                    observation_id,
+                    int(row["person_id"]) if row["person_id"] is not None else None,
+                    str(row["person_name"] or ""),
+                    str(row["review_status"] or ""),
+                ))
 
         self._invalidate_reference_gallery()
         self.request_match_refresh()
-        if normalized_action == "assign":
-            for observation_id in changed:
-                self._emit_identity_update(observation_id, source="manual_bulk")
+        for observation_id, previous_id, previous_name, previous_status in identity_changes:
+            self._emit_identity_update(
+                observation_id,
+                source="manual_bulk",
+                previous_person_id=previous_id,
+                previous_person_name=previous_name,
+                previous_review_status=previous_status,
+            )
         return {
             "action": normalized_action,
             "person_id": person_id,
@@ -1059,13 +1188,9 @@ class FaceStorePeopleMixin:
                 connection.execute(
                     """update face_observations set person_id = ?, review_status = 'confirmed',
                         match_confidence = 1, candidate_person_id = null, candidate_confidence = null,
-                        rejected_person_id = null
+                        rejected_person_id = null, match_details_json = '{}'
                         where id = ?""",
                     (person_id, observation_id),
-                )
-                connection.execute(
-                    "delete from face_rejections where observation_id = ?",
-                    (observation_id,),
                 )
         if observation_id is not None:
             self._invalidate_reference_gallery()
@@ -1083,7 +1208,11 @@ class FaceStorePeopleMixin:
             if person_id is not None and connection.execute("select 1 from face_people where id = ?", (person_id,)).fetchone() is None:
                 raise ValueError("person not found")
             current = connection.execute(
-                "select person_id, candidate_person_id from face_observations where id = ?",
+                """select o.person_id, o.candidate_person_id, o.review_status,
+                    p.name as person_name
+                from face_observations o
+                left join face_people p on p.id = o.person_id
+                where o.id = ?""",
                 (observation_id,),
             ).fetchone()
             if current is None:
@@ -1091,12 +1220,34 @@ class FaceStorePeopleMixin:
             rejected_person_id = (
                 int(current["candidate_person_id"])
                 if person_id is None and current["candidate_person_id"] is not None
+                else int(current["person_id"])
+                if person_id is None
+                and current["person_id"] is not None
+                and str(current["review_status"] or "") == "auto_identified"
                 else None
             )
             if person_id is not None:
+                previous_person_id = (
+                    int(current["person_id"])
+                    if current["person_id"] is not None
+                    else None
+                )
+                if (
+                    previous_person_id is not None
+                    and previous_person_id != int(person_id)
+                ):
+                    connection.execute(
+                        """insert or ignore into face_rejections
+                        (observation_id, person_id, created_at) values (?, ?, ?)""",
+                        (
+                            observation_id,
+                            previous_person_id,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
                 connection.execute(
-                    "delete from face_rejections where observation_id = ?",
-                    (observation_id,),
+                    "delete from face_rejections where observation_id = ? and person_id = ?",
+                    (observation_id, person_id),
                 )
             elif rejected_person_id is not None:
                 connection.execute(
@@ -1109,13 +1260,16 @@ class FaceStorePeopleMixin:
             connection.execute(
                 """update face_observations set person_id = ?, review_status = ?, match_confidence = ?,
                     candidate_person_id = null, candidate_confidence = null, rejected_person_id = ?,
-                    auto_identified = 0, reference_pinned = 0
+                    auto_identified = 0, reference_pinned = 0,
+                    reference_auto_pinned = 0,
+                    match_details_json = case when ? is not null then '{}' else match_details_json end
                     where id = ?""",
                 (
                     person_id,
                     "confirmed" if person_id is not None else "rejected" if rejected_person_id is not None else "unknown",
                     1 if person_id is not None else None,
                     rejected_person_id,
+                    person_id,
                     observation_id,
                 ),
             )
@@ -1129,8 +1283,17 @@ class FaceStorePeopleMixin:
             )
         else:
             self.request_match_refresh()
-        if person_id is not None:
-            self._emit_identity_update(observation_id, source="manual")
+        self._emit_identity_update(
+            observation_id,
+            source="manual",
+            previous_person_id=(
+                int(current["person_id"])
+                if current["person_id"] is not None
+                else None
+            ),
+            previous_person_name=str(current["person_name"] or ""),
+            previous_review_status=str(current["review_status"] or ""),
+        )
         return self.observation(observation_id)
 
     def set_reference_pinned(
@@ -1165,7 +1328,22 @@ class FaceStorePeopleMixin:
         return self.observation(observation_id)
 
     def delete_person(self, person_id: int) -> bool:
+        cleared_observations: list[tuple[int, str]] = []
+        person_name = ""
         with self._lock, self._connect() as connection:
+            person = connection.execute(
+                "select name from face_people where id = ?",
+                (person_id,),
+            ).fetchone()
+            if person is not None:
+                person_name = str(person["name"] or "")
+                cleared_observations = [
+                    (int(row["id"]), str(row["review_status"] or ""))
+                    for row in connection.execute(
+                        "select id, review_status from face_observations where person_id = ?",
+                        (person_id,),
+                    ).fetchall()
+                ]
             connection.execute(
                 "update face_observations set candidate_person_id = null, candidate_confidence = null where candidate_person_id = ?",
                 (person_id,),
@@ -1178,7 +1356,8 @@ class FaceStorePeopleMixin:
                 """
                 update face_observations
                 set person_id = null, review_status = 'unknown', match_confidence = null,
-                    auto_identified = 0, reference_pinned = 0
+                    auto_identified = 0, reference_pinned = 0,
+                    reference_auto_pinned = 0
                 where person_id = ?
                 """,
                 (person_id,),
@@ -1188,4 +1367,12 @@ class FaceStorePeopleMixin:
         if deleted:
             self._invalidate_reference_gallery()
             self.request_match_refresh()
+            for observation_id, previous_status in cleared_observations:
+                self._emit_identity_update(
+                    observation_id,
+                    source="person_deleted",
+                    previous_person_id=person_id,
+                    previous_person_name=person_name,
+                    previous_review_status=previous_status,
+                )
         return deleted

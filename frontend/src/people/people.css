@@ -1,1 +1,118 @@
-/* People workspace styles live with Search in search/search.css (shared campaign). */
+/* Local enhancements for the People workspace. Core shell layout stays shared. */
+.people-mode-tabs {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 0;
+  min-height: 46px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-solid);
+  padding: 0 12px;
+}
+
+.faces-page {
+  grid-template-rows: 52px 46px minmax(0, 1fr);
+}
+
+.people-mode-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 46px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+.people-mode-tabs button.active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
+.queue-toolbar-copy,
+.cluster-toolbar-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.queue-toolbar-copy small,
+.cluster-toolbar-copy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cluster-toolbar-copy { flex: 1; }
+
+.unknown-cluster-layout {
+  grid-area: observations;
+  display: grid;
+  grid-template-columns: minmax(250px, .85fr) minmax(0, 1.4fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.unknown-cluster-grid {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  list-style: none;
+  margin: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  padding: 10px;
+}
+
+.unknown-cluster-card {
+  display: flex;
+  align-items: center;
+  min-height: 70px;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  padding: 7px;
+  text-align: left;
+}
+
+.unknown-cluster-card.active { border-color: var(--accent); background: var(--accent-soft); }
+.cluster-preview { display: grid; width: 54px; height: 54px; flex: 0 0 54px; }
+.cluster-preview img, .cluster-preview .face-avatar { grid-area: 1 / 1; width: 54px; height: 54px; border-radius: 50%; object-fit: cover; }
+.unknown-cluster-card>span:last-child, .cluster-members>div:first-child { display: grid; gap: 2px; }
+.unknown-cluster-card small, .cluster-members span { color: var(--muted); font-size: 11px; }
+
+.cluster-members { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; padding: 10px; }
+.cluster-members>div:first-child { padding: 2px 2px 10px; }
+.face-observation-grid.compact { padding: 0; }
+.face-observation-grid.compact { grid-area: auto; }
+.spinning { animation: people-spin .8s linear infinite; }
+@keyframes people-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 760px) {
+  .people-mode-tabs { grid-column: 1; min-height: 44px; padding: 0 6px; }
+  .people-mode-tabs button { min-height: 44px; padding: 0 10px; font-size: 11px; }
+  .unknown-cluster-layout { grid-template-columns: 1fr; overflow: visible; }
+  .unknown-cluster-grid { max-height: 38dvh; border-right: 0; border-bottom: 1px solid var(--line); }
+  .cluster-members { min-height: 360px; }
+}
+
+@media (min-width: 761px) {
+  .faces-mode-review,
+  .faces-mode-clusters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .faces-mode-review .faces-people-panel,
+  .faces-mode-clusters .faces-people-panel {
+    display: none;
+  }
+}

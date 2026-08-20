@@ -155,6 +155,7 @@ class FaceStoreRecognitionMixin:
                         match.score,
                         json.dumps(
                             {
+                                "person_id": match.person_id,
                                 "score": match.score,
                                 "runner_up_score": match.runner_up_score,
                                 "margin": match.margin,
@@ -337,6 +338,7 @@ class FaceStoreRecognitionMixin:
                 )
                 details = json.dumps(
                     {
+                        "person_id": match.person_id,
                         "score": match.score,
                         "runner_up_score": match.runner_up_score,
                         "margin": match.margin,

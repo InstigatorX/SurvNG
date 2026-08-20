@@ -661,7 +661,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
         {faces.length ? faces.map((face, index) => (
           <button type="button" className={`inspector-face ${face.status || "unknown"}`} key={`${face.status}-${face.name}-${index}`} onClick={() => onFaceOpen(face)}>
             <strong>{face.name || "Unknown"}</strong>
-            <span>{Math.round(Number(face.confidence || 0) * 100)}%{Number(face.candidate_count || 0) > 1 ? ` · ${face.candidate_count} frames` : ""}</span>
+            <span>{face.status === "automatic" ? "Automatic · " : ""}{Math.round(Number(face.confidence || 0) * 100)}%{Number(face.candidate_count || 0) > 1 ? ` · ${face.candidate_count} frames` : ""}</span>
           </button>
         )) : <p>No recognized faces.</p>}
       </section>

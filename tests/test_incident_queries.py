@@ -12,10 +12,64 @@ from survng.app.incident_queries import (
     IncidentQueryService,
     create_incident_query_router,
 )
+from survng.app.identity_projection import identity_summaries
 from survng.app.manager_access import ManagerAccessCoordinator
 
 
 class IncidentQueryRouterTest(unittest.TestCase):
+    def test_confirmed_identity_wins_over_automatic_duplicate(self) -> None:
+        identities = identity_summaries([
+            {
+                "identity_id": 3,
+                "person_id": 3,
+                "name": "Steve",
+                "status": "automatic",
+                "confidence": 0.99,
+                "observation_id": 10,
+            },
+            {
+                "identity_id": 3,
+                "person_id": 3,
+                "name": "Steve",
+                "status": "confirmed",
+                "confidence": 0.75,
+                "observation_id": 11,
+            },
+        ])
+
+        self.assertEqual(len(identities), 1)
+        self.assertEqual(identities[0]["status"], "confirmed")
+
+    def test_face_enrichment_preserves_automatic_identity_provenance(self) -> None:
+        manager = SimpleNamespace(
+            faces=SimpleNamespace(
+                for_event_ids=lambda _ids: [
+                    {
+                        "observation_id": 10,
+                        "event_id": 7,
+                        "person_id": 3,
+                        "person_name": "Steve",
+                        "candidate_person_id": None,
+                        "match_confidence": 0.88,
+                        "review_status": "auto_identified",
+                        "auto_identified": 1,
+                        "consensus": {},
+                    }
+                ]
+            )
+        )
+
+        result = IncidentQueryService.with_faces(
+            manager,
+            [{"events": [{"id": 7, "objects": []}]}],
+        )
+
+        identity = result[0]["primary_identity"]
+        self.assertEqual(identity["name"], "Steve")
+        self.assertEqual(identity["status"], "automatic")
+        self.assertEqual(identity["review_status"], "auto_identified")
+        self.assertEqual(identity["source"], "automatic")
+
     def test_face_enrichment_keeps_distinct_unknown_tracks(self) -> None:
         manager = SimpleNamespace(
             faces=SimpleNamespace(

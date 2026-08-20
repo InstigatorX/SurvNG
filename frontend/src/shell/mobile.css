@@ -613,6 +613,18 @@
   color: var(--warn);
 }
 
+.identity-chip.automatic {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.identity-chip.automatic > span {
+  padding-left: 4px;
+  border-left: 1px solid currentColor;
+  font-size: 9px;
+  opacity: 0.8;
+}
+
 .recordings-v2-selected-event .identity-chip {
   margin-top: 2px;
 }

@@ -15,7 +15,7 @@ def identity_summaries(faces: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(face, dict):
             continue
         status = str(face.get("status") or "")
-        if status not in {"confirmed", "unknown"}:
+        if status not in {"confirmed", "automatic", "unknown"}:
             continue
         unknown_cluster_id = int(face.get("unknown_cluster_id") or 0)
         if status == "unknown":
@@ -36,11 +36,25 @@ def identity_summaries(faces: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "unknown_cluster_id": unknown_cluster_id or None,
             "name": name,
             "status": status,
+            "review_status": str(face.get("review_status") or status),
+            "source": str(
+                face.get("source")
+                or (
+                    "automatic" if status == "automatic"
+                    else "operator" if status == "confirmed"
+                    else "cluster"
+                )
+            ),
             "confidence": float(face.get("confidence") or 0.0),
             "observation_id": int(face.get("observation_id") or 0),
         }
         previous = identities.get(identity_id)
-        if previous is None or item["confidence"] > previous["confidence"]:
+        status_rank = {"confirmed": 2, "automatic": 1, "unknown": 0}
+        if previous is None or (
+            status_rank.get(item["status"], -1), item["confidence"]
+        ) > (
+            status_rank.get(previous["status"], -1), previous["confidence"]
+        ):
             identities[identity_id] = item
     return sorted(
         identities.values(),

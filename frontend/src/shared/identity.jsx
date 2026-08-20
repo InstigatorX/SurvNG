@@ -15,7 +15,21 @@ export function visibleIdentity(item) {
   if (confirmed) return {
     name: String(confirmed.name).trim(),
     unknown: false,
+    automatic: false,
+    status: "confirmed",
     confidence: Number(confirmed.confidence) || 0,
+  };
+
+  const automatic = candidates.find((identity) => (
+    identity?.status === "automatic"
+    && String(identity?.name || "").trim()
+  ));
+  if (automatic) return {
+    name: String(automatic.name).trim(),
+    unknown: false,
+    automatic: true,
+    status: "automatic",
+    confidence: Number(automatic.confidence) || 0,
   };
 
   const unknown = candidates.find((identity) => (
@@ -33,6 +47,8 @@ export function visibleIdentity(item) {
       ? `Unknown Person ${clusterId}`
       : String(unknown.name || "Unknown person"),
     unknown: true,
+    automatic: false,
+    status: "unknown",
     confidence: Number(unknown.confidence) || 0,
   };
 }
@@ -42,13 +58,14 @@ export function IdentityChip({ item, className = "" }) {
   if (!identity) return null;
   return (
     <span
-      className={`identity-chip ${identity.unknown ? "unknown" : "known"} ${className}`.trim()}
+      className={`identity-chip ${identity.unknown ? "unknown" : identity.automatic ? "automatic" : "known"} ${className}`.trim()}
       title={identity.confidence > 0
-        ? `${identity.name} · ${Math.round(identity.confidence * 100)}% identity confidence`
+        ? `${identity.name} · ${Math.round(identity.confidence * 100)}% ${identity.automatic ? "automatic identity confidence" : "identity confidence"}`
         : identity.name}
     >
       <UserRound size={12} />
       {identity.name}
+      {identity.automatic ? <span aria-label="Automatically identified">Auto</span> : null}
     </span>
   );
 }

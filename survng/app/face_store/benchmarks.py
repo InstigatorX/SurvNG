@@ -820,7 +820,13 @@ class FaceStoreBenchmarkMixin:
             },
             "current": {
                 "match_threshold": float(recognizer.config.face_match_threshold),
-                "unknown_cluster_threshold": 0.62,
+                "unknown_cluster_threshold": float(
+                    getattr(
+                        recognizer.config,
+                        "face_unknown_cluster_threshold",
+                        0.55,
+                    )
+                ),
             },
             "message": (
                 "Recommendations are empirical and should be reviewed before "

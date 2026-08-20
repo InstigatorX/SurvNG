@@ -78,6 +78,25 @@ class AssistantInvestigationTest(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["match_strength"], "confirmed_identity")
 
+    def test_automatic_identity_remains_distinct_from_confirmation(self) -> None:
+        anchor = incident(
+            1,
+            "gate",
+            "2026-08-01T12:00:00+00:00",
+            faces=({"identity_id": 7, "name": "Steve", "status": "confirmed"},),
+        )
+        candidate = incident(
+            4,
+            "foyer",
+            "2026-08-01T12:03:00+00:00",
+            faces=({"identity_id": 7, "name": "Steve", "status": "automatic"},),
+        )
+
+        matches = correlate_incident_timeline(anchor, [candidate])
+
+        self.assertEqual(matches[0]["match_strength"], "automatic_identity")
+        self.assertIn("Automatic face match", matches[0]["reasons"][0])
+
     def test_unrelated_classes_are_not_added_to_timeline(self) -> None:
         anchor = incident(
             1,

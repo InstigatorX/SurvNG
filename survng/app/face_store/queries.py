@@ -320,10 +320,10 @@ class FaceStoreQueryMixin:
         return self._observation_row(row) if row else None
 
     def for_event_ids(self, event_ids: list[int]) -> list[dict[str, Any]]:
-        self.refresh_unknown_clusters()
         unique_ids = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
         if not unique_ids:
             return []
+        fingerprint, threshold = self._unknown_cluster_policy()
         observations: list[dict[str, Any]] = []
         with self._connect() as connection:
             for offset in range(0, len(unique_ids), 500):
@@ -334,16 +334,27 @@ class FaceStoreQueryMixin:
                     select o.id as observation_id, o.event_id, o.person_id, o.confidence, o.match_confidence,
                         o.candidate_person_id, o.candidate_confidence,
                         o.candidate_track_id, o.consensus_json,
+                        o.review_status, o.auto_identified,
                         unknowns.cluster_id as unknown_cluster_id,
                         p.name as person_name, candidate.name as candidate_person_name
                     from face_observations o
                     left join face_people p on p.id = o.person_id
                     left join face_people candidate on candidate.id = o.candidate_person_id
-                    left join face_unknown_members unknowns on unknowns.observation_id = o.id
+                    left join face_unknown_members unknowns
+                        on unknowns.observation_id = o.id
+                        and unknowns.model_fingerprint != ''
+                        and unknowns.model_fingerprint = ?
+                        and abs(unknowns.policy_threshold - ?) < 0.000001
+                        and unknowns.generation = (
+                            select coalesce(max(current_members.generation), 0)
+                            from face_unknown_members current_members
+                            where current_members.model_fingerprint = ?
+                                and abs(current_members.policy_threshold - ?) < 0.000001
+                        )
                     where o.event_id in ({placeholders})
                         and o.canonical = 1
                     """,
-                    chunk,
+                    (fingerprint, threshold, fingerprint, threshold, *chunk),
                 ).fetchall()
                 for row in rows:
                     item = dict(row)

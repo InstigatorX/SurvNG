@@ -1620,7 +1620,7 @@ class IntelligenceService:
             if existing is not None:
                 existing.setdefault('reasons', []).append(reason)
                 existing['appearance_similarity'] = round(similarity, 4)
-                if existing.get('match_strength') not in {'confirmed_identity', 'possible_identity'}:
+                if existing.get('match_strength') not in {'confirmed_identity', 'automatic_identity', 'possible_identity'}:
                     existing['match_strength'] = 'appearance_similarity'
                     existing['confidence'] = round(similarity, 3)
                 continue
@@ -1629,14 +1629,15 @@ class IntelligenceService:
             item = {'incident': matched_incident, 'event_id': representative_id, 'camera_id': str(matched_incident.get('camera_id') or appearance.get('camera_id') or ''), 'start_at': matched_at, 'seconds_from_anchor': round(matched_epoch.timestamp() - anchor_at.timestamp() if matched_epoch is not None else 0.0, 1), 'match_strength': 'appearance_similarity', 'confidence': round(similarity, 3), 'appearance_similarity': round(similarity, 4), 'reasons': [reason]}
             matches.append(item)
             matches_by_event_id[representative_id] = item
-        strength_rank = {'confirmed_identity': 4, 'possible_identity': 3, 'appearance_similarity': 2, 'context_candidate': 1}
+        strength_rank = {'confirmed_identity': 5, 'automatic_identity': 4, 'possible_identity': 3, 'appearance_similarity': 2, 'context_candidate': 1}
         matches = sorted(sorted(matches, key=lambda item: (-strength_rank.get(str(item.get('match_strength') or ''), 0), -float(item.get('confidence') or 0.0), abs(float(item.get('seconds_from_anchor') or 0.0))))[:min(call.limit, 12)], key=lambda item: str(item.get('start_at') or ''))
         confirmed = sum((item['match_strength'] == 'confirmed_identity' for item in matches))
+        automatic = sum((item['match_strength'] == 'automatic_identity' for item in matches))
         possible = sum((item['match_strength'] == 'possible_identity' for item in matches))
         contextual = sum((item['match_strength'] == 'context_candidate' for item in matches))
         appearance_similar = sum((item['match_strength'] == 'appearance_similarity' for item in matches))
-        timeline_data = {'anchor_event_id': int(event_id) if event_id else None, 'anchor_camera_id': (anchor or {}).get('camera_id'), 'start_at': start.isoformat(), 'end_at': end.isoformat(), 'object_label': call.object_label, 'face_name': call.face_name, 'matches': [{key: item.get(key) for key in ('event_id', 'camera_id', 'start_at', 'seconds_from_anchor', 'match_strength', 'confidence', 'reasons', 'appearance_similarity')} for item in matches], 'limitations': ['Confirmed recognized faces can link incidents across cameras.', 'Possible face matches remain uncertain.', 'Shared person, vehicle, or animal labels plus nearby time provide context only.', 'Appearance similarity uses durable, model-versioned ReID vectors and is stronger than a shared class label, but it is not proof of identity.', 'Camera angle, lighting, occlusion, and visually similar subjects can change the score.', 'Only the strongest 12 candidates and at most 24 hours are returned.']}
-        trace = AssistantEvidence(evidence_id=f'E-trace-{event_id or 'search'}', kind='cross_camera_timeline', title='Cross-camera investigation timeline', summary=f'Found {len(matches)} bounded timeline candidate(s): {confirmed} confirmed identity, {possible} possible identity, {appearance_similar} appearance-similar, and {contextual} context-only.', data=timeline_data, href=self._assistant_incident_evidence(anchor, int(event_id)).href if anchor and event_id else '/incidents', client_data={'timeline': timeline_data})
+        timeline_data = {'anchor_event_id': int(event_id) if event_id else None, 'anchor_camera_id': (anchor or {}).get('camera_id'), 'start_at': start.isoformat(), 'end_at': end.isoformat(), 'object_label': call.object_label, 'face_name': call.face_name, 'matches': [{key: item.get(key) for key in ('event_id', 'camera_id', 'start_at', 'seconds_from_anchor', 'match_strength', 'confidence', 'reasons', 'appearance_similarity')} for item in matches], 'limitations': ['Operator-confirmed faces can link incidents across cameras.', 'Automatic face matches are model decisions and remain distinguishable from operator confirmation.', 'Possible face matches remain uncertain.', 'Shared person, vehicle, or animal labels plus nearby time provide context only.', 'Appearance similarity uses durable, model-versioned ReID vectors and is stronger than a shared class label, but it is not proof of identity.', 'Camera angle, lighting, occlusion, and visually similar subjects can change the score.', 'Only the strongest 12 candidates and at most 24 hours are returned.']}
+        trace = AssistantEvidence(evidence_id=f'E-trace-{event_id or 'search'}', kind='cross_camera_timeline', title='Cross-camera investigation timeline', summary=f'Found {len(matches)} bounded timeline candidate(s): {confirmed} confirmed identity, {automatic} automatic identity, {possible} possible identity, {appearance_similar} appearance-similar, and {contextual} context-only.', data=timeline_data, href=self._assistant_incident_evidence(anchor, int(event_id)).href if anchor and event_id else '/incidents', client_data={'timeline': timeline_data})
         evidence = [trace]
         if anchor and event_id:
             evidence.append(self._assistant_incident_evidence(anchor, int(event_id)))
