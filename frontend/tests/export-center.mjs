@@ -136,6 +136,7 @@ try {
     waitUntil: "domcontentloaded",
     timeout: 30_000,
   });
+  await page.getByText("Loading workspace…").waitFor({ state: "hidden", timeout: 30_000 });
   await page.locator(".export-center-page").waitFor({ state: "visible" });
   await page.getByText("gate-clip.mp4", { exact: true }).waitFor({ state: "visible" });
   assert.equal(

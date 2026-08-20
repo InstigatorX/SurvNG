@@ -59,6 +59,8 @@ try {
     waitUntil: "domcontentloaded",
     timeout: 30_000,
   });
+  await page.getByText("Loading workspace…").waitFor({ state: "hidden", timeout: 30_000 });
+  await page.locator(".camera-tile").first().waitFor({ state: "visible", timeout: 30_000 });
   await page.getByRole("button", { name: "Open SurvNG Assistant" }).click();
   const compose = page.getByPlaceholder("Ask about SurvNG…");
   await compose.fill("Create a Gate timelapse from 8 AM to 8 PM yesterday");

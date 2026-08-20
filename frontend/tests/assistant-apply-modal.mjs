@@ -28,6 +28,8 @@ try {
   await page.route("**/api/incidents/42/ai-apply", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ applied: [{ setting: "sensitivity" }] }) }));
 
   await page.goto("http://127.0.0.1:8088/survng/", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await page.getByText("Loading workspace…").waitFor({ state: "hidden", timeout: 30_000 });
+  await page.locator(".camera-tile").first().waitFor({ state: "visible", timeout: 30_000 });
   await page.getByRole("button", { name: "Open SurvNG Assistant" }).click();
   await page.getByPlaceholder("Ask about SurvNG…").fill("Review this incident");
   await page.getByRole("button", { name: "Send" }).click();

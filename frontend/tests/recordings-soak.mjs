@@ -32,6 +32,7 @@ page.on("requestfailed", (request) => {
 
 try {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await page.getByText("Loading workspace…").waitFor({ state: "hidden", timeout: 30_000 });
   const video = page.locator(".recordings-v2-player video");
   await video.waitFor({ state: "visible", timeout: 30_000 });
   await page.waitForFunction(() => {
