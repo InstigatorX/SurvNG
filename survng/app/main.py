@@ -16,6 +16,8 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.middleware.gzip import GZipMiddleware, GZipResponder, IdentityResponder
 from fastapi.staticfiles import StaticFiles
 
 from .config import (
@@ -385,6 +387,83 @@ class SecurityBoundaryMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_security_headers)
+
+
+class JsonGZipResponder(GZipResponder):
+    """Apply Starlette's gzip implementation only to JSON response bodies."""
+
+    @staticmethod
+    def _is_json_content_type(headers: Headers) -> bool:
+        media_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        return media_type == "application/json" or media_type.endswith("+json")
+
+    async def send_with_compression(self, message: dict) -> None:
+        message_type = message["type"]
+        if message_type == "http.response.start":
+            self.initial_message = message
+            headers = Headers(raw=self.initial_message["headers"])
+            self.content_encoding_set = "content-encoding" in headers
+            self.content_type_is_excluded = not self._is_json_content_type(headers)
+        elif message_type == "http.response.body" and (
+            self.content_encoding_set or self.content_type_is_excluded
+        ):
+            if not self.started:
+                self.started = True
+                await self.send(self.initial_message)
+            await self.send(message)
+        elif message_type == "http.response.body" and not self.started:
+            self.started = True
+            body = message.get("body", b"")
+            more_body = message.get("more_body", False)
+            if len(body) < self.minimum_size and not more_body:
+                await self.send(self.initial_message)
+                await self.send(message)
+            elif not more_body:
+                body = self.apply_compression(body, more_body=False)
+                headers = MutableHeaders(raw=self.initial_message["headers"])
+                headers.add_vary_header("Accept-Encoding")
+                if body != message["body"]:
+                    headers["Content-Encoding"] = self.content_encoding
+                    headers["Content-Length"] = str(len(body))
+                    message["body"] = body
+                await self.send(self.initial_message)
+                await self.send(message)
+            else:
+                body = self.apply_compression(body, more_body=True)
+                headers = MutableHeaders(raw=self.initial_message["headers"])
+                headers.add_vary_header("Accept-Encoding")
+                if body != message["body"]:
+                    headers["Content-Encoding"] = self.content_encoding
+                    del headers["Content-Length"]
+                    message["body"] = body
+                await self.send(self.initial_message)
+                await self.send(message)
+        elif message_type == "http.response.body":
+            body = message.get("body", b"")
+            message["body"] = self.apply_compression(
+                body,
+                more_body=message.get("more_body", False),
+            )
+            await self.send(message)
+        elif message_type == "http.response.pathsend":
+            await self.send(self.initial_message)
+            await self.send(message)
+
+
+class JsonGZipMiddleware(GZipMiddleware):
+    """Starlette gzip middleware with a JSON-only response boundary."""
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        responder = (
+            JsonGZipResponder(self.app, self.minimum_size, compresslevel=self.compresslevel)
+            if "gzip" in headers.get("accept-encoding", "")
+            else IdentityResponder(self.app, self.minimum_size)
+        )
+        await responder(scope, receive, send)
 
 
 def public_url(path: str) -> str:
@@ -855,6 +934,7 @@ async def ai_operations_active_handler(
 
 app.add_middleware(ConfiguredBasePathMiddleware)
 app.add_middleware(SecurityBoundaryMiddleware)
+app.add_middleware(JsonGZipMiddleware, minimum_size=1024, compresslevel=5)
 app.mount("/static", StaticFiles(directory="survng/static"), name="static")
 
 

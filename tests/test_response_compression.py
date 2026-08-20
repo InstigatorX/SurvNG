@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+import asyncio
+import gzip
+import unittest
+
+from survng.app.main import JsonGZipMiddleware
+
+
+class JsonResponseCompressionTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    async def _receive() -> dict:
+        await asyncio.sleep(0)
+        return {"type": "http.disconnect"}
+
+    @staticmethod
+    def _collector(messages: list[dict]):
+        async def collect(message: dict) -> None:
+            messages.append(message)
+
+        return collect
+
+    async def _request(self, *, content_type: bytes, body: bytes) -> list[dict]:
+        async def inner(_scope, _receive, send) -> None:
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", content_type), (b"content-length", str(len(body)).encode())],
+            })
+            await send({"type": "http.response.body", "body": body})
+
+        messages: list[dict] = []
+        middleware = JsonGZipMiddleware(inner, minimum_size=64, compresslevel=5)
+        await middleware({
+            "type": "http", "method": "GET", "path": "/api/example",
+            "headers": [(b"accept-encoding", b"gzip")],
+        }, self._receive, self._collector(messages))
+        return messages
+
+    async def test_large_json_is_gzipped_and_varies_by_accept_encoding(self) -> None:
+        body = b'{"items":["' + (b"camera-event," * 40) + b'"]}'
+
+        messages = await self._request(content_type=b"application/json", body=body)
+
+        headers = dict(messages[0]["headers"])
+        self.assertEqual(headers[b"content-encoding"], b"gzip")
+        self.assertIn(b"accept-encoding", headers[b"vary"].lower())
+        self.assertEqual(gzip.decompress(messages[1]["body"]), body)
+
+    async def test_sse_and_media_bodies_are_not_gzipped(self) -> None:
+        body = b"x" * 512
+        for content_type in (b"text/event-stream", b"video/mp4", b"multipart/x-mixed-replace"):
+            with self.subTest(content_type=content_type):
+                messages = await self._request(content_type=content_type, body=body)
+                headers = dict(messages[0]["headers"])
+                self.assertNotIn(b"content-encoding", headers)
+                self.assertNotIn(b"vary", headers)
+                self.assertEqual(messages[1]["body"], body)
+
+    async def test_small_json_remains_uncompressed(self) -> None:
+        messages = await self._request(content_type=b"application/json", body=b'{"ok":true}')
+
+        headers = dict(messages[0]["headers"])
+        self.assertNotIn(b"content-encoding", headers)
+        self.assertNotIn(b"vary", headers)
+
+
+if __name__ == "__main__":
+    unittest.main()
