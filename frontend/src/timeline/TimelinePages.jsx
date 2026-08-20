@@ -46,6 +46,7 @@ import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
+import { usePollingData } from "../shared/polling.js";
 
 
 export function mergeRecordingEvents(current, updates) {
@@ -667,6 +668,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
 }
 
 export function RecordingsPage({ timeZone, onAssistantContextChange }) {
+  const { cameras: sharedCameras, appConfig } = usePollingData();
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const initialView = useMemo(() => parseTimelineView(initialQuery, today), [initialQuery, today]);
@@ -1074,31 +1076,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   }, [gridPlaying, isAllCameras]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    Promise.all([
-      fetch("/api/cameras", { signal: controller.signal }),
-      fetch("/api/config", { signal: controller.signal }).catch(() => null),
-    ])
-      .then(async ([cameraResponse, configResponse]) => {
-        if (!cameraResponse.ok) throw new Error(`Camera status failed (${cameraResponse.status})`);
-        const [cameraPayload, configPayload] = await Promise.all([
-          cameraResponse.json(),
-          configResponse?.ok ? configResponse.json() : null,
-        ]);
-        return { cameraPayload, configPayload };
-      })
-      .then(({ cameraPayload, configPayload }) => {
-        setCameras(cameraPayload);
-        setCameraTransitionRoutes(configPayload?.detector?.tracking?.camera_transition_routes || []);
-      })
-      .catch((error) => {
-        if (error.name !== "AbortError") {
-          setPlaybackErrorStage("index");
-          setPlaybackError("Unable to load cameras");
-        }
-      });
-    return () => controller.abort();
-  }, []);
+    setCameras(sharedCameras);
+    setCameraTransitionRoutes(appConfig?.detector?.tracking?.camera_transition_routes || []);
+  }, [appConfig, sharedCameras]);
 
   useEffect(() => {
     if (!activeCameraId) return undefined;

@@ -27,6 +27,7 @@ import { appUrl, recordingsHref, fetch } from "../shared/api.js";
 import { formatBytes, formatMilliseconds, formatRate } from "../shared/format.js";
 import { useStoredState, useModalFocus } from "../shared/hooks.js";
 import { useAppEvents } from "../shared/events.js";
+import { useRuntimeState } from "../shared/runtimeState.jsx";
 
 export const WORKSPACE_ICONS = Object.freeze({
   live: Video,
@@ -162,6 +163,7 @@ export function Shell({ page, theme, recordingContext, children }) {
   );
 }
 export function LiveHeaderStats() {
+  const runtimeState = useRuntimeState();
   const [stats, setStats] = useState({
     lifecycle: "",
     resources: null,
@@ -201,7 +203,11 @@ export function LiveHeaderStats() {
     }
   });
 
-  useVisiblePolling(loadSystem, 60_000);
+  useVisiblePolling(loadSystem, 60_000, !runtimeState);
+
+  useEffect(() => {
+    if (runtimeState?.system) setStats((current) => ({ ...current, ...runtimeState.system }));
+  }, [runtimeState?.system]);
 
   const detector = stats.detector || {};
   const runtime = detector.runtime || {};

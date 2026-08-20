@@ -20,6 +20,7 @@ import { DEFAULT_TIME_ZONE, THEMES } from "./shared/constants.js";
 import { useStoredState } from "./shared/hooks.js";
 import { Shell } from "./shell/Shell.jsx";
 import { AssistantPanel } from "./assistant/AssistantPanel.jsx";
+import { RuntimeStateProvider } from "./shared/runtimeState.jsx";
 import { canonicalWorkspaceUrl, resolveWorkspace } from "./workspaceNavigation.mjs";
 
 function lazyExport(importer, exportName) {
@@ -59,7 +60,7 @@ function App() {
     document.documentElement.dataset.theme = THEMES.includes(theme) ? theme : "auto";
   }, [theme]);
   return (
-    <Shell page={page} theme={theme} recordingContext={recordingContext}>
+    <RuntimeStateProvider><Shell page={page} theme={theme} recordingContext={recordingContext}>
       <Suspense fallback={<WorkspaceFallback />}>
         {page === "admin"
           ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
@@ -78,7 +79,7 @@ function App() {
                       : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       </Suspense>
       <AssistantPanel pageContext={{ ...assistantContext, page }} timeZone={timeZone} />
-    </Shell>
+    </Shell></RuntimeStateProvider>
   );
 }
 

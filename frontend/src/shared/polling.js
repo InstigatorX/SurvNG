@@ -4,8 +4,9 @@ import { camerasWithLiveFraming } from "../liveFraming.mjs";
 import { createIncidentPageCache, incidentDetailQuery } from "../incidentNavigation.mjs";
 import { fetch } from "./api.js";
 import { useAppEvents } from "./events.js";
+import { useRuntimeState } from "./runtimeState.jsx";
 
-export function usePollingData() {
+function useLocalPollingData(enabled) {
   const [cameras, setCameras] = useState([]);
   const [appConfig, setAppConfig] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -46,7 +47,7 @@ export function usePollingData() {
     }
   });
 
-  useVisiblePolling(load, 60_000);
+  useVisiblePolling(load, 60_000, enabled);
   useEffect(() => () => { loadSequence.current += 1; }, []);
 
   const camerasWithPresentation = useMemo(
@@ -55,6 +56,16 @@ export function usePollingData() {
   );
 
   return { cameras: camerasWithPresentation, appConfig, loading, refresh: load };
+}
+
+export function usePollingData() {
+  const shared = useRuntimeState();
+  const fallback = useLocalPollingData(!shared);
+  const sharedCameras = useMemo(
+    () => camerasWithLiveFraming(shared?.cameras || [], shared?.appConfig?.cameras),
+    [shared?.appConfig, shared?.cameras],
+  );
+  return shared ? { ...shared, cameras: sharedCameras } : fallback;
 }
 
 export function useIncidentDetails() {

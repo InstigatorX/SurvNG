@@ -19,6 +19,7 @@ import { PEOPLE_REVIEW_FILTERS, PEOPLE_WORKSPACE_MODES, peopleWorkspaceSearch, r
 import { appUrl, recordingsHref, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 import { isMobileViewport } from "../shared/hooks.js";
+import { useRuntimeState } from "../shared/runtimeState.jsx";
 
 export function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated }) {
   const [newName, setNewName] = useState("");
@@ -157,6 +158,7 @@ export function FaceReviewDialog({ observation, people, timeZone, onClose, onUpd
 }
 
 export function FacesPage({ timeZone, onAssistantContextChange }) {
+  const runtimeState = useRuntimeState();
   const initialPeopleQuery = useMemo(() => readPeopleWorkspaceQuery(window.location.search), []);
   const [people, setPeople] = useState([]);
   const [observations, setObservations] = useState([]);
@@ -264,17 +266,6 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
       }
       if (countPayload) setTotalObservations(Number(countPayload.total || 0));
       setNotice("");
-      void Promise.all([fetch("/api/cameras"), fetch("/api/faces/status")])
-        .then(async ([cameraResponse, statusResponse]) => {
-          const [cameraPayload, statusPayload] = await Promise.all([
-            cameraResponse.ok ? cameraResponse.json() : null,
-            statusResponse.ok ? statusResponse.json() : null,
-          ]);
-          if (sequence !== faceLoadSequence.current) return;
-          if (cameraPayload) setCameras(cameraPayload);
-          if (statusPayload) setStatus(statusPayload);
-        })
-        .catch(() => { });
       return observationPayload;
     } catch (error) {
       if (sequence === faceLoadSequence.current) setLoadError(error.message || "Unable to load faces");
@@ -283,6 +274,27 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
       if (sequence === faceLoadSequence.current) setLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (runtimeState?.cameras) {
+      setCameras(runtimeState.cameras);
+      return undefined;
+    }
+    const controller = new AbortController();
+    fetch("/api/cameras", { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => { if (!controller.signal.aborted && Array.isArray(payload)) setCameras(payload); })
+      .catch(() => { });
+    return () => controller.abort();
+  }, [runtimeState?.cameras]);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/faces/status", { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => { if (!controller.signal.aborted && payload) setStatus(payload); })
+      .catch(() => { });
+    return () => controller.abort();
+  }, []);
 
   async function loadClusters() {
     const sequence = ++clusterLoadSequence.current;
