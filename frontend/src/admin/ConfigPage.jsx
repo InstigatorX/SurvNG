@@ -1,8 +1,5 @@
 import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-
-import "./admin.css";
-import "./workspace.css";
 import {
   Activity,
   ArrowLeft,

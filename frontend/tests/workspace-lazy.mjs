@@ -27,7 +27,9 @@ for (const specifier of [
 assert.match(appSource, /import \{ Shell \} from "\.\/shell\/Shell\.jsx"/);
 assert.match(appSource, /import \{ AssistantPanel \} from "\.\/assistant\/AssistantPanel\.jsx"/);
 
-for (const stylesheet of [
+const stylesheetOrder = [
+  "./styles.css",
+  "./shell/shell.css",
   "./timeline/timeline.css",
   "./live/live.css",
   "./timeline/investigation.css",
@@ -35,39 +37,21 @@ for (const stylesheet of [
   "./search/search.css",
   "./people/people.css",
   "./admin/admin.css",
+  "./shell/responsive.css",
   "./admin/workspace.css",
-]) {
-  assert.doesNotMatch(
-    appSource,
-    new RegExp(`import "${stylesheet.replaceAll(".", "\\.")}"`),
-    `${stylesheet} must load with its workspace chunk, not App.jsx`,
+  "./shell/mobile.css",
+];
+const stylesheetPositions = stylesheetOrder.map((stylesheet) => {
+  const index = appSource.indexOf(`import "${stylesheet}"`);
+  assert.notEqual(index, -1, `${stylesheet} must load from App.jsx in cascade order`);
+  return index;
+});
+stylesheetPositions.forEach((index, offset) => {
+  if (offset === 0) return;
+  assert.ok(
+    index > stylesheetPositions[offset - 1],
+    `${stylesheetOrder[offset]} must follow ${stylesheetOrder[offset - 1]} so mobile/responsive overrides stay last`,
   );
-}
-
-assert.match(appSource, /import "\.\/styles\.css"/);
-assert.match(
-  readFileSync(join(directory, "../src/shell/Shell.jsx"), "utf8"),
-  /import "\.\/shell\.css"/,
-);
-assert.match(
-  readFileSync(join(directory, "../src/live/LivePage.jsx"), "utf8"),
-  /import "\.\/live\.css"/,
-);
-assert.match(
-  readFileSync(join(directory, "../src/incidents/IncidentsPage.jsx"), "utf8"),
-  /import "\.\/incidents\.css"/,
-);
-assert.match(
-  readFileSync(join(directory, "../src/timeline/TimelinePages.jsx"), "utf8"),
-  /import "\.\/timeline\.css"/,
-);
-assert.match(
-  readFileSync(join(directory, "../src/people/FacesPage.jsx"), "utf8"),
-  /import "\.\/people\.css"/,
-);
-assert.match(
-  readFileSync(join(directory, "../src/admin/ConfigPage.jsx"), "utf8"),
-  /import "\.\/admin\.css"/,
-);
+});
 
 console.log("workspace lazy-load contract tests passed");

@@ -1,6 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-
-import "./incidents.css";
 import {
   ArrowLeft,
   ArrowRight,
