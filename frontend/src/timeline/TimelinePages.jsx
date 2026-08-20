@@ -1,4 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+
+import "./timeline.css";
+import "./investigation.css";
+import "../search/search.css";
 import {
   ArrowLeft,
   ArrowRight,

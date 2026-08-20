@@ -1,5 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+
+import "./live.css";
 import {
   Activity,
   ArrowLeft,

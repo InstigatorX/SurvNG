@@ -3,17 +3,6 @@ import { createRoot } from "react-dom/client";
 import { CircleAlert } from "lucide-react";
 
 import "./styles.css";
-import "./shell/shell.css";
-import "./timeline/timeline.css";
-import "./live/live.css";
-import "./timeline/investigation.css";
-import "./incidents/incidents.css";
-import "./search/search.css";
-import "./people/people.css";
-import "./admin/admin.css";
-import "./shell/responsive.css";
-import "./admin/workspace.css";
-import "./shell/mobile.css";
 
 import { appPathname, appUrl } from "./shared/api.js";
 import { DEFAULT_TIME_ZONE, THEMES } from "./shared/constants.js";
