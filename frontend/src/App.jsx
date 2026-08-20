@@ -46,8 +46,6 @@ function App() {
   const workspace = resolveWorkspace(pathname);
   const page = workspace?.id || "not-found";
   const canonicalPath = canonicalWorkspaceUrl(pathname, window.location.search, window.location.hash);
-  const isExportCenter = pathname.startsWith("/recordings/exports") || pathname.startsWith("/timeline/exports");
-  const isSemanticSearch = page === "search";
   const [assistantContext, setAssistantContext] = useState({ page });
   useEffect(() => {
     const nextUrl = appUrl(canonicalPath);
@@ -65,21 +63,21 @@ function App() {
       <Suspense fallback={<WorkspaceFallback />}>
         {page === "admin"
           ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
-          : page === "timeline"
-            ? isExportCenter
-              ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-              : <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-            : isSemanticSearch
-              ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-              : page === "incidents"
-                ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
-                : page === "people"
-                  ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-                  : page === "live"
-                    ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
-                    : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
+          : page === "exports"
+            ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+            : page === "timeline"
+              ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+              : page === "search"
+                ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+                : page === "incidents"
+                  ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
+                  : page === "people"
+                    ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+                    : page === "live"
+                      ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
+                      : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       </Suspense>
-      <AssistantPanel pageContext={{ ...assistantContext, page: isExportCenter ? "exports" : page }} timeZone={timeZone} />
+      <AssistantPanel pageContext={{ ...assistantContext, page }} timeZone={timeZone} />
     </Shell>
   );
 }

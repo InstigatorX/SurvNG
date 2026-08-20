@@ -45,6 +45,7 @@ def create_frontend_router(
         "recordings_page": ("/recordings", "recordings.html"),
         "recording_search_page": ("/recordings/search", "recordings.html"),
         "recording_exports_page": ("/recordings/exports", "recordings.html"),
+        "exports_page": ("/exports", "recordings.html"),
         "timeline_page": ("/timeline", "recordings.html"),
         "timeline_exports_page": ("/timeline/exports", "recordings.html"),
         "search_page": ("/search", "recordings.html"),

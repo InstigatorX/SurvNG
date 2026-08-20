@@ -290,12 +290,16 @@ export function RecordingCompanionStrip({ cameras, routes, activeCameraId, sourc
   </div>;
 }
 
-export function TimelineCameraPicker({ cameras, value, onChange }) {
+export function TimelineCameraPicker({ cameras, value, onChange, allOption = null, ariaLabel = "Select timeline camera" }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef(null);
   const searchRef = useRef(null);
-  const selected = cameras.find((camera) => camera.id === value) || cameras[0];
+  const allSelected = Boolean(allOption) && value === allOption.value;
+  const selectedCamera = cameras.find((camera) => camera.id === value);
+  const selected = allSelected
+    ? { id: allOption.value, name: allOption.label, recording: cameras.some((camera) => camera.recording || camera.sub_recording) }
+    : selectedCamera || cameras[0] || (allOption ? { id: allOption.value, name: allOption.label, recording: false } : null);
   const matches = filteredTimelineCameras(cameras, query);
   useEffect(() => {
     if (!open) return undefined;
@@ -328,13 +332,26 @@ export function TimelineCameraPicker({ cameras, value, onChange }) {
         <i className={(selected.recording || selected.sub_recording) ? "online" : ""} />
       </button>
       {open ? (
-        <div className="timeline-camera-picker-menu" role="listbox" aria-label="Select timeline camera">
+        <div className="timeline-camera-picker-menu" role="listbox" aria-label={ariaLabel}>
           <label className="timeline-camera-picker-search">
             <Search size={14} aria-hidden="true" />
             <span className="sr-only">Search cameras</span>
             <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search cameras" />
           </label>
           <div className="timeline-camera-picker-list">
+            {allOption ? (
+              <button
+                type="button"
+                role="option"
+                aria-selected={allSelected}
+                className={allSelected ? "active" : ""}
+                onClick={() => { onChange(allOption.value); setOpen(false); setQuery(""); }}
+              >
+                <Camera size={15} />
+                <span>{allOption.label}</span>
+                <i className={cameras.some((camera) => camera.recording || camera.sub_recording) ? "online" : ""} />
+              </button>
+            ) : null}
             {matches.map((camera) => (
               <button
                 key={camera.id}
@@ -357,35 +374,129 @@ export function TimelineCameraPicker({ cameras, value, onChange }) {
   );
 }
 
-export function RecordingSectionSwitcher({ mode, cameraId = "" }) {
-  const query = cameraId ? `?camera=${encodeURIComponent(cameraId)}` : "";
-  return (
-    <div className="recordings-section-switcher" aria-label="Recording section">
-      <a className={mode === "history" ? "active" : ""} href={appUrl(`/timeline${query}`)}><Clock3 size={14} />Timeline</a>
-      <a className={mode === "exports" ? "active" : ""} href={appUrl("/timeline/exports")}><Download size={14} />Exports</a>
-    </div>
-  );
+function parseDateKey(dateKey) {
+  const [year, month, day] = String(dateKey || "").split("-").map(Number);
+  return { year, month, day };
 }
 
-export function RecordingCameraRail({ cameras = [], value = ALL_RECORDING_CAMERAS_ID, query = "", onCameraChange = () => { }, onQueryChange = () => { }, showSearch = true, children }) {
+function formatTimelineDateLabel(dateKey) {
+  const { year, month, day } = parseDateKey(dateKey);
+  if (!year || !month || !day) return dateKey || "";
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, { month: "2-digit", day: "2-digit", year: "numeric" });
+}
+
+function shiftCalendarMonth(year, month, delta) {
+  const next = new Date(year, month - 1 + delta, 1);
+  return { year: next.getFullYear(), month: next.getMonth() + 1 };
+}
+
+export function TimelineDatePicker({ value, max, onChange }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const menuRef = useRef(null);
+  const selected = parseDateKey(value);
+  const latest = parseDateKey(max);
+  const [viewYear, setViewYear] = useState(selected.year);
+  const [viewMonth, setViewMonth] = useState(selected.month);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    setViewYear(selected.year);
+    setViewMonth(selected.month);
+    function onPointerDown(event) {
+      if (!rootRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) setOpen(false);
+    }
+    function onKey(event) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, selected.month, selected.year]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    function place() {
+      const button = rootRef.current;
+      const menu = menuRef.current;
+      if (!button || !menu) return;
+      const rect = button.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const width = menuRect.width || 228;
+      const height = menuRect.height || 236;
+      menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rect.left + (rect.width / 2) - (width / 2)))}px`;
+      menu.style.top = `${Math.max(8, rect.top - height - 6)}px`;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      place();
+      window.requestAnimationFrame(place);
+    });
+    window.addEventListener("resize", place);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, viewMonth, viewYear]);
+
+  const firstWeekday = new Date(viewYear, viewMonth - 1, 1).getDay();
+  const daysInMonth = new Date(viewYear, viewMonth, 0).getDate();
+  const cells = [
+    ...Array.from({ length: firstWeekday }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, index) => index + 1),
+  ];
+  const monthLabel = new Date(viewYear, viewMonth - 1, 1).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  const previousMonth = shiftCalendarMonth(viewYear, viewMonth, -1);
+  const nextMonth = shiftCalendarMonth(viewYear, viewMonth, 1);
+  const nextMonthDisabled = latest.year && (nextMonth.year > latest.year || (nextMonth.year === latest.year && nextMonth.month > latest.month));
+
   return (
-    <aside className="recordings-v2-cameras" aria-label="Cameras">
-      <header className={`recordings-camera-header ${showSearch ? "" : "single"}`.trim()}>
-        <label>
-          <span className="sr-only">Timeline camera</span>
-          <select value={value} onChange={(event) => onCameraChange(event.target.value)}>
-            <option value={ALL_RECORDING_CAMERAS_ID}>All cameras</option>
-            {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
-          </select>
-        </label>
-        {showSearch ? <label className="recordings-camera-search">
-          <Search size={14} aria-hidden="true" />
-          <span className="sr-only">Search cameras</span>
-          <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search cameras" />
-        </label> : null}
-      </header>
-      <div className="recordings-camera-list">{children}</div>
-    </aside>
+    <div className={`recordings-v2-date-picker${open ? " open" : ""}`}>
+      <button
+        ref={rootRef}
+        type="button"
+        className="recordings-v2-date-toggle"
+        aria-label="Recording day"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        onClick={() => setOpen((current) => !current)}
+      >
+        {formatTimelineDateLabel(value)}
+      </button>
+      {open ? (
+        <div ref={menuRef} className="recordings-v2-date-calendar" role="dialog" aria-label="Choose recording day">
+          <header>
+            <button type="button" aria-label="Previous month" onClick={() => { setViewYear(previousMonth.year); setViewMonth(previousMonth.month); }}><ChevronLeft size={14} /></button>
+            <strong>{monthLabel}</strong>
+            <button type="button" aria-label="Next month" disabled={nextMonthDisabled} onClick={() => { setViewYear(nextMonth.year); setViewMonth(nextMonth.month); }}><ChevronRight size={14} /></button>
+          </header>
+          <div className="recordings-v2-date-weekdays" aria-hidden="true">
+            {["S", "M", "T", "W", "T", "F", "S"].map((label, index) => <span key={`${label}-${index}`}>{label}</span>)}
+          </div>
+          <div className="recordings-v2-date-days">
+            {cells.map((day, index) => {
+              if (!day) return <span key={`empty-${index}`} />;
+              const dateKey = `${viewYear}-${String(viewMonth).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+              const disabled = Boolean(max) && dateKey > max;
+              const active = dateKey === value;
+              return (
+                <button
+                  key={dateKey}
+                  type="button"
+                  className={active ? "active" : ""}
+                  disabled={disabled}
+                  onClick={() => { onChange(dateKey); setOpen(false); }}
+                >
+                  {day}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1400,6 +1511,29 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     }
   }
 
+  function timelineDayControls() {
+    return (
+      <>
+        <div className="recordings-v2-date">
+          <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={15} /></button>
+          <TimelineDatePicker value={date} max={today} onChange={changeDate} />
+          <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={15} /></button>
+          <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
+        </div>
+        <div className="recordings-v2-player-source" role="group" aria-label="Recording stream">
+          <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} title="High" onClick={() => { checkpointTimelineView(); setSource("main"); }} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
+          <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} title="Medium" onClick={() => { checkpointTimelineView(); setSource("live"); }} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
+        </div>
+        <label className="recordings-playback-rate">
+          <span className="sr-only">Playback speed</span>
+          <select value={playbackRate} onChange={(event) => { checkpointTimelineView(); setPlaybackRate(normalizedTimelinePlaybackRate(event.target.value)); }}>
+            {TIMELINE_PLAYBACK_RATES.map((rate) => <option key={rate} value={rate}>{rate}x</option>)}
+          </select>
+        </label>
+      </>
+    );
+  }
+
   return (
     <main className={`recordings-v2-page${investigationOpen ? " has-investigation" : " investigation-hidden"}`}>
       <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
@@ -1409,26 +1543,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
           onChange={(nextCameraId) => { checkpointTimelineView(); setCameraId(nextCameraId); }}
         />
         <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
-        <div className="recordings-v2-date">
-          <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={15} /></button>
-          <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
-          <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={15} /></button>
-          <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
-        </div>
-        <div className="recordings-v2-player-source" role="group" aria-label="Recording stream">
-          <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} onClick={() => { checkpointTimelineView(); setSource("main"); }} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main <small>High</small></button>
-          <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} onClick={() => { checkpointTimelineView(); setSource("live"); }} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub <small>Medium</small></button>
-        </div>
-        <label className="recordings-playback-rate">
-          <span className="sr-only">Playback speed</span>
-          <select value={playbackRate} onChange={(event) => { checkpointTimelineView(); setPlaybackRate(normalizedTimelinePlaybackRate(event.target.value)); }}>
-            {TIMELINE_PLAYBACK_RATES.map((rate) => <option key={rate} value={rate}>{rate}x</option>)}
-          </select>
-        </label>
-        <div className="recordings-commandbar-export">
-          <button type="button" onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}>Export</button>
-          <a href={appUrl("/timeline/exports")} aria-label="Open Export Center"><ChevronRight size={15} /></a>
-        </div>
+        <div className="recordings-commandbar-day-controls">{timelineDayControls()}</div>
       </nav>
       <section className="recordings-v2-workspace">
         <div className={`recordings-v2-player${isAllCameras ? " all-camera-grid" : " selected-camera-stage"}`}>
@@ -1505,6 +1620,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
                   >{label}</button>
                 ))}
               </div>
+              <div className="recordings-toolbar-day-controls">{timelineDayControls()}</div>
             </div>
             <div className="recordings-timeline-display-controls">
               <button type="button" className={timelineLanes.object ? "active object" : "object"} aria-pressed={timelineLanes.object} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, object: !current.object })); }}>Objects</button>
@@ -1578,7 +1694,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
               {exportError ? <div className="recordings-v2-export-error"><CircleAlert size={15} />{exportError}</div> : null}
               <div className="recordings-v2-export-actions">
                 {exportJob?.status === "completed" && exportJob.download_url ? <a className="nav-button" href={mediaUrl(exportJob.download_url)}><Download size={15} />Download</a> : null}
-                {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/timeline/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Export Center</a> : null}
+                {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Open export</a> : null}
                 {exportJob && ["queued", "running", "cancelling"].includes(exportJob.status) ? <button type="button" onClick={cancelExport} disabled={exportJob.status === "cancelling"}><X size={15} />{exportJob.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : null}
                 {!exportJob ? <button type="button" className="primary" onClick={startExport} disabled={exportSubmitting}><Download size={15} />{exportSubmitting ? "Starting..." : `Start ${exportKind === "timelapse" ? "timelapse" : "export"}`}</button> : null}
                 {exportJob && ["completed", "failed", "cancelled"].includes(exportJob.status) ? <button type="button" onClick={() => { setExportJob(null); setExportError(""); setExportLabel(""); }}>New export</button> : null}
@@ -1798,13 +1914,12 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   useEffect(() => {
     const params = new URLSearchParams();
     if (cameraId) params.set("camera", cameraId);
-    window.history.replaceState(null, "", appUrl(`/timeline/exports${params.size ? `?${params.toString()}` : ""}`));
+    window.history.replaceState(null, "", appUrl(`/exports${params.size ? `?${params.toString()}` : ""}`));
   }, [cameraId]);
 
   useEffect(() => {
     onAssistantContextChange?.({
-      page: "recordings",
-      view: "exports",
+      page: "exports",
       camera_id: cameraId || selected?.camera_id || "",
       export_id: selected?.id || "",
       filters: { kind, status, protected: protectedOnly },
@@ -1915,21 +2030,16 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
 
   return (
     <main className="recordings-v2-page export-center-page">
-      <nav className="recordings-tabs"><RecordingSectionSwitcher mode="exports" cameraId={cameraId} /></nav>
-      <RecordingCameraRail cameras={cameras} value={cameraId || ALL_RECORDING_CAMERAS_ID} onCameraChange={(nextCameraId) => setCameraId(nextCameraId === ALL_RECORDING_CAMERAS_ID ? "" : nextCameraId)} showSearch={false}>
-        <button type="button" className={!cameraId ? "active" : ""} onClick={() => setCameraId("")}>
-          <Film size={16} /><span>All exports</span><i className={Number(summary.total) ? "online" : ""} />
-        </button>
-        {cameras.map((camera) => (
-          <button key={camera.id} type="button" className={camera.id === cameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
-            <Camera size={16} /><span>{camera.name}</span><i className={(camera.recording || camera.sub_recording) ? "online" : ""} />
-          </button>
-        ))}
-      </RecordingCameraRail>
-
       <section className="export-center-workspace">
         <header className="export-center-toolbar">
           <div className="export-center-filters">
+            <TimelineCameraPicker
+              cameras={cameras}
+              value={cameraId}
+              onChange={setCameraId}
+              allOption={{ value: "", label: "All cameras" }}
+              ariaLabel="Select export camera"
+            />
             <label>Type<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All exports</option><option value="recording">Video clips</option><option value="timelapse">Timelapses</option></select></label>
             <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Any status</option><option value="completed">Ready</option><option value="active">In progress</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label>
             <button type="button" className={protectedOnly ? "active" : ""} onClick={() => setProtectedOnly((current) => !current)}><ShieldCheck size={15} />Protected</button>

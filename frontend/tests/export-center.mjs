@@ -138,6 +138,8 @@ try {
   });
   await page.getByText("Loading workspace…").waitFor({ state: "hidden", timeout: 30_000 });
   await page.locator(".export-center-page").waitFor({ state: "visible" });
+  assert.equal(await page.locator(".export-center-page .recordings-v2-cameras").count(), 0);
+  await page.locator(".export-center-toolbar .timeline-camera-picker-toggle").waitFor({ state: "visible" });
   await page.getByText("gate-clip.mp4", { exact: true }).waitFor({ state: "visible" });
   assert.equal(
     await page.getByRole("link", { name: "Download" }).getAttribute("href"),

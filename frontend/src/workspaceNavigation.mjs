@@ -1,7 +1,8 @@
 export const WORKSPACES = Object.freeze([
   Object.freeze({ id: "live", label: "Live", path: "/", paths: ["/"], legacyRoutes: { "/live": "/" } }),
   Object.freeze({ id: "incidents", label: "Incidents", path: "/incidents", paths: ["/incidents"], legacyRoutes: {} }),
-  Object.freeze({ id: "timeline", label: "Timeline", path: "/timeline", paths: ["/timeline", "/timeline/exports"], legacyRoutes: { "/recordings": "/timeline", "/recordings/exports": "/timeline/exports" } }),
+  Object.freeze({ id: "timeline", label: "Timeline", path: "/timeline", paths: ["/timeline"], legacyRoutes: { "/recordings": "/timeline" } }),
+  Object.freeze({ id: "exports", label: "Exports", path: "/exports", paths: ["/exports"], legacyRoutes: { "/timeline/exports": "/exports", "/recordings/exports": "/exports" } }),
   Object.freeze({ id: "search", label: "Search", path: "/search", paths: ["/search"], legacyRoutes: { "/recordings/search": "/search" } }),
   Object.freeze({ id: "people", label: "People", path: "/people", paths: ["/people"], legacyRoutes: { "/faces": "/people" } }),
   Object.freeze({ id: "admin", label: "Admin", path: "/admin", paths: ["/admin"], legacyRoutes: { "/config": "/admin" } }),
@@ -11,6 +12,7 @@ export const DESKTOP_PRIMARY_WORKSPACES = Object.freeze([
   "live",
   "incidents",
   "timeline",
+  "exports",
   "search",
   "people",
 ]);

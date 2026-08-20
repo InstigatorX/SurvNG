@@ -23,14 +23,14 @@
 }
 
 .recordings-v2-page.export-center-page {
-  grid-template-columns: var(--timeline-camera-rail-width) minmax(0, 1fr);
-  grid-template-rows: var(--timeline-command-height) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .recordings-commandbar {
   grid-column: 1;
   grid-row: 1;
-  grid-template-columns: minmax(160px, 240px) auto auto auto auto auto;
+  grid-template-columns: minmax(160px, 240px) auto;
   gap: 10px;
   min-height: var(--timeline-command-height);
   border: 0;
@@ -41,8 +41,28 @@
   padding: 6px 14px;
 }
 
-.export-center-page .recordings-tabs {
-  grid-column: 2;
+.recordings-commandbar-day-controls {
+  display: none;
+}
+
+.recordings-toolbar-day-controls {
+  display: contents;
+}
+
+.export-center-page .export-center-workspace {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.export-center-toolbar .timeline-camera-picker {
+  width: min(240px, 36vw);
+  flex: 0 1 240px;
+}
+
+.export-center-toolbar .timeline-camera-picker-toggle {
+  min-height: 30px;
+  font-size: 11px;
+  font-weight: 560;
 }
 
 .recordings-section-switcher {
@@ -193,7 +213,6 @@
 .recordings-v2-scale {
   display: inline-flex;
   overflow: hidden;
-  margin-left: 10px;
   border: 1px solid var(--line);
   border-radius: 4px;
 }
@@ -282,31 +301,149 @@
   box-shadow: none;
 }
 
-.recordings-v2-date {
+.recordings-v2-timeline-toolbar .recordings-v2-date,
+.recordings-commandbar-day-controls .recordings-v2-date {
+  display: inline-flex;
+  width: max-content;
+  max-width: none;
+  flex: 0 0 auto;
+  align-items: center;
   gap: 0;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: 4px;
 }
 
-.recordings-v2-date input,
-.recordings-v2-date button {
-  min-height: 38px;
+.recordings-v2-timeline-toolbar .recordings-v2-date > button,
+.recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
+.recordings-commandbar-day-controls .recordings-v2-date > button,
+.recordings-commandbar-day-controls .recordings-v2-date-toggle {
+  display: inline-flex;
+  min-height: 32px;
+  height: 32px;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
   border: 0;
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 540;
+  line-height: 1;
+  padding: 0 7px;
 }
 
-.recordings-v2-date button:first-child {
+.recordings-v2-timeline-toolbar .recordings-v2-date > button:first-child,
+.recordings-commandbar-day-controls .recordings-v2-date > button:first-child {
   border-left: 0;
 }
 
-.recordings-commandbar .recordings-v2-player-source {
+.recordings-v2-timeline-toolbar .recordings-v2-date > button[aria-label],
+.recordings-commandbar-day-controls .recordings-v2-date > button[aria-label] {
+  width: 28px;
+  padding: 0;
+}
+
+.recordings-v2-date-picker {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+}
+
+.recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
+.recordings-commandbar-day-controls .recordings-v2-date-toggle {
+  width: auto;
+  min-width: 0;
+  padding: 0 8px;
+  text-align: center;
+}
+
+.recordings-v2-date-calendar {
+  position: fixed;
+  z-index: 40;
+  width: 228px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-solid);
+  box-shadow: var(--shadow);
+  padding: 8px;
+}
+
+.recordings-v2-date-calendar header {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.recordings-v2-date-calendar header strong {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 620;
+  text-align: center;
+}
+
+.recordings-v2-date-calendar header button {
+  display: grid;
+  width: 28px;
+  min-height: 28px;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+}
+
+.recordings-v2-date-weekdays,
+.recordings-v2-date-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.recordings-v2-date-weekdays span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 620;
+  line-height: 18px;
+  text-align: center;
+}
+
+.recordings-v2-date-days button,
+.recordings-v2-date-days span {
+  display: grid;
+  min-height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 540;
+  padding: 0;
+}
+
+.recordings-v2-date-days button.active {
+  background: color-mix(in srgb, var(--accent) 22%, var(--control));
+  color: var(--active-ink);
+  font-weight: 620;
+}
+
+.recordings-v2-date-days button:disabled {
+  color: var(--muted);
+  opacity: .4;
+}
+
+.recordings-v2-timeline-toolbar .recordings-v2-player-source,
+.recordings-commandbar-day-controls .recordings-v2-player-source {
   position: static;
   z-index: auto;
-  display: flex;
+  display: inline-flex;
+  flex: 0 0 auto;
   gap: 0;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -316,41 +453,51 @@
   backdrop-filter: none;
 }
 
-.recordings-commandbar .recordings-v2-player-source button {
-  display: grid;
-  min-width: 70px;
-  min-height: 38px;
-  gap: 0;
+.recordings-v2-timeline-toolbar .recordings-v2-player-source button,
+.recordings-commandbar-day-controls .recordings-v2-player-source button {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 32px;
+  height: 32px;
+  align-items: center;
   border: 0;
   border-left: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
   color: var(--ink);
-  font-size: 12px;
-  line-height: 1.05;
-  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 540;
+  line-height: 1;
+  padding: 0 8px;
 }
 
-.recordings-commandbar .recordings-v2-player-source button:first-child {
+.recordings-v2-timeline-toolbar .recordings-v2-player-source button:first-child,
+.recordings-commandbar-day-controls .recordings-v2-player-source button:first-child {
   border-left: 0;
 }
 
-.recordings-commandbar .recordings-v2-player-source button.active {
+.recordings-v2-timeline-toolbar .recordings-v2-player-source button.active,
+.recordings-commandbar-day-controls .recordings-v2-player-source button.active {
   background: color-mix(in srgb, var(--accent) 20%, var(--control));
   color: var(--active-ink);
 }
 
-.recordings-v2-player-source button small {
-  color: var(--muted);
-  font-size: 9px;
-  font-weight: 500;
+.recordings-v2-timeline-toolbar .recordings-playback-rate,
+.recordings-commandbar-day-controls .recordings-playback-rate {
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
-.recordings-playback-rate select {
-  width: 68px;
-  min-height: 38px;
+.recordings-v2-timeline-toolbar .recordings-playback-rate select,
+.recordings-commandbar-day-controls .recordings-playback-rate select {
+  width: auto;
+  min-width: 0;
+  min-height: 32px;
+  height: 32px;
   border-radius: 4px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 540;
+  padding: 0 6px;
 }
 
 .recordings-commandbar-export {
@@ -464,10 +611,6 @@
   padding: 0;
 }
 
-.export-center-page .export-center-workspace {
-  grid-column: 2;
-}
-
 .recordings-v2-player {
   border: 0;
   border-bottom: 1px solid var(--line);
@@ -561,7 +704,12 @@
 }
 
 .recordings-v2-incidents-tools {
-  gap: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  flex-wrap: nowrap;
 }
 
 .recordings-v2-filter-label {
@@ -745,7 +893,7 @@
 }
 
 .recordings-v2-track output {
-  top: -27px;
+  top: 6px;
   border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
   background: #087f7c;
   color: #fff;
@@ -1056,13 +1204,13 @@
   }
 
   .recordings-v2-page.export-center-page {
-    grid-template-columns: 190px minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .recordings-commandbar {
-    grid-template-columns: minmax(140px, 1fr) auto auto auto;
-    grid-template-rows: auto auto;
+    grid-template-columns: minmax(140px, 1fr) auto;
+    grid-template-rows: auto;
   }
 
   .timeline-camera-picker {
@@ -1073,18 +1221,6 @@
   .recordings-commandbar-scope {
     grid-column: 1;
     grid-row: 1;
-  }
-
-  .recordings-commandbar .recordings-v2-player-source {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .recordings-commandbar .recordings-v2-date {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    justify-self: start;
-    overflow: visible;
   }
 
   .recordings-commandbar-time {
@@ -1165,9 +1301,6 @@
 @media (max-width: 1279px) and (min-width: 761px) {
 
   .recordings-section-switcher a,
-  .recordings-v2-date input,
-  .recordings-v2-date button,
-  .recordings-commandbar .recordings-v2-player-source button,
   .recordings-camera-list button,
   .recordings-v2-event-filter button,
   .recordings-v2-range select,
@@ -1176,7 +1309,15 @@
     min-height: 44px;
   }
 
-  .recordings-playback-rate select,
+  .recordings-v2-timeline-toolbar .recordings-v2-date > button,
+  .recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
+  .recordings-v2-timeline-toolbar .recordings-v2-date-picker,
+  .recordings-v2-timeline-toolbar .recordings-v2-player-source button,
+  .recordings-v2-timeline-toolbar .recordings-playback-rate select {
+    min-height: 44px;
+    height: 44px;
+  }
+
   .recordings-commandbar-export button,
   .recordings-commandbar-export a,
   .recordings-timeline-display-controls button,
@@ -1249,8 +1390,20 @@
     padding: 6px 8px;
   }
 
+  .recordings-v2-page.export-center-page {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
   .recordings-commandbar-scope,
-  .recordings-playback-rate {
+  .recordings-commandbar-day-controls .recordings-playback-rate {
+    display: none;
+  }
+
+  .recordings-commandbar-day-controls {
+    display: contents;
+  }
+
+  .recordings-toolbar-day-controls {
     display: none;
   }
 
@@ -1259,15 +1412,17 @@
     min-width: 120px;
   }
 
-  .recordings-v2-date {
+  .recordings-commandbar-day-controls .recordings-v2-date {
     min-width: 0;
   }
 
-  .recordings-v2-date input {
-    width: min(126px, 34vw);
+  .recordings-commandbar-day-controls .recordings-v2-date-toggle {
+    width: auto;
+    min-width: 0;
+    padding-inline: 8px;
   }
 
-  .recordings-commandbar .recordings-v2-player-source button {
+  .recordings-commandbar-day-controls .recordings-v2-player-source button {
     min-width: 62px;
     padding-inline: 8px;
   }

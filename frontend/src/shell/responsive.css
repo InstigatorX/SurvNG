@@ -140,8 +140,9 @@
     min-height: 44px;
   }
 
-  .recordings-v2-date button,
-  .recordings-commandbar .recordings-v2-player-source button,
+  .recordings-v2-timeline-toolbar .recordings-v2-date > button,
+  .recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
+  .recordings-v2-timeline-toolbar .recordings-v2-player-source button,
   .recordings-v2-range select,
   .recordings-event-inspector-tabs button,
   .recording-grid-tile.primary .recording-grid-camera,

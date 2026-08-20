@@ -124,6 +124,7 @@ try {
 
   for (const [path, title] of [
     ["incidents", "Incidents"],
+    ["timeline/exports", "Exports"],
     ["search", "Search"],
     ["people", "People"],
     ["admin", "Admin"],
@@ -140,19 +141,19 @@ try {
   assert.equal(await incidentSurface.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(0, 0, 0, 0)");
 
   await page.setViewportSize({ width: 900, height: 844 });
-  await openWorkspace(page, "timeline", ".recordings-v2-date");
+  await openWorkspace(page, "timeline", ".recordings-toolbar-day-controls .recordings-v2-date");
   await page.getByRole("button", { name: "All events" }).waitFor({ state: "visible" });
   assert.ok(await page.locator(".workspace-sidebar").evaluate((node) => node.getBoundingClientRect().width <= 68));
-  assert.ok(await page.locator(".recordings-v2-date").evaluate((node) => node.scrollWidth <= node.clientWidth));
+  assert.ok(await page.locator(".recordings-toolbar-day-controls .recordings-v2-date").evaluate((node) => node.scrollWidth <= node.clientWidth));
   for (const selector of [
-    ".recordings-v2-date button",
-    ".recordings-v2-player-source button",
+    ".recordings-toolbar-day-controls .recordings-v2-date button",
+    ".recordings-toolbar-day-controls .recordings-v2-player-source button",
     ".recordings-v2-event-filter button",
     ".recordings-v2-export-toggle",
   ]) {
     assert.ok(await page.locator(selector).first().evaluate((node) => node.getBoundingClientRect().height >= 44));
   }
-  assert.equal(await page.locator(".recordings-v2-player-source button[aria-pressed='true']").count(), 1);
+  assert.equal(await page.locator(".recordings-toolbar-day-controls .recordings-v2-player-source button[aria-pressed='true']").count(), 1);
 
   await page.setViewportSize({ width: 740, height: 844 });
   await openWorkspace(page, "/", ".camera-tile");

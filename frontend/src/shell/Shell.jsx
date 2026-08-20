@@ -6,6 +6,7 @@ import {
   Clock3,
   Cog,
   Cpu,
+  Download,
   Gauge,
   HardDrive,
   Search,
@@ -31,6 +32,7 @@ export const WORKSPACE_ICONS = Object.freeze({
   live: Video,
   incidents: Siren,
   timeline: Clock3,
+  exports: Download,
   search: Search,
   people: Users,
   admin: Cog,
@@ -43,7 +45,7 @@ export function MobileMoreSheet({ links, page, onClose }) {
       <button type="button" className="mobile-more-backdrop" onClick={onClose} aria-label="Close more menu" />
       <div id="mobile-more-panel" className="mobile-more-panel" tabIndex={-1}>
         <header><h2 id="mobile-more-title">More</h2><button type="button" data-modal-initial onClick={onClose} aria-label="Close more menu"><X size={20} /></button></header>
-        {links.slice(4).map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} href={href} key={id}><Icon size={20} /><span>{label}</span></a>)}
+        {links.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} href={href} key={id}><Icon size={20} /><span>{label}</span></a>)}
         <a href={appUrl("/admin?section=telemetry")}><Gauge size={20} /><span>System status</span></a>
         <a href={appUrl("/admin?section=general")}><Sun size={20} /><span>Appearance</span></a>
       </div>
@@ -72,6 +74,8 @@ export function Shell({ page, theme, recordingContext, children }) {
   };
   const workspaceLinks = [...DESKTOP_PRIMARY_WORKSPACES, "admin"].map(workspaceLink);
   const mobileLinks = MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more").map(workspaceLink);
+  const mobilePrimaryIds = new Set(MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more"));
+  const moreLinks = workspaceLinks.filter(([id]) => !mobilePrimaryIds.has(id));
 
   useEffect(() => {
     const label = workspaceDefinition(page)?.label || "SurvNG";
@@ -151,9 +155,9 @@ export function Shell({ page, theme, recordingContext, children }) {
       <div className="workspace-content"><h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>{children}</div>
       <nav className="mobile-workspace-nav" aria-label="Primary">
         {mobileLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} href={href} key={id}><Icon size={21} /><span>{label}</span></a>)}
-        <button ref={mobileMoreButtonRef} type="button" className={page === "people" || page === "admin" || mobileMoreOpen ? "active" : ""} onClick={() => setMobileMoreOpen((current) => !current)} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-panel"><Rows3 size={21} /><span>More</span></button>
+        <button ref={mobileMoreButtonRef} type="button" className={!mobilePrimaryIds.has(page) || mobileMoreOpen ? "active" : ""} onClick={() => setMobileMoreOpen((current) => !current)} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-panel"><Rows3 size={21} /><span>More</span></button>
       </nav>
-      {mobileMoreOpen ? <MobileMoreSheet links={workspaceLinks} page={page} onClose={() => setMobileMoreOpen(false)} /> : null}
+      {mobileMoreOpen ? <MobileMoreSheet links={moreLinks} page={page} onClose={() => setMobileMoreOpen(false)} /> : null}
     </div>
   );
 }

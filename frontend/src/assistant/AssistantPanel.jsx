@@ -357,7 +357,7 @@ export function AssistantPanel({ pageContext, timeZone }) {
                   <div><strong>{item.details.media_export.phase || item.details.media_export.status}</strong><span>{Math.round(Number(item.details.media_export.progress) || 0)}%</span></div>
                   <i><b style={{ width: `${Math.max(0, Math.min(100, Number(item.details.media_export.progress) || 0))}%` }} /></i>
                   {item.details.media_export.error ? <small>{item.details.media_export.error}</small> : null}
-                  <a className="assistant-export-download" href={appUrl("/timeline/exports")}>View in Export Center</a>
+                  <a className="assistant-export-download" href={appUrl("/exports")}>View in Exports</a>
                   {item.details.media_export.status === "completed" && item.details.media_export.download_url ? <a className="assistant-export-download" href={appUrl(item.details.media_export.download_url)}><Download size={14} />Download MP4</a> : null}
                 </div> : null}
                 {item.details?.advice ? <div className="assistant-visual-review">

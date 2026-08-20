@@ -195,7 +195,7 @@
 
   .recordings-commandbar-scope,
   .recordings-section-switcher,
-  .recordings-playback-rate,
+  .recordings-commandbar-day-controls .recordings-playback-rate,
   .recordings-commandbar-export {
     display: none !important;
   }
@@ -206,7 +206,15 @@
     max-width: 210px;
   }
 
-  .recordings-v2-date {
+  .recordings-commandbar-day-controls {
+    display: contents !important;
+  }
+
+  .recordings-toolbar-day-controls {
+    display: none !important;
+  }
+
+  .recordings-commandbar-day-controls .recordings-v2-date {
     grid-column: 2 !important;
     display: flex !important;
     min-width: 0;
@@ -214,37 +222,33 @@
     overflow: hidden !important;
   }
 
-  .recordings-v2-date>button {
+  .recordings-commandbar-day-controls .recordings-v2-date>button {
     display: none !important;
   }
 
-  .recordings-v2-date input {
-    width: 108px !important;
+  .recordings-commandbar-day-controls .recordings-v2-date-toggle {
+    width: auto !important;
     min-width: 0 !important;
     height: 36px !important;
     min-height: 36px !important;
     border: 0 !important;
-    padding: 0 4px !important;
+    padding: 0 8px !important;
     font-size: 11px !important;
   }
 
-  .recordings-commandbar .recordings-v2-player-source {
+  .recordings-commandbar-day-controls .recordings-v2-player-source {
     grid-column: 3 !important;
     display: flex !important;
     height: 38px !important;
     min-height: 38px !important;
   }
 
-  .recordings-commandbar .recordings-v2-player-source button {
+  .recordings-commandbar-day-controls .recordings-v2-player-source button {
     min-width: 44px !important;
     min-height: 36px !important;
     height: 36px !important;
     padding: 2px 6px !important;
     font-size: 10px !important;
-  }
-
-  .recordings-commandbar .recordings-v2-player-source button small {
-    display: none !important;
   }
 
   .recordings-v2-workspace {
@@ -393,8 +397,8 @@
     grid-template-columns: minmax(104px, 1fr) 104px auto !important;
   }
 
-  .recordings-v2-date input {
-    width: 104px !important;
+  .recordings-commandbar-day-controls .recordings-v2-date-toggle {
+    padding-inline: 6px !important;
   }
 
   .live-mobile-camera-select {
