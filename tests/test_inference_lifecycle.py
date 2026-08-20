@@ -230,6 +230,16 @@ def test_face_matching_policy_change_refreshes_saved_suggestions() -> None:
     service.faces.request_match_refresh.assert_called_once_with()
 
 
+def test_unknown_cluster_threshold_change_refreshes_saved_suggestions() -> None:
+    service = _lifecycle()
+    next_config = service.detector.config.model_copy(deep=True)
+    next_config.face_unknown_cluster_threshold = 0.71
+
+    service.reconfigure_policy(next_config)
+
+    service.faces.request_match_refresh.assert_called_once_with()
+
+
 def test_unrelated_policy_change_does_not_refresh_saved_face_suggestions() -> None:
     service = _lifecycle()
     next_config = service.detector.config.model_copy(deep=True)

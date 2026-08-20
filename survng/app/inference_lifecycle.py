@@ -237,6 +237,7 @@ class InferenceLifecycle:
             refresh_faces = (
                 previous.face_match_threshold != config.face_match_threshold
                 or previous.face_max_references != config.face_max_references
+                or previous.face_unknown_cluster_threshold != config.face_unknown_cluster_threshold
             )
             try:
                 self.detector.update_runtime_config(config)
