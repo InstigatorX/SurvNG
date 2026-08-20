@@ -91,6 +91,25 @@ export function timelineIdentityDetailEventId(incident) {
   return null;
 }
 
+export function timelineIncidentIncludesEvent(incident, eventId) {
+  const requestedId = Number(eventId);
+  if (!Number.isInteger(requestedId) || requestedId <= 0 || !incident) return false;
+  if (Number(incident.representative_event_id) === requestedId) return true;
+  return (Array.isArray(incident.events) ? incident.events : [])
+    .some((event) => Number(event?.id) === requestedId);
+}
+
+export function invalidateTimelineIdentityCache(cache, eventId) {
+  if (!(cache instanceof Map)) return [];
+  const invalidated = [];
+  for (const [cacheEventId, detail] of cache) {
+    if (!timelineIncidentIncludesEvent(detail, eventId)) continue;
+    cache.delete(cacheEventId);
+    invalidated.push(cacheEventId);
+  }
+  return invalidated;
+}
+
 export function mergeTimelineIncidentIdentity(summary, detail) {
   if (!summary || !detail) return summary;
   const merged = { ...summary };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { expectedTimelineCameras, filteredTimelineCameras, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -48,6 +48,15 @@ assert.deepEqual(timelineEvidenceWindow(evidence, 18, 2).map((event) => event.in
 assert.equal(timelineIdentityDetailEventId({ id: "incident:4", representative_event_id: 41 }), 41);
 assert.equal(timelineIdentityDetailEventId({ id: "incident:4", events: [{ id: 42 }] }), 42);
 assert.equal(timelineIdentityDetailEventId({ id: "not-an-event" }), null);
+assert.equal(timelineIncidentIncludesEvent({ representative_event_id: 41, events: [{ id: 40 }] }, 41), true);
+assert.equal(timelineIncidentIncludesEvent({ representative_event_id: 41, events: [{ id: 40 }] }, "40"), true);
+assert.equal(timelineIncidentIncludesEvent({ representative_event_id: 41, events: [{ id: 40 }] }, 99), false);
+const identityCache = new Map([
+  [41, { representative_event_id: 41, events: [{ id: 40 }] }],
+  [50, { representative_event_id: 50, events: [{ id: 49 }] }],
+]);
+assert.deepEqual(invalidateTimelineIdentityCache(identityCache, 40), [41]);
+assert.deepEqual([...identityCache.keys()], [50]);
 const timelineSummary = { id: "incident:4", incident_epoch: 10, labels: ["person"] };
 assert.deepEqual(mergeTimelineIncidentIdentity(timelineSummary, {
   identities: [{ name: "Ada", status: "confirmed" }],
@@ -125,6 +134,8 @@ assert.match(recordingsSource, /investigation-hidden/);
 assert.match(recordingsSource, /recordings-investigation-toggle/);
 assert.match(recordingsSource, /selectedIncidentIdentityCacheRef/);
 assert.match(recordingsSource, /\/api\/incidents\/by-event\//);
+assert.match(recordingsSource, /type !== "identity_update"/);
+assert.match(recordingsSource, /selectedIdentityRevision\]\);/);
 assert.match(recordingsSource, /recordings-return-playhead/);
 assert.match(recordingsSource, /recordings-v2-scale/);
 assert.doesNotMatch(recordingsSource, /setEventFilter\("object"\)/);

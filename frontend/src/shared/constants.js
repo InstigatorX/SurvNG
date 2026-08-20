@@ -29,7 +29,7 @@ export const THEMES = ["auto", "light", "dark"];
 export const SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__";
 export const PREFER_NATIVE_HLS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-export const APP_EVENT_TYPES = ["camera_state", "cameras_state", "motion", "object", "incident", "system_state"];
+export const APP_EVENT_TYPES = ["camera_state", "cameras_state", "motion", "object", "incident", "identity_update", "system_state"];
 export const INCIDENT_REFRESH_FALLBACK_MS = 15_000;
 export const STREAM_MODES = ["motion", "mjpeg", "webrtc"];
 export const STREAM_LABELS = {

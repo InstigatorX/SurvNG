@@ -88,6 +88,12 @@ assert.deepEqual(received, [{
   data: { id: "gate", running: true },
   id: "abc:8",
 }]);
+resumedSource.emit("identity_update", { event_id: 42, person_id: 7 }, "abc:9");
+assert.deepEqual(received.at(-1), {
+  type: "identity_update",
+  data: { event_id: 42, person_id: 7 },
+  id: "abc:9",
+});
 
 unsubscribe();
 assert.equal(documentListeners.has("visibilitychange"), false);
@@ -103,7 +109,7 @@ documentListeners.get("visibilitychange")();
 assert.equal(FakeEventSource.instances.length, 3);
 assert.equal(
   FakeEventSource.instances[2].url,
-  "/survng/api/events/stream?last_event_id=abc%3A8",
+  "/survng/api/events/stream?last_event_id=abc%3A9",
 );
 hiddenUnsubscribe();
 

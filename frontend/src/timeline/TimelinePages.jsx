@@ -37,7 +37,7 @@ import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
-import { expectedTimelineCameras, filteredTimelineCameras, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
 import { appUrl, mediaUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { ALL_RECORDING_CAMERAS_ID } from "../shared/constants.js";
@@ -48,6 +48,7 @@ import { IdentityChip } from "../shared/identity.jsx";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
 import { usePollingData } from "../shared/polling.js";
+import { useAppEvents } from "../shared/events.js";
 
 
 export function mergeRecordingEvents(current, updates) {
@@ -722,6 +723,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [gridPlaying, setGridPlaying] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState(initialView.eventId);
   const [selectedIncidentIdentity, setSelectedIncidentIdentity] = useState(null);
+  const [selectedIdentityRevision, setSelectedIdentityRevision] = useState(0);
   const [timelineInspectorTab, setTimelineInspectorTab] = useState(initialView.inspector);
   const [timelineInspectorOpen, setTimelineInspectorOpen] = useState(false);
   const [investigationOpen, setInvestigationOpen] = useState(false);
@@ -813,6 +815,18 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     ? mergeTimelineIncidentIdentity(selectedEventSummary, selectedIncidentIdentity.detail)
     : selectedEventSummary;
 
+  useAppEvents(({ type, data }) => {
+    if (type !== "identity_update") return;
+    const eventId = Number(data?.event_id);
+    if (!Number.isInteger(eventId) || eventId <= 0) return;
+    const invalidatedCacheIds = invalidateTimelineIdentityCache(selectedIncidentIdentityCacheRef.current, eventId);
+    const selectedCacheInvalidated = invalidatedCacheIds.includes(selectedIdentityEventId);
+    if (selectedCacheInvalidated || timelineIncidentIncludesEvent(selectedEventSummary, eventId)) {
+      setSelectedIncidentIdentity(null);
+      setSelectedIdentityRevision((revision) => revision + 1);
+    }
+  });
+
   useEffect(() => {
     if (!investigationOpen || !selectedIdentityEventId) {
       setSelectedIncidentIdentity(null);
@@ -839,7 +853,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
         // The compact timeline incident remains usable when identity detail is unavailable.
       });
     return () => controller.abort();
-  }, [investigationOpen, selectedIdentityEventId]);
+  }, [investigationOpen, selectedIdentityEventId, selectedIdentityRevision]);
 
   useEffect(() => {
     setTimelineViewportAnchor(null);
