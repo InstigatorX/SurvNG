@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { peopleFilterLabel, peopleModeLabel, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../src/peopleWorkspace.mjs";
+import { peopleFilterLabel, peopleModeLabel, peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../src/peopleWorkspace.mjs";
 
 assert.deepEqual(readPeopleWorkspaceQuery(""), {
   mode: "review", status: "unknown", cameraId: "", personId: "", page: 0, faceId: "", clusterId: "",
@@ -17,5 +17,19 @@ assert.equal(peopleWorkspaceSearch(), "");
 assert.equal(peopleWorkspaceSearch({ mode: "clusters", clusterId: 4 }), "?mode=clusters&cluster=4");
 assert.equal(peopleFilterLabel("unusable"), "Unusable");
 assert.equal(peopleModeLabel("people"), "People profiles");
+assert.deepEqual(peopleObservationRequestPlan({ mode: "review", pageSize: 24 }), {
+  observations: "/api/faces/review/queue?limit=24",
+  count: "",
+});
+assert.deepEqual(peopleObservationRequestPlan({ mode: "clusters", pageSize: 24 }), {
+  observations: "",
+  count: "",
+});
+assert.deepEqual(peopleObservationRequestPlan({
+  mode: "people", status: "known", cameraId: "gate", personId: "4", page: 2, pageSize: 24,
+}), {
+  observations: "/api/faces/observations?status=all&limit=24&offset=48&camera_id=gate&person_id=4",
+  count: "/api/faces/observations/count?status=all&camera_id=gate&person_id=4",
+});
 
 console.log("people workspace tests passed");

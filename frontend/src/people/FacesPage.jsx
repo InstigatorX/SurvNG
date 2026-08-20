@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { nextFaceReviewObservation } from "../faceReview.mjs";
-import { PEOPLE_REVIEW_FILTERS, PEOPLE_WORKSPACE_MODES, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../peopleWorkspace.mjs";
+import { PEOPLE_REVIEW_FILTERS, PEOPLE_WORKSPACE_MODES, peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../peopleWorkspace.mjs";
 import { appUrl, recordingsHref, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 import { isMobileViewport } from "../shared/hooks.js";
@@ -184,6 +184,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(initialPeopleQuery.page);
   const [totalObservations, setTotalObservations] = useState(0);
+  const peopleLoadSequence = useRef(0);
   const faceLoadSequence = useRef(0);
   const clusterLoadSequence = useRef(0);
   const clusterMemberLoadSequence = useRef(0);
@@ -226,44 +227,46 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
     }
   }
 
-  async function load() {
+  async function loadPeople() {
+    const sequence = ++peopleLoadSequence.current;
+    try {
+      const response = await fetch("/api/faces/people");
+      if (!response.ok) throw new Error("Unable to load enrolled people");
+      const payload = await response.json();
+      if (sequence === peopleLoadSequence.current) setPeople(payload);
+      return payload;
+    } catch (error) {
+      if (sequence === peopleLoadSequence.current) setLoadError(error.message || "Unable to load enrolled people");
+      return null;
+    }
+  }
+
+  async function load({ refreshPeople = false } = {}) {
     const sequence = ++faceLoadSequence.current;
+    if (mode === "clusters") {
+      if (refreshPeople) await loadPeople();
+      if (sequence === faceLoadSequence.current) setLoading(false);
+      return [];
+    }
     setLoading(true);
     try {
-      const query = new URLSearchParams({ status: personId ? "all" : filter, limit: String(pageSize), offset: String(page * pageSize) });
-      if (cameraId) query.set("camera_id", cameraId);
-      if (personId) query.set("person_id", personId);
-      const countQuery = new URLSearchParams(query);
-      countQuery.delete("limit");
-      countQuery.delete("offset");
-      const observationUrl = mode === "review"
-        ? `/api/faces/review/queue?limit=${pageSize}`
-        : `/api/faces/observations?${query}`;
-      const [peopleResponse, observationResponse, countResponse] = await Promise.all([
-        fetch("/api/faces/people"),
-        fetch(observationUrl),
-        mode === "review" ? fetch("/api/faces/observations/count?status=unknown") : fetch(`/api/faces/observations/count?${countQuery}`),
+      const requestPlan = peopleObservationRequestPlan({
+        mode, status: filter, cameraId, personId, page, pageSize,
+      });
+      const peoplePromise = refreshPeople ? loadPeople() : Promise.resolve(null);
+      const [observationResponse, countResponse] = await Promise.all([
+        fetch(requestPlan.observations),
+        requestPlan.count ? fetch(requestPlan.count) : Promise.resolve(null),
       ]);
-      if (!peopleResponse.ok || !observationResponse.ok) throw new Error("Unable to load the face database");
-      const [peoplePayload, observationPayload, countPayload] = await Promise.all([
-        peopleResponse.json(),
+      if (!observationResponse.ok) throw new Error("Unable to load the face database");
+      const [observationPayload, countPayload] = await Promise.all([
         observationResponse.json(),
-        countResponse.ok ? countResponse.json() : null,
+        countResponse?.ok ? countResponse.json() : null,
+        peoplePromise,
       ]);
       if (sequence !== faceLoadSequence.current) return;
       setLoadError("");
-      setPeople(peoplePayload);
       setObservations(observationPayload);
-      if (initialFaceIdRef.current) {
-        const requestedFace = observationPayload.find((item) => String(item.id) === initialFaceIdRef.current);
-        if (requestedFace) {
-          setRequestedFaceId("");
-          setSelected(requestedFace);
-        } else {
-          void loadExactFace(initialFaceIdRef.current);
-        }
-        initialFaceIdRef.current = "";
-      }
       if (countPayload) setTotalObservations(Number(countPayload.total || 0));
       setNotice("");
       return observationPayload;
@@ -275,6 +278,13 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
     }
   }
 
+  useEffect(() => {
+    void loadPeople();
+    const requestedId = initialFaceIdRef.current;
+    initialFaceIdRef.current = "";
+    if (requestedId) void loadExactFace(requestedId);
+    return () => { peopleLoadSequence.current += 1; };
+  }, []);
   useEffect(() => {
     if (runtimeState?.cameras) {
       setCameras(runtimeState.cameras);
@@ -334,7 +344,12 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
   }
 
   useEffect(() => {
-    void load();
+    if (mode !== "clusters") void load();
+    else {
+      faceLoadSequence.current += 1;
+      setLoading(false);
+      setLoadError("");
+    }
     return () => { faceLoadSequence.current += 1; };
   }, [filter, cameraId, mode, personId, page]);
   useEffect(() => {
@@ -422,7 +437,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
         return setNotice(payload.detail || "Could not delete this person");
       }
       setPersonId("");
-      await load();
+      await Promise.all([loadPeople(), load()]);
     } catch (error) {
       setNotice(error.message || "Could not delete this person");
     }
@@ -573,8 +588,8 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
         // The selected cluster can lose members after enrollment or rejection.
         // Refresh its independent list before choosing the next review target.
         const refreshed = isClusterReview
-          ? (await load(), await loadClusters(), await loadClusterMembers(selectedClusterId))
-          : await load();
+          ? (await Promise.all([loadPeople(), loadClusters()]), await loadClusterMembers(selectedClusterId))
+          : await load({ refreshPeople: true });
         const nextObservation = action.advance && refreshed
           ? nextFaceReviewObservation(action.observationId || selected.id, currentObservations, refreshed)
           : null;

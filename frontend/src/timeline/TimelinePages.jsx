@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { browserStorage } from "../storage.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
+import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
@@ -839,34 +840,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     return [...nearbyEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
   }, [nearbyEvents, selectedEvent, timelineView.endEpoch, timelineView.startEpoch]);
 
-  useEffect(() => {
-    if (!exportJob?.id || !["queued", "running", "cancelling"].includes(exportJob.status)) return undefined;
-    let stopped = false;
-    let timer = null;
-    const refresh = async () => {
-      try {
-        const response = await fetch(appUrl(`/api/exports/${exportJob.id}`));
-        if (!response.ok) throw new Error(`Export status failed (${response.status})`);
-        const next = await response.json();
-        if (!stopped) {
-          setExportJob(next);
-          if (["queued", "running", "cancelling"].includes(next.status)) {
-            timer = window.setTimeout(refresh, 1000);
-          }
-        }
-      } catch (error) {
-        if (!stopped) {
-          setExportError(error.message || "Unable to refresh export status");
-          timer = window.setTimeout(refresh, 2500);
-        }
+  useVisiblePolling(async (signal) => {
+    try {
+      const next = await fetchExportJob(exportJob?.id, fetch, { signal, maxAgeMs: 750 });
+      if (next) {
+        setExportJob(next);
+        setExportError("");
       }
-    };
-    timer = window.setTimeout(refresh, 700);
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [exportJob?.id, exportJob?.status]);
+    } catch (error) {
+      if (error?.name !== "AbortError") setExportError(error.message || "Unable to refresh export status");
+    }
+  }, 1_000, exportIsActive(exportJob), { restartKey: exportJob?.id || "" });
 
   useEffect(() => {
     setExportRange(null);
@@ -884,10 +868,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
         return response.json();
       })
       .then((payload) => {
+        cacheExportJobs(payload.exports || []);
         const active = (payload.exports || []).find((job) => (
           job.camera_id === activeCameraId
           && job.source === source
-          && ["queued", "running", "cancelling"].includes(job.status)
+          && ACTIVE_EXPORT_STATUSES.includes(job.status)
         ));
         if (!active || controller.signal.aborted) return;
         setExportKind(active.kind === "timelapse" ? "timelapse" : "recording");
@@ -1471,6 +1456,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `Export failed (${response.status})`);
+      cacheExportJobs([payload]);
       setExportJob(payload);
     } catch (error) {
       setExportError(error.message || "Unable to start export");
@@ -1485,6 +1471,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       const response = await fetch(appUrl(`/api/exports/${exportJob.id}`), { method: "DELETE" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `Cancel failed (${response.status})`);
+      if (!payload.deleted) cacheExportJobs([payload]);
       setExportJob(payload.deleted ? null : payload);
     } catch (error) {
       setExportError(error.message || "Unable to cancel export");
@@ -1826,8 +1813,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
     return () => controller.abort();
   }, []);
 
-  useEffect(() => {
-    const controller = new AbortController();
+  async function loadExportCenter(signal) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cameraId) params.set("camera_id", cameraId);
     if (kind !== "all") params.set("kind", kind);
@@ -1835,38 +1821,34 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
     if (protectedOnly) params.set("protected", "true");
     setLoading(true);
     setError("");
-    fetch(`/api/exports?${params.toString()}`, { signal: controller.signal })
+    const listRequest = fetch(`/api/exports?${params.toString()}`, { signal })
       .then(async (response) => {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.detail || `Export list failed (${response.status})`);
         return payload;
-      })
-      .then((payload) => {
-        setExportsList(payload.exports || []);
-        setTotal(Number(payload.total) || 0);
-      })
-      .catch((loadError) => {
-        if (loadError.name !== "AbortError") setError(loadError.message || "Unable to load exports");
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
       });
-    return () => controller.abort();
-  }, [cameraId, kind, limit, protectedOnly, revision, status]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch("/api/exports/summary", { signal: controller.signal })
+    const summaryRequest = fetch("/api/exports/summary", { signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Export summary failed (${response.status})`);
         return response.json();
-      })
-      .then(setSummary)
-      .catch((loadError) => {
-        if (loadError.name !== "AbortError") setError(loadError.message || "Unable to load export summary");
       });
-    return () => controller.abort();
-  }, [revision]);
+    const [listResult, summaryResult] = await Promise.allSettled([listRequest, summaryRequest]);
+    if (signal.aborted) return;
+    if (listResult.status === "fulfilled") {
+      const jobs = listResult.value.exports || [];
+      cacheExportJobs(jobs);
+      setExportsList(jobs);
+      setTotal(Number(listResult.value.total) || 0);
+    }
+    if (summaryResult.status === "fulfilled") setSummary(summaryResult.value);
+    const failure = listResult.status === "rejected"
+      ? listResult.reason
+      : summaryResult.status === "rejected"
+        ? summaryResult.reason
+        : null;
+    if (failure?.name !== "AbortError") setError(failure?.message || "Unable to load exports");
+    setLoading(false);
+  }
 
   useEffect(() => {
     setLimit(50);
@@ -1874,12 +1856,9 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
     setSelectionMode(false);
   }, [cameraId, kind, protectedOnly, status]);
 
-  useVisiblePolling(
-    () => setRevision((current) => current + 1),
-    activeCount ? 2_000 : 15_000,
-    true,
-    { immediate: false },
-  );
+  useVisiblePolling(loadExportCenter, activeCount ? 2_000 : 15_000, true, {
+    restartKey: `${cameraId}|${kind}|${status}|${protectedOnly}|${limit}|${revision}`,
+  });
 
   useEffect(() => {
     if (!selectedId || !filteredExports.some((item) => item.id === selectedId)) {
@@ -1918,6 +1897,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `Protection update failed (${response.status})`);
+      cacheExportJobs([payload]);
       setExportsList((current) => current.map((candidate) => candidate.id === payload.id ? payload : candidate));
       setRevision((current) => current + 1);
     } catch (actionError) {
@@ -1939,6 +1919,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `Rename failed (${response.status})`);
+      cacheExportJobs([payload]);
       setExportsList((current) => current.map((candidate) => candidate.id === payload.id ? payload : candidate));
     } catch (actionError) {
       setError(actionError.message || "Unable to rename export");
@@ -1969,6 +1950,8 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       if (payload.errors?.length) {
         setError(`${payload.errors.length} export${payload.errors.length === 1 ? "" : "s"} could not be updated`);
       }
+      cacheExportJobs(payload.results || []);
+      if (action === "delete") removeCachedExportJobs(selectedIds);
       setSelectedIds([]);
       setSelectionMode(false);
       setSelectedId("");
@@ -1995,9 +1978,11 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `Delete failed (${response.status})`);
       if (payload.deleted) {
+        removeCachedExportJobs([item.id]);
         setExportsList((current) => current.filter((candidate) => candidate.id !== item.id));
         setSelectedId("");
       } else {
+        cacheExportJobs([payload]);
         setExportsList((current) => current.map((candidate) => candidate.id === payload.id ? payload : candidate));
       }
       setRevision((current) => current + 1);

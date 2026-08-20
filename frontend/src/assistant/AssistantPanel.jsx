@@ -12,9 +12,11 @@ import { browserStorage } from "../storage.mjs";
 import { readAssistantHistory, writeAssistantHistory } from "../assistantStorage.mjs";
 import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContext } from "../assistantContext.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "../assistantNavigation.mjs";
+import { assistantActiveExportIds, fetchAssistantExportJobs, mergeAssistantExportJobs } from "../exportPolling.mjs";
 import { appUrl, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 import { useStoredState, useViewportQuery } from "../shared/hooks.js";
+import { useVisiblePolling } from "../visibilityPolling.mjs";
 
 export const ASSISTANT_STORAGE_KEY = "survng.assistantConversation.v1";
 
@@ -79,12 +81,7 @@ export function AssistantPanel({ pageContext, timeZone }) {
   const currentContext = useMemo(() => snapshotAssistantContext(pageContext, timeZone), [pageContext, timeZone]);
   const currentContextLabel = assistantContextLabel(currentContext, (epoch) => formatDateTime(epoch, timeZone));
   const quickPrompts = assistantContextPrompts(currentContext).slice(0, 3);
-  const activeExportIds = [...new Set(messages.flatMap((message) =>
-    (message.evidence || [])
-      .map((item) => item.details?.media_export)
-      .filter((job) => job?.id && ["queued", "running", "cancelling"].includes(job.status))
-      .map((job) => job.id)
-  ))].sort().join(",");
+  const activeExportIds = assistantActiveExportIds(messages).join(",");
 
   useEffect(() => {
     writeAssistantHistory(browserStorage(window), ASSISTANT_STORAGE_KEY, messages);
@@ -123,58 +120,11 @@ export function AssistantPanel({ pageContext, timeZone }) {
     };
   }, [open]);
 
-  useEffect(() => {
-    if (!open || !activeExportIds) return undefined;
-    let cancelled = false;
+  useVisiblePolling(async (signal) => {
     const ids = activeExportIds.split(",").filter(Boolean);
-    async function refreshExports() {
-      if (document.hidden) return;
-      const updates = await Promise.all(ids.map(async (id) => {
-        try {
-          const response = await fetch(`/api/exports/${encodeURIComponent(id)}`);
-          return response.ok ? await response.json() : null;
-        } catch {
-          return null;
-        }
-      }));
-      if (cancelled) return;
-      const byId = new Map(updates.filter(Boolean).map((job) => [job.id, job]));
-      if (!byId.size) return;
-      setMessages((current) => current.map((message) => ({
-        ...message,
-        evidence: (message.evidence || []).map((item) => {
-          const previous = item.details?.media_export;
-          const update = previous?.id ? byId.get(previous.id) : null;
-          if (!update) return item;
-          return {
-            ...item,
-            details: {
-              ...item.details,
-              media_export: {
-                ...previous,
-                status: update.status,
-                phase: update.phase,
-                progress: update.progress,
-                error: update.error,
-                output_name: update.output_name,
-                size_bytes: update.size_bytes,
-                download_url: update.download_url,
-              },
-            },
-          };
-        }),
-      })));
-    }
-    refreshExports();
-    const timer = window.setInterval(refreshExports, 2000);
-    const onVisibility = () => { if (!document.hidden) void refreshExports(); };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [activeExportIds, open]);
+    const updates = await fetchAssistantExportJobs(ids, fetch, { signal });
+    if (updates.length) setMessages((current) => mergeAssistantExportJobs(current, updates));
+  }, 2_000, Boolean(open && activeExportIds), { restartKey: activeExportIds });
 
   useEffect(() => {
     if (!open) return undefined;

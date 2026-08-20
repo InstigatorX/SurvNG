@@ -49,3 +49,32 @@ export function peopleFilterLabel(value) {
 export function peopleModeLabel(value) {
   return PEOPLE_WORKSPACE_MODES[value] || PEOPLE_WORKSPACE_MODES.review;
 }
+
+export function peopleObservationRequestPlan({
+  mode = "review",
+  status = "unknown",
+  cameraId = "",
+  personId = "",
+  page = 0,
+  pageSize = 48,
+} = {}) {
+  if (mode === "clusters") return { observations: "", count: "" };
+  const limit = Math.max(1, Math.floor(Number(pageSize) || 48));
+  if (mode === "review") {
+    return { observations: `/api/faces/review/queue?limit=${limit}`, count: "" };
+  }
+  const query = new URLSearchParams({
+    status: personId ? "all" : status,
+    limit: String(limit),
+    offset: String(Math.max(0, Math.floor(Number(page) || 0)) * limit),
+  });
+  if (cameraId) query.set("camera_id", cameraId);
+  if (personId) query.set("person_id", personId);
+  const countQuery = new URLSearchParams(query);
+  countQuery.delete("limit");
+  countQuery.delete("offset");
+  return {
+    observations: `/api/faces/observations?${query}`,
+    count: `/api/faces/observations/count?${countQuery}`,
+  };
+}
