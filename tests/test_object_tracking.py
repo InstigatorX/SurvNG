@@ -39,8 +39,8 @@ def detection(
 
 
 class UltralyticsDependencyStatusTest(unittest.TestCase):
-    @patch("survng.app.object_tracking.importlib.util.find_spec", return_value=object())
-    @patch("survng.app.object_tracking.version", return_value="8.4.999")
+    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_track.registry.version", return_value="8.4.999")
     def test_compatible_patch_version_is_not_rejected(
         self,
         _version,
@@ -52,8 +52,8 @@ class UltralyticsDependencyStatusTest(unittest.TestCase):
         self.assertFalse(status["is_tested_version"])
         self.assertEqual(status["reason"], "")
 
-    @patch("survng.app.object_tracking.importlib.util.find_spec", return_value=object())
-    @patch("survng.app.object_tracking.version", return_value="8.5.0")
+    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_track.registry.version", return_value="8.5.0")
     def test_unreviewed_tracker_api_line_is_rejected(
         self,
         _version,
@@ -64,19 +64,19 @@ class UltralyticsDependencyStatusTest(unittest.TestCase):
         self.assertFalse(status["available"])
         self.assertIn("outside", status["reason"])
 
-    @patch("survng.app.object_tracking.version", return_value="8.4.115")
+    @patch("survng.app.object_track.registry.version", return_value="8.4.115")
     def test_deep_ocsort_module_is_required(self, _version) -> None:
         def find_spec(name: str):
             return None if name == "ultralytics.trackers.deep_oc_sort" else object()
 
-        with patch("survng.app.object_tracking.importlib.util.find_spec", side_effect=find_spec):
+        with patch("survng.app.object_track.registry.importlib.util.find_spec", side_effect=find_spec):
             status = ultralytics_deepocsort_dependency_status()
 
         self.assertFalse(status["available"])
         self.assertIn("does not include Deep OC-SORT", status["reason"])
 
-    @patch("survng.app.object_tracking.importlib.util.find_spec", return_value=object())
-    @patch("survng.app.object_tracking.version", return_value="8.4.115")
+    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_track.registry.version", return_value="8.4.115")
     def test_fasttrack_dependency_is_available(self, _version, _find_spec) -> None:
         status = ultralytics_fasttrack_dependency_status()
 
@@ -1333,7 +1333,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         session.set_accepting(True)
 
         with patch(
-            "survng.app.object_tracking.TRACKING_CATCHUP_RETRY_SECONDS",
+            "survng.app.object_track.session.TRACKING_CATCHUP_RETRY_SECONDS",
             0.01,
         ):
             self.assertTrue(session.start(
@@ -1390,11 +1390,11 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         with (
             patch(
-                "survng.app.object_tracking.TRACKING_CATCHUP_SETTLE_SECONDS",
+                "survng.app.object_track.session.TRACKING_CATCHUP_SETTLE_SECONDS",
                 0.05,
             ),
             patch(
-                "survng.app.object_tracking.TRACKING_CATCHUP_RETRY_SECONDS",
+                "survng.app.object_track.session.TRACKING_CATCHUP_RETRY_SECONDS",
                 0.01,
             ),
             self.assertLogs("survng.app.object_tracking", level="WARNING"),
