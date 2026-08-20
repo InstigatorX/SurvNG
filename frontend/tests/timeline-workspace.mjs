@@ -116,12 +116,19 @@ const appSource = readFileSync(new URL("../src/timeline/TimelinePages.jsx", impo
 const stylesSource = [
   readFileSync(new URL("../src/styles.css", import.meta.url), "utf8"),
   readFileSync(new URL("../src/timeline/timeline.css", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/shell/mobile.css", import.meta.url), "utf8"),
 ].join("\n");
 const recordingsSource = appSource.slice(appSource.indexOf("function RecordingsPage"), appSource.indexOf("function exportStatusLabel"));
 assert.match(recordingsSource, /const timelineInspectorTriggerRef = useRef\(null\)/);
 assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);
 assert.match(appSource, /timeline-camera-picker/);
 assert.match(recordingsSource, /<TimelineCameraPicker/);
+assert.match(recordingsSource, /MobileCameraSelect/);
+assert.match(recordingsSource, /timeline-mobile-camera-select/);
+assert.match(appSource, /search-mobile-camera-select/);
+assert.match(stylesSource, /\.timeline-camera-picker,\s*\.search-camera-list/);
+assert.match(stylesSource, /\.timeline-mobile-camera-select/);
+assert.match(stylesSource, /\.search-mobile-camera-select/);
 assert.match(recordingsSource, /recordings-toolbar-day-controls/);
 assert.match(recordingsSource, /recordings-commandbar-day-controls/);
 assert.match(recordingsSource, /<TimelineDatePicker/);

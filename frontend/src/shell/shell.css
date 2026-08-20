@@ -490,21 +490,12 @@
     display: none;
   }
 
-  .search-camera-list {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(140px, auto);
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 6px;
-  }
-
   .search-history-panel {
     display: grid;
     grid-auto-flow: column;
     grid-auto-columns: minmax(145px, 220px);
     overflow-x: auto;
-    border-top: 1px solid var(--line);
+    border-top: 0;
     padding: 6px;
   }
 

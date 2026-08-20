@@ -35,6 +35,7 @@ import { useStoredState, useViewportQuery, useModalFocus } from "../shared/hooks
 import { clearLegacyIncidentFilterStorage, preferredStreamSource, sourceLabel, liveTransportLabel } from "../shared/cameras.js";
 import { useAppEvents } from "../shared/events.js";
 import { WebRtcLive } from "../shared/media.jsx";
+import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
 import { IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
 
@@ -543,13 +544,13 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
         <span className="live-command-scope"><Grid2X2 size={15} /><strong>All cameras</strong><small>{cameraCount} of {totalCameraCount}</small></span>
         <strong className="live-command-mobile-title">Command Center</strong>
       </div>
-      <label className="mobile-camera-select live-mobile-camera-select">
-        <Camera size={15} aria-hidden="true" />
-        <span className="sr-only">Live camera</span>
-        <select value={focusedCameraId} onChange={(event) => onFocusedCameraChange(event.target.value)} aria-label="Live camera">
-          {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>)}
-        </select>
-      </label>
+      <MobileCameraSelect
+        className="live-mobile-camera-select"
+        cameras={cameras}
+        value={focusedCameraId}
+        onChange={onFocusedCameraChange}
+        ariaLabel="Live camera"
+      />
       <div className="live-density-control" role="group" aria-label="Visible camera density">
         {LIVE_DENSITY_OPTIONS.map((option) => <button type="button" key={option} className={density === option ? "active" : ""} aria-pressed={density === option} onClick={() => onDensityChange(option)}>{option === "fit" ? <Grid2X2 size={15} /> : option === "4" ? <><Grid2X2 size={13} /> 4</> : option}</button>)}
         {densityPageCount > 1 ? <span className="live-density-pages"><button type="button" onClick={() => onDensityPageChange(densityPage - 1)} disabled={densityPage === 0} aria-label="Previous camera page"><ChevronLeft size={15} /></button><small>{densityPage + 1}/{densityPageCount}</small><button type="button" onClick={() => onDensityPageChange(densityPage + 1)} disabled={densityPage >= densityPageCount - 1} aria-label="Next camera page"><ChevronRight size={15} /></button></span> : null}
