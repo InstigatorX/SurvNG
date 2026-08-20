@@ -78,6 +78,28 @@ export function timelineEvidenceWindow(events, playhead, limit = 12) {
     .sort((left, right) => left.incident_epoch - right.incident_epoch);
 }
 
+export function timelineIdentityDetailEventId(incident) {
+  const candidates = [
+    incident?.representative_event_id,
+    ...(Array.isArray(incident?.events) ? incident.events.map((event) => event?.id) : []),
+    incident?.id,
+  ];
+  for (const value of candidates) {
+    const eventId = Number(value);
+    if (Number.isInteger(eventId) && eventId > 0) return eventId;
+  }
+  return null;
+}
+
+export function mergeTimelineIncidentIdentity(summary, detail) {
+  if (!summary || !detail) return summary;
+  const merged = { ...summary };
+  for (const key of ["identities", "primary_identity", "faces"]) {
+    if (Object.hasOwn(detail, key)) merged[key] = detail[key];
+  }
+  return merged;
+}
+
 export function timelineViewport(startEpoch, endEpoch, anchorEpoch, windowHours) {
   const start = Number(startEpoch);
   const end = Number(endEpoch);

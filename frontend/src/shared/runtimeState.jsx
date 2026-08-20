@@ -2,7 +2,7 @@ import React, { createContext, useContext, useMemo, useRef, useState } from "rea
 import { fetch } from "./api.js";
 import { useAppEvents } from "./events.js";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
-import { RUNTIME_STATE_PATHS } from "./runtimeState.mjs";
+import { loadRuntimeState } from "./runtimeState.mjs";
 
 const RuntimeStateContext = createContext(null);
 
@@ -16,16 +16,9 @@ export function RuntimeStateProvider({ children }) {
   async function refresh(signal) {
     const sequence = ++sequenceRef.current;
     try {
-      const [cameraResponse, configResponse, systemResponse] = await Promise.all([
-        ...RUNTIME_STATE_PATHS.map((path) => fetch(path, { signal })),
-      ]);
-      if (!cameraResponse.ok) throw new Error(`Camera status failed (${cameraResponse.status})`);
-      const [cameraPayload, configPayload, systemPayload] = await Promise.all([
-        cameraResponse.json(), configResponse.ok ? configResponse.json() : null,
-        systemResponse.ok ? systemResponse.json() : null,
-      ]);
+      const { cameras: cameraPayload, appConfig: configPayload, system: systemPayload } = await loadRuntimeState(fetch, { signal });
       if (sequence !== sequenceRef.current) return;
-      if (Array.isArray(cameraPayload)) setCameras(cameraPayload);
+      if (cameraPayload) setCameras(cameraPayload);
       if (configPayload) setAppConfig(configPayload);
       if (systemPayload) setSystem(systemPayload);
     } finally {

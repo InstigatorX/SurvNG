@@ -178,6 +178,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
   const [personId, setPersonId] = useState(initialPeopleQuery.personId);
   const [selected, setSelected] = useState(null);
   const [notice, setNotice] = useState("");
+  const [peopleLoadError, setPeopleLoadError] = useState("");
   const [loadError, setLoadError] = useState("");
   const [exactFaceError, setExactFaceError] = useState("");
   const [requestedFaceId, setRequestedFaceId] = useState(initialPeopleQuery.faceId);
@@ -239,10 +240,13 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
         "/api/faces/people",
         "Unable to load enrolled people",
       );
-      if (sequence === peopleLoadSequence.current) setPeople(payload);
+      if (sequence === peopleLoadSequence.current) {
+        setPeople(payload);
+        setPeopleLoadError("");
+      }
       return payload;
     } catch (error) {
-      if (sequence === peopleLoadSequence.current) setLoadError(error.message || "Unable to load enrolled people");
+      if (sequence === peopleLoadSequence.current) setPeopleLoadError(error.message || "Unable to load enrolled people");
       return null;
     }
   }
@@ -550,6 +554,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
           </details>
           {notice ? <div className="save-status" role="status">{notice}</div> : null}
           {loading && observations.length ? <div className="face-updating" role="status">Updating results…</div> : null}
+          {peopleLoadError ? <div className="face-load-error" role="alert"><span>{peopleLoadError}</span><button type="button" onClick={() => void loadPeople()}>Retry people</button></div> : null}
           {loadError ? <div className="face-load-error" role="alert"><span>{loadError}</span><button type="button" onClick={() => void load()}>Retry</button></div> : null}
           {exactFaceError ? <div className="face-load-error" role="alert"><span>{exactFaceError}</span><button type="button" onClick={() => void loadExactFace(requestedFaceId)}>Retry face</button></div> : null}
         </div>

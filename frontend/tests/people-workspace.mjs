@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { peopleFilterLabel, peopleModeLabel, peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../src/peopleWorkspace.mjs";
 
 assert.deepEqual(readPeopleWorkspaceQuery(""), {
@@ -31,5 +32,9 @@ assert.deepEqual(peopleObservationRequestPlan({
   observations: "/api/faces/observations?status=all&limit=24&offset=48&camera_id=gate&person_id=4",
   count: "/api/faces/observations/count?status=all&camera_id=gate&person_id=4",
 });
+
+const facesPageSource = readFileSync(new URL("../src/people/FacesPage.jsx", import.meta.url), "utf8");
+assert.match(facesPageSource, /const \[peopleLoadError, setPeopleLoadError\] = useState\(""\)/);
+assert.match(facesPageSource, /peopleLoadError[\s\S]*?onClick=\{\(\) => void loadPeople\(\)\}>Retry people/);
 
 console.log("people workspace tests passed");

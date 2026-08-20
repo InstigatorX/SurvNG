@@ -37,7 +37,7 @@ import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
 import { appUrl, mediaUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { ALL_RECORDING_CAMERAS_ID } from "../shared/constants.js";
@@ -688,6 +688,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const gridRefreshCursorRef = useRef(null);
   const recordingUpdatesInFlightRef = useRef(false);
   const gridUpdatesInFlightRef = useRef(false);
+  const selectedIncidentIdentityCacheRef = useRef(new Map());
   const [cameras, setCameras] = useState([]);
   const [cameraTransitionRoutes, setCameraTransitionRoutes] = useState([]);
   const [cameraId, setCameraId] = useState(initialView.cameraId);
@@ -720,6 +721,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [exportSubmitting, setExportSubmitting] = useState(false);
   const [gridPlaying, setGridPlaying] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState(initialView.eventId);
+  const [selectedIncidentIdentity, setSelectedIncidentIdentity] = useState(null);
   const [timelineInspectorTab, setTimelineInspectorTab] = useState(initialView.inspector);
   const [timelineInspectorOpen, setTimelineInspectorOpen] = useState(false);
   const [investigationOpen, setInvestigationOpen] = useState(false);
@@ -803,9 +805,41 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     event.incident_epoch >= timelineView.startEpoch
     && event.incident_epoch <= timelineView.endEpoch
   )), [filteredEvents, timelineView.endEpoch, timelineView.startEpoch]);
-  const selectedEvent = nearbyEvents.find((event) => event.id === selectedEventId)
+  const selectedEventSummary = nearbyEvents.find((event) => event.id === selectedEventId)
     || timelineEvents.find((event) => event.id === selectedEventId)
     || null;
+  const selectedIdentityEventId = timelineIdentityDetailEventId(selectedEventSummary);
+  const selectedEvent = selectedEventSummary && selectedIncidentIdentity?.eventId === selectedIdentityEventId
+    ? mergeTimelineIncidentIdentity(selectedEventSummary, selectedIncidentIdentity.detail)
+    : selectedEventSummary;
+
+  useEffect(() => {
+    if (!investigationOpen || !selectedIdentityEventId) {
+      setSelectedIncidentIdentity(null);
+      return undefined;
+    }
+    const cached = selectedIncidentIdentityCacheRef.current.get(selectedIdentityEventId);
+    if (cached) {
+      setSelectedIncidentIdentity({ eventId: selectedIdentityEventId, detail: cached });
+      return undefined;
+    }
+    const controller = new AbortController();
+    setSelectedIncidentIdentity(null);
+    fetch(`/api/incidents/by-event/${encodeURIComponent(selectedIdentityEventId)}`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Incident identity failed (${response.status})`);
+        return response.json();
+      })
+      .then((detail) => {
+        if (controller.signal.aborted) return;
+        selectedIncidentIdentityCacheRef.current.set(selectedIdentityEventId, detail);
+        setSelectedIncidentIdentity({ eventId: selectedIdentityEventId, detail });
+      })
+      .catch(() => {
+        // The compact timeline incident remains usable when identity detail is unavailable.
+      });
+    return () => controller.abort();
+  }, [investigationOpen, selectedIdentityEventId]);
 
   useEffect(() => {
     setTimelineViewportAnchor(null);
@@ -857,6 +891,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     setExportJob(null);
     setExportError("");
     setExportLabel("");
+    selectedIncidentIdentityCacheRef.current.clear();
+    setSelectedIncidentIdentity(null);
   }, [activeCameraId, date, source]);
 
   useEffect(() => {

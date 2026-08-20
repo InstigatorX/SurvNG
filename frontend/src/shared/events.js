@@ -93,8 +93,10 @@ export function subscribeAppEvents(listener) {
   };
 }
 
-export function useAppEvents(handler) {
+export function useAppEvents(handler, enabled = true) {
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
-  useEffect(() => subscribeAppEvents((event) => handlerRef.current(event)), []);
+  useEffect(() => (
+    enabled ? subscribeAppEvents((event) => handlerRef.current(event)) : undefined
+  ), [enabled]);
 }

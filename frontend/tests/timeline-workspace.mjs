@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -45,6 +45,19 @@ assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["car"] }, 
 assert.equal(timelineEventMatchesFilter({ has_objects: false, labels: [] }, "motion"), true);
 const evidence = [0, 10, 20, 30].map((incident_epoch) => ({ incident_epoch }));
 assert.deepEqual(timelineEvidenceWindow(evidence, 18, 2).map((event) => event.incident_epoch), [10, 20]);
+assert.equal(timelineIdentityDetailEventId({ id: "incident:4", representative_event_id: 41 }), 41);
+assert.equal(timelineIdentityDetailEventId({ id: "incident:4", events: [{ id: 42 }] }), 42);
+assert.equal(timelineIdentityDetailEventId({ id: "not-an-event" }), null);
+const timelineSummary = { id: "incident:4", incident_epoch: 10, labels: ["person"] };
+assert.deepEqual(mergeTimelineIncidentIdentity(timelineSummary, {
+  identities: [{ name: "Ada", status: "confirmed" }],
+  primary_identity: { name: "Ada", status: "confirmed" },
+  objects: [{ label: "different-detail-shape" }],
+}), {
+  ...timelineSummary,
+  identities: [{ name: "Ada", status: "confirmed" }],
+  primary_identity: { name: "Ada", status: "confirmed" },
+});
 assert.deepEqual(timelineViewport(0, 24 * 3600, 12 * 3600, 2), { startEpoch: 11 * 3600, endEpoch: 13 * 3600 });
 assert.deepEqual(timelineViewport(0, 24 * 3600, 15 * 60, 2), { startEpoch: 0, endEpoch: 2 * 3600 });
 assert.deepEqual(timelineViewport(0, 24 * 3600, 23.75 * 3600, 2), { startEpoch: 22 * 3600, endEpoch: 24 * 3600 });
@@ -110,6 +123,8 @@ assert.match(recordingsSource, /onPanViewport=/);
 assert.doesNotMatch(recordingsSource, /onPageViewport=/);
 assert.match(recordingsSource, /investigation-hidden/);
 assert.match(recordingsSource, /recordings-investigation-toggle/);
+assert.match(recordingsSource, /selectedIncidentIdentityCacheRef/);
+assert.match(recordingsSource, /\/api\/incidents\/by-event\//);
 assert.match(recordingsSource, /recordings-return-playhead/);
 assert.match(recordingsSource, /recordings-v2-scale/);
 assert.doesNotMatch(recordingsSource, /setEventFilter\("object"\)/);
