@@ -32,7 +32,7 @@ config.json
 docker-data/
 survng/storage/
 recordings/
-recording*/
+/recording*/
 media/
 clips/
 event_clips/

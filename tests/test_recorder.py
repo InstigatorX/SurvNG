@@ -165,7 +165,7 @@ class RecorderTest(unittest.TestCase):
             with (
                 patch.object(recorder, "_backfill_recording_location_id_batch") as backfill,
                 patch.object(recorder.retention, "start"),
-                patch("survng.app.recorder.threading.Thread.start"),
+                patch("survng.app.recording_process.recorder.threading.Thread.start"),
             ):
                 recorder.start_indexer([])
 
@@ -361,7 +361,7 @@ class RecorderTest(unittest.TestCase):
                 stream_url="rtsp://camera/main",
             )
             with patch.object(recorder, "_ensure_recording_dirs", side_effect=OSError(28, "No space left")) as ensure_dirs:
-                with patch("survng.app.recorder.subprocess.Popen") as popen:
+                with patch("survng.app.recording_process.recorder.subprocess.Popen") as popen:
                     recorder.start(camera, "main")
                     recorder.start(camera, "main")
 
@@ -374,7 +374,7 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
             with patch(
-                "survng.app.recorder.subprocess.Popen",
+                "survng.app.recording_process.recorder.subprocess.Popen",
                 side_effect=RuntimeError("capture command"),
             ) as popen, patch.object(
                 recorder,
@@ -396,7 +396,7 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
             with patch(
-                "survng.app.recorder.subprocess.Popen",
+                "survng.app.recording_process.recorder.subprocess.Popen",
                 side_effect=RuntimeError("capture command"),
             ) as popen, patch.object(
                 recorder,
@@ -414,7 +414,7 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
             with patch(
-                "survng.app.recorder.subprocess.Popen",
+                "survng.app.recording_process.recorder.subprocess.Popen",
                 side_effect=RuntimeError("capture command"),
             ) as popen, patch.object(
                 recorder,
@@ -441,7 +441,7 @@ class RecorderTest(unittest.TestCase):
                         {"available": True, "codec": "aac", "sample_rate": 8000},
                     ],
                 ) as audio_info,
-                patch("survng.app.recorder.time.sleep"),
+                patch("survng.app.recording_process.recorder.time.sleep"),
             ):
                 info = recorder._probe_audio_stream(camera, "main")
 
@@ -477,8 +477,8 @@ class RecorderTest(unittest.TestCase):
                 return None
 
             with (
-                patch("survng.app.recorder.subprocess.Popen", return_value=process),
-                patch("survng.app.recorder.start_ffmpeg_pipe", side_effect=cancel_start),
+                patch("survng.app.recording_process.recorder.subprocess.Popen", return_value=process),
+                patch("survng.app.recording_process.recorder.start_ffmpeg_pipe", side_effect=cancel_start),
                 patch.object(
                     recorder,
                     "_probe_audio_stream",
@@ -579,7 +579,7 @@ class RecorderTest(unittest.TestCase):
         keeper = Mock()
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
-            with patch("survng.app.recorder.os.killpg"):
+            with patch("survng.app.recording_process.recorder.os.killpg"):
                 recorder._stop_item((process, None, stop_event, keeper))
 
         stop_event.set.assert_called_once_with()
@@ -595,7 +595,7 @@ class RecorderTest(unittest.TestCase):
         keeper = Mock()
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
-            with patch("survng.app.recorder.os.killpg") as killpg:
+            with patch("survng.app.recording_process.recorder.os.killpg") as killpg:
                 recorder._stop_item((process, pipe, stop_event, keeper))
 
         pipe.stop.assert_called_once_with()
@@ -772,10 +772,10 @@ class RecorderTest(unittest.TestCase):
             clip.parent.mkdir(parents=True)
             clip.write_bytes(b"recording")
 
-            with patch("survng.app.recorder.time.monotonic", return_value=100.0):
+            with patch("survng.app.recording_process.recorder.time.monotonic", return_value=100.0):
                 recorder.lease_recordings_for_playback([{"path": str(clip)}], ttl_seconds=20)
                 protected = recorder.retention.protected_paths_provider()
-            with patch("survng.app.recorder.time.monotonic", return_value=121.0):
+            with patch("survng.app.recording_process.recorder.time.monotonic", return_value=121.0):
                 expired = recorder.retention.protected_paths_provider()
 
         self.assertEqual(protected, {str(external.resolve()), str(clip.resolve())})
@@ -899,7 +899,7 @@ class RecorderTest(unittest.TestCase):
                 index_dir=index_dir,
             )
 
-            with patch("survng.app.recorder.RECORDING_PATH_REBASE_BATCH_SIZE", 1):
+            with patch("survng.app.recording_process.recorder.RECORDING_PATH_REBASE_BATCH_SIZE", 1):
                 new_recorder._rebase_recording_index_paths()
 
             with new_recorder._index_connection() as connection:
@@ -1026,7 +1026,7 @@ class RecorderTest(unittest.TestCase):
             process.poll.return_value = None
             recorder.processes[("front-door", "live")] = (process, None, Mock(), Mock())
 
-            with patch("survng.app.recorder.time.time", return_value=now_epoch):
+            with patch("survng.app.recording_process.recorder.time.time", return_value=now_epoch):
                 rows = recorder._recording_rows_for_files("front-door", "live", [clip])
 
         self.assertEqual(rows, [])
@@ -1177,7 +1177,7 @@ class RecorderTest(unittest.TestCase):
             recorder._index_thread = index_thread
             maintenance_thread = Mock(name="replacement-maintenance-thread")
             with patch(
-                "survng.app.recorder.threading.Thread",
+                "survng.app.recording_process.recorder.threading.Thread",
                 return_value=maintenance_thread,
             ) as thread_factory:
                 recorder.start_indexer([])
@@ -1404,7 +1404,7 @@ class RecorderTest(unittest.TestCase):
             recorder.queue_recording_validation([row])
 
             with (
-                patch("survng.app.recorder.time.time", return_value=now_epoch),
+                patch("survng.app.recording_process.recorder.time.time", return_value=now_epoch),
                 patch.object(recorder, "_probe_recording") as probe,
             ):
                 validated = recorder._validate_index_batch(limit=1)
@@ -1418,7 +1418,7 @@ class RecorderTest(unittest.TestCase):
             old_epoch = now_epoch - 30
             os.utime(clip, (old_epoch, old_epoch))
             with (
-                patch("survng.app.recorder.time.time", return_value=now_epoch + 15),
+                patch("survng.app.recording_process.recorder.time.time", return_value=now_epoch + 15),
                 patch.object(recorder, "_probe_recording", return_value=(10.0, "")) as retry_probe,
             ):
                 retried = recorder._validate_index_batch(limit=1)
@@ -1477,7 +1477,7 @@ class RecorderTest(unittest.TestCase):
                 row["end_epoch"] + 1,
             ))
 
-            with patch("survng.app.recorder.mp4_stream_fingerprint", return_value="stream-v1"):
+            with patch("survng.app.recording_process.recorder.mp4_stream_fingerprint", return_value="stream-v1"):
                 updated = recorder._backfill_stream_fingerprints(limit=1)
             with recorder._index_connection() as connection:
                 indexed = dict(connection.execute(
@@ -1515,7 +1515,7 @@ class RecorderTest(unittest.TestCase):
 
             with (
                 patch.object(recorder, "_probe_recording", return_value=(9.0, "")),
-                patch("survng.app.recorder.mp4_stream_fingerprint", return_value="stream-v2"),
+                patch("survng.app.recording_process.recorder.mp4_stream_fingerprint", return_value="stream-v2"),
             ):
                 self.assertEqual(
                     recorder._validate_index_batch(limit=1, discover_unqueued=True),
@@ -1540,7 +1540,7 @@ class RecorderTest(unittest.TestCase):
             row["validated"] = True
             recorder._store_recording_rows("front-door", "main", [row])
 
-            with patch("survng.app.recorder.mp4_stream_fingerprint") as fingerprint:
+            with patch("survng.app.recording_process.recorder.mp4_stream_fingerprint") as fingerprint:
                 updated = recorder._backfill_stream_fingerprints(limit=1)
 
         self.assertEqual(updated, 0)
@@ -1555,7 +1555,7 @@ class RecorderTest(unittest.TestCase):
             row["validated"] = True
             recorder._store_recording_rows("front-door", "main", [row])
 
-            with patch("survng.app.recorder.mp4_stream_fingerprint", return_value="stream-v3"):
+            with patch("survng.app.recording_process.recorder.mp4_stream_fingerprint", return_value="stream-v3"):
                 self.assertEqual(
                     recorder._backfill_stream_fingerprints(
                         limit=1,

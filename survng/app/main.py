@@ -88,7 +88,6 @@ from .security import authenticate_api_token, redact_secret_text, required_api_s
 from .storage_maintenance import StorageMaintenanceRunner
 
 config = load_config()
-manager = AppManager(config)
 LOGGER = logging.getLogger(__name__)
 LOG_LINES: deque[dict] = deque(maxlen=1000)
 FACE_OBSERVATIONS_SYNCED = False
@@ -110,7 +109,24 @@ SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 INCIDENT_QUERIES = IncidentQueryService()
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
-MODEL_EVALUATION = ModelEvaluationRunner(lambda: manager, lambda: config)
+
+
+def get_manager() -> AppManager:
+    current = globals().get("manager")
+    if current is not None:
+        return current
+    created = AppManager(config)
+    globals()["manager"] = created
+    return created
+
+
+def __getattr__(name: str):
+    if name == "manager":
+        return get_manager()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+MODEL_EVALUATION = ModelEvaluationRunner(get_manager, lambda: config)
 SERVER_RESTART_LOCK = threading.Lock()
 SERVER_RESTART_SCHEDULED = False
 
@@ -368,7 +384,7 @@ def normalize_source(source: str) -> str:
 
 
 def _require_recording_camera(camera_id: str) -> None:
-    if manager.camera(camera_id) is None:
+    if get_manager().camera(camera_id) is None:
         raise HTTPException(status_code=404, detail="camera not found")
 
 
@@ -413,7 +429,7 @@ def _request_server_restart() -> dict[str, object]:
     with SERVER_RESTART_LOCK:
         if SERVER_RESTART_SCHEDULED or APPLICATION_STOPPING.is_set():
             raise RuntimeError("SurvNG is already restarting or shutting down")
-        active_tasks = _active_storage_tasks(manager)
+        active_tasks = _active_storage_tasks(get_manager())
         if active_tasks:
             raise RuntimeError(
                 "SurvNG cannot restart while storage work is active: "
@@ -501,7 +517,7 @@ def reload_manager(
             ),
         ),
     )
-    lifecycle.reload(config, manager, effective, persist=persist)
+    lifecycle.reload(config, get_manager(), effective, persist=persist)
     return effective
 
 
@@ -536,7 +552,7 @@ def apply_config_update(
     effective, result = application.apply(
         config,
         effective,
-        manager,
+        get_manager(),
         persist=persist,
     )
     config = effective
@@ -548,7 +564,7 @@ def apply_config_update(
 def _record_process_lifecycle(kind: str) -> None:
     """Record restart evidence without making telemetry a lifecycle dependency."""
     try:
-        manager.telemetry.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
+        get_manager().telemetry.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
     except Exception:
         logging.getLogger(__name__).exception(
             "could not persist process lifecycle event %s",
@@ -571,7 +587,7 @@ async def lifespan(app: FastAPI):
         with early_onvif_lock:
             if early_onvif_thread is not None and early_onvif_thread.is_alive():
                 return
-            active_manager = manager
+            active_manager = get_manager()
 
             def release() -> None:
                 logging.getLogger("uvicorn.error").info(
@@ -600,7 +616,7 @@ async def lifespan(app: FastAPI):
             "early ONVIF shutdown signal is unavailable on this platform"
         )
     _record_process_lifecycle("startup_started")
-    manager.start_all()
+    get_manager().start_all()
     try:
         media_exports = _recording_media_runtime._media_export_manager()
         media_exports.start()
@@ -646,12 +662,16 @@ async def lifespan(app: FastAPI):
                 finally:
                     try:
                         with MANAGER_RELOAD_LOCK:
-                            manager.stop_all()
+                            active = globals().get("manager")
+                            if active is not None:
+                                active.stop_all()
                     finally:
                         if early_onvif_thread is not None and early_onvif_thread.is_alive():
                             early_onvif_thread.join()
                         try:
-                            manager.detector.stop_resource_tracker()
+                            active = globals().get("manager")
+                            if active is not None:
+                                active.detector.stop_resource_tracker()
                         except Exception:
                             logging.getLogger("uvicorn.error").exception(
                                 "final multiprocessing resource tracker cleanup failed"
@@ -665,14 +685,14 @@ app = FastAPI(title="SurvNG", lifespan=lifespan)
 def _publish_config_runtime(next_config: AppConfig) -> None:
     global config
     config = next_config
-    manager.config = next_config
+    get_manager().config = next_config
 
 
 app.include_router(
     create_config_router(
         ConfigRouteDependencies(
             get_config=lambda: config,
-            get_manager=lambda: manager,
+            get_manager=get_manager,
             publish_config=_publish_config_runtime,
             apply_config=apply_config_update,
             reload_manager=reload_manager,
@@ -687,7 +707,7 @@ app.include_router(
     create_system_telemetry_router(
         SystemTelemetryDependencies(
             get_config=lambda: config,
-            get_manager=lambda: manager,
+            get_manager=get_manager,
         ),
         SYSTEM_TELEMETRY,
     )
@@ -695,7 +715,7 @@ app.include_router(
 app.include_router(
     create_operations_router(
         OperationsRouteDependencies(
-            get_manager=lambda: manager,
+            get_manager=get_manager,
             manager_lock=MANAGER_RELOAD_LOCK,
             log_rows=lambda: tuple(LOG_LINES),
             storage_maintenance=STORAGE_MAINTENANCE,
@@ -746,13 +766,13 @@ def _sync_face_observations(limit: int = 5000) -> int:
         while not APPLICATION_STOPPING.is_set():
             with MANAGER_ACCESS.lease(
                 MANAGER_RELOAD_LOCK,
-                lambda: manager,
+                get_manager,
             ) as active_manager:
                 inserted += active_manager.faces.ingest_events(
                     active_manager.events.recent(max(1, min(limit, 20000)))
                 )
             with MANAGER_RELOAD_LOCK:
-                if manager is active_manager:
+                if globals().get("manager") is active_manager:
                     FACE_OBSERVATIONS_SYNCED = True
                     return inserted
         return inserted
@@ -783,7 +803,7 @@ def _start_face_observation_sync() -> None:
 _recording_media_runtime = RecordingMediaRuntime(
     RecordingMediaDependencies(
         get_config=lambda: config,
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         ffprobe_path=_ffprobe_path,
         validate_recording_range=_validate_recording_range,
         recording_playback_window=_recording_playback_window,
@@ -816,7 +836,7 @@ onvif_page = _frontend_route_bundle.handlers["onvif_page"]
 
 _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         manager_lock=MANAGER_RELOAD_LOCK,
         manager_access=MANAGER_ACCESS,
     )
@@ -827,7 +847,7 @@ semantic_search = _semantic_route_bundle.handlers["semantic_search"]
 
 _system_route_bundle = create_system_router(
     SystemRouteDependencies(
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         get_config=lambda: config,
         system_telemetry=SYSTEM_TELEMETRY,
         ffprobe_path=_ffprobe_path,
@@ -861,7 +881,7 @@ recording_cache_status = _system_route_bundle.handlers["recording_cache_status"]
 # Assemble incident/event queries after all assistant consumers are defined.
 _incident_query_bundle = create_incident_query_router(
     IncidentQueryDependencies(
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         manager_lock=MANAGER_RELOAD_LOCK,
         manager_access=MANAGER_ACCESS,
     ),
@@ -880,7 +900,7 @@ incident_for_event = _incident_query_bundle.handlers["incident_for_event"]
 _intelligence_route_bundle = create_intelligence_router(
     IntelligenceDependencies(
         get_config=lambda: config,
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         manager_lock=MANAGER_RELOAD_LOCK,
         get_audit_ai_limiter=lambda: AUDIT_AI_LIMITER,
         get_assistant_limiter=lambda: ASSISTANT_LIMITER,
@@ -902,7 +922,7 @@ app.include_router(_intelligence_route_bundle.router)
 
 _camera_api_route_bundle = create_camera_api_router(
     CameraApiDependencies(
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         manager_lock=MANAGER_RELOAD_LOCK,
         manager_access=MANAGER_ACCESS,
     )
@@ -933,7 +953,7 @@ set_camera_detection = _camera_api_route_bundle.handlers["set_camera_detection"]
 
 _detection_route_bundle = create_detection_router(
     DetectionRouteDependencies(
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         get_config=lambda: config,
         manager_lock=MANAGER_RELOAD_LOCK,
         get_comparison_limiter=lambda: TRACKING_COMPARISON_LIMITER,
@@ -965,7 +985,7 @@ detect_debug_frame = _detection_route_bundle.handlers["detect_debug_frame"]
 
 _appearance_route_bundle = create_appearance_router(
     AppearanceRouteDependencies(
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         manager_lock=MANAGER_RELOAD_LOCK,
         manager_access=MANAGER_ACCESS,
         resolve_incident=lambda active, event_id: INCIDENT_QUERIES.resolve_event(
@@ -987,7 +1007,7 @@ app.include_router(
     create_training_router(
         TrainingRouteDependencies(
             get_config=lambda: config,
-            get_manager=lambda: manager,
+            get_manager=get_manager,
             manager_lock=MANAGER_RELOAD_LOCK,
             manager_access=MANAGER_ACCESS,
         )
@@ -997,7 +1017,7 @@ app.include_router(
 
 _face_route_bundle = create_face_router(
     FaceRouteDependencies(
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         manager_lock=MANAGER_RELOAD_LOCK,
         start_observation_sync=_start_face_observation_sync,
         manager_access=MANAGER_ACCESS,
@@ -1021,7 +1041,7 @@ face_crop = _face_route_bundle.handlers["face_crop"]
 # and tests while route ownership lives in recording_routes.
 _recording_route_bundle = create_recording_router(
     RecordingRouteDependencies(
-        get_manager=lambda: manager,
+        get_manager=get_manager,
         get_config=lambda: config,
         get_media_exports=lambda: _recording_media_runtime._media_export_manager(),
         public_url=lambda path: public_url(path),

@@ -627,7 +627,7 @@ class EventStoreTest(unittest.TestCase):
             )
 
             with patch(
-                "survng.app.events.Path.resolve",
+                "survng.app.event_store.store.Path.resolve",
                 side_effect=AssertionError("protection lookup must not resolve media paths"),
             ):
                 protected = store.protected_recording_paths()

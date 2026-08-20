@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from .event_store import EventStore
+from .store import EventStore
 
 __all__ = ["EventStore"]

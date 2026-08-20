@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Python test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest anyio
+      - name: Run focused Python tests
+        run: |
+          scripts/run-tests.sh \
+            tests/test_event_store.py \
+            tests/test_app_lifespan.py \
+            tests/test_frontend_routes.py \
+            tests/test_recorder.py \
+            tests/test_face_store.py \
+            tests/test_calibration.py \
+            tests/test_live_delivery.py
+      - name: Run frontend unit tests
+        run: |
+          npm --prefix frontend ci
+          node frontend/tests/run-tests.mjs unit

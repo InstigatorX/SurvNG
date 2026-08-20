@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .face_store import (
+from .store import (
     FACE_OUTCOME_EMBEDDED,
     FACE_OUTCOME_FAILED,
     FACE_OUTCOME_PENDING,

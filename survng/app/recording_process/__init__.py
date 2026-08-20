@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from .recording_process import AudioStreamInfo, Recorder
+from .recorder import AudioStreamInfo, Recorder
 
 __all__ = ["AudioStreamInfo", "Recorder"]
