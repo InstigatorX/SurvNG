@@ -1257,6 +1257,51 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
         self.assertEqual(calls, ["initial", "refinement"])
 
+    def test_refinement_rejects_live_frame_outside_event_time_window(self) -> None:
+        event_epoch = 1_800_000_000.0
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=1,
+                event_class_confirmation_frames={},
+            )
+
+            def __init__(self):
+                self.calls = 0
+
+            def detect_refinement(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                return [detected("person", 0.9, (2, 2, 18, 18))]
+
+        detector = Detector()
+        frame = np.zeros((20, 20, 3), dtype=np.uint8)
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector,
+            SimpleNamespace(recording_at=lambda *_args: None),
+            lambda: frame,
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=frame,
+                captured_at_epoch=event_epoch + 20.0,
+                captured_at_monotonic=10.0,
+                sequence=7,
+                camera_generation=2,
+                capture_generation=3,
+            ),
+        )
+
+        with (
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.0),
+        ):
+            result = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertIsNone(result.frame)
+        self.assertEqual(result.objects, [{"status": "no_recorded_frame"}])
+        self.assertEqual(detector.calls, 0)
+
     def test_detector_uses_one_followup_stage_to_replace_clipped_cover_frame(self) -> None:
         event_epoch = 1_800_000_000.0
         requested_offsets: list[float] = []

@@ -613,6 +613,38 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(plan["expired_files"], 0)
             self.assertEqual(result["selected_files"], 0)
             self.assertTrue(snapshot.exists())
+
+    def test_reopening_store_recovers_snapshot_claim_after_unlink_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "old.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"snapshot")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "insert into media_deletion_claims(path, role, claimed_at) values (?, 'snapshot', ?)",
+                    (event["snapshot_path"], "2026-01-01T00:00:00+00:00"),
+                )
+            snapshot.unlink()
+
+            recovered = EventStore(root)
+
+            with recovered._connect() as connection:
+                row = connection.execute(
+                    "select snapshot_path from events where id = ?", (event["id"],)
+                ).fetchone()
+                claims = connection.execute(
+                    "select count(*) from media_deletion_claims where role = 'snapshot'"
+                ).fetchone()[0]
+            self.assertEqual(row["snapshot_path"], "")
+            self.assertEqual(claims, 0)
     def test_protected_recording_paths_use_lexical_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

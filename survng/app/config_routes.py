@@ -226,6 +226,30 @@ def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
+def _masked_probe_credentials_match(
+    camera: CameraConfig,
+    *,
+    host: str,
+    username: str,
+    onvif_port: int,
+) -> bool:
+    """Only reuse a stored camera password for that camera's own endpoint.
+
+    The probe is intentionally able to reach a camera that is not yet in the
+    configuration, but the secret placeholder must never turn it into a way to
+    forward an already-stored credential to an arbitrary host.
+    """
+    service = camera.onvif if camera.onvif.password else camera.baichuan
+    return (
+        bool(service.password)
+        and host.casefold() == service.host.strip().casefold()
+        and username == service.username
+        # The password is sent by the ONVIF capability request, even when a
+        # Reolink/Baichuan credential is the configured fallback.
+        and onvif_port == camera.onvif.port
+    )
+
+
 def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
     router = APIRouter()
 
@@ -413,6 +437,16 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
                 existing = camera_by_id(deps.get_config(), payload.camera_id)
                 if existing is None:
                     raise HTTPException(status_code=422, detail="masked probe credentials require an existing camera")
+                if not _masked_probe_credentials_match(
+                    existing,
+                    host=host,
+                    username=username,
+                    onvif_port=payload.onvif_port,
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="masked probe credentials may only be used with the configured camera endpoint",
+                    )
                 password = existing.onvif.password or existing.baichuan.password
             result: dict[str, Any] = {
                 "host": host,

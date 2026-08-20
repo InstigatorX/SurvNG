@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -31,6 +33,131 @@ class ConfigReloadTest(unittest.TestCase):
         main.APPLICATION_STOPPING.clear()
         main.config = self.previous_config
         main.manager = self.previous_manager
+
+    def test_concurrent_manager_reloads_retire_the_published_generation(self) -> None:
+        preferences = {
+            "recording_enabled": {},
+            "detection_enabled": {},
+            "camera_enabled": {},
+        }
+        active = Mock()
+        active.runtime_preferences.return_value = preferences
+        candidate_a = Mock()
+        candidate_a.runtime_preferences.return_value = preferences
+        candidate_b = Mock()
+        first_start_entered = threading.Event()
+        release_first_start = threading.Event()
+        errors: list[BaseException] = []
+
+        def block_first_start() -> None:
+            first_start_entered.set()
+            release_first_start.wait(timeout=2.0)
+
+        candidate_a.start_all.side_effect = block_first_start
+        main.config = AppConfig(base_path="/old")
+        main.manager = active
+
+        def reload(value: AppConfig) -> None:
+            try:
+                main.reload_manager(value, persist=False)
+            except BaseException as error:
+                errors.append(error)
+
+        with (
+            patch("survng.app.main.AppManager", side_effect=[candidate_a, candidate_b]) as factory,
+            patch.object(main, "_active_storage_tasks", return_value=[]),
+            patch.object(main, "_active_ai_operations", return_value={}),
+            patch.object(main, "_start_face_observation_sync"),
+            patch.object(main._recording_media_runtime, "prewarmer_running", return_value=False),
+            patch.object(main._recording_media_runtime, "_stop_recording_prewarmer"),
+            patch.object(main._recording_media_runtime, "rebind_media_exports"),
+            patch.object(main._recording_media_runtime, "clear_runtime_caches"),
+        ):
+            first = threading.Thread(
+                target=reload,
+                args=(AppConfig(base_path="/a"),),
+            )
+            second = threading.Thread(
+                target=reload,
+                args=(AppConfig(base_path="/b"),),
+            )
+            first.start()
+            self.assertTrue(first_start_entered.wait(timeout=1.0))
+            second.start()
+            time.sleep(0.05)
+            self.assertEqual(factory.call_count, 1)
+            release_first_start.set()
+            first.join(timeout=2.0)
+            second.join(timeout=2.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        active.stop_all_with_runtime_preferences.assert_called_once_with()
+        candidate_a.stop_all_with_runtime_preferences.assert_called_once_with()
+        candidate_b.stop_all_with_runtime_preferences.assert_not_called()
+        self.assertIs(main.manager, candidate_b)
+        self.assertEqual(main.config.base_path, "/b")
+
+    def test_targeted_config_publication_remains_inside_generation_lock(self) -> None:
+        active = Mock()
+        active.config = AppConfig(base_path="/old")
+        main.config = active.config
+        main.manager = active
+        first_unpack_entered = threading.Event()
+        release_first_unpack = threading.Event()
+        observed_currents: list[str] = []
+        errors: list[BaseException] = []
+
+        class ApplyResult:
+            def __init__(self, incoming: AppConfig) -> None:
+                self.incoming = incoming
+
+            def __iter__(self):
+                yield self.incoming
+                if self.incoming.base_path == "/a":
+                    first_unpack_entered.set()
+                    release_first_unpack.wait(timeout=2.0)
+                yield {"apply_mode": "hot"}
+
+        def apply(_application, current, incoming, runtime, *, persist):
+            del persist
+            observed_currents.append(current.base_path)
+            runtime.config = incoming
+            return ApplyResult(incoming)
+
+        def update(value: AppConfig) -> None:
+            try:
+                main.apply_config_update(value, persist=False)
+            except BaseException as error:
+                errors.append(error)
+
+        with patch(
+            "survng.app.main.TargetedConfigApplication.apply",
+            autospec=True,
+            side_effect=apply,
+        ):
+            first = threading.Thread(
+                target=update,
+                args=(AppConfig(base_path="/a"),),
+            )
+            second = threading.Thread(
+                target=update,
+                args=(AppConfig(base_path="/b"),),
+            )
+            first.start()
+            self.assertTrue(first_unpack_entered.wait(timeout=1.0))
+            second.start()
+            time.sleep(0.05)
+            self.assertEqual(observed_currents, ["/old"])
+            release_first_unpack.set()
+            first.join(timeout=2.0)
+            second.join(timeout=2.0)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(observed_currents, ["/old", "/a"])
+        self.assertEqual(main.config.base_path, "/b")
+        self.assertEqual(active.config.base_path, "/b")
 
     def test_detector_reload_classification_covers_each_setting_once(self) -> None:
         detector_groups = (

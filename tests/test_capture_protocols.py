@@ -566,6 +566,56 @@ class CaptureProtocolTest(unittest.TestCase):
         self.assertIs(sent_envelope, envelope)
         self.assertEqual(sent_headers["Content-Type"], "application/soap+xml")
 
+    def test_pullmessages_capture_is_replaced_for_each_zeep_client(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        first = SimpleNamespace(zeep_client=SimpleNamespace(plugins=[]))
+        second = SimpleNamespace(zeep_client=SimpleNamespace(plugins=[]))
+
+        listener._enable_pullmessages_capture(first)
+        first_capture = listener._pullmessages_capture
+        listener._enable_pullmessages_capture(second)
+
+        self.assertIsNotNone(first_capture)
+        self.assertIsNot(listener._pullmessages_capture, first_capture)
+        self.assertEqual(first.zeep_client.plugins, [first_capture])
+        self.assertEqual(second.zeep_client.plugins, [listener._pullmessages_capture])
+
+    def test_raw_notifications_are_authoritative_when_zeep_omits_an_entry(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        raw = listener._raw_pullmessages_notifications(REOLINK_PULLMESSAGES_XML)
+        parsed_only_second = [SimpleNamespace(Topic="parsed-second")]
+
+        inputs = listener._notification_inputs(parsed_only_second, raw[:2])
+
+        self.assertEqual(len(inputs), 2)
+        self.assertEqual([item[1].topic for item in inputs], [
+            "tns1:VideoSource/MotionAlarm",
+            "tns1:RuleEngine/MyRuleDetector/VehicleDetect",
+        ])
+        self.assertTrue(all(item[0] is None for item in inputs))
+
+    def test_failed_pull_capture_can_be_cleared_before_next_response(self) -> None:
+        capture = _PullMessagesResponseCapture()
+        old_envelope = ElementTree.fromstring(REOLINK_PULLMESSAGES_XML)
+        new_xml = REOLINK_PULLMESSAGES_XML.replace(
+            "tns1:VideoSource/MotionAlarm",
+            "tns1:RuleEngine/NewDetector/Motion",
+            1,
+        )
+        new_envelope = ElementTree.fromstring(new_xml)
+        operation = SimpleNamespace(name="PullMessages")
+
+        capture.ingress(old_envelope, {}, operation)
+        capture.clear()
+        capture.ingress(new_envelope, {}, operation)
+
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        notifications = listener._raw_pullmessages_notifications(capture.take())
+        self.assertEqual(
+            notifications[0].topic,
+            "tns1:RuleEngine/NewDetector/Motion",
+        )
+
     def test_onvif_effectiveness_degrades_without_changing_transport_health(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
         listener.connected = True

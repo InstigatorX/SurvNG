@@ -21,6 +21,8 @@ from .security import redact_secret_text
 
 
 LOGGER = logging.getLogger(__name__)
+REFINEMENT_COMPLETION_RETRY_SECONDS = 2.0
+REFINEMENT_COMPLETION_MAXIMUM_ATTEMPTS = 2_147_483_647
 
 
 def _refinement_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
@@ -93,6 +95,7 @@ TrackingStarter = Callable[
     bool | None,
 ]
 RefinementCallback = Callable[[MotionDecisionOutcome], None]
+RefinementCompletionHandler = Callable[[MotionDecisionOutcome, dict[str, Any]], None]
 
 
 def _compact_refinement_qualification(
@@ -121,6 +124,7 @@ class _RefinementJob:
     require_eligible_object: bool
     require_motion_correlation: bool
     callback: RefinementCallback | None
+    completion_context: dict[str, Any] | None
     initial_outcome: MotionDecisionOutcome
 
     def key(self) -> tuple[str, str | int | float]:
@@ -151,6 +155,7 @@ class _RefinementJob:
             "existing_event_id": self.existing_event_id,
             "require_eligible_object": self.require_eligible_object,
             "require_motion_correlation": self.require_motion_correlation,
+            "completion_context": durable_json_copy(self.completion_context or {}),
             "initial_outcome": {
                 **self.initial_outcome.as_dict(),
                 "detected_objects": list(self.initial_outcome.detected_objects),
@@ -176,6 +181,7 @@ class _RefinementJob:
             require_eligible_object=bool(payload.get("require_eligible_object")),
             require_motion_correlation=bool(payload.get("require_motion_correlation")),
             callback=callback,
+            completion_context=(dict(payload.get("completion_context") or {}) or None),
             initial_outcome=MotionDecisionOutcome(
                 event_id=(int(initial["event_id"]) if initial.get("event_id") is not None else None),
                 snapshot_path=str(initial.get("snapshot_path") or ""),
@@ -313,6 +319,7 @@ class MotionIncidentService:
         self._refinement_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
         self._lease_owner = uuid.uuid4().hex
         self._refinement_callbacks: dict[str, RefinementCallback] = {}
+        self._refinement_completion_handler: RefinementCompletionHandler | None = None
         self._refinement_thread: threading.Thread | None = None
         self._refinement_stop: threading.Event | None = None
         self._refinement_accepting = False
@@ -377,6 +384,14 @@ class MotionIncidentService:
                 },
                 "object_activity_attribution": self.decision_processor.activity_status(),
             }
+
+    def set_refinement_completion_handler(
+        self,
+        handler: RefinementCompletionHandler | None,
+    ) -> None:
+        """Register finalization that can be rebuilt from a durable payload."""
+        with self._status_lock:
+            self._refinement_completion_handler = handler
 
     def start(self, stop_event: threading.Event) -> None:
         with self._status_lock:
@@ -464,6 +479,7 @@ class MotionIncidentService:
         require_eligible_object: bool = False,
         require_motion_correlation: bool = False,
         refinement_callback: RefinementCallback | None = None,
+        refinement_completion_context: dict[str, Any] | None = None,
     ) -> MotionDecisionOutcome:
         outcome = self.decision_processor.handle(
             topic,
@@ -488,6 +504,7 @@ class MotionIncidentService:
                     require_eligible_object=require_eligible_object,
                     require_motion_correlation=require_motion_correlation,
                     callback=refinement_callback,
+                    completion_context=refinement_completion_context,
                     initial_outcome=outcome,
                 )
             )
@@ -631,6 +648,7 @@ class MotionIncidentService:
             job_id = str(claimed["id"])
             with self._status_lock:
                 callback = self._refinement_callbacks.get(job_id)
+                completion_handler = self._refinement_completion_handler
             job = _RefinementJob.from_payload(dict(claimed["payload"]), callback)
             job.qualification["detection_intent_id"] = job_id
             completed = False
@@ -699,38 +717,93 @@ class MotionIncidentService:
                     outcome,
                     job.event_at,
                 )
-                if job.callback is not None and not stop.is_set():
+                durable_completion = job.completion_context is not None
+                if durable_completion:
+                    try:
+                        if stop.is_set():
+                            raise RuntimeError(
+                                "refinement completion deferred during shutdown"
+                            )
+                        if completion_handler is None:
+                            raise RuntimeError(
+                                "refinement completion handler is unavailable"
+                            )
+                        completion_handler(outcome, job.completion_context or {})
+                    except Exception as error:
+                        self._record_refinement_completion_failure(job, error)
+                        self._retry_refinement_completion(job_id, error)
+                        continue
+                elif job.callback is not None and not stop.is_set():
+                    # Compatibility-only callbacks have no durable replay
+                    # context. Preserve their historical best-effort behavior.
                     try:
                         job.callback(outcome)
                     except Exception as error:
-                        failure = {
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "error": redact_secret_text(error)[:500],
-                            "error_type": type(error).__name__,
-                            "event_at": job.event_at.isoformat(),
-                            "existing_event_id": job.existing_event_id,
-                        }
-                        with self._status_lock:
-                            self._refinement_callback_failures += 1
-                            self._last_refinement_callback_failure = failure
+                        self._record_refinement_completion_failure(job, error)
                         LOGGER.exception(
                             "motion refinement callback failed for %s: %s: %s",
                             self.camera_id,
                             type(error).__name__,
                             redact_secret_text(error)[:500],
                         )
+                try:
+                    self.refinement_store.complete_detection_job(
+                        job_id,
+                        outcome.event_id,
+                        lease_owner=self._lease_owner,
+                    )
+                except Exception as error:
+                    self._record_refinement_completion_failure(job, error)
+                    self._retry_refinement_completion(job_id, error)
+                    continue
+                completed = True
                 with self._status_lock:
                     self._refinements_completed += 1
-                self.refinement_store.complete_detection_job(
-                    job_id,
-                    outcome.event_id,
-                    lease_owner=self._lease_owner,
-                )
-                completed = True
             finally:
                 with self._status_lock:
                     if completed:
                         self._refinement_callbacks.pop(job_id, None)
+
+    def _record_refinement_completion_failure(
+        self,
+        job: _RefinementJob,
+        error: Exception,
+    ) -> None:
+        failure = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": redact_secret_text(error)[:500],
+            "error_type": type(error).__name__,
+            "event_at": job.event_at.isoformat(),
+            "existing_event_id": job.existing_event_id,
+        }
+        with self._status_lock:
+            self._refinement_callback_failures += 1
+            self._last_refinement_callback_failure = failure
+
+    def _retry_refinement_completion(
+        self,
+        job_id: str,
+        error: Exception,
+    ) -> None:
+        retrying = self.refinement_store.retry_detection_job(
+            job_id,
+            redact_secret_text(error)[:500],
+            retry_delay_seconds=REFINEMENT_COMPLETION_RETRY_SECONDS,
+            maximum_attempts=REFINEMENT_COMPLETION_MAXIMUM_ATTEMPTS,
+            lease_owner=self._lease_owner,
+        )
+        LOGGER.exception(
+            "motion refinement completion failed for %s (%s): %s: %s",
+            self.camera_id,
+            "retrying" if retrying else "terminal",
+            type(error).__name__,
+            redact_secret_text(error)[:500],
+        )
+        if retrying:
+            try:
+                self._refinement_queue.put_nowait(True)
+            except queue.Full:
+                pass
 
     def _record_timing(self, outcome: MotionDecisionOutcome) -> None:
         timing = outcome.processing_timing

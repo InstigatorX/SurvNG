@@ -80,6 +80,15 @@ class ManagerShutdownIncompleteError(RuntimeError):
         super().__init__(f"camera shutdown remains active: {residuals}")
 
 
+class MotionReconfigurationIncompleteError(RuntimeError):
+    """A replacement worker could not be retired safely.
+
+    Continuing in-process replacement after this condition could create a
+    third, unmanaged camera generation. The manager remains fenced until a
+    full manager generation replacement.
+    """
+
+
 def validate_media_storage_configuration(config: AppConfig) -> None:
     if config.media_storage.locations:
         required_roles = {
@@ -194,6 +203,7 @@ class AppManager:
         self.detection_watch = RouteDetectionWatch(
             config.detector.tracking.camera_transition_routes
         )
+        self._motion_reconfiguration_fenced = False
         self._restored_detection_watches: list[Any] = []
         self._restored_watch_retry_lock = threading.Lock()
         self._restored_watch_retry_timer: threading.Timer | None = None
@@ -1103,6 +1113,11 @@ class AppManager:
         with self._lifecycle_lock:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
+            if getattr(self, "_motion_reconfiguration_fenced", False):
+                raise MotionReconfigurationIncompleteError(
+                    "motion reconfiguration is fenced after an incomplete rollback; "
+                    "reload the application manager before applying another motion change"
+                )
             for camera_id in sorted(hot_camera_ids):
                 worker = self.workers.get(camera_id)
                 camera = cameras.get(camera_id)
@@ -1119,7 +1134,8 @@ class AppManager:
             previous_evidence: dict[str, MotionEvidenceRepository] = {}
             enabled: dict[str, bool] = {}
             detection: dict[str, bool] = {}
-            published: set[str] = set()
+            publication_attempted: set[str] = set()
+            replacement_start_attempted: set[str] = set()
             try:
                 for camera_id in sorted(restart_camera_ids):
                     camera = cameras.get(camera_id)
@@ -1137,34 +1153,88 @@ class AppManager:
                     replacement = replacements[camera_id]
                     replacement.set_detection_enabled(detection[camera_id])
                     if enabled[camera_id]:
+                        # start() can fail after launching a subset of owned
+                        # workers, so rollback must treat invocation as enough
+                        # evidence that an explicit stop is required.
+                        replacement_start_attempted.add(camera_id)
                         replacement.start()
                     camera = cameras[camera_id]
+                    # From this point forward a failed registry operation may
+                    # have mutated its owner before raising. Rollback therefore
+                    # restores every owner for this camera unconditionally.
+                    publication_attempted.add(camera_id)
                     self.workers[camera_id] = replacement
                     self.camera_fleet.replace_worker(camera, replacement)
                     self.camera_controls.replace_worker(camera, replacement)
                     self.inference.replace_worker(camera_id, replacement)
-                    published.add(camera_id)
-            except BaseException:
+            except BaseException as error:
+                rollback_incomplete = False
+                replacement_stopped: dict[str, bool] = {}
                 for camera_id, replacement in replacements.items():
-                    try:
-                        replacement.close()
-                    except Exception:
-                        LOGGER.exception(
-                            "failed to close replacement camera %s during rollback",
-                            camera_id,
-                        )
-                for camera_id in published:
+                    replacement_stopped[camera_id] = True
+                    if camera_id in replacement_start_attempted:
+                        try:
+                            replacement.stop()
+                        except Exception:
+                            LOGGER.exception(
+                                "failed to stop replacement camera %s during rollback",
+                                camera_id,
+                            )
+                            replacement_stopped[camera_id] = False
+                            rollback_incomplete = True
+                    if replacement_stopped[camera_id]:
+                        try:
+                            replacement.close()
+                        except Exception:
+                            LOGGER.exception(
+                                "failed to close replacement camera %s during rollback",
+                                camera_id,
+                            )
+                            rollback_incomplete = True
+                for camera_id in publication_attempted:
                     old_worker = previous[camera_id]
                     old_camera = old_worker.camera
                     self.workers[camera_id] = old_worker
-                    self.camera_fleet.replace_worker(old_camera, old_worker)
-                    self.camera_controls.replace_worker(old_camera, old_worker)
-                    self.inference.replace_worker(camera_id, old_worker)
+                    for label, restore in (
+                        (
+                            "camera fleet",
+                            lambda: self.camera_fleet.replace_worker(
+                                old_camera,
+                                old_worker,
+                            ),
+                        ),
+                        (
+                            "camera controls",
+                            lambda: self.camera_controls.replace_worker(
+                                old_camera,
+                                old_worker,
+                            ),
+                        ),
+                        (
+                            "inference lifecycle",
+                            lambda: self.inference.replace_worker(
+                                camera_id,
+                                old_worker,
+                            ),
+                        ),
+                    ):
+                        try:
+                            restore()
+                        except Exception:
+                            LOGGER.exception(
+                                "failed to restore %s for camera %s during rollback",
+                                label,
+                                camera_id,
+                            )
+                            rollback_incomplete = True
                     self.motion_evidence[camera_id] = previous_evidence[camera_id]
-                for camera_id in previous.keys() - published:
+                for camera_id in previous.keys() - publication_attempted:
                     self.motion_evidence[camera_id] = previous_evidence[camera_id]
                 for camera_id, old_worker in previous.items():
-                    if enabled.get(camera_id):
+                    if enabled.get(camera_id) and replacement_stopped.get(
+                        camera_id,
+                        True,
+                    ):
                         try:
                             old_worker.start()
                         except Exception:
@@ -1172,6 +1242,12 @@ class AppManager:
                                 "failed to restart camera %s after motion rollback",
                                 camera_id,
                             )
+                            rollback_incomplete = True
+                if rollback_incomplete:
+                    self._motion_reconfiguration_fenced = True
+                    raise MotionReconfigurationIncompleteError(
+                        "camera replacement rollback was incomplete; manager is fenced"
+                    ) from error
                 raise
 
             for camera_id, old_worker in previous.items():

@@ -899,14 +899,17 @@ class ObjectTrackingSession:
                             break
                         if sample_epoch <= captured_at or sample_epoch > target_epoch:
                             continue
-                        process_frame(
+                        processed = process_frame(
                             frame,
                             sample_epoch,
                             catchup=True,
                             frame_reference=frame_reference,
                         )
-                        captured_at = sample_epoch
-                        advanced = True
+                        if processed:
+                            # Track expiry is based only on successfully
+                            # analyzed media, never on a deferred/failed cursor.
+                            captured_at = sample_epoch
+                            advanced = True
                 finally:
                     close_catchup = getattr(catchup_frames, "close", None)
                     if callable(close_catchup):

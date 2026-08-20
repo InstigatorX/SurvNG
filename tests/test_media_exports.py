@@ -654,6 +654,69 @@ class MediaExportTest(unittest.TestCase):
             self.assertFalse(any(manager.recording_dir.iterdir()))
             self.assertFalse(any(manager.manifest_dir.iterdir()))
 
+    def test_restart_removes_export_published_before_completion_was_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database", recorder=lambda: FakeRecorder([]),
+                ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+            )
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            })
+            manager.store.update(str(job["id"]), status="running", phase="Finalizing")
+            orphan = manager.recording_dir / f"{job['id']}-gate-19700101-000140-recording.mp4"
+            orphan.write_bytes(b"published before crash")
+            manifest = manager.manifest_dir / f"{job['id']}.json"
+            manifest.write_text("{}", encoding="utf-8")
+
+            recovered = MediaExportManager(
+                root / "storage", root / "database", recorder=lambda: FakeRecorder([]),
+                ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+            )
+
+            self.assertFalse(orphan.exists())
+            self.assertFalse(manifest.exists())
+            failed = recovered.store.get(str(job["id"]))
+            self.assertEqual(failed["status"], "failed")
+
+    def test_publish_syncs_file_and_directory_before_returning_final_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database", recorder=lambda: FakeRecorder([]),
+                ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+            )
+            source = root / "rendered.mp4"
+            source.write_bytes(b"rendered")
+            job = {"id": "job-sync", "camera_id": "gate", "kind": "recording", "start_epoch": 100.0}
+
+            with patch("survng.app.media_exports.os.fsync") as fsync:
+                final, _name = manager._publish(job, source, threading.Event())
+
+            self.assertTrue(final.exists())
+            self.assertGreaterEqual(fsync.call_count, 2)
+
+    def test_cleanup_claim_prevents_late_protection_from_reporting_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database", recorder=lambda: FakeRecorder([]),
+                ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+            )
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            })
+            manager.store.update(str(job["id"]), status="completed")
+
+            claimed = manager.store.claim_unprotected_cleanup(str(job["id"]))
+
+            self.assertIsNotNone(claimed)
+            with self.assertRaisesRegex(RuntimeError, "currently being deleted"):
+                manager.set_protected(str(job["id"]), True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -733,3 +733,103 @@ def test_refinement_callback_failure_does_not_reclassify_completed_refinement() 
     stop.set()
     service.request_stop()
     assert service.wait_stopped(1.0)
+
+
+def test_recovered_refinement_runs_persisted_completion_context() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=84,
+        snapshot_path="refined.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        first, *_ = _service(initial, refinement_store=store)
+        event_at = datetime.now(timezone.utc)
+        first.process(
+            "motion",
+            "person",
+            event_at,
+            {"detection_intent_id": "gate:restart-safe-refinement"},
+            refinement_completion_context={
+                "decision_id": "decision-7",
+                "event_at": event_at.isoformat(),
+            },
+        )
+
+        replacement, decision, *_ = _service(initial, refinement_store=store)
+        decision.refine.return_value = refined
+        completion = Mock()
+        replacement.set_refinement_completion_handler(completion)
+        stop = threading.Event()
+        replacement.start(stop)
+
+        waiter = threading.Event()
+        for _ in range(100):
+            if replacement.status()["refinements_completed"]:
+                break
+            waiter.wait(0.01)
+
+        completion.assert_called_once_with(
+            refined,
+            {
+                "decision_id": "decision-7",
+                "event_at": event_at.isoformat(),
+            },
+        )
+        stop.set()
+        replacement.request_stop()
+        assert replacement.wait_stopped(1.0)
+
+
+def test_durable_completion_failure_retries_until_handler_succeeds() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=84,
+        snapshot_path="refined.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+    )
+    service, decision, *_ = _service(initial)
+    decision.refine.return_value = refined
+    completion = Mock(side_effect=[RuntimeError("audit unavailable"), None])
+    service.set_refinement_completion_handler(completion)
+    stop = threading.Event()
+
+    with patch(
+        "survng.app.motion_incidents.REFINEMENT_COMPLETION_RETRY_SECONDS",
+        0.0,
+    ):
+        service.start(stop)
+        service.process(
+            "motion",
+            "person",
+            datetime.now(timezone.utc),
+            {"detection_intent_id": "gate:retry-completion"},
+            refinement_completion_context={"completion_id": "decision-8:refinement"},
+        )
+        waiter = threading.Event()
+        for _ in range(100):
+            if service.status()["refinements_completed"]:
+                break
+            waiter.wait(0.01)
+
+    assert completion.call_count == 2
+    assert decision.refine.call_count == 2
+    assert service.status()["refinements_completed"] == 1
+    assert service.status()["refinement_callback_failures"] == 1
+    assert service.status()["refinement_jobs"] == {"completed": 1}
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)

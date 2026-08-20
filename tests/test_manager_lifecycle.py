@@ -1011,6 +1011,54 @@ class ManagerLifecycleTest(unittest.TestCase):
             ("gate", True),
         )
 
+    def test_motion_reconfiguration_publish_failure_retires_replacement(self) -> None:
+        manager = manager_with_mocks()
+        camera = manager.config.cameras[0]
+        previous = manager.workers["gate"]
+        previous.camera = camera
+        replacement = Mock()
+        replacement.camera = camera
+        replacement.close.side_effect = lambda: self.assertTrue(
+            replacement.stop.called
+        )
+        previous_evidence = object()
+        replacement_evidence = object()
+        manager.motion_evidence = {"gate": previous_evidence}
+
+        def create_replacement(_camera: CameraConfig):
+            manager.motion_evidence["gate"] = replacement_evidence
+            return replacement
+
+        manager._create_camera_worker = Mock(side_effect=create_replacement)
+        manager.camera_fleet.replace_worker = Mock(
+            side_effect=[RuntimeError("fleet publication failed"), None]
+        )
+        manager.camera_controls.replace_worker = Mock()
+        manager.inference.replace_worker = Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "fleet publication failed"):
+            manager.reconfigure_motion(
+                manager.config,
+                restart_camera_ids={"gate"},
+                hot_camera_ids=set(),
+            )
+
+        replacement.start.assert_called_once_with()
+        replacement.stop.assert_called_once_with()
+        replacement.close.assert_called_once_with()
+        previous.start.assert_called_once_with()
+        self.assertIs(manager.workers["gate"], previous)
+        self.assertIs(manager.motion_evidence["gate"], previous_evidence)
+        self.assertEqual(manager.camera_fleet.replace_worker.call_count, 2)
+        manager.camera_controls.replace_worker.assert_called_once_with(
+            camera,
+            previous,
+        )
+        manager.inference.replace_worker.assert_called_once_with(
+            "gate",
+            previous,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

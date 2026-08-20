@@ -447,6 +447,58 @@ def test_observer_mailbox_replaces_backlog_with_latest_frame() -> None:
     assert service.wait_stopped(1.0) == {}
 
 
+def test_observer_mailbox_preserves_latest_frame_for_each_source() -> None:
+    observed: list[tuple[str, int]] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def observe(frame: CapturedFrame) -> None:
+        observed.append((frame.source, frame.sequence))
+        if len(observed) == 1:
+            entered.set()
+            assert release.wait(1.0)
+
+    service = _service(frame_observer=observe)
+    with service._lock:
+        service._stop.clear()
+    assert service._observer_dispatch is not None
+    service._observer_dispatch.start()
+
+    assert service._publish_frame("live", np.zeros((2, 2, 3), dtype=np.uint8))
+    assert entered.wait(1.0)
+    assert service._publish_frame("live", np.ones((2, 2, 3), dtype=np.uint8))
+    assert service._publish_frame("main", np.ones((2, 2, 3), dtype=np.uint8))
+
+    release.set()
+    _wait_until(lambda: len(observed) == 3)
+    assert [source for source, _sequence in observed] == ["live", "live", "main"]
+    stats = service.status()["capture_stats"]
+    assert stats["live"]["observer_frames_replaced"] == 0
+    assert stats["main"]["observer_frames_replaced"] == 0
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+
+
+def test_observer_mailbox_can_restart_after_clean_stop() -> None:
+    observed: list[int] = []
+    service = _service(frame_observer=lambda frame: observed.append(frame.sequence))
+    assert service._observer_dispatch is not None
+
+    for generation in range(2):
+        with service._lock:
+            service._stop.clear()
+        service._observer_dispatch.start()
+        assert service._publish_frame(
+            "live",
+            np.full((2, 2, 3), generation, dtype=np.uint8),
+        )
+        _wait_until(lambda: len(observed) == generation + 1)
+        service._observer_dispatch.request_stop()
+        assert service._observer_dispatch.wait_stopped(1.0)
+
+    assert observed == [1, 2]
+
+
 def test_repeated_start_stop_leaves_no_capture_generations() -> None:
     service = _service(FakeBackend([
         [np.ones((10, 20, 3), dtype=np.uint8)],

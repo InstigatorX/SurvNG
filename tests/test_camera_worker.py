@@ -2919,7 +2919,7 @@ class CameraWorkerTest(unittest.TestCase):
             second.telemetry["graphs"]["fusion"]["invocation_timings"],
         )
 
-    def test_motion_event_runs_detection_on_live_fallback(self) -> None:
+    def test_motion_event_rejects_untimestamped_live_fallback(self) -> None:
         camera = CameraConfig(
             id="back-middle",
             name="Back Middle",
@@ -2940,12 +2940,10 @@ class CameraWorkerTest(unittest.TestCase):
                     datetime(2026, 7, 11, 15, 36, 57, tzinfo=timezone.utc)
                 )
 
-        self.assertIsNotNone(fallback)
+        self.assertIsNone(fallback)
         self.assertEqual(recording_path, "")
-        self.assertEqual(detector.calls, 1)
-        self.assertEqual(objects[0]["label"], "car")
-        self.assertEqual(objects[0]["frame_source"], "live_fallback")
-        self.assertEqual(objects[0]["recording_status"], "no_recorded_frame")
+        self.assertEqual(detector.calls, 0)
+        self.assertEqual(objects, [{"status": "no_recorded_frame"}])
 
     def test_recorded_frame_retry_deadline_bounds_ffmpeg_attempts(self) -> None:
         camera = CameraConfig(
@@ -2993,9 +2991,9 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertLess(elapsed, 0.15)
         self.assertEqual(len(timeouts), 1)
         self.assertLessEqual(timeouts[0], 0.04)
-        self.assertIsNotNone(frame)
+        self.assertIsNone(frame)
         self.assertEqual(recording_path, "")
-        self.assertEqual(objects[0]["frame_source"], "live_fallback")
+        self.assertEqual(objects, [{"status": "no_recorded_frame"}])
 
 
 if __name__ == "__main__":

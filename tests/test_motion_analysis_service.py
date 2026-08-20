@@ -920,6 +920,25 @@ def test_temporal_filter_skips_stable_scene() -> None:
 
     assert list(service.events.queue.queue) == []
     assert service.telemetry_snapshot()["temporal_filter_skips"] == 1
+    assert service.primary_last_processed_at == 100.0
+
+
+def test_temporal_filter_warms_visual_backup_during_quiet_scene() -> None:
+    run_pipeline = Mock()
+    service = _service(_hooks(run_pipeline=run_pipeline, trigger_mode="camera_rescue"))
+    frame = np.full((90, 160, 3), 45, dtype=np.uint8)
+
+    for captured_at in (100.0, 103.0, 106.0, 109.0, 112.0):
+        with service.frame_lock:
+            service.color_frames.extend(
+                [(captured_at - 0.5, frame.copy()), (captured_at, frame.copy())]
+            )
+        service.analyze_continuous(captured_at)
+
+    run_pipeline.assert_not_called()
+    assert service.ema_v2.scene_ready is True
+    assert service.ema_verification.scene_ready is True
+    assert service.primary_last_processed_at == 112.0
 
 
 def test_stop_requested_before_adaptive_admission_prevents_publication() -> None:

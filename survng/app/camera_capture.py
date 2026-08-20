@@ -196,7 +196,10 @@ class LatestFrameObserver:
         self._monotonic_clock = monotonic_clock
         self._condition = threading.Condition()
         self._stop = False
-        self._pending: CapturedFrame | None = None
+        # Keep one latest frame per source. A single shared slot allowed a busy
+        # main stream to replace the live frame needed by motion analysis (and
+        # vice versa) before the observer could route either frame.
+        self._pending: dict[str, CapturedFrame] = {}
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -208,7 +211,7 @@ class LatestFrameObserver:
                     )
                 return
             self._stop = False
-            self._pending = None
+            self._pending.clear()
             thread = threading.Thread(
                 target=self._run,
                 name=f"camera-{self.camera_id}-observer",
@@ -221,15 +224,15 @@ class LatestFrameObserver:
         with self._condition:
             if self._stop or self._thread is None or not self._thread.is_alive():
                 return False, False
-            replaced = self._pending is not None
-            self._pending = frame
+            replaced = frame.source in self._pending
+            self._pending[frame.source] = frame
             self._condition.notify()
             return True, replaced
 
     def request_stop(self) -> None:
         with self._condition:
             self._stop = True
-            self._pending = None
+            self._pending.clear()
             self._condition.notify_all()
 
     def wait_stopped(self, timeout: float) -> bool:
@@ -253,7 +256,7 @@ class LatestFrameObserver:
 
     def pending(self) -> bool:
         with self._condition:
-            return self._pending is not None
+            return bool(self._pending)
 
     def thread(self) -> threading.Thread | None:
         with self._condition:
@@ -269,14 +272,15 @@ class LatestFrameObserver:
         try:
             while True:
                 with self._condition:
-                    while self._pending is None and not self._stop:
+                    while not self._pending and not self._stop:
                         self._condition.wait()
                     if self._stop:
                         return
-                    frame = self._pending
-                    self._pending = None
-                if frame is None:
-                    continue
+                    # Dict insertion order provides simple fairness: replacing
+                    # one source keeps its position, while a newly pending
+                    # source is queued behind sources already waiting.
+                    source = next(iter(self._pending))
+                    frame = self._pending.pop(source)
                 started = self._monotonic_clock()
                 wait_ms = max(
                     0.0,
@@ -294,7 +298,9 @@ class LatestFrameObserver:
                 self._on_result(frame.source, wait_ms, duration_ms, error)
         finally:
             with self._condition:
-                self._pending = None
+                # Preserve the mailbox container across generations. start()
+                # clears it before launching the replacement thread.
+                self._pending.clear()
 
 
 class CameraCaptureService:

@@ -121,6 +121,7 @@ class InferenceLifecycle:
         self._workers_bound = False
         self._lock = threading.RLock()
         self._core_started = False
+        self._core_ready = False
         self._auxiliary_started = False
         self._closed = False
         self._retired_cleanup: list[tuple[str, Callable[[], object]]] = []
@@ -147,8 +148,15 @@ class InferenceLifecycle:
                 raise RuntimeError("inference lifecycle is closed")
             if self._core_started:
                 return
-            self.detector.start()
             try:
+                if not self.detector.start():
+                    # A model/device can be temporarily unavailable at boot.
+                    # Keep the application usable and let runtime maintenance
+                    # retry the isolated inference pool.
+                    self._core_started = True
+                    self._core_ready = False
+                    LOGGER.warning("inference pool is unavailable at startup; retrying in maintenance")
+                    return
                 self.faces.start()
             except BaseException:
                 for label, operation in (
@@ -165,6 +173,7 @@ class InferenceLifecycle:
                         )
                 raise
             self._core_started = True
+            self._core_ready = True
 
     def start_auxiliary(self) -> None:
         with self._lock:
@@ -218,6 +227,7 @@ class InferenceLifecycle:
                         redact_secret_text(error),
                     )
             self._core_started = False
+            self._core_ready = False
             self._auxiliary_started = False
             self._closed = True
             self._retired_cleanup = []
@@ -413,6 +423,7 @@ class InferenceLifecycle:
         with self._lock:
             return {
                 "core_started": self._core_started,
+                "core_ready": getattr(self, "_core_ready", False),
                 "auxiliary_started": self._auxiliary_started,
                 "closed": self._closed,
                 "bound_cameras": len(self._workers),
@@ -421,8 +432,18 @@ class InferenceLifecycle:
             }
 
     def maintain(self) -> None:
-        """Retry retirement cleanup without changing the active generation."""
+        """Retry retirement cleanup and a degraded inference startup."""
         with self._lock:
+            if self._core_started and not getattr(self, "_core_ready", False) and not self._closed:
+                try:
+                    if self.detector.start():
+                        self.faces.start()
+                        self._core_ready = True
+                        LOGGER.info("inference pool recovered during maintenance")
+                except Exception as error:
+                    LOGGER.warning(
+                        "inference pool retry failed: %s", redact_secret_text(error)
+                    )
             pending = self._retired_cleanup
             self._retired_cleanup = []
             for label, operation in pending:

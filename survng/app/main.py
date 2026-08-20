@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
+import os
 import signal
 import subprocess
 import threading
@@ -104,6 +105,8 @@ AI_ACTIVITY_LOCK = threading.Lock()
 AI_ACTIVITY_CONDITION = threading.Condition(AI_ACTIVITY_LOCK)
 AI_ACTIVE_OPERATIONS: dict[str, int] = {}
 AI_SHUTDOWN_DRAIN_SECONDS = 30.0
+MANAGER_ACCESS_DRAIN_SECONDS = 15.0
+FACE_OBSERVATION_SYNC_STOP_SECONDS = 5.0
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
@@ -183,37 +186,102 @@ def _scope_header(scope: dict, name: bytes) -> str:
     return ""
 
 
+def _origin_tuple(
+    value: str,
+    *,
+    allow_root_path: bool = False,
+) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"} or parsed.hostname is None:
+            return None
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            return None
+        if parsed.path and not (allow_root_path and parsed.path == "/"):
+            return None
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return None
+    return scheme, parsed.hostname.lower(), port
+
+
+def _trusted_request_origins(scope: dict) -> set[tuple[str, str, int]]:
+    """Return allowed browser origins for the current request authority.
+
+    Uvicorn applies forwarding headers only for its configured trusted proxies
+    and publishes the resulting protocol as ``scope['scheme']``. Raw Host and
+    X-Forwarded-Proto headers are therefore never allowed to select the scheme.
+
+    When explicit trusted origins are configured they are authoritative. The
+    fallback uses the HTTP Host authority because it is the only public
+    authority ASGI exposes for ordinary LAN DNS/mDNS and reverse-proxy access.
+    This is a browser same-origin boundary, not client authentication: browsers
+    prevent script from choosing Host independently of the request URL.
+    """
+    trusted: set[tuple[str, str, int]] = set()
+    configured = {
+        normalized
+        for value in os.environ.get("SURVNG_TRUSTED_ORIGINS", "").split(",")
+        if (
+            normalized := _origin_tuple(
+                value.strip(),
+                allow_root_path=True,
+            )
+        )
+    }
+    if configured:
+        return configured
+
+    scheme = str(scope.get("scheme") or "").lower()
+    scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
+    server = scope.get("server")
+    if (
+        scheme in {"http", "https"}
+        and isinstance(server, (tuple, list))
+        and len(server) == 2
+    ):
+        server_host = str(server[0] or "").strip().lower()
+        try:
+            server_port = int(server[1])
+        except (TypeError, ValueError):
+            server_port = 0
+        if (
+            server_host
+            and server_host not in {"0.0.0.0", "::"}
+            and 1 <= server_port <= 65535
+        ):
+            trusted.add((scheme, server_host, server_port))
+
+    host_values = [
+        value.decode("latin-1").strip()
+        for name, value in scope.get("headers", [])
+        if name.lower() == b"host"
+    ]
+    if scheme in {"http", "https"} and len(host_values) == 1:
+        try:
+            authority = urlsplit(f"//{host_values[0]}")
+            if (
+                authority.hostname is not None
+                and not authority.username
+                and not authority.password
+                and not authority.path
+                and not authority.query
+                and not authority.fragment
+            ):
+                port = authority.port or (443 if scheme == "https" else 80)
+                trusted.add((scheme, authority.hostname.lower(), port))
+        except ValueError:
+            pass
+    return trusted
+
+
 def _same_origin_request(scope: dict) -> bool:
     origin = _scope_header(scope, b"origin")
     if not origin:
         return _scope_header(scope, b"sec-fetch-site").lower() != "cross-site"
-    host = _scope_header(scope, b"host").lower()
-    if not host:
-        return False
-    try:
-        parsed = urlsplit(origin)
-        parsed_host = urlsplit(f"//{host}")
-        origin_port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-        forwarded_scheme = _scope_header(scope, b"x-forwarded-proto").split(",", 1)[0].strip().lower()
-        request_scheme = forwarded_scheme or str(scope.get("scheme") or "").lower()
-        request_scheme = {"ws": "http", "wss": "https"}.get(request_scheme, request_scheme)
-        request_port = parsed_host.port or (443 if request_scheme == "https" else 80)
-    except ValueError:
-        return False
-    return (
-        parsed.scheme.lower() in {"http", "https"}
-        and (not request_scheme or parsed.scheme.lower() == request_scheme)
-        and parsed.hostname is not None
-        and parsed.hostname.lower() == str(parsed_host.hostname or "").lower()
-        and origin_port == request_port
-        and not parsed.username
-        and not parsed.password
-        and not parsed_host.username
-        and not parsed_host.password
-        and parsed.path == ""
-        and not parsed.query
-        and not parsed.fragment
-    )
+    normalized = _origin_tuple(origin)
+    return normalized is not None and normalized in _trusted_request_origins(scope)
 
 
 def _api_scope_path(scope: dict) -> str:
@@ -513,11 +581,22 @@ def reload_manager(
             ai_error=AiOperationsActiveError,
             wait_for_manager_idle=lambda active: MANAGER_ACCESS.wait_idle(
                 active,
-                15.0,
+                MANAGER_ACCESS_DRAIN_SECONDS,
             ),
         ),
     )
-    lifecycle.reload(config, get_manager(), effective, persist=persist)
+    # Capture the active generation only after entering the generation lock.
+    # Otherwise two callers can both select the same predecessor, allowing the
+    # second reload to publish a replacement without retiring the first one.
+    with MANAGER_RELOAD_LOCK:
+        previous_config = config
+        previous_manager = get_manager()
+        lifecycle.reload(
+            previous_config,
+            previous_manager,
+            effective,
+            persist=persist,
+        )
     return effective
 
 
@@ -541,24 +620,30 @@ def apply_config_update(
         storage_error=StorageTasksActiveError,
     )
     effective = application.normalize(next_config, assign_ids=assign_ids)
-    if manager_owned_config(config) != manager_owned_config(effective):
-        applied = reload_manager(effective, assign_ids=False, persist=persist)
-        return applied, {
-            "apply_mode": "manager_reload",
-            "camera_workers_restarted": True,
-            "subsystems_restarted": ["manager"],
-        }
-    previous_ffmpeg_path = config.ffmpeg_path
-    effective, result = application.apply(
-        config,
-        effective,
-        get_manager(),
-        persist=persist,
-    )
-    config = effective
-    if effective.ffmpeg_path != previous_ffmpeg_path:
-        _recording_media_runtime.clear_hardware_probe_caches()
-    return effective, result
+    # Classification, application, and publication are one generation
+    # transaction. Publishing after TargetedConfigApplication released this
+    # lock allowed a concurrent update to leave global and manager config on
+    # different commits.
+    with MANAGER_RELOAD_LOCK:
+        current = config
+        if manager_owned_config(current) != manager_owned_config(effective):
+            applied = reload_manager(effective, assign_ids=False, persist=persist)
+            return applied, {
+                "apply_mode": "manager_reload",
+                "camera_workers_restarted": True,
+                "subsystems_restarted": ["manager"],
+            }
+        previous_ffmpeg_path = current.ffmpeg_path
+        effective, result = application.apply(
+            current,
+            effective,
+            get_manager(),
+            persist=persist,
+        )
+        config = effective
+        if effective.ffmpeg_path != previous_ffmpeg_path:
+            _recording_media_runtime.clear_hardware_probe_caches()
+        return effective, result
 
 
 def _record_process_lifecycle(kind: str) -> None:
@@ -663,11 +748,32 @@ async def lifespan(app: FastAPI):
                     try:
                         with MANAGER_RELOAD_LOCK:
                             active = globals().get("manager")
-                            if active is not None:
+                            manager_idle = (
+                                active is None
+                                or MANAGER_ACCESS.wait_idle(
+                                    active,
+                                    MANAGER_ACCESS_DRAIN_SECONDS,
+                                )
+                            )
+                            if active is not None and manager_idle:
                                 active.stop_all()
+                            elif active is not None:
+                                logging.getLogger("uvicorn.error").error(
+                                    "manager users did not drain before shutdown; "
+                                    "preserving the active generation for supervisor cleanup"
+                                )
                     finally:
                         if early_onvif_thread is not None and early_onvif_thread.is_alive():
                             early_onvif_thread.join()
+                        face_sync_thread = FACE_OBSERVATIONS_SYNC_THREAD
+                        if face_sync_thread is not None and face_sync_thread.is_alive():
+                            face_sync_thread.join(
+                                timeout=FACE_OBSERVATION_SYNC_STOP_SECONDS
+                            )
+                            if face_sync_thread.is_alive():
+                                logging.getLogger("uvicorn.error").warning(
+                                    "face observation sync did not stop before shutdown"
+                                )
                         try:
                             active = globals().get("manager")
                             if active is not None:

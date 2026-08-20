@@ -57,6 +57,7 @@ class EventStore(
         self._jobs_maintenance_lock = threading.Lock()
         self._last_detection_job_prune_monotonic = 0.0
         self._init_db()
+        self._recover_snapshot_deletion_claims()
         self._init_jobs_db()
         self._migrate_legacy_jobs()
 
@@ -1251,6 +1252,68 @@ class EventStore(
             ],
         }
 
+    def _snapshot_path_for_retention(self, raw_path: str) -> Path:
+        """Resolve a snapshot retention path even when its file is gone."""
+        path = Path(raw_path)
+        resolved = (
+            path if path.is_absolute() else self.storage_dir / path
+        ).resolve(strict=False)
+        if resolved.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+            raise PermissionError("snapshot is not an image")
+        if self.media_storage is None:
+            resolved.relative_to((self.storage_dir / "snapshots").resolve())
+        elif self.media_storage.location_id_for(resolved, role="snapshots") is None:
+            raise PermissionError("snapshot is outside configured snapshot storage")
+        return resolved
+
+    @staticmethod
+    def _clear_snapshot_references(
+        conn: sqlite3.Connection,
+        paths: list[str],
+    ) -> None:
+        if not paths:
+            return
+        conn.executemany(
+            "update events set snapshot_path = '', snapshot_size_bytes = 0 where snapshot_path = ?",
+            ((path,) for path in paths),
+        )
+        conn.executemany(
+            "update motion_audits set snapshot_path = '' where snapshot_path = ?",
+            ((path,) for path in paths),
+        )
+        has_faces = conn.execute(
+            "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
+        ).fetchone() is not None
+        if has_faces:
+            conn.executemany(
+                "update face_observations set snapshot_path = '' where snapshot_path = ?",
+                ((path,) for path in paths),
+            )
+
+    def _recover_snapshot_deletion_claims(self) -> None:
+        """Finish or release snapshot deletion claims left by a process crash."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "select path from media_deletion_claims where role = 'snapshot'"
+            ).fetchall()
+            missing: list[str] = []
+            releasable: list[str] = []
+            for row in rows:
+                raw_path = str(row["path"] or "")
+                try:
+                    path = self._snapshot_path_for_retention(raw_path)
+                except (OSError, RuntimeError, ValueError, PermissionError):
+                    # A malformed claim must never authorize a reference wipe.
+                    continue
+                releasable.append(raw_path)
+                if not path.exists():
+                    missing.append(raw_path)
+            self._clear_snapshot_references(conn, missing)
+            conn.executemany(
+                "delete from media_deletion_claims where path = ? and role = 'snapshot'",
+                ((path,) for path in releasable),
+            )
+
     def apply_snapshot_retention(self, cutoff_epoch: float, limit: int) -> dict[str, Any]:
         """Delete age-expired incident images and clear every stale reference."""
         cutoff = datetime.fromtimestamp(float(cutoff_epoch), timezone.utc).isoformat()
@@ -1309,19 +1372,7 @@ class EventStore(
         for row in rows:
             raw_path = str(row["snapshot_path"] or "")
             try:
-                path = event_snapshot_path(
-                    self.storage_dir,
-                    {"snapshot_path": raw_path},
-                    self.media_storage,
-                )
-                if self.media_storage is None:
-                    path.relative_to((self.storage_dir / "snapshots").resolve())
-                elif self.media_storage.location_id_for(
-                    path, role="snapshots"
-                ) is None:
-                    raise PermissionError(
-                        "snapshot is outside configured snapshot storage"
-                    )
+                path = self._snapshot_path_for_retention(raw_path)
                 actual_size = max(
                     int(row["snapshot_size_bytes"] or 0), int(path.stat().st_size)
                 )
@@ -1337,23 +1388,7 @@ class EventStore(
         for offset in range(0, len(removed), self.SNAPSHOT_REFERENCE_WRITE_BATCH):
             batch = removed[offset : offset + self.SNAPSHOT_REFERENCE_WRITE_BATCH]
             with self._lock, self._connect() as conn:
-                conn.executemany(
-                    "update events set snapshot_path = '', snapshot_size_bytes = 0 where snapshot_path = ?",
-                    ((path,) for path in batch),
-                )
-                conn.executemany(
-                    "update motion_audits set snapshot_path = '' where snapshot_path = ?",
-                    ((path,) for path in batch),
-                )
-                has_faces = conn.execute(
-                    "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
-                ).fetchone() is not None
-                if has_faces:
-                    conn.executemany(
-                        "update face_observations set snapshot_path = '' "
-                        "where snapshot_path = ? and reference_pinned = 0",
-                        ((path,) for path in batch),
-                    )
+                self._clear_snapshot_references(conn, batch)
         if rows:
             with self._lock, self._connect() as conn:
                 conn.executemany(

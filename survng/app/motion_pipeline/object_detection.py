@@ -40,6 +40,7 @@ RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS = 6.0
 FAST_LIVE_FRAME_MAX_AGE_SECONDS = 1.0
 FAST_LIVE_FRAME_FUTURE_TOLERANCE_SECONDS = 0.5
+RECORDED_LIVE_FALLBACK_EVENT_TOLERANCE_SECONDS = 1.5
 TEMPORAL_ASSOCIATION_MIN_IOU = 0.05
 TEMPORAL_ASSOCIATION_MAX_DISTANCE_RATIO = 2.5
 REPRESENTATIVE_DYNAMIC_DISPLACEMENT_RATIO = 0.01
@@ -1350,8 +1351,34 @@ class RecordedMotionObjectDetector:
                 frame_timestamp_exact=selected.exact_timestamp,
             )
 
-        fallback = self.live_frame_provider()
-        if fallback is None:
+        fallback_sample = (
+            self.timestamped_live_frame_provider()
+            if self.timestamped_live_frame_provider is not None
+            else None
+        )
+        fallback = (
+            fallback_sample.frame
+            if isinstance(fallback_sample, TimestampedLiveFrame)
+            else None
+        )
+        fallback_captured_at = (
+            float(fallback_sample.captured_at_epoch)
+            if isinstance(fallback_sample, TimestampedLiveFrame)
+            else None
+        )
+        fallback_valid = bool(
+            isinstance(fallback_sample, TimestampedLiveFrame)
+            and fallback_sample.source == "live"
+            and fallback_sample.sequence > 0
+            and fallback_sample.camera_generation > 0
+            and fallback_sample.capture_generation > 0
+            and math.isfinite(float(fallback_sample.captured_at_monotonic))
+            and fallback_captured_at is not None
+            and math.isfinite(fallback_captured_at)
+            and abs(fallback_captured_at - event_epoch)
+            <= RECORDED_LIVE_FALLBACK_EVENT_TOLERANCE_SECONDS
+        )
+        if fallback is None or not fallback_valid:
             return self._result(
                 None,
                 [{"status": "no_recorded_frame"}],
@@ -1377,6 +1404,8 @@ class RecordedMotionObjectDetector:
                 timing,
                 workflow_started,
                 refinement_pending=refinement_pending,
+                frame_captured_at_epoch=fallback_captured_at,
+                frame_source="live_fallback",
             )
         return self._result(
             fallback,
@@ -1385,6 +1414,8 @@ class RecordedMotionObjectDetector:
             timing,
             workflow_started,
             refinement_pending=refinement_pending,
+            frame_captured_at_epoch=fallback_captured_at,
+            frame_source="live_fallback",
         )
 
     @staticmethod

@@ -133,6 +133,26 @@ class ApiSecretBoundaryTest(unittest.TestCase):
         self.assertIn("rtsp://user:***@host/live", redacted)
         self.assertIn("rtsps://secure:***@host/live", redacted)
 
+    def test_secret_redaction_handles_common_oauth_and_cookie_formats(self) -> None:
+        redacted = redact_secret_text(
+            "access_token=access-secret client_secret=client-secret "
+            "Cookie: session=session-secret; preference=dark"
+        )
+
+        for secret in ("access-secret", "client-secret", "session-secret"):
+            self.assertNotIn(secret, redacted)
+        self.assertIn("access_token=***", redacted)
+        self.assertIn("client_secret=***", redacted)
+        self.assertIn("Cookie: ***", redacted)
+
+    def test_secret_redaction_handles_structured_cookie_and_token_fields(self) -> None:
+        redacted = redact_secret_text(
+            {"cookie": "session=abc", "set-cookie": "session=def", "refresh_token": "ghi", "id_token": "jkl"}
+        )
+
+        for secret in ("abc", "def", "ghi", "jkl"):
+            self.assertNotIn(secret, redacted)
+
     def test_public_rows_do_not_expose_filesystem_paths(self) -> None:
         event = _event_row(
             {
@@ -261,6 +281,24 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(messages[0]["status"], 403)
 
+    async def test_read_token_cannot_access_operator_logs(self) -> None:
+        async def inner(_scope, _receive, _send) -> None:
+            self.fail("read-scoped request reached the operator log route")
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        messages: list[dict] = []
+        auth = ApiAuthConfig(enabled=True, tokens=[ApiTokenConfig(
+            id="reader", name="Reader", token_hash=hash_api_token("read-token"), scopes=["read"],
+        )])
+        with patch.object(main.config, "api_auth", auth):
+            await middleware({
+                "type": "http", "scheme": "http", "method": "GET",
+                "path": "/api/logs",
+                "headers": [(b"host", b"survng.local"), (b"authorization", b"Bearer read-token")],
+            }, self._receive, self._collector(messages))
+
+        self.assertEqual(messages[0]["status"], 403)
+
     async def test_camera_control_token_reaches_camera_control_route(self) -> None:
         called = False
 
@@ -329,6 +367,111 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(main._same_origin_request(scope))
 
+    async def test_explicit_trusted_origins_reject_spoofed_host(self) -> None:
+        scope = {
+            "type": "http",
+            "scheme": "http",
+            "server": ("192.0.2.10", 8088),
+            "headers": [
+                (b"host", b"evil.example"),
+                (b"origin", b"http://evil.example:8088"),
+            ],
+        }
+
+        with patch.dict(
+            main.os.environ,
+            {"SURVNG_TRUSTED_ORIGINS": "http://survng.example:8088"},
+            clear=False,
+        ):
+            self.assertFalse(main._same_origin_request(scope))
+
+    async def test_duplicate_host_authority_is_rejected(self) -> None:
+        scope = {
+            "type": "http",
+            "scheme": "http",
+            "server": ("192.0.2.10", 8088),
+            "headers": [
+                (b"host", b"survng.local:8088"),
+                (b"host", b"evil.example:8088"),
+                (b"origin", b"http://evil.example:8088"),
+            ],
+        }
+
+        with patch.dict(
+            main.os.environ,
+            {"SURVNG_TRUSTED_ORIGINS": ""},
+            clear=False,
+        ):
+            self.assertFalse(main._same_origin_request(scope))
+
+    async def test_spoofed_forwarded_proto_does_not_define_scheme(self) -> None:
+        scope = {
+            "type": "http",
+            "scheme": "http",
+            "server": ("survng.local", 80),
+            "headers": [
+                (b"host", b"survng.local"),
+                (b"x-forwarded-proto", b"https"),
+                (b"origin", b"https://survng.local"),
+            ],
+        }
+
+        self.assertFalse(main._same_origin_request(scope))
+
+    async def test_explicit_trusted_proxy_origin_is_accepted(self) -> None:
+        scope = {
+            "type": "http",
+            "scheme": "https",
+            "server": ("127.0.0.1", 8088),
+            "headers": [
+                (b"host", b"survng.example"),
+                (b"origin", b"https://survng.example"),
+            ],
+        }
+
+        with patch.dict(
+            main.os.environ,
+            {"SURVNG_TRUSTED_ORIGINS": "https://survng.example"},
+            clear=False,
+        ):
+            self.assertTrue(main._same_origin_request(scope))
+
+    async def test_lan_dns_authority_is_accepted_without_origin_config(self) -> None:
+        scope = {
+            "type": "http",
+            "scheme": "http",
+            "server": ("192.0.2.10", 8088),
+            "headers": [
+                (b"host", b"survng.local:8088"),
+                (b"origin", b"http://survng.local:8088"),
+            ],
+        }
+
+        with patch.dict(
+            main.os.environ,
+            {"SURVNG_TRUSTED_ORIGINS": ""},
+            clear=False,
+        ):
+            self.assertTrue(main._same_origin_request(scope))
+
+    async def test_reverse_proxy_authority_is_accepted_without_origin_config(self) -> None:
+        scope = {
+            "type": "http",
+            "scheme": "https",
+            "server": ("127.0.0.1", 8088),
+            "headers": [
+                (b"host", b"cameras.example"),
+                (b"origin", b"https://cameras.example"),
+            ],
+        }
+
+        with patch.dict(
+            main.os.environ,
+            {"SURVNG_TRUSTED_ORIGINS": ""},
+            clear=False,
+        ):
+            self.assertTrue(main._same_origin_request(scope))
+
     async def test_api_response_receives_security_and_no_store_headers(self) -> None:
         async def inner(_scope, _receive, send) -> None:
             await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -339,6 +482,7 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
         scope = {
             "type": "http",
             "scheme": "https",
+            "server": ("survng.local", 443),
             "method": "GET",
             "path": "/api/config",
             "headers": [(b"host", b"survng.local"), (b"origin", b"https://survng.local")],
@@ -360,6 +504,7 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
         scope = {
             "type": "websocket",
             "scheme": "wss",
+            "server": ("survng.local", 443),
             "path": "/api/cameras/gate/webrtc",
             "headers": [(b"host", b"survng.local"), (b"origin", b"https://evil.example")],
         }
@@ -379,6 +524,7 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
         scope = {
             "type": "websocket",
             "scheme": "wss",
+            "server": ("survng.local", 443),
             "path": "/api/cameras/gate/webrtc",
             "headers": [(b"host", b"survng.local"), (b"origin", b"https://survng.local")],
         }

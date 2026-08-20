@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from survng.app.config import CameraConfig, MotionQualificationConfig
+from survng.app.config import CameraConfig, DetectionZone, MotionQualificationConfig
 from survng.app.motion import MotionQualificationResult
 from survng.app.motion_pipeline import MotionDebugSnapshotStore
 from survng.app.motion_qualification_service import (
@@ -70,6 +70,26 @@ def test_camera_overrides_are_resolved_without_worker_knowledge() -> None:
     assert service.trigger_mode() == "adaptive"
     assert service.stationary_object_tolerance() == "high"
     assert service.rescue_settings() == (False, 0.01)
+
+
+def test_hot_zone_update_refreshes_pipeline_configuration_snapshot() -> None:
+    service = _service()
+    exclusion = DetectionZone.model_validate({
+        "name": "Tree",
+        "exclude_from_ema": True,
+        "points": [
+            {"x": 0.0, "y": 0.0},
+            {"x": 0.5, "y": 0.0},
+            {"x": 0.5, "y": 0.5},
+        ],
+    })
+
+    service.update_zones([exclusion])
+    assert service._pipeline_configuration["motion_zones"][0]["name"] == "Tree"
+    assert service._pipeline_configuration["motion_zones"][0]["exclude_from_ema"] is True
+
+    service.update_zones([])
+    assert service._pipeline_configuration["motion_zones"] == []
 
 
 def test_validation_failure_preserves_rejected_primary_when_required() -> None:

@@ -442,6 +442,7 @@ class CameraWorker:
         next_zones = [zone.model_copy(deep=True) for zone in zones]
         with self._lifecycle_lock:
             self.camera.zones = next_zones
+            self.motion_qualification.update_zones(next_zones)
 
     def set_detection_enabled(self, enabled: bool) -> None:
         self.lifecycle.set_detection_enabled(enabled)

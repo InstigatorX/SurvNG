@@ -98,7 +98,7 @@ class MediaExportStore:
             connection.execute(
                 "UPDATE media_exports SET status = 'failed', phase = 'Interrupted by restart', "
                 "error = 'export interrupted by server restart', finished_at = ? "
-                "WHERE status IN ('running', 'cancelling')",
+                "WHERE status IN ('running', 'cancelling', 'deleting')",
                 (_utc_now(),),
             )
 
@@ -289,6 +289,55 @@ class MediaExportStore:
             ).fetchall()
         return [self._row(row) for row in rows]
 
+    def interrupted_cleanup_ids(self) -> list[str]:
+        """Return jobs whose interrupted finalization may have left artifacts."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM media_exports WHERE phase = 'Interrupted by restart'"
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def claim_unprotected_cleanup(self, job_id: str) -> dict[str, object] | None:
+        """Claim a terminal export before removing it from disk.
+
+        The claim linearizes cleanup with a user protecting an export: either
+        protection wins and this returns ``None``, or cleanup wins and later
+        protection requests see an in-progress deletion rather than reporting
+        success for a file that is about to disappear.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE media_exports
+                SET status = 'deleting', phase = 'Cleaning up'
+                WHERE id = ?
+                  AND status IN ('completed', 'failed', 'cancelled')
+                  AND protected = 0
+                """,
+                (job_id,),
+            )
+            if not cursor.rowcount:
+                return None
+            row = connection.execute(
+                "SELECT * FROM media_exports WHERE id = ?", (job_id,)
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def set_protected_if_not_deleting(
+        self, job_id: str, *, protected: bool, expires_at: str
+    ) -> bool:
+        """Atomically update protection unless cleanup has already claimed the job."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE media_exports
+                SET protected = ?, expires_at = ?
+                WHERE id = ? AND status != 'deleting'
+                """,
+                (1 if protected else 0, expires_at, job_id),
+            )
+        return bool(cursor.rowcount)
+
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, object]:
         payload = dict(row)
@@ -341,6 +390,7 @@ class MediaExportManager:
         default_expiry = (datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)).isoformat()
         for job in self.store.terminal_without_expiry():
             self.store.update(str(job["id"]), expires_at=default_expiry)
+        self._cleanup_interrupted_artifacts()
         self._queue: queue.Queue[str | None] = queue.Queue(maxsize=100)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -458,16 +508,20 @@ class MediaExportManager:
         job = self.store.get(job_id)
         if job is None:
             raise KeyError(job_id)
+        if str(job.get("status") or "") == "deleting":
+            raise RuntimeError("export is currently being deleted")
         expires_at = ""
         if not protected and str(job.get("status") or "") not in ACTIVE_STATUSES:
             expires_at = (
                 datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)
             ).isoformat()
-        self.store.update(
-            job_id,
-            protected=1 if protected else 0,
-            expires_at=expires_at,
-        )
+        if not self.store.set_protected_if_not_deleting(
+            job_id, protected=protected, expires_at=expires_at
+        ):
+            latest = self.store.get(job_id)
+            if latest is None:
+                raise KeyError(job_id)
+            raise RuntimeError("export is currently being deleted")
         return self.get(job_id) or {}
 
     def set_label(self, job_id: str, label: str) -> dict[str, object]:
@@ -540,8 +594,11 @@ class MediaExportManager:
     def cleanup(self) -> None:
         now = datetime.now(timezone.utc)
         for job in self.store.expired(now.isoformat()):
-            self._delete_job_files(job)
-            self.store.delete(str(job["id"]))
+            claimed = self.store.claim_unprotected_cleanup(str(job["id"]))
+            if claimed is None:
+                continue
+            self._delete_job_files(claimed)
+            self.store.delete(str(claimed["id"]))
         completed = self.store.completed_oldest_first()
         # Protected files still consume the export storage budget. Delete only
         # unprotected jobs, but account for all completed output so protection
@@ -551,8 +608,11 @@ class MediaExportManager:
             if total <= self.max_storage_bytes:
                 break
             total -= int(job.get("size_bytes") or 0)
-            self._delete_job_files(job)
-            self.store.delete(str(job["id"]))
+            claimed = self.store.claim_unprotected_cleanup(str(job["id"]))
+            if claimed is None:
+                continue
+            self._delete_job_files(claimed)
+            self.store.delete(str(claimed["id"]))
         cutoff = time.time() - 3600
         for path in itertools.islice(self.exports_dir.rglob("*.partial"), 250):
             try:
@@ -1196,9 +1256,12 @@ class MediaExportManager:
                     if not chunk:
                         break
                     destination_handle.write(chunk)
+                destination_handle.flush()
+                os.fsync(destination_handle.fileno())
             if cancel.is_set() or self._stop.is_set():
                 raise InterruptedError
             os.replace(partial, final)
+            self._sync_directory(destination_dir)
         except BaseException:
             partial.unlink(missing_ok=True)
             raise
@@ -1208,10 +1271,48 @@ class MediaExportManager:
         final = self.manifest_dir / f"{job_id}.json"
         temporary = final.with_suffix(".json.partial")
         try:
-            temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            with temporary.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary, final)
+            self._sync_directory(self.manifest_dir)
         finally:
             temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _sync_directory(directory: Path) -> None:
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            os.fsync(descriptor)
+        except OSError:
+            # Some network filesystems do not support directory fsync. The
+            # output file itself remains synced before it is published.
+            pass
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def _cleanup_interrupted_artifacts(self) -> None:
+        """Remove final files published before an interrupted DB transition."""
+        for job_id in self.store.interrupted_cleanup_ids():
+            for directory in (self.recording_dir, self.timelapse_dir):
+                for path in directory.glob(f"{job_id}-*"):
+                    try:
+                        if path.is_file():
+                            path.unlink()
+                    except OSError:
+                        LOGGER.warning("could not remove interrupted export artifact: %s", path)
+            try:
+                (self.manifest_dir / f"{job_id}.json").unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning("could not remove interrupted export manifest: %s", job_id)
 
     def _delete_job_files(self, job: dict[str, object]) -> None:
         raw = str(job.get("output_path") or "")

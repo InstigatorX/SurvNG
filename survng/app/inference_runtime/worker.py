@@ -22,6 +22,7 @@ from .types import (
     LOGGER,
     MAX_INFERENCE_FRAME_BYTES,
     PERSON_REID_REQUEST_TIMEOUT_SECONDS,
+    InferenceRollbackIncomplete,
     InferenceUnavailable,
     InferenceWorkload,
 )

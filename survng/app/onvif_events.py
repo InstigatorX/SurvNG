@@ -39,7 +39,6 @@ EFFECTIVENESS_MINIMUM_OBSERVATIONS = 3
 EFFECTIVENESS_DEGRADED_MISMATCH_RATIO = 0.8
 UNKNOWN_NOTIFICATION_SAMPLE_LIMIT = 5
 EFFECTIVENESS_OBSERVATION_LIMIT = 512
-PULLMESSAGES_CAPTURE_LIMIT = 2
 REOLINK_MOTION_TOPICS = frozenset({
     "videosource/motionalarm",
     "ruleengine/myruledetector/vehicledetect",
@@ -68,14 +67,17 @@ class _RawOnvifNotification:
 
 class _PullMessagesResponseCapture:
     def __init__(self) -> None:
-        self._responses: deque[str] = deque(maxlen=PULLMESSAGES_CAPTURE_LIMIT)
+        self._response = ""
         self._lock = threading.Lock()
 
     def ingress(self, envelope: Any, http_headers: Any, operation: Any):
         if str(getattr(operation, "name", "")) != "PullMessages":
             return envelope, http_headers
         with self._lock:
-            self._responses.append(OnvifEventListener._stringify_xml_static(envelope))
+            # There is exactly one in-flight PullMessages call per listener.
+            # Keep only that call's newest envelope so a failed deserialization
+            # cannot poison the following successful response.
+            self._response = OnvifEventListener._stringify_xml_static(envelope)
         return envelope, http_headers
 
     @staticmethod
@@ -89,7 +91,13 @@ class _PullMessagesResponseCapture:
 
     def take(self) -> str:
         with self._lock:
-            return self._responses.popleft() if self._responses else ""
+            response = self._response
+            self._response = ""
+            return response
+
+    def clear(self) -> None:
+        with self._lock:
+            self._response = ""
 
 
 class OnvifEventListener:
@@ -366,14 +374,17 @@ class OnvifEventListener:
                     )
                     break
                 try:
+                    capture = self._pullmessages_capture
+                    if capture is not None:
+                        capture.clear()
                     response = pullpoint.PullMessages(
                         {"Timeout": f"PT{PULL_TIMEOUT_SECONDS}S", "MessageLimit": 10}
                     )
                     if stop_event.is_set() or not self._generation_matches(generation):
                         return
                     raw_notifications = self._raw_pullmessages_notifications(
-                        self._pullmessages_capture.take()
-                        if self._pullmessages_capture is not None
+                        capture.take()
+                        if capture is not None
                         else ""
                     )
                     self._record_subscription_times(response)
@@ -381,14 +392,18 @@ class OnvifEventListener:
                     self.connected = True
                     self.last_error = ""
                     self.last_poll_success_at = datetime.now(timezone.utc).isoformat()
-                    for index, notification in enumerate(
+                    parsed_notifications = list(
                         getattr(response, "NotificationMessage", []) or []
-                    ):
-                        raw_notification = (
-                            raw_notifications[index]
-                            if index < len(raw_notifications)
-                            else None
-                        )
+                    )
+                    # Raw SOAP is authoritative when available. Iterating the
+                    # parsed Zeep list first loses raw-only vendor messages and
+                    # ordinal pairing can attach the wrong raw payload after a
+                    # parser omission.
+                    notification_inputs = self._notification_inputs(
+                        parsed_notifications,
+                        raw_notifications,
+                    )
+                    for notification, raw_notification in notification_inputs:
                         topic, message = self._extract_event(
                             notification, raw_notification
                         )
@@ -460,6 +475,9 @@ class OnvifEventListener:
                                 received_at,
                             )
                 except Exception as exc:
+                    capture = self._pullmessages_capture
+                    if capture is not None:
+                        capture.clear()
                     if stop_event.is_set() or not self._generation_matches(generation):
                         return
                     error_text = self._error_text(exc)
@@ -887,14 +905,22 @@ class OnvifEventListener:
         return parsed.astimezone(timezone.utc)
 
     def _enable_pullmessages_capture(self, pullpoint: Any) -> None:
-        if self._pullmessages_capture is not None:
-            return
         plugins = getattr(getattr(pullpoint, "zeep_client", None), "plugins", None)
         if not isinstance(plugins, list):
+            self._pullmessages_capture = None
             return
         capture = _PullMessagesResponseCapture()
         plugins.append(capture)
         self._pullmessages_capture = capture
+
+    @staticmethod
+    def _notification_inputs(
+        parsed_notifications: list[Any],
+        raw_notifications: list[_RawOnvifNotification],
+    ) -> list[tuple[Any | None, _RawOnvifNotification | None]]:
+        if raw_notifications:
+            return [(None, raw) for raw in raw_notifications]
+        return [(parsed, None) for parsed in parsed_notifications]
 
     @staticmethod
     def _normalized_topic(topic: str) -> str:

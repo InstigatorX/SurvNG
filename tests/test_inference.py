@@ -26,6 +26,30 @@ from survng.app.inference import (
 
 
 class InferenceSupervisorTest(unittest.TestCase):
+    def test_worker_rollback_failure_raises_fencing_exception(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+        )
+        worker._process = Mock()
+        worker._process.is_alive.return_value = True
+
+        with (
+            patch.object(
+                worker,
+                "stop",
+                side_effect=[None, RuntimeError("rollback stop failed")],
+            ),
+            patch.object(worker, "start", side_effect=[False, False]),
+            self.assertRaises(InferenceRollbackIncomplete),
+        ):
+            worker.reconfigure(
+                DetectorConfig(enabled=False),
+                {},
+                start_enabled=True,
+            )
+
     def test_detector_threshold_configuration_is_bounded(self) -> None:
         with self.assertRaises(ValidationError):
             DetectorConfig(confidence_threshold=0.0)

@@ -158,6 +158,15 @@ class MotionDecisionOrchestrator:
         self._analysis = analysis
         self._state = state
         self._thread: threading.Thread | None = None
+        self._refinement_completion_lock = threading.Lock()
+        self._completed_refinement_contexts: set[str] = set()
+        completion_setter = getattr(
+            self._incidents,
+            "set_refinement_completion_handler",
+            None,
+        )
+        if callable(completion_setter):
+            completion_setter(self._record_refined_outcome_from_context)
 
     def start(self, stop_event: threading.Event) -> None:
         """Start the sole decision worker owned by this orchestrator."""
@@ -626,6 +635,25 @@ class MotionDecisionOrchestrator:
                         qualification.get("motion_episode_managed")
                     ),
                 ),
+                refinement_completion_context={
+                    "completion_id": f"{decision_id}:refinement",
+                    "decision_id": decision_id,
+                    "event_at": event_at.isoformat(),
+                    "mode": mode,
+                    "sensitivity": sensitivity,
+                    "result": result.as_dict(),
+                    "trigger_count": len(triggers),
+                    "visual_backup": visual_backup,
+                    "active_followup": active_followup,
+                    "borderline_candidate": borderline_candidate,
+                    "suppression_verification_candidate": (
+                        suppression_verification_candidate
+                    ),
+                    "episode_sequence": episode_sequence,
+                    "episode_managed": bool(
+                        qualification.get("motion_episode_managed")
+                    ),
+                },
             ).as_dict()
             event_id = outcome.get("event_id")
             if event_id is not None:
@@ -735,22 +763,6 @@ class MotionDecisionOrchestrator:
         event_id = outcome.get("event_id")
         object_outcome = outcome.get("object_detected")
         found_object = object_outcome is True
-        if event_id is not None and episode_managed:
-            self._events.link_incident(
-                int(event_id),
-                expected_sequence=episode_sequence,
-            )
-        if found_object:
-            self._state.increment_stat("late_object_rescues", 1)
-            if borderline_candidate:
-                self._state.increment_stat("borderline_rescues", 1)
-            if suppression_verification_candidate:
-                self._state.increment_stat("suppression_verification_rescues", 1)
-        if active_followup:
-            if object_outcome is True:
-                self._state.increment_stat("active_followup_objects", 1)
-            elif object_outcome is False:
-                self._state.increment_stat("active_followup_no_object", 1)
         correlation = outcome.get("motion_correlation")
         reason = str(outcome.get("rejection_reason") or result.reason)
         features = {
@@ -788,6 +800,76 @@ class MotionDecisionOrchestrator:
                     else "qualification"
                 ),
             )
+        # Complete all fallible durable writes before mutating process-local
+        # counters. Durable retries may safely replay the audit by decision_id
+        # and incident linkage without double-counting runtime statistics.
+        if event_id is not None and episode_managed:
+            self._events.link_incident(
+                int(event_id),
+                expected_sequence=episode_sequence,
+            )
+        if found_object:
+            self._state.increment_stat("late_object_rescues", 1)
+            if borderline_candidate:
+                self._state.increment_stat("borderline_rescues", 1)
+            if suppression_verification_candidate:
+                self._state.increment_stat("suppression_verification_rescues", 1)
+        if active_followup:
+            if object_outcome is True:
+                self._state.increment_stat("active_followup_objects", 1)
+            elif object_outcome is False:
+                self._state.increment_stat("active_followup_no_object", 1)
+
+    def _record_refined_outcome_from_context(
+        self,
+        refined: Any,
+        context: dict[str, Any],
+    ) -> None:
+        """Rebuild refinement finalization after a durable-job restart."""
+        completion_id = str(
+            context.get("completion_id") or context.get("decision_id") or ""
+        )
+        if not completion_id:
+            raise ValueError("durable refinement completion is missing an id")
+        with self._refinement_completion_lock:
+            if completion_id in self._completed_refinement_contexts:
+                return
+            self._record_refined_outcome_from_context_once(refined, context)
+            self._completed_refinement_contexts.add(completion_id)
+
+    def _record_refined_outcome_from_context_once(
+        self,
+        refined: Any,
+        context: dict[str, Any],
+    ) -> None:
+        raw_result = dict(context.get("result") or {})
+        result = MotionQualificationResult(
+            accepted=bool(raw_result.get("accepted")),
+            score=float(raw_result.get("score", 0.0)),
+            threshold=float(raw_result.get("threshold", 0.0)),
+            reason=str(raw_result.get("reason") or "refinement"),
+            frame_count=int(raw_result.get("frame_count", 0)),
+            features=dict(raw_result.get("features") or {}),
+            telemetry=dict(raw_result.get("telemetry") or {}),
+        )
+        event_at = datetime.fromisoformat(str(context["event_at"]))
+        self._record_refined_outcome(
+            refined,
+            decision_id=str(context.get("decision_id") or ""),
+            event_at=event_at,
+            mode=str(context.get("mode") or ""),
+            sensitivity=str(context.get("sensitivity") or ""),
+            result=result,
+            trigger_count=int(context.get("trigger_count", 0)),
+            visual_backup=bool(context.get("visual_backup")),
+            active_followup=bool(context.get("active_followup")),
+            borderline_candidate=bool(context.get("borderline_candidate")),
+            suppression_verification_candidate=bool(
+                context.get("suppression_verification_candidate")
+            ),
+            episode_sequence=int(context.get("episode_sequence", 0)),
+            episode_managed=bool(context.get("episode_managed")),
+        )
 
     def _record_active_followup_audit(
         self,

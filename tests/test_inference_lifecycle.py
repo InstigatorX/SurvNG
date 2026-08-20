@@ -102,6 +102,31 @@ def test_core_start_rolls_back_detector_when_face_queue_fails() -> None:
     assert not service.status()["core_started"]
 
 
+def test_core_start_enters_degraded_mode_for_an_unready_inference_pool() -> None:
+    service = _lifecycle()
+    service.detector.start.return_value = False
+
+    service.start_core()
+
+    service.faces.start.assert_not_called()
+    service.faces.close.assert_not_called()
+    service.detector.stop.assert_not_called()
+    assert service.status()["core_started"]
+    assert not service.status()["core_ready"]
+
+
+def test_degraded_inference_start_retries_during_maintenance() -> None:
+    service = _lifecycle()
+    service.detector.start.side_effect = [False, True]
+
+    service.start_core()
+    service.maintain()
+
+    assert service.detector.start.call_count == 2
+    service.faces.start.assert_called_once_with()
+    assert service.status()["core_ready"]
+
+
 def test_workers_bind_once_before_start() -> None:
     service = _lifecycle()
     worker = Mock()

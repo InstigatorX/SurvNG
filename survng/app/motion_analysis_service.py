@@ -1054,6 +1054,24 @@ class MotionAnalysisService:
                     self._telemetry["temporal_filter_skips"] = self._telemetry.get(
                         "temporal_filter_skips", 0
                     ) + 1
+                stable_result = MotionQualificationResult(
+                    accepted=False,
+                    score=0.0,
+                    threshold=1.0,
+                    reason="temporal_stable_scene",
+                    frame_count=len(samples),
+                    features={"pixel_change_ratio": pixel_change_ratio},
+                    telemetry={},
+                )
+                with self.frame_lock:
+                    # A cheap temporal observation still satisfies the primary
+                    # cadence and must not leave every subsequent quiet frame due.
+                    self.primary_last_processed_at = captured_at
+                if self.qualification.trigger_mode() == "camera_rescue":
+                    self._observe_stable_scene_for_visual_backup(
+                        stable_result,
+                        captured_at,
+                    )
                 return
         
         if cached_processed:
@@ -1130,6 +1148,40 @@ class MotionAnalysisService:
             )
             self._persist_ema_route_candidate(captured_at, persist_candidate)
             return
+
+    def _observe_stable_scene_for_visual_backup(
+        self,
+        result: MotionQualificationResult,
+        captured_at: float,
+    ) -> None:
+        """Advance visual-backup readiness without running route/audit work."""
+        observed_monotonic = time.monotonic()
+        with self._visual_lock:
+            policy = self.qualification.visual_backup_policy()
+            detection_enabled = self.state.detection_enabled()
+            self.ema_v2.evaluate(
+                result,
+                captured_at,
+                observed_monotonic,
+                policy,
+                detection_enabled=detection_enabled,
+            )
+            self.ema_verification.evaluate(
+                result,
+                captured_at,
+                observed_monotonic,
+                replace(
+                    policy,
+                    minimum_score=min(
+                        float(policy.minimum_score),
+                        float(result.threshold),
+                    ),
+                    score_margin=0.0,
+                    minimum_consecutive=policy.minimum_consecutive + 2,
+                    grace_seconds=policy.grace_seconds + 1.0,
+                ),
+                detection_enabled=detection_enabled,
+            )
 
     def _persist_ema_route_candidate(
         self,

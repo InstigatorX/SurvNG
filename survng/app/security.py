@@ -15,13 +15,25 @@ _SECRET_URL_RE = re.compile(
 )
 _SECRET_FIELD_RE = re.compile(
     r'''(?ix)
-    (\b(?:api[_-]?key|authorization|password|token)\b["']?\s*[=:]\s*)
+    (\b(?:
+        api[_-]?key|
+        authorization|
+        password|
+        token|
+        access[_-]?token|
+        client[_-]?secret|
+        refresh[_-]?token|
+        id[_-]?token|
+        cookie|
+        set-cookie
+    )\b["']?\s*[=:]\s*)
     (?:"[^"]*"|'[^']*'|[^,;\s}\]]+)
     ''',
 )
 _AUTHORIZATION_RE = re.compile(
     r"(?i)(\bauthorization\s*[=:]\s*(?:bearer|basic)\s+)[^\s,;]+"
 )
+_COOKIE_RE = re.compile(r"(?i)(\b(?:cookie|set-cookie)\s*:\s*)[^\r\n]*")
 
 
 def redact_secret_text(value: object) -> str:
@@ -30,6 +42,7 @@ def redact_secret_text(value: object) -> str:
         str(value),
     )
     redacted = _AUTHORIZATION_RE.sub(lambda match: f"{match.group(1)}***", redacted)
+    redacted = _COOKIE_RE.sub(lambda match: f"{match.group(1)}***", redacted)
     return _SECRET_FIELD_RE.sub(lambda match: f"{match.group(1)}***", redacted)
 
 
@@ -77,6 +90,10 @@ _CAMERA_CONTROL_SUFFIXES = frozenset({
 
 def required_api_scope(method: str, path: str) -> ApiScope:
     normalized_method = method.upper()
+    # Process logs can contain operationally sensitive context even after
+    # redaction, so they are not part of the integration-facing read surface.
+    if path == "/api/logs":
+        return "admin"
     if normalized_method in {"GET", "HEAD", "OPTIONS"}:
         return "read"
     if path.startswith("/api/cameras/") and any(

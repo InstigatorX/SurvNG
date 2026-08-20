@@ -6,7 +6,13 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
-from survng.app.config import ApiTokenConfig, AppConfig, CameraConfig, DetectionZone
+from survng.app.config import (
+    ApiTokenConfig,
+    AppConfig,
+    CameraConfig,
+    DetectionZone,
+    OnvifConfig,
+)
 from survng.app.config_routes import (
     ApiTokenCreateRequest,
     ConfigProbeRequest,
@@ -150,6 +156,46 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertFalse(available["onvif"]["reachable"])
         self.assertTrue(self.limiter.acquire(blocking=False))
         self.limiter.release()
+
+    def test_masked_probe_credentials_cannot_be_forwarded_to_another_host(self) -> None:
+        self.config.cameras[0].onvif = OnvifConfig(
+            enabled=True,
+            host="gate.local",
+            port=8000,
+            username="viewer",
+            password="camera-secret",
+        )
+        endpoint = self.endpoint("/api/config/probe", "POST")
+
+        with self.assertRaises(HTTPException) as raised:
+            endpoint(ConfigProbeRequest(
+                camera_id="gate",
+                host="attacker.example",
+                username="viewer",
+                password=SECRET_PLACEHOLDER,
+            ))
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("configured camera endpoint", raised.exception.detail)
+
+    def test_masked_probe_credentials_allow_the_configured_camera_endpoint(self) -> None:
+        self.config.cameras[0].onvif = OnvifConfig(
+            enabled=True,
+            host="gate.local",
+            port=8000,
+            username="viewer",
+            password="camera-secret",
+        )
+        endpoint = self.endpoint("/api/config/probe", "POST")
+        with patch("survng.app.config_routes._tcp_reachable", return_value=False):
+            result = endpoint(ConfigProbeRequest(
+                camera_id="gate",
+                host="gate.local",
+                username="viewer",
+                password=SECRET_PLACEHOLDER,
+            ))
+
+        self.assertFalse(result["onvif"]["reachable"])
 
     def test_zone_persistence_failure_restores_runtime_zones(self) -> None:
         self.config.cameras[0].zones = [

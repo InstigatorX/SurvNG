@@ -1480,6 +1480,85 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             "object_exited_recorded_window",
         )
 
+    def test_deferred_catchup_does_not_expire_track_or_skip_live_recovery(self) -> None:
+        live_processed = threading.Event()
+        updates: list[dict] = []
+        event_epoch = time.time() - 1.0
+        event_at = datetime.fromtimestamp(event_epoch, timezone.utc)
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def __init__(self):
+                self.live_calls = 0
+
+            def detect(self, frame, confidence_threshold=None):
+                if int(frame[0, 0, 0]) == 0:
+                    return [{"status": "inference_deferred"}]
+                self.live_calls += 1
+                return [detection("car", 0.9, (10, 10, 60, 70))]
+
+        detector = Detector()
+        token = 0.0
+
+        def live_frame():
+            nonlocal token
+            token += 1.0
+            return np.ones((100, 100, 3), dtype=np.uint8), time.time(), token
+
+        def catchup_provider(_start, _end, _fps, _width):
+            yield event_epoch + 0.75, np.zeros((100, 100, 3), dtype=np.uint8)
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            if int(tracking.get("frames_processed") or 0) >= 1:
+                live_processed.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(
+                sample_fps=4.0,
+                max_session_seconds=3.0,
+                lost_timeout_seconds=0.5,
+            ),
+            detector=detector,
+            frame_provider=live_frame,
+            catchup_frame_provider=catchup_provider,
+            update_event=update_event,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        with (
+            patch(
+                "survng.app.object_track.session.TRACKING_CATCHUP_SETTLE_SECONDS",
+                0.05,
+            ),
+            patch(
+                "survng.app.object_track.session.TRACKING_CATCHUP_RETRY_SECONDS",
+                0.01,
+            ),
+        ):
+            self.assertTrue(session.start(
+                46,
+                event_at,
+                [detection("car", 0.95, (10, 10, 60, 70))],
+                np.zeros((100, 100, 3), dtype=np.uint8),
+            ))
+            self.assertTrue(live_processed.wait(2.0))
+        session.stop()
+
+        self.assertGreater(detector.live_calls, 0)
+        self.assertNotEqual(
+            updates[-1].get("completion_reason"),
+            "object_exited_recorded_window",
+        )
+
     def test_detector_failures_persist_terminal_failure_state(self) -> None:
         terminal = threading.Event()
         updates: list[dict] = []

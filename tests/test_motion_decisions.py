@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 from survng.app.motion import MotionQualificationResult
 from survng.app.ema_v2 import CameraNotice
 from survng.app.events import EventStore
@@ -555,3 +557,61 @@ def test_refined_active_followup_updates_completed_outcome_telemetry() -> None:
     audit_kwargs = audit.record_audit.call_args.kwargs
     assert audit_kwargs["category"] == "active_followup"
     assert audit_kwargs["event_id"] == 55
+
+
+def test_durable_refinement_completion_is_retry_safe_and_idempotent() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    state = Mock()
+    audit = Mock()
+    audit.record_audit.side_effect = [RuntimeError("audit unavailable"), None]
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=audit,
+        config=MotionQualificationConfig(),
+        qualification=Mock(),
+        incidents=Mock(),
+        media=Mock(),
+        analysis=Mock(),
+        state=state,
+    )
+    refined = Mock()
+    refined.as_dict.return_value = {
+        "event_id": 55,
+        "object_detected": True,
+        "snapshot_path": "followup.webp",
+        "rejection_reason": "",
+        "motion_correlation": {"required": True},
+    }
+    event_at = datetime.now(timezone.utc)
+    context = {
+        "completion_id": "followup-refined:refinement",
+        "decision_id": "followup-refined",
+        "event_at": event_at.isoformat(),
+        "mode": "adaptive",
+        "sensitivity": "balanced",
+        "result": MotionQualificationResult(
+            True,
+            0.82,
+            0.48,
+            "active_event_new_motion",
+            3,
+            {},
+        ).as_dict(),
+        "trigger_count": 1,
+        "active_followup": True,
+        "episode_sequence": events.current_episode_sequence(),
+        "episode_managed": False,
+    }
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        orchestrator._record_refined_outcome_from_context(refined, context)
+    state.increment_stat.assert_not_called()
+
+    orchestrator._record_refined_outcome_from_context(refined, context)
+    orchestrator._record_refined_outcome_from_context(refined, context)
+
+    assert audit.record_audit.call_count == 2
+    assert state.increment_stat.call_count == 2
+    state.increment_stat.assert_any_call("late_object_rescues", 1)
+    state.increment_stat.assert_any_call("active_followup_objects", 1)

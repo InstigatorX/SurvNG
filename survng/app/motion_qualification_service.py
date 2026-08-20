@@ -10,7 +10,7 @@ from typing import Any, Callable, Protocol
 
 import numpy as np
 
-from .config import CameraConfig, MotionQualificationConfig
+from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .motion import MotionQualificationResult
 from .ema_v2 import EmaPolicy
 from .motion_pipeline import (
@@ -89,6 +89,14 @@ class MotionQualificationService:
             "motion_zones": [
                 zone.model_dump(mode="python") for zone in self.camera.zones
             ],
+        }
+
+    def update_zones(self, zones: list[DetectionZone]) -> None:
+        """Refresh the immutable per-run zone snapshot after a hot update."""
+        self._pipeline_configuration = {
+            **self.config.model_dump(mode="python"),
+            "camera_id": self.camera.id,
+            "motion_zones": [zone.model_dump(mode="python") for zone in zones],
         }
 
     def settings(self) -> tuple[str, str, int]:

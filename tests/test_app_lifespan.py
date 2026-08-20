@@ -121,3 +121,57 @@ def test_lifespan_starts_calibration_monitor_through_intelligence_owner() -> Non
         exports.stop.assert_called_once_with(timeout=10.0)
 
     asyncio.run(exercise())
+
+
+def test_lifespan_drains_manager_lease_before_stop_and_joins_face_sync() -> None:
+    async def exercise() -> None:
+        async def monitor_forever() -> None:
+            await asyncio.Event().wait()
+
+        actions: list[str] = []
+        active_manager = SimpleNamespace(
+            start_all=Mock(),
+            stop_all=Mock(side_effect=lambda: actions.append("manager-stop")),
+            detector=SimpleNamespace(stop_resource_tracker=Mock()),
+        )
+        exports = SimpleNamespace(start=Mock(), stop=Mock(return_value=True))
+        face_sync = Mock()
+        face_sync.is_alive.side_effect = [True, False]
+        face_sync.join.side_effect = lambda **_kwargs: actions.append("face-join")
+        monitor = AsyncMock(side_effect=monitor_forever)
+
+        def wait_idle(manager, timeout: float) -> bool:
+            assert manager is active_manager
+            assert timeout == main.MANAGER_ACCESS_DRAIN_SECONDS
+            actions.append("manager-drain")
+            return True
+
+        with (
+            patch.object(main, "manager", active_manager),
+            patch.object(main, "FACE_OBSERVATIONS_SYNC_THREAD", face_sync),
+            patch.object(main.MANAGER_ACCESS, "wait_idle", side_effect=wait_idle),
+            patch.object(main, "_record_process_lifecycle"),
+            patch.object(main, "_start_face_observation_sync"),
+            patch.object(
+                main._recording_media_runtime,
+                "_media_export_manager",
+                return_value=exports,
+            ),
+            patch.object(main._recording_media_runtime, "_start_recording_prewarmer"),
+            patch.object(main._recording_media_runtime, "_stop_recording_prewarmer"),
+            patch.object(
+                main._intelligence_route_bundle.service,
+                "_calibration_followup_monitor",
+                monitor,
+            ),
+            patch.object(main.STORAGE_MAINTENANCE, "stop", return_value=True),
+        ):
+            async with main.lifespan(main.app):
+                await asyncio.sleep(0)
+
+        assert actions == ["manager-drain", "manager-stop", "face-join"]
+        face_sync.join.assert_called_once_with(
+            timeout=main.FACE_OBSERVATION_SYNC_STOP_SECONDS
+        )
+
+    asyncio.run(exercise())
