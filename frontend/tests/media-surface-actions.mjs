@@ -7,6 +7,7 @@ const directory = dirname(fileURLToPath(import.meta.url));
 const appSource = [
   readFileSync(join(directory, "../src/live/LivePage.jsx"), "utf8"),
   readFileSync(join(directory, "../src/shared/evidence.jsx"), "utf8"),
+  readFileSync(join(directory, "../src/incidents/IncidentCard.jsx"), "utf8"),
   readFileSync(join(directory, "../src/incidents/IncidentsPage.jsx"), "utf8"),
   readFileSync(join(directory, "../src/timeline/TimelinePages.jsx"), "utf8"),
 ].join("\n");

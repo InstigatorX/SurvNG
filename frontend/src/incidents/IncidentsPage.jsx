@@ -21,7 +21,8 @@ import { useStoredState, isMobileViewport } from "../shared/hooks.js";
 import { clearLegacyIncidentFilterStorage } from "../shared/cameras.js";
 import { useAppEvents } from "../shared/events.js";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
-import { incidentLabels, IncidentObjectBadges, IncidentListItem, IncidentCard, IncidentInspector, EventOverlay } from "../shared/evidence.jsx";
+import { incidentLabels, IncidentObjectBadges, IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
+import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
 export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
