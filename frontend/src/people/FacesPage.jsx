@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { nextFaceReviewObservation } from "../faceReview.mjs";
+import { createConditionalJsonClient } from "../conditionalJson.mjs";
 import { PEOPLE_REVIEW_FILTERS, PEOPLE_WORKSPACE_MODES, peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../peopleWorkspace.mjs";
 import { appUrl, recordingsHref, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
@@ -188,6 +189,10 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
   const faceLoadSequence = useRef(0);
   const clusterLoadSequence = useRef(0);
   const clusterMemberLoadSequence = useRef(0);
+  const stableDirectoryClient = useRef(null);
+  if (!stableDirectoryClient.current) {
+    stableDirectoryClient.current = createConditionalJsonClient(fetch);
+  }
   const faceReviewTriggerRef = useRef(null);
   const faceReviewPanelRef = useRef(null);
   const initialFaceIdRef = useRef(initialPeopleQuery.faceId);
@@ -230,9 +235,10 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
   async function loadPeople() {
     const sequence = ++peopleLoadSequence.current;
     try {
-      const response = await fetch("/api/faces/people");
-      if (!response.ok) throw new Error("Unable to load enrolled people");
-      const payload = await response.json();
+      const payload = await stableDirectoryClient.current.get(
+        "/api/faces/people",
+        "Unable to load enrolled people",
+      );
       if (sequence === peopleLoadSequence.current) setPeople(payload);
       return payload;
     } catch (error) {
@@ -310,9 +316,10 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
     const sequence = ++clusterLoadSequence.current;
     setClusterLoadError("");
     try {
-      const clusterResponse = await fetch("/api/faces/unknown-clusters");
-      if (!clusterResponse.ok) throw new Error("Unable to load unknown clusters");
-      const clusterPayload = await clusterResponse.json();
+      const clusterPayload = await stableDirectoryClient.current.get(
+        "/api/faces/unknown-clusters",
+        "Unable to load unknown clusters",
+      );
       if (sequence !== clusterLoadSequence.current) return null;
       setClusters(clusterPayload);
       return clusterPayload;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import threading
@@ -10,8 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import cv2
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from .manager import AppManager
@@ -57,6 +59,31 @@ def _public_face_observation(observation: dict[str, Any]) -> dict[str, Any]:
     payload = dict(observation)
     payload.pop("snapshot_path", None)
     return payload
+
+
+def _etag_matches(if_none_match: str, etag: str) -> bool:
+    for candidate in if_none_match.split(","):
+        candidate = candidate.strip()
+        if candidate == "*":
+            return True
+        if candidate.startswith("W/"):
+            candidate = candidate[2:]
+        if candidate == etag:
+            return True
+    return False
+
+
+def _conditional_json_response(request: Request, payload: Any) -> Response:
+    response = JSONResponse(content=jsonable_encoder(payload))
+    etag = f'"{hashlib.sha256(response.body).hexdigest()}"'
+    cache_headers = {
+        "Cache-Control": "private, no-cache",
+        "ETag": etag,
+    }
+    if _etag_matches(request.headers.get("if-none-match", ""), etag):
+        return Response(status_code=304, headers=cache_headers)
+    response.headers.update(cache_headers)
+    return response
 
 
 def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
@@ -116,10 +143,13 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
             return active_manager.faces.unknown_cluster_health()
         return with_manager(rebuild)
 
-    @router.get("/api/faces/unknown-clusters")
-    def face_unknown_clusters() -> list[dict[str, Any]]:
+    def face_unknown_clusters_payload() -> list[dict[str, Any]]:
         deps.start_observation_sync()
         return with_manager(lambda active: active.faces.unknown_clusters())
+
+    @router.get("/api/faces/unknown-clusters")
+    def face_unknown_clusters(request: Request) -> Response:
+        return _conditional_json_response(request, face_unknown_clusters_payload())
 
 
     @router.get("/api/faces/diagnostics/duplicates")
@@ -285,10 +315,13 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
         return with_manager(history)
 
-    @router.get("/api/faces/people")
-    def face_people() -> list[dict[str, Any]]:
+    def face_people_payload() -> list[dict[str, Any]]:
         deps.start_observation_sync()
         return with_manager(lambda active: active.faces.people())
+
+    @router.get("/api/faces/people")
+    def face_people(request: Request) -> Response:
+        return _conditional_json_response(request, face_people_payload())
 
     @router.get("/api/faces/camera-suitability")
     def face_camera_suitability() -> list[dict[str, Any]]:
@@ -499,4 +532,7 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
         for name, value in locals().copy().items()
         if callable(value) and name not in {"with_manager"}
     }
+    # Preserve the direct-call API while the HTTP endpoints add revalidation.
+    handlers["face_people"] = face_people_payload
+    handlers["face_unknown_clusters"] = face_unknown_clusters_payload
     return FaceRouteBundle(router=router, handlers=handlers)
