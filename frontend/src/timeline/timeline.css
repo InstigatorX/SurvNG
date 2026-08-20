@@ -1,7 +1,7 @@
 /* Timeline workspace */
 .recordings-v2-page {
-  grid-template-columns: var(--timeline-camera-rail-width) minmax(0, 1fr);
-  grid-template-rows: var(--timeline-command-height) minmax(0, 1fr) clamp(210px, 24dvh, 280px);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--timeline-command-height) minmax(0, 1fr) auto;
   gap: 0;
   height: calc(100dvh - 58px);
   min-height: calc(100dvh - 58px);
@@ -10,10 +10,27 @@
   padding: 0;
 }
 
+.recordings-v2-page.has-investigation {
+  grid-template-rows: var(--timeline-command-height) minmax(0, 1fr) clamp(210px, 24dvh, 280px);
+}
+
+.recordings-v2-page.investigation-hidden {
+  grid-template-rows: var(--timeline-command-height) minmax(0, 1fr);
+}
+
+.recordings-v2-page.investigation-hidden .recordings-v2-incidents {
+  display: none;
+}
+
+.recordings-v2-page.export-center-page {
+  grid-template-columns: var(--timeline-camera-rail-width) minmax(0, 1fr);
+  grid-template-rows: var(--timeline-command-height) minmax(0, 1fr);
+}
+
 .recordings-commandbar {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 1;
-  grid-template-columns: minmax(170px, 1fr) auto auto auto auto;
+  grid-template-columns: minmax(160px, 240px) auto auto auto auto auto;
   gap: 10px;
   min-height: var(--timeline-command-height);
   border: 0;
@@ -22,6 +39,10 @@
   background: var(--topbar);
   box-shadow: none;
   padding: 6px 14px;
+}
+
+.export-center-page .recordings-tabs {
+  grid-column: 2;
 }
 
 .recordings-section-switcher {
@@ -58,6 +79,181 @@
   align-items: center;
   gap: 7px;
   padding-left: 4px;
+}
+
+.timeline-camera-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.timeline-camera-picker-toggle {
+  display: inline-flex;
+  width: 100%;
+  min-height: 38px;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--control);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 620;
+  padding: 0 10px;
+}
+
+.timeline-camera-picker-toggle strong {
+  overflow: hidden;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-camera-picker-toggle i,
+.timeline-camera-picker-list button i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.timeline-camera-picker-toggle i.online,
+.timeline-camera-picker-list button i.online {
+  background: #24b47e;
+}
+
+.timeline-camera-picker-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  width: min(360px, 72vw);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-solid);
+  box-shadow: var(--shadow);
+}
+
+.timeline-camera-picker-search {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  padding: 8px 10px;
+}
+
+.timeline-camera-picker-search input {
+  min-height: 36px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+}
+
+.timeline-camera-picker-list {
+  display: grid;
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+}
+
+.timeline-camera-picker-list button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 8px;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  padding: 0 12px;
+  text-align: left;
+}
+
+.timeline-camera-picker-list button.active,
+.timeline-camera-picker-list button:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.timeline-camera-picker-list p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 14px;
+}
+
+.recordings-v2-scale {
+  display: inline-flex;
+  overflow: hidden;
+  margin-left: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.recordings-v2-scale button {
+  min-height: 32px;
+  min-width: 36px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 8px;
+}
+
+.recordings-v2-scale button:first-child {
+  border-left: 0;
+}
+
+.recordings-v2-scale button.active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--control));
+  color: var(--active-ink);
+}
+
+.recordings-return-playhead {
+  position: absolute;
+  z-index: 3;
+  right: 12px;
+  top: calc(100% + 8px);
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel-solid));
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 620;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.recordings-investigation-toggle {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 620;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.recordings-investigation-toggle.active {
+  background: color-mix(in srgb, var(--accent) 16%, var(--control));
+  color: var(--active-ink);
 }
 
 .recordings-commandbar-scope strong {
@@ -258,7 +454,7 @@
 }
 
 .recordings-v2-workspace {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 2;
   grid-template-rows: minmax(280px, 1fr) auto;
   border: 0;
@@ -268,10 +464,42 @@
   padding: 0;
 }
 
+.export-center-page .export-center-workspace {
+  grid-column: 2;
+}
+
 .recordings-v2-player {
   border: 0;
   border-bottom: 1px solid var(--line);
   background: #020608;
+}
+
+.recordings-v2-player.selected-camera-stage,
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) {
+  --timeline-companion-width: clamp(148px, 22vw, 280px);
+}
+
+.recordings-v2-player.selected-camera-stage video {
+  right: auto;
+  width: calc(100% - var(--timeline-companion-width));
+}
+
+.recordings-v2-player.selected-camera-stage:not(:has(.recording-selected-companions)) video {
+  width: 100%;
+}
+
+.recording-selected-companions {
+  display: flex;
+  flex-direction: column;
+  width: var(--timeline-companion-width);
+  overflow-x: hidden;
+  overflow-y: auto;
+  grid-template-columns: none;
+  grid-template-rows: none;
+}
+
+.recording-selected-companions button {
+  flex: 0 0 calc((100% - 8px) / 3);
 }
 
 .recordings-v2-controls {
@@ -283,8 +511,9 @@
 }
 
 .recordings-v2-timeline-toolbar {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   min-height: 42px;
   align-items: center;
   gap: 12px;
@@ -387,16 +616,13 @@
 }
 
 .recordings-v2-timeline {
-  height: var(--timeline-evidence-height);
+  height: auto;
+  min-height: 84px;
   padding: 4px 10px 8px;
 }
 
 .recordings-v2-lane-legend {
-  height: 20px;
-  font-size: 9px;
-  font-weight: 560;
-  text-transform: none;
-  letter-spacing: 0;
+  display: none;
 }
 
 .recordings-v2-lane-legend span::before {
@@ -408,6 +634,8 @@
   border-color: var(--line);
   border-radius: 2px;
   background: color-mix(in srgb, var(--canvas) 78%, transparent);
+  touch-action: pan-y;
+  overscroll-behavior-x: contain;
 }
 
 .recordings-v2-timeline-page {
@@ -432,6 +660,10 @@
 
 .recordings-v2-event-lane.hidden {
   display: none;
+}
+
+.recordings-v2-event-lane b {
+  min-width: 3px;
 }
 
 .recordings-timeline-evidence {
@@ -526,6 +758,31 @@
   grid-template-rows: minmax(0, 1fr);
   border: 0;
   background: var(--panel-solid);
+}
+
+.recordings-v2-incidents.collapsed {
+  min-height: 0;
+  height: auto;
+}
+
+.recordings-v2-incidents.collapsed .recordings-related-events,
+.recordings-v2-incidents.collapsed .recordings-event-inspector,
+.recordings-v2-incidents.collapsed .recordings-inspector-toggle {
+  display: none;
+}
+
+.recordings-v2-incidents.collapsed .recordings-v2-investigation {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.recordings-v2-incidents.collapsed .recordings-v2-selected-event.empty {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  border-right: 0;
+  padding: 4px 12px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .recordings-v2-investigation {
@@ -785,14 +1042,32 @@
 }
 
 @media (max-width: 1100px) and (min-width: 761px) {
-  .recordings-v2-page {
-    grid-template-columns: 190px minmax(0, 1fr);
+  .recordings-v2-page:not(.export-center-page) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .recordings-v2-page:not(.export-center-page).has-investigation {
     grid-template-rows: auto minmax(0, 1fr) clamp(210px, 26dvh, 270px);
+  }
+
+  .recordings-v2-page:not(.export-center-page).investigation-hidden {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .recordings-v2-page.export-center-page {
+    grid-template-columns: 190px minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .recordings-commandbar {
     grid-template-columns: minmax(140px, 1fr) auto auto auto;
     grid-template-rows: auto auto;
+  }
+
+  .timeline-camera-picker {
+    grid-column: 1;
+    grid-row: 1;
   }
 
   .recordings-commandbar-scope {
@@ -814,6 +1089,25 @@
 
   .recordings-commandbar-time {
     display: none;
+  }
+
+  .recordings-v2-player.selected-camera-stage video {
+    width: 100%;
+    height: calc(100% - 86px);
+  }
+
+  .recording-selected-companions {
+    inset: auto 0 0;
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    height: 86px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .recording-selected-companions button {
+    flex: 0 0 118px;
   }
 
   .recordings-v2-investigation {
@@ -909,6 +1203,14 @@
     background: var(--bg);
   }
 
+  .recordings-v2-page:not(.export-center-page) {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .recordings-v2-page:not(.export-center-page).investigation-hidden {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
   .recordings-tabs {
     grid-column: 1;
     grid-row: 1;
@@ -924,9 +1226,17 @@
     grid-row: 3;
   }
 
+  .recordings-v2-page:not(.export-center-page) .recordings-v2-workspace {
+    grid-row: 2;
+  }
+
   .recordings-v2-incidents {
     grid-column: 1;
     grid-row: 4;
+  }
+
+  .recordings-v2-page:not(.export-center-page) .recordings-v2-incidents {
+    grid-row: 3;
   }
 
   .recordings-commandbar {
@@ -942,6 +1252,11 @@
   .recordings-commandbar-scope,
   .recordings-playback-rate {
     display: none;
+  }
+
+  .timeline-camera-picker {
+    flex: 1 1 160px;
+    min-width: 120px;
   }
 
   .recordings-v2-date {

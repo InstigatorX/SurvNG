@@ -161,7 +161,7 @@
   .recordings-v2-page {
     display: grid !important;
     grid-template-columns: minmax(0, 1fr) !important;
-    grid-template-rows: 46px minmax(0, 1fr) !important;
+    grid-template-rows: 46px minmax(0, 1fr) auto !important;
     width: 100% !important;
     height: var(--workspace-available-height) !important;
     min-height: 0 !important;
@@ -170,6 +170,10 @@
     overflow: hidden !important;
     background: var(--bg);
     padding: 0 !important;
+  }
+
+  .recordings-v2-page.investigation-hidden {
+    grid-template-rows: 46px minmax(0, 1fr) !important;
   }
 
   .recordings-tabs.recordings-commandbar {
@@ -196,7 +200,7 @@
     display: none !important;
   }
 
-  .timeline-mobile-camera-select {
+  .timeline-camera-picker {
     grid-column: 1 !important;
     width: 100%;
     max-width: 210px;
@@ -268,10 +272,37 @@
   .recordings-v2-thumbnails,
   .recordings-thumbnail-rail,
   .recording-grid-companions,
-  .recording-selected-companions,
   .recording-stage-pagination,
   [class*="recordings"][class*="thumbnail-rail"] {
     display: none !important;
+  }
+
+  .recordings-v2-page.has-investigation .recordings-v2-incidents,
+  .recordings-v2-page.has-investigation .recordings-v2-investigation,
+  .recordings-v2-page.has-investigation .recordings-v2-selected-event {
+    display: grid !important;
+  }
+
+  .recordings-v2-page.has-investigation .recordings-v2-incidents {
+    grid-column: 1 !important;
+    grid-row: 3 !important;
+    min-height: 0 !important;
+    max-height: 42svh !important;
+    overflow: auto !important;
+  }
+
+  .recording-selected-companions {
+    display: flex !important;
+    flex-direction: row !important;
+    inset: auto 0 0 !important;
+    width: 100% !important;
+    height: 86px !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+  }
+
+  .recording-selected-companions button {
+    flex: 0 0 118px !important;
   }
 
   .recordings-v2-player.all-camera-grid .recording-grid-tile:not(:first-child),
@@ -308,9 +339,13 @@
   .recordings-v2-player.all-camera-grid video {
     inset: 0 !important;
     width: 100% !important;
-    height: 100% !important;
+    height: calc(100% - 86px) !important;
     max-height: none !important;
     object-fit: contain !important;
+  }
+
+  .recordings-v2-player.selected-camera-stage:not(:has(.recording-selected-companions)) video {
+    height: 100% !important;
   }
 
   .recordings-v2-timeline-toolbar,
@@ -350,7 +385,7 @@
 }
 
 @media (max-width: 430px) {
-  .timeline-mobile-camera-select {
+  .timeline-camera-picker {
     max-width: 148px;
   }
 

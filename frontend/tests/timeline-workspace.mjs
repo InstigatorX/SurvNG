@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -49,9 +49,32 @@ assert.deepEqual(timelineViewport(0, 24 * 3600, 12 * 3600, 2), { startEpoch: 11 
 assert.deepEqual(timelineViewport(0, 24 * 3600, 15 * 60, 2), { startEpoch: 0, endEpoch: 2 * 3600 });
 assert.deepEqual(timelineViewport(0, 24 * 3600, 23.75 * 3600, 2), { startEpoch: 22 * 3600, endEpoch: 24 * 3600 });
 assert.deepEqual(timelineViewport(0, 24 * 3600, 12 * 3600, 24), { startEpoch: 0, endEpoch: 24 * 3600 });
+assert.deepEqual(timelineViewport(0, 24 * 3600, 12 * 3600, 1), { startEpoch: 11.5 * 3600, endEpoch: 12.5 * 3600 });
+const pannedBack = timelinePanViewport(0, 24 * 3600, { startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, -1800);
+assert.deepEqual(pannedBack, { startEpoch: 10.5 * 3600, endEpoch: 12.5 * 3600 });
+assert.deepEqual(timelinePanViewport(0, 24 * 3600, pannedBack, 1800), { startEpoch: 11 * 3600, endEpoch: 13 * 3600 });
+assert.deepEqual(timelinePanViewport(0, 24 * 3600, { startEpoch: 0, endEpoch: 2 * 3600 }, -3600), { startEpoch: 0, endEpoch: 2 * 3600 });
+assert.deepEqual(timelinePanViewport(0, 24 * 3600, { startEpoch: 22 * 3600, endEpoch: 24 * 3600 }, 3600), { startEpoch: 22 * 3600, endEpoch: 24 * 3600 });
+assert.equal(pannedBack.endEpoch - pannedBack.startEpoch, 2 * 3600);
+const playhead = 12 * 3600;
+assert.deepEqual(timelinePanViewport(0, 24 * 3600, { startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, -3600).startEpoch, 10 * 3600);
+assert.equal(playhead, 12 * 3600);
+assert.equal(timelinePlayheadInComfortZone({ startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, 12 * 3600), true);
+assert.equal(timelinePlayheadInComfortZone({ startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, 11.1 * 3600), false);
 assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, 1), { startEpoch: 12 * 3600, endEpoch: 14 * 3600 });
 assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 0, endEpoch: 2 * 3600 }, -1), { startEpoch: 0, endEpoch: 2 * 3600 });
 assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 22 * 3600, endEpoch: 24 * 3600 }, 1), { startEpoch: 22 * 3600, endEpoch: 24 * 3600 });
+assert.equal(resolveTimelineHeroCameraId(routeCameras, "all"), "gate");
+assert.equal(resolveTimelineHeroCameraId(routeCameras, "front-door"), "front-door");
+assert.equal(resolveTimelineHeroCameraId(routeCameras, "missing"), "gate");
+assert.equal(resolveTimelineHeroCameraId([], "all"), "");
+assert.equal(timelineTickIntervalSeconds(1), 5 * 60);
+assert.equal(timelineTickIntervalSeconds(24), 3600);
+assert.deepEqual(expectedTimelineCameras(routeCameras, routes, resolveTimelineHeroCameraId(routeCameras, "gate")).map((camera) => camera.id), ["lower-garage", "upper-garage"]);
+const promotedHero = resolveTimelineHeroCameraId(routeCameras, "lower-garage");
+assert.equal(promotedHero, "lower-garage");
+assert.deepEqual(expectedTimelineCameras(routeCameras, routes, promotedHero).map((camera) => camera.id), []);
+assert.equal(playhead, 12 * 3600);
 const filteredEvidence = [
   { id: 1, incident_epoch: 10, has_objects: true, labels: ["person"] },
   { id: 2, incident_epoch: 11, has_objects: true, labels: ["car"] },
@@ -62,6 +85,11 @@ assert.deepEqual(parseTimelineView("?camera=gate&date=2026-08-15&source=main&at=
   cameraId: "gate", date: "2026-08-15", source: "main", at: 123.5, eventFilter: "vehicles", eventId: 44101,
   inspector: "ai", windowHours: 4, lanes: { object: false, motion: true }, thumbnails: false, speed: 2,
 });
+assert.deepEqual(parseTimelineView("?camera=all&date=2026-08-15&at=123.5&window=1", "2026-08-16"), {
+  cameraId: "all", date: "2026-08-15", source: null, at: 123.5, eventFilter: "all", eventId: null,
+  inspector: "details", windowHours: 1, lanes: { object: true, motion: true }, thumbnails: true, speed: 1,
+});
+assert.equal(resolveTimelineHeroCameraId(routeCameras, parseTimelineView("?camera=all", "2026-08-16").cameraId), "gate");
 const appSource = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
 const stylesSource = [
   readFileSync(new URL("../src/styles.css", import.meta.url), "utf8"),
@@ -70,9 +98,22 @@ const stylesSource = [
 const recordingsSource = appSource.slice(appSource.indexOf("function RecordingsPage"), appSource.indexOf("function exportStatusLabel"));
 assert.match(recordingsSource, /const timelineInspectorTriggerRef = useRef\(null\)/);
 assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);
-assert.match(recordingsSource, /<a className="recordings-v2-selected-event-image"[^>]+\/incidents\?event_ids=/);
+assert.match(appSource, /timeline-camera-picker/);
+assert.match(recordingsSource, /<TimelineCameraPicker/);
+assert.doesNotMatch(recordingsSource, /<RecordingCameraRail/);
+assert.match(recordingsSource, /onPanViewport=/);
+assert.doesNotMatch(recordingsSource, /onPageViewport=/);
+assert.match(recordingsSource, /investigation-hidden/);
+assert.match(recordingsSource, /recordings-investigation-toggle/);
+assert.match(recordingsSource, /recordings-return-playhead/);
+assert.match(recordingsSource, /recordings-v2-scale/);
+assert.doesNotMatch(recordingsSource, /setEventFilter\("object"\)/);
+assert.doesNotMatch(recordingsSource, /Thumbnails/);
+assert.doesNotMatch(recordingsSource, /recordings-timeline-evidence/);
 assert.doesNotMatch(recordingsSource, /View full incident/);
-assert.match(stylesSource, /\.recordings-v2-incidents\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1;[\s\S]*?grid-row:\s*3;/);
+assert.match(stylesSource, /\.recordings-v2-incidents\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1;/);
 assert.match(stylesSource, /\.recordings-v2-selected-event-image img\s*\{[^}]*object-fit:\s*contain;/);
+assert.match(stylesSource, /--timeline-companion-width:\s*clamp\(148px, 22vw, 280px\)/);
+assert.doesNotMatch(recordingsSource.slice(recordingsSource.indexOf("return ("), recordingsSource.indexOf("<RecordingTimeline")), /recordings-v2-cameras/);
 
 console.log("timeline workspace tests passed");

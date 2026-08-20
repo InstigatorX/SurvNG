@@ -163,6 +163,10 @@
     overflow: visible;
   }
 
+  .recordings-v2-incidents.collapsed {
+    min-height: 0;
+  }
+
   .recordings-v2-investigation {
     min-height: 510px;
   }

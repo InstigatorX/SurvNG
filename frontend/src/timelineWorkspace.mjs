@@ -92,16 +92,46 @@ export function timelineViewport(startEpoch, endEpoch, anchorEpoch, windowHours)
   return { startEpoch: viewportStart, endEpoch: viewportStart + span };
 }
 
-export function timelineViewportPage(startEpoch, endEpoch, viewport, direction) {
-  const start = Number(startEpoch);
-  const end = Number(endEpoch);
+export function timelinePanViewport(dayStartEpoch, dayEndEpoch, viewport, deltaSeconds) {
+  const start = Number(dayStartEpoch);
+  const end = Number(dayEndEpoch);
   const currentStart = Number(viewport?.startEpoch);
   const currentEnd = Number(viewport?.endEpoch);
   const span = Math.max(1, currentEnd - currentStart);
   const maximumStart = Math.max(start, end - span);
-  const shift = direction < 0 ? -span / 2 : span / 2;
-  const nextStart = Math.max(start, Math.min(maximumStart, currentStart + shift));
+  const nextStart = Math.max(start, Math.min(maximumStart, currentStart + (Number(deltaSeconds) || 0)));
   return { startEpoch: nextStart, endEpoch: nextStart + span };
+}
+
+export function timelineViewportPage(startEpoch, endEpoch, viewport, direction) {
+  const currentStart = Number(viewport?.startEpoch);
+  const currentEnd = Number(viewport?.endEpoch);
+  const span = Math.max(1, currentEnd - currentStart);
+  return timelinePanViewport(startEpoch, endEpoch, viewport, direction < 0 ? -span / 2 : span / 2);
+}
+
+export function timelinePlayheadInComfortZone(viewport, playhead, edgeRatio = 0.2) {
+  const start = Number(viewport?.startEpoch);
+  const end = Number(viewport?.endEpoch);
+  const epoch = Number(playhead);
+  if (![start, end, epoch].every(Number.isFinite) || end <= start) return false;
+  const margin = (end - start) * Math.max(0, Math.min(0.45, Number(edgeRatio) || 0));
+  return epoch >= start + margin && epoch <= end - margin;
+}
+
+export function resolveTimelineHeroCameraId(cameras, requestedId) {
+  const available = Array.isArray(cameras) ? cameras : [];
+  const requested = String(requestedId || "");
+  if (requested && requested !== "all" && available.some((camera) => camera?.id === requested)) return requested;
+  return available[0]?.id || "";
+}
+
+export function timelineTickIntervalSeconds(windowHours) {
+  const hours = Number(windowHours);
+  if (hours >= 24) return 3600;
+  if (hours >= 8) return 30 * 60;
+  if (hours >= 4) return 15 * 60;
+  return 5 * 60;
 }
 
 export function parseTimelineView(search, today = "") {

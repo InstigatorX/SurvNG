@@ -62,16 +62,58 @@ try {
 
   await openWorkspace(page, "timeline", ".recordings-v2-page");
   await page.getByRole("button", { name: "All events" }).waitFor({ state: "visible" });
-  await page.locator(".recording-grid-camera").first().waitFor({ state: "visible" });
+  await page.locator(".timeline-camera-picker-toggle").first().waitFor({ state: "visible" });
+  assert.equal(await page.locator(".recordings-v2-page .recordings-v2-cameras").count(), 0);
   assert.equal(await page.title(), "SurvNG · Timeline");
   assert.match(await page.locator(".workspace-content > h1").textContent(), /SurvNG — Timeline/);
   assert.equal(await page.locator("h1").count(), 1);
   assert.equal(await page.getByRole("button", { name: "All events" }).getAttribute("aria-pressed"), "true");
-  const timelineEvidence = page.locator(".recordings-timeline-evidence button").first();
+  const heroVideo = page.locator(".recordings-v2-player.selected-camera-stage video").first();
+  const companionRail = page.locator(".recording-selected-companions").first();
+  if (await heroVideo.count() && await companionRail.count() && await companionRail.isVisible()) {
+    const heroBox = await heroVideo.boundingBox();
+    const railBox = await companionRail.boundingBox();
+    assert.ok(heroBox && railBox && heroBox.width > railBox.width);
+  }
+  const nearbyToggle = page.getByRole("button", { name: "Nearby" });
+  await nearbyToggle.waitFor({ state: "visible" });
+  assert.equal(await nearbyToggle.getAttribute("aria-expanded"), "false");
+  const nearbyRow = page.locator(".recordings-related-events");
+  assert.equal(await nearbyRow.isVisible(), false);
+  const heroBeforeShow = await page.locator(".recordings-v2-player").evaluate((node) => node.getBoundingClientRect().height);
+  const exportTopBefore = await page.locator(".recordings-v2-export-toggle").evaluate((node) => node.getBoundingClientRect().y);
+  await nearbyToggle.click();
+  assert.equal(await nearbyToggle.getAttribute("aria-expanded"), "true");
+  await nearbyRow.waitFor({ state: "visible" });
+  const heroAfterShow = await page.locator(".recordings-v2-player").evaluate((node) => node.getBoundingClientRect().height);
+  assert.ok(heroBeforeShow > heroAfterShow + 40);
+  await nearbyToggle.click();
+  assert.equal(await nearbyToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(await nearbyRow.isVisible(), false);
+  const playheadLabel = page.locator(".recordings-v2-track output").first();
+  await playheadLabel.waitFor({ state: "visible" });
+  await page.locator(".recordings-v2-player video").first().evaluate((video) => { video.pause(); }).catch(() => {});
+  await page.waitForTimeout(250);
+  const playheadBeforePan = await playheadLabel.textContent();
+  await page.locator(".recordings-v2-track").first().evaluate((node) => {
+    node.dispatchEvent(new WheelEvent("wheel", { deltaX: 240, deltaY: 0, bubbles: true, cancelable: true }));
+  });
+  assert.equal(await playheadLabel.textContent(), playheadBeforePan);
+  const exportTopAfterPan = await page.locator(".recordings-v2-export-toggle").evaluate((node) => node.getBoundingClientRect().y);
+  assert.ok(Math.abs(exportTopAfterPan - exportTopBefore) < 2);
+  const trackBox = await page.locator(".recordings-v2-track input").first().boundingBox();
+  if (trackBox) {
+    await page.mouse.click(trackBox.x + Math.max(16, trackBox.width * 0.25), trackBox.y + trackBox.height / 2);
+    await page.waitForTimeout(400);
+    assert.notEqual(await playheadLabel.textContent(), playheadBeforePan);
+  }
+  const timelineEvidence = page.locator(".recordings-v2-events button").first();
   if (await timelineEvidence.count()) {
     await timelineEvidence.click();
     const selectedCard = page.locator(".recordings-v2-selected-event");
     await selectedCard.waitFor({ state: "visible", timeout: 10_000 });
+    assert.equal(await page.locator(".recordings-v2-incidents").evaluate((node) => node.hidden), false);
+    assert.ok(await page.locator(".recordings-v2-incidents").evaluate((node) => node.getBoundingClientRect().height > 96));
     const selectedAction = selectedCard.getByRole("link", { name: /View full incident/ });
     if (await selectedAction.isVisible()) {
       const cardBox = await selectedCard.boundingBox();
@@ -153,10 +195,10 @@ try {
   assert.equal(await page.locator(".detection-subsection-tabs").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length), 2);
 
   await page.setViewportSize(DESKTOP);
-  await openWorkspace(page, "timeline", ".recording-grid-camera");
+  await openWorkspace(page, "timeline", ".timeline-camera-picker-toggle");
   await page.waitForFunction(() => (document.querySelector(".recordings-v2-page")?.scrollHeight || 0) > 800);
   assert.ok(await page.locator(".recordings-v2-page").evaluate((node) => node.scrollHeight > 800));
-  assert.ok(await page.locator(".recording-grid-camera").first().evaluate((node) => node.getBoundingClientRect().height >= 28));
+  assert.ok(await page.locator(".timeline-camera-picker-toggle").first().evaluate((node) => node.getBoundingClientRect().height >= 28));
 
   await page.setViewportSize({ width: 844, height: 390 });
   await openWorkspace(page, "/", ".camera-tile");
@@ -165,14 +207,14 @@ try {
   assert.ok(liveLandscapeCamera && liveLandscapeActivity && liveLandscapeActivity.y >= liveLandscapeCamera.y + liveLandscapeCamera.height - 1);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
 
-  await openWorkspace(page, "timeline", ".recording-grid-camera");
+  await openWorkspace(page, "timeline", ".timeline-camera-picker-toggle");
   await page.waitForFunction(() => {
     const workspace = document.querySelector(".recordings-v2-workspace")?.getBoundingClientRect().height || 0;
-    const camera = document.querySelector(".recording-grid-camera")?.getBoundingClientRect().height || 0;
-    return workspace >= 360 && camera >= 44;
+    const picker = document.querySelector(".timeline-camera-picker-toggle")?.getBoundingClientRect().height || 0;
+    return workspace >= 360 && picker >= 36;
   });
   assert.ok(await page.locator(".recordings-v2-workspace").evaluate((node) => node.getBoundingClientRect().height >= 360));
-  assert.ok(await page.locator(".recording-grid-camera").first().evaluate((node) => node.getBoundingClientRect().height >= 44));
+  assert.ok(await page.locator(".timeline-camera-picker-toggle").first().evaluate((node) => node.getBoundingClientRect().height >= 36));
 } finally {
   await browser.close();
 }

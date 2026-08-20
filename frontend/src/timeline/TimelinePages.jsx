@@ -6,9 +6,10 @@ import {
   CarFront,
   Check,
   CircleAlert,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  CircleDot,
+  ChevronUp,
   Clock3,
   Download,
   Film,
@@ -35,7 +36,7 @@ import { browserStorage } from "../storage.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
-import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
 import { appUrl, mediaUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { ALL_RECORDING_CAMERAS_ID } from "../shared/constants.js";
@@ -275,22 +276,85 @@ export function RecordingCameraGrid({ cameras, source, epoch, playing, onSelect 
 
 export function RecordingCompanionStrip({ cameras, routes, activeCameraId, source, epoch, onSelect }) {
   const previewEpoch = Math.floor(Math.max(0, Number(epoch) || 0) / 15) * 15;
-  const expectedCompanions = expectedTimelineCameras(cameras, routes, activeCameraId, 6);
-  const usingExpectedRoutes = expectedCompanions.length > 0;
-  const companions = usingExpectedRoutes ? expectedCompanions : cameras.filter((camera) => camera.id !== activeCameraId).slice(0, 6);
+  const companions = expectedTimelineCameras(cameras, routes, activeCameraId, 6);
   if (!companions.length) return null;
-  const grid = timelineCompanionGrid(companions.length);
   return <div
     className="recording-selected-companions"
-    style={{ "--companion-columns": grid.columns, "--companion-rows": grid.rows }}
     data-camera-count={companions.length}
-    aria-label={usingExpectedRoutes ? "Expected route camera previews" : "Companion camera previews"}
+    aria-label="Linked camera previews"
   >
-    {companions.map((camera) => <button key={camera.id} type="button" onClick={() => onSelect(camera.id)} aria-label={`Show ${camera.name} recording`}>
+    {companions.map((camera) => <button key={camera.id} type="button" onClick={() => onSelect(camera.id)} aria-label={`Show ${camera.name} recording at the current time`}>
       <img src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" loading="lazy" decoding="async" />
-      <span><i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />{camera.name}<em>{usingExpectedRoutes ? "Expected" : "Preview"}</em></span>
+      <span><i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />{camera.name}</span>
     </button>)}
   </div>;
+}
+
+export function TimelineCameraPicker({ cameras, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef(null);
+  const searchRef = useRef(null);
+  const selected = cameras.find((camera) => camera.id === value) || cameras[0];
+  const matches = filteredTimelineCameras(cameras, query);
+  useEffect(() => {
+    if (!open) return undefined;
+    searchRef.current?.focus();
+    function onPointerDown(event) {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    }
+    function onKey(event) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  if (!selected) return null;
+  return (
+    <div ref={rootRef} className={`timeline-camera-picker${open ? " open" : ""}`}>
+      <button
+        type="button"
+        className="timeline-camera-picker-toggle"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => { setQuery(""); setOpen((current) => !current); }}
+      >
+        <Camera size={15} />
+        <strong>{selected.name}</strong>
+        <i className={(selected.recording || selected.sub_recording) ? "online" : ""} />
+      </button>
+      {open ? (
+        <div className="timeline-camera-picker-menu" role="listbox" aria-label="Select timeline camera">
+          <label className="timeline-camera-picker-search">
+            <Search size={14} aria-hidden="true" />
+            <span className="sr-only">Search cameras</span>
+            <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search cameras" />
+          </label>
+          <div className="timeline-camera-picker-list">
+            {matches.map((camera) => (
+              <button
+                key={camera.id}
+                type="button"
+                role="option"
+                aria-selected={camera.id === selected.id}
+                className={camera.id === selected.id ? "active" : ""}
+                onClick={() => { onChange(camera.id); setOpen(false); setQuery(""); }}
+              >
+                <Camera size={15} />
+                <span>{camera.name}</span>
+                <i className={(camera.recording || camera.sub_recording) ? "online" : ""} />
+              </button>
+            ))}
+            {!matches.length ? <p>No matching cameras</p> : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function RecordingSectionSwitcher({ mode, cameraId = "" }) {
@@ -520,7 +584,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [events, setEvents] = useState([]);
   const [eventFilter, setEventFilter] = useState(initialView.eventFilter);
   const [timelineLanes, setTimelineLanes] = useState(initialView.lanes);
-  const [showTimelineThumbnails, setShowTimelineThumbnails] = useState(initialView.thumbnails);
   const [incidentRangeHours, setIncidentRangeHours] = useState(initialView.windowHours);
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
@@ -545,7 +608,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [selectedEventId, setSelectedEventId] = useState(initialView.eventId);
   const [timelineInspectorTab, setTimelineInspectorTab] = useState(initialView.inspector);
   const [timelineInspectorOpen, setTimelineInspectorOpen] = useState(false);
-  const [cameraQuery, setCameraQuery] = useState("");
+  const [investigationOpen, setInvestigationOpen] = useState(false);
+  const [followPlayhead, setFollowPlayhead] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(initialView.speed);
   const [timelineViewportAnchor, setTimelineViewportAnchor] = useState(initialView.at);
 
@@ -560,18 +624,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [timelineInspectorOpen]);
 
-  const isAllCameras = cameraId === ALL_RECORDING_CAMERAS_ID;
-  const activeCameraId = isAllCameras
-    ? ALL_RECORDING_CAMERAS_ID
-    : cameras.some((camera) => camera.id === cameraId) ? cameraId : cameras[0]?.id || "";
+  const isAllCameras = false;
+  const activeCameraId = resolveTimelineHeroCameraId(cameras, cameraId);
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
   const nextDate = addDaysToDateKey(date, 1);
   const dayEnd = useMemo(() => zonedDateSecondToEpoch(nextDate, 0, timeZone), [nextDate, timeZone]);
   const daySeconds = Math.max(1, dayEnd - dayStart);
-  const visibleRailCameras = useMemo(
-    () => filteredTimelineCameras(cameras, cameraQuery),
-    [cameraQuery, cameras],
-  );
 
   useEffect(() => {
     onAssistantContextChange?.({
@@ -609,20 +667,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
   const filteredEvents = useMemo(() => events
     .filter((event) => timelineEventMatchesFilter(event, eventFilter))
+    .filter((event) => (event.has_objects ? timelineLanes.object : timelineLanes.motion))
     .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
     .filter((event) => Number.isFinite(event.incident_epoch))
-    .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events]);
+    .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events, timelineLanes.motion, timelineLanes.object]);
 
+  const viewportAnchor = Number.isFinite(timelineViewportAnchor)
+    ? timelineViewportAnchor
+    : Number.isFinite(playhead) ? playhead : desiredEpochRef.current;
   const timelineView = useMemo(
-    () => timelineViewport(
-      dayStart,
-      dayEnd,
-      Number.isFinite(timelineViewportAnchor)
-        ? timelineViewportAnchor
-        : Number.isFinite(playhead) ? playhead : desiredEpochRef.current,
-      incidentRangeHours,
-    ),
-    [dayEnd, dayStart, incidentRangeHours, playhead, timelineViewportAnchor],
+    () => timelineViewport(dayStart, dayEnd, viewportAnchor, incidentRangeHours),
+    [dayEnd, dayStart, incidentRangeHours, viewportAnchor],
   );
 
   const timelineEvents = useMemo(() => events
@@ -636,14 +691,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   )), [filteredEvents, timelineView.endEpoch, timelineView.startEpoch]);
   const selectedEvent = nearbyEvents.find((event) => event.id === selectedEventId)
     || timelineEvents.find((event) => event.id === selectedEventId)
-    || nearbyEvents.reduce((closest, event) => (
-      !closest || Math.abs(event.incident_epoch - playhead) < Math.abs(closest.incident_epoch - playhead) ? event : closest
-    ), null);
-
-  useEffect(() => {
-    if (!timelineEvents.length) return;
-    if (selectedEvent?.id !== selectedEventId) setSelectedEventId(selectedEvent?.id ?? null);
-  }, [selectedEvent?.id, selectedEventId, timelineEvents.length]);
+    || null;
 
   useEffect(() => {
     setTimelineViewportAnchor(null);
@@ -654,6 +702,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       setTimelineViewportAnchor(playhead);
     }
   }, [playhead, timelineViewportAnchor]);
+
+  useEffect(() => {
+    if (!followPlayhead || !Number.isFinite(playhead)) return;
+    const playing = isAllCameras ? gridPlaying : autoplayRef.current;
+    if (!playing) return;
+    if (timelinePlayheadInComfortZone(timelineView, playhead)) return;
+    setTimelineViewportAnchor(playhead);
+  }, [followPlayhead, gridPlaying, isAllCameras, playhead, timelineView]);
   const selectedEventEnd = selectedEvent ? recordingIncidentEndEpoch(selectedEvent) : null;
   const selectedEventDuration = selectedEvent && Number.isFinite(selectedEventEnd)
     ? Math.max(0, selectedEventEnd - selectedEvent.incident_epoch)
@@ -812,7 +868,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       target < timelineView.startEpoch
       || target > timelineView.endEpoch
       )
-    ) setTimelineViewportAnchor(target);
+    ) {
+      setFollowPlayhead(true);
+      setTimelineViewportAnchor(target);
+    }
     if (isAllCameras) {
       autoplayRef.current = autoplay;
       setGridPlaying(autoplay);
@@ -854,22 +913,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     }
   }
 
-  function pageTimelineViewport(direction) {
-    const next = timelineViewportPage(
-      dayStart,
-      dayEnd,
-      timelineView,
-      direction,
-    );
+  function panTimelineViewport(deltaSeconds) {
+    const next = timelinePanViewport(dayStart, dayEnd, timelineView, deltaSeconds);
     if (next.startEpoch === timelineView.startEpoch) return;
+    setFollowPlayhead(false);
     setTimelineViewportAnchor((next.startEpoch + next.endEpoch) / 2);
-    const current = Number(playhead);
-    if (current >= next.startEpoch && current <= next.endEpoch) return;
-    const target = current < next.startEpoch
-      ? next.startEpoch
-      : Math.max(next.startEpoch, next.endEpoch - 0.01);
-    const autoplay = isAllCameras ? gridPlaying : !videoRef.current?.paused;
-    playAt(target, autoplay, true);
+  }
+
+  function returnToPlayhead() {
+    if (!Number.isFinite(playhead)) return;
+    setFollowPlayhead(true);
+    setTimelineViewportAnchor(playhead);
   }
 
   useEffect(() => {
@@ -1122,10 +1176,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
     if (incidentRangeHours !== 1) params.set("window", String(incidentRangeHours));
     if (!timelineLanes.object) params.set("objects", "0");
     if (!timelineLanes.motion) params.set("motion", "0");
-    if (!showTimelineThumbnails) params.set("thumbs", "0");
     if (playbackRate !== 1) params.set("speed", String(playbackRate));
     window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, selectedEventId, showTimelineThumbnails, source, timelineInspectorTab, timelineLanes.motion, timelineLanes.object]);
+  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, selectedEventId, source, timelineInspectorTab, timelineLanes.motion, timelineLanes.object]);
 
   useEffect(() => {
     const restoreView = () => {
@@ -1149,7 +1202,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
       setTimelineInspectorTab(view.inspector);
       setIncidentRangeHours(view.windowHours);
       setTimelineLanes(view.lanes);
-      setShowTimelineThumbnails(view.thumbnails);
       setPlaybackRate(view.speed);
     };
     window.addEventListener("popstate", restoreView);
@@ -1349,27 +1401,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
   }
 
   return (
-    <main className="recordings-v2-page">
+    <main className={`recordings-v2-page${investigationOpen ? " has-investigation" : " investigation-hidden"}`}>
       <nav className="recordings-tabs recordings-commandbar" aria-label="Timeline controls">
-        <div className="recordings-commandbar-scope">
-          {isAllCameras ? <Grid2X2 size={15} /> : <Camera size={15} />}
-          <strong>{isAllCameras ? "All cameras" : cameras.find((camera) => camera.id === activeCameraId)?.name || activeCameraId}</strong>
-          <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
-        </div>
-        <label className="mobile-camera-select timeline-mobile-camera-select">
-          <Camera size={15} aria-hidden="true" />
-          <span className="sr-only">Timeline camera</span>
-          <select
-            value={isAllCameras ? (cameras[0]?.id || "") : activeCameraId}
-            onChange={(event) => {
-              checkpointTimelineView();
-              setCameraId(event.target.value);
-            }}
-            aria-label="Timeline camera"
-          >
-            {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}</option>)}
-          </select>
-        </label>
+        <TimelineCameraPicker
+          cameras={cameras}
+          value={activeCameraId}
+          onChange={(nextCameraId) => { checkpointTimelineView(); setCameraId(nextCameraId); }}
+        />
+        <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
         <div className="recordings-v2-date">
           <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={15} /></button>
           <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
@@ -1391,29 +1430,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
           <a href={appUrl("/timeline/exports")} aria-label="Open Export Center"><ChevronRight size={15} /></a>
         </div>
       </nav>
-      <RecordingCameraRail
-        cameras={cameras}
-        value={isAllCameras ? ALL_RECORDING_CAMERAS_ID : activeCameraId}
-        query={cameraQuery}
-        onCameraChange={(nextCameraId) => { checkpointTimelineView(); setCameraId(nextCameraId); if (nextCameraId === ALL_RECORDING_CAMERAS_ID) setSource("live"); }}
-        onQueryChange={setCameraQuery}
-      >
-        <span className="recordings-camera-group">Camera views</span>
-        <button type="button" className={isAllCameras ? "active" : ""} onClick={() => { checkpointTimelineView(); setCameraId(ALL_RECORDING_CAMERAS_ID); setSource("live"); }}>
-          <Grid2X2 size={16} />
-          <span>All Cameras</span>
-          <i className={cameras.some((camera) => camera.recording || camera.sub_recording) ? "online" : ""} />
-        </button>
-        <span className="recordings-camera-group">Cameras · {visibleRailCameras.length}</span>
-        {visibleRailCameras.map((camera) => (
-          <button key={camera.id} type="button" className={camera.id === activeCameraId ? "active" : ""} onClick={() => { checkpointTimelineView(); setCameraId(camera.id); }}>
-            <Camera size={16} />
-            <span>{camera.name}</span>
-            <i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />
-          </button>
-        ))}
-      </RecordingCameraRail>
-
       <section className="recordings-v2-workspace">
         <div className={`recordings-v2-player${isAllCameras ? " all-camera-grid" : " selected-camera-stage"}`}>
           {isAllCameras && Number.isFinite(playhead) ? <RecordingCameraGrid
@@ -1472,29 +1488,43 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
         <div className="recordings-v2-controls">
           <div className="recordings-v2-timeline-toolbar">
             <div className="recordings-v2-incidents-tools">
-              <span className="recordings-v2-filter-label"><SlidersHorizontal size={14} />Evidence</span>
+              <span className="recordings-v2-filter-label" title="Evidence" aria-label="Evidence"><SlidersHorizontal size={14} /></span>
               <div className="recordings-v2-event-filter" role="group" aria-label="Recording incident type">
                 <button type="button" className={eventFilter === "all" ? "active" : ""} aria-pressed={eventFilter === "all"} onClick={() => { checkpointTimelineView(); setEventFilter("all"); }}><Images size={14} />All events</button>
-                <button type="button" className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => { checkpointTimelineView(); setEventFilter("object"); }}><CircleDot size={14} />Objects</button>
-                <button type="button" className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { checkpointTimelineView(); setEventFilter("motion"); }}><Radar size={14} />Motion</button>
                 <button type="button" className={eventFilter === "people" ? "active" : ""} aria-pressed={eventFilter === "people"} onClick={() => { checkpointTimelineView(); setEventFilter("people"); }}><UserRound size={14} />People</button>
                 <button type="button" className={eventFilter === "vehicles" ? "active" : ""} aria-pressed={eventFilter === "vehicles"} onClick={() => { checkpointTimelineView(); setEventFilter("vehicles"); }}><CarFront size={14} />Vehicles</button>
               </div>
-              <label className="recordings-v2-range">
-                <span>Window</span>
-                <select value={incidentRangeHours} onChange={(event) => { checkpointTimelineView(); setTimelineViewportAnchor(playhead); setIncidentRangeHours(Number(event.target.value)); }} aria-label="Timeline time window">
-                  <option value="1">1 hour</option><option value="2">2 hours</option><option value="4">4 hours</option><option value="8">8 hours</option><option value="12">12 hours</option><option value="24">Full day</option>
-                </select>
-              </label>
+              <div className="recordings-v2-scale" role="group" aria-label="Visible time scale">
+                {[[1, "1h"], [2, "2h"], [4, "4h"], [8, "8h"], [12, "12h"], [24, "Day"]].map(([hours, label]) => (
+                  <button
+                    key={hours}
+                    type="button"
+                    className={incidentRangeHours === hours ? "active" : ""}
+                    aria-pressed={incidentRangeHours === hours}
+                    onClick={() => { checkpointTimelineView(); setIncidentRangeHours(hours); }}
+                  >{label}</button>
+                ))}
+              </div>
             </div>
             <div className="recordings-timeline-display-controls">
               <button type="button" className={timelineLanes.object ? "active object" : "object"} aria-pressed={timelineLanes.object} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, object: !current.object })); }}>Objects</button>
               <button type="button" className={timelineLanes.motion ? "active motion" : "motion"} aria-pressed={timelineLanes.motion} onClick={() => { checkpointTimelineView(); setTimelineLanes((current) => ({ ...current, motion: !current.motion })); }}>Motion</button>
-              <button type="button" className={showTimelineThumbnails ? "active" : ""} aria-pressed={showTimelineThumbnails} onClick={() => { checkpointTimelineView(); setShowTimelineThumbnails((current) => !current); }}>Thumbnails</button>
             </div>
+            <button
+              type="button"
+              className={`recordings-investigation-toggle${investigationOpen ? " active" : ""}`}
+              aria-pressed={investigationOpen}
+              aria-expanded={investigationOpen}
+              aria-controls="timeline-investigation"
+              onClick={() => setInvestigationOpen((current) => !current)}
+            >
+              {investigationOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
+              Nearby
+            </button>
             <button type="button" className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`} onClick={toggleExport} disabled={isAllCameras || !timeline.length || exportActive}>
               <Download size={15} />{isAllCameras ? "Select camera" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
             </button>
+            {!followPlayhead && Number.isFinite(playhead) ? <button type="button" className="recordings-return-playhead" onClick={returnToPlayhead}>Return to playhead</button> : null}
           </div>
           <RecordingTimeline
             cameraId={isAllCameras ? "" : activeCameraId}
@@ -1508,15 +1538,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
             events={displayedTimelineEvents}
             evidenceFilter={eventFilter}
             laneVisibility={timelineLanes}
-            showThumbnails={showTimelineThumbnails}
             selectedEventId={selectedEvent?.id}
-            onEventSelect={(event) => { checkpointTimelineView(); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
+            onEventSelect={(event) => { checkpointTimelineView(); setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
             playhead={playhead ?? dayStart}
             timeZone={timeZone}
+            windowHours={incidentRangeHours}
             onSeek={(epoch) => playAt(epoch, true)}
-            onPageViewport={pageTimelineViewport}
-            canPageBackward={timelineView.startEpoch > dayStart}
-            canPageForward={timelineView.endEpoch < dayEnd}
+            onPanViewport={panTimelineViewport}
             exportRange={isAllCameras ? null : exportRange}
             onExportRangeChange={isAllCameras || exportJob ? null : setExportRange}
           />
@@ -1561,7 +1589,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
       </section>
 
-      <div className="recordings-v2-incidents">
+      <div id="timeline-investigation" className="recordings-v2-incidents" hidden={!investigationOpen}>
         <div className="recordings-v2-investigation">
           {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
             <header>Selected incident</header>
@@ -1577,7 +1605,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
               <em>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion only"}</em>
               {selectedEventConfidence > 0 ? <span>Confidence {Math.round(selectedEventConfidence * 100)}%</span> : null}
             </div>
-          </aside> : <aside className="recordings-v2-selected-event empty"><Radar size={20} /><span>Select an event to investigate</span></aside>}
+          </aside> : <aside className="recordings-v2-selected-event empty"><span>Select an event on the timeline to investigate</span></aside>}
           <section className="recordings-related-events" aria-label="Nearby evidence">
             <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} in view</span><button ref={timelineInspectorTriggerRef} type="button" className="recordings-inspector-toggle" onClick={() => setTimelineInspectorOpen(true)}>Details</button></header>
             <div className="recordings-v2-events">
@@ -1586,7 +1614,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
                   key={event.id}
                   type="button"
                   className={`${event.has_objects ? "object" : "motion"}${selectedEvent?.id === event.id ? " selected" : ""}`}
-                  onClick={() => { checkpointTimelineView(); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
+                  onClick={() => { checkpointTimelineView(); setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
                   aria-pressed={selectedEvent?.id === event.id}
                   aria-label={`${event.labels?.length ? event.labels.join(", ") : "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
                   title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion only"}`}
@@ -1961,9 +1989,10 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-export function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, showThumbnails, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onPageViewport, canPageBackward, canPageForward, exportRange, onExportRangeChange }) {
+export function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, evidenceFilter, laneVisibility, selectedEventId, onEventSelect, playhead, timeZone, onSeek, onPanViewport, windowHours = 1, exportRange, onExportRangeChange }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
+  const trackRef = useRef(null);
   const [draft, setDraft] = useState(offset);
   const [scrubbing, setScrubbing] = useState(false);
   const [preview, setPreview] = useState({ epoch: null, url: "", loading: false, gap: false, unavailable: false, mode: "jpeg" });
@@ -1985,6 +2014,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   const localPreviewTargetRef = useRef(null);
   const exportDragRef = useRef(null);
   const ticks = useMemo(() => {
+    const tickInterval = timelineTickIntervalSeconds(windowHours);
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone,
       hour: "numeric",
@@ -1997,8 +2027,8 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       minute: "2-digit",
     });
     const items = [];
-    const first = Math.ceil(startEpoch / (15 * 60)) * 15 * 60;
-    for (let epoch = first; epoch < endEpoch; epoch += 15 * 60) {
+    const first = Math.ceil(startEpoch / tickInterval) * tickInterval;
+    for (let epoch = first; epoch < endEpoch; epoch += tickInterval) {
       const parts = partFormatter.formatToParts(new Date(epoch * 1000));
       const minute = Number(parts.find((item) => item.type === "minute")?.value || 0);
       const kind = minute === 0 ? "hour" : minute === 30 ? "half" : "quarter";
@@ -2009,7 +2039,21 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       });
     }
     return items;
-  }, [endEpoch, startEpoch, timeZone]);
+  }, [endEpoch, startEpoch, timeZone, windowHours]);
+  useEffect(() => {
+    const track = trackRef.current;
+    if (!track || !onPanViewport) return undefined;
+    function onWheel(event) {
+      const horizontal = Math.abs(event.deltaX) >= Math.abs(event.deltaY);
+      event.preventDefault();
+      if (!horizontal && !event.shiftKey) return;
+      const deltaPx = horizontal ? event.deltaX : event.deltaY;
+      const width = track.clientWidth || 1;
+      onPanViewport((deltaPx / width) * duration);
+    }
+    track.addEventListener("wheel", onWheel, { passive: false });
+    return () => track.removeEventListener("wheel", onWheel);
+  }, [duration, onPanViewport]);
   const eventMarkers = useMemo(() => (events || []).map((event) => {
     const start = recordingIncidentEpoch(event);
     const end = recordingIncidentEndEpoch(event);
@@ -2024,10 +2068,6 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       event: { ...event, incident_epoch: start },
     };
   }).filter(Boolean), [duration, endEpoch, events, startEpoch]);
-  const evidenceItems = useMemo(
-    () => timelineEvidenceWindow(eventMarkers.map((marker) => marker.event), playhead, 12),
-    [eventMarkers, playhead],
-  );
   useEffect(() => {
     if (dragRef.current) return;
     draftRef.current = offset;
@@ -2062,7 +2102,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     setLocalPreviewFrameReady(false);
     localPreviewTargetRef.current = null;
   }, [previewManifestUrl]);
-  const percent = (draft / duration) * 100;
+  const percent = ((scrubbing ? draft : offset) / duration) * 100;
 
   function hidePreviewAfterDelay() {
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
@@ -2291,22 +2331,35 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       width: rect.width,
       startX: pointerX,
       startValue: draftRef.current,
+      lastX: pointerX,
       precise: Math.abs(pointerX - playheadX) <= grabRadius,
+      panning: false,
     };
     dragRef.current = drag;
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
     if (previewManifestUrl) setLocalPreviewEnabled(true);
-    setScrubbing(true);
+    if (drag.precise) setScrubbing(true);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
-    if (!drag.precise) updateDraft(pointerValue(event, drag), true);
-    else schedulePreview(draftRef.current, true);
+    if (drag.precise) schedulePreview(draftRef.current, true);
   }
 
   function moveDrag(event) {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
+    const dx = event.clientX - drag.lastX;
+    if (!drag.precise) {
+      if (!drag.panning && Math.abs(event.clientX - drag.startX) > 10) {
+        drag.panning = true;
+        setScrubbing(false);
+      }
+      if (drag.panning && onPanViewport) {
+        onPanViewport(-(dx / drag.width) * duration);
+        drag.lastX = event.clientX;
+      }
+      return;
+    }
     updateDraft(pointerValue(event, drag), true);
   }
 
@@ -2320,10 +2373,23 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     dragRef.current = null;
     if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
     previewTimerRef.current = null;
-    if (!cancelled) schedulePreview(pointerValue(event, drag), true);
+    if (drag.panning) {
+      hidePreviewAfterDelay();
+      return;
+    }
+    if (cancelled) {
+      updateDraft(offset);
+      hidePreviewAfterDelay();
+      return;
+    }
+    if (!drag.precise) {
+      commit(pointerValue(event, drag));
+      hidePreviewAfterDelay();
+      return;
+    }
+    schedulePreview(pointerValue(event, drag), true);
     hidePreviewAfterDelay();
-    if (cancelled) updateDraft(offset);
-    else commit(pointerValue(event, drag));
+    commit(pointerValue(event, drag));
   }
 
   function exportEpochAtPointer(event, drag) {
@@ -2378,14 +2444,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
 
   return (
     <div className="recordings-v2-timeline">
-      <div className="recordings-v2-lane-legend">
-        <span className="visually-hidden">{eventMarkers.filter((event) => event.hasObjects).length} object incidents and {eventMarkers.filter((event) => !event.hasObjects).length} motion-only incidents on this day.</span>
-        <span className={evidenceFilter === "object" ? "active object" : "object"}>Objects ({eventMarkers.filter((event) => event.hasObjects).length})</span>
-        <span className={evidenceFilter === "motion" ? "active motion" : "motion"}>Motion ({eventMarkers.filter((event) => !event.hasObjects).length})</span>
-      </div>
-      <div className="recordings-v2-track">
-        {onPageViewport ? <button type="button" className="recordings-v2-timeline-page previous" onClick={() => onPageViewport(-1)} disabled={!canPageBackward} aria-label="Previous timeline window" title="Previous half-window"><ChevronLeft size={16} /></button> : null}
-        {onPageViewport ? <button type="button" className="recordings-v2-timeline-page next" onClick={() => onPageViewport(1)} disabled={!canPageForward} aria-label="Next timeline window" title="Next half-window"><ChevronRight size={16} /></button> : null}
+      <div ref={trackRef} className="recordings-v2-track">
         <div className="recordings-v2-ticks" aria-hidden="true">
           {ticks.map((tick) => (
             <span className={tick.kind} key={tick.epoch} style={{ left: `${((tick.epoch - startEpoch) / duration) * 100}%` }}>
@@ -2476,38 +2535,27 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
           <time>{formatTimeOnly(Number.isFinite(preview.epoch) ? preview.epoch : startEpoch + draft, timeZone)}</time>
         </div>
         <i style={{ left: `${percent}%` }} />
-        <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatTimeOnly(startEpoch + draft, timeZone)}</output>
+        <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatTimeOnly(startEpoch + (scrubbing ? draft : offset), timeZone)}</output>
         <input
           type="range"
           min="0"
           max={duration}
           step="0.1"
-          value={draft}
+          value={scrubbing ? draft : offset}
           onChange={(event) => {
-            if (!dragRef.current) updateDraft(event.target.value);
+            if (!dragRef.current) {
+              updateDraft(event.target.value);
+              commit(event.target.value);
+            }
           }}
           onPointerDown={startDrag}
           onPointerMove={moveDrag}
           onPointerUp={(event) => finishDrag(event)}
           onPointerCancel={(event) => finishDrag(event, true)}
           onKeyUp={(event) => commit(event.currentTarget.value)}
-          aria-label="24 hour recording timeline"
+          aria-label="Recording timeline"
         />
       </div>
-      {showThumbnails ? <div className="recordings-timeline-evidence" aria-label="Events near the selected time">
-        {evidenceItems.map((event) => <button
-          key={event.id}
-          type="button"
-          className={`${event.has_objects ? "object" : "motion"}${event.id === selectedEventId ? " selected" : ""}`}
-          onClick={() => onEventSelect?.(event)}
-          aria-pressed={event.id === selectedEventId}
-          aria-label={`${event.labels?.join(", ") || "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
-        >
-          <i>{event.has_objects ? <CircleDot size={12} /> : <Radar size={12} />}</i>
-          <span>{event.snapshot_path ? <img src={eventThumbnailUrl(event, 180, 72)} alt="" loading="lazy" decoding="async" /> : <Film size={18} />}</span>
-          <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
-        </button>)}
-      </div> : null}
     </div>
   );
 }
