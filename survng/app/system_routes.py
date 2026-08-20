@@ -20,6 +20,10 @@ from pydantic import BaseModel, Field
 from .motion_pipeline import motion_pipeline_catalog
 
 
+SSE_HEARTBEAT_SECONDS = 15.0
+SSE_DISCONNECT_POLL_SECONDS = 1.0
+
+
 @dataclass(frozen=True, slots=True)
 class SystemRouteDependencies:
     get_manager: Callable[[], Any]
@@ -99,7 +103,11 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
         async def generate():
             try:
                 yield "retry: 3000\n\n"
-                last_event_id = request.headers.get("last-event-id", "")
+                query_params = getattr(request, "query_params", {})
+                last_event_id = (
+                    request.headers.get("last-event-id", "")
+                    or query_params.get("last_event_id", "")
+                )
                 replay = active_manager.state_events.events_after(last_event_id)
                 replayed_ids: set[str] = set()
                 snapshot_sequence: int | None = None
@@ -109,7 +117,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
                     yield _sse_message(
                         "system_state",
-                        await asyncio.to_thread(deps.system_telemetry.system_status, deps.get_manager()),
+                        await asyncio.to_thread(deps.system_telemetry.system_status, active_manager),
                     )
                 else:
                     for event in replay:
@@ -121,24 +129,22 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     {"instance": active_manager.state_events.instance_id},
                     connection_cursor,
                 )
-                next_system_update = time.monotonic() + 5.0
-                stream_deadline = time.monotonic() + 6.0
+                next_heartbeat = time.monotonic() + SSE_HEARTBEAT_SECONDS
                 while True:
-                    if await request.is_disconnected() or time.monotonic() >= stream_deadline:
+                    if await request.is_disconnected():
                         return
                     try:
                         event = subscriber.get_nowait()
                     except queue.Empty:
-                        if time.monotonic() >= next_system_update:
-                            yield _sse_message(
-                                "system_state",
-                                await asyncio.to_thread(
-                                    deps.system_telemetry.system_status,
-                                    deps.get_manager(),
-                                ),
-                            )
-                            next_system_update = time.monotonic() + 5.0
-                        await asyncio.sleep(0.2)
+                        now = time.monotonic()
+                        if now >= next_heartbeat:
+                            yield ": heartbeat\n\n"
+                            next_heartbeat = time.monotonic() + SSE_HEARTBEAT_SECONDS
+                            continue
+                        await asyncio.sleep(min(
+                            SSE_DISCONNECT_POLL_SECONDS,
+                            max(0.0, next_heartbeat - now),
+                        ))
                         continue
                     if event is None:
                         return
