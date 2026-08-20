@@ -160,7 +160,7 @@ class IncidentQueryService:
 
         while True:
             batch = manager.events.recent_compact(
-                batch_size, before_created_at, before_id
+                batch_size, before_created_at, before_id, camera_id
             )
             if not batch:
                 summaries = _incident_rows(compact_rows, gap_seconds)
@@ -470,7 +470,7 @@ class IncidentQueryService:
         compact_rows = [
             _event_row(row)
             for row in manager.events.between_compact(
-                query_start.isoformat(), query_end.isoformat()
+                query_start.isoformat(), query_end.isoformat(), camera_id
             )
         ]
         day_start_epoch = day_start.timestamp()

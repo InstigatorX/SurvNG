@@ -521,35 +521,45 @@ class EventStore(
         limit: int = 500,
         before_created_at: str | None = None,
         before_id: int | None = None,
+        camera_id: str = "",
     ) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(int(limit), 10000))
         with self._connect() as conn:
+            camera_clause = " and camera_id = ?" if camera_id else ""
             if before_created_at is None or before_id is None:
                 rows = conn.execute(
-                    f"select {self.COMPACT_COLUMNS} from events order by created_at desc, id desc limit ?",
-                    (bounded_limit,),
+                    f"select {self.COMPACT_COLUMNS} from events where 1 = 1{camera_clause} order by created_at desc, id desc limit ?",
+                    ((camera_id,) if camera_id else ()) + (bounded_limit,),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     f"""
                     select {self.COMPACT_COLUMNS} from events
-                    where created_at < ? or (created_at = ? and id < ?)
+                    where (created_at < ? or (created_at = ? and id < ?)){camera_clause}
                     order by created_at desc, id desc
                     limit ?
                     """,
-                    (before_created_at, before_created_at, int(before_id), bounded_limit),
+                    (before_created_at, before_created_at, int(before_id))
+                    + ((camera_id,) if camera_id else ())
+                    + (bounded_limit,),
                 ).fetchall()
         return [dict(row) for row in rows]
 
-    def between_compact(self, start_at: str, end_at: str) -> list[dict[str, Any]]:
+    def between_compact(
+        self,
+        start_at: str,
+        end_at: str,
+        camera_id: str = "",
+    ) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 select {self.COMPACT_COLUMNS} from events
                 where created_at >= ? and created_at < ?
+                    {"and camera_id = ?" if camera_id else ""}
                 order by created_at desc, id desc
                 """,
-                (start_at, end_at),
+                (start_at, end_at) + ((camera_id,) if camera_id else ()),
             ).fetchall()
         return [dict(row) for row in rows]
 
