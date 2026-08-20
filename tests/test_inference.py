@@ -308,7 +308,7 @@ class InferenceSupervisorTest(unittest.TestCase):
         updated = DetectorConfig(enabled=False, labels_path="/unreadable/labels.txt")
 
         with patch(
-            "survng.app.inference.load_detector_labels",
+            "survng.app.inference_runtime.supervisor.load_detector_labels",
             side_effect=OSError("labels unreadable"),
         ):
             with self.assertRaisesRegex(OSError, "labels unreadable"):
@@ -326,7 +326,7 @@ class InferenceSupervisorTest(unittest.TestCase):
         updated = DetectorConfig(enabled=False, labels_path="/unreadable/labels.txt")
 
         with patch(
-            "survng.app.inference.load_detector_labels",
+            "survng.app.inference_runtime.supervisor.load_detector_labels",
             side_effect=OSError("labels unreadable"),
         ):
             with self.assertRaisesRegex(OSError, "labels unreadable"):
@@ -663,7 +663,7 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertTrue(self.supervisor.start())
 
         with patch(
-            "survng.app.inference.stop_multiprocessing_resource_tracker"
+            "survng.app.inference_runtime.supervisor.stop_multiprocessing_resource_tracker"
         ) as stop_tracker:
             stopped = self.supervisor.stop_resource_tracker()
 
