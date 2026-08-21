@@ -65,7 +65,7 @@ export function assistantContextPrompts(value = {}) {
   if (context.page === "incidents" && context.incident_event_id) return ["Analyze this incident", "Trace this incident across cameras", "Open this incident in Timeline"];
   if (context.page === "timeline") return ["Summarize activity around this time", `Create a timelapse for ${camera}`, "Find related incidents"];
   if (context.page === "search") return ["Explain these search results", "Refine this search", "Find the strongest matching incident"];
-  if (context.page === "people") return ["Find related sightings", "Explain face matching quality", "Show recent unknown faces"];
+  if (context.page === "people") return ["Summarize recent person activity", "Is everything healthy?", "Find person incidents from the last 24 hours"];
   if (context.page === "admin") return ["Explain these settings", "Is everything healthy?", "What needs attention?"];
   if (context.page === "exports") return ["Explain the active exports", "Create a recording export", "Is export processing healthy?"];
   if (context.page === "live" && context.camera_id) return [`Is ${camera} healthy?`, `Summarize recent activity for ${camera}`, `Create a timelapse for ${camera}`];

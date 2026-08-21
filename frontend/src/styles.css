@@ -11731,10 +11731,20 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   }
 }
 
-.assistant-launcher {
+.assistant-launcher-wrap {
   position: fixed;
   right: max(18px, env(safe-area-inset-right));
   bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 1100;
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.assistant-launcher {
+  position: relative;
+  right: auto;
+  bottom: auto;
   z-index: 1100;
   width: 50px;
   min-width: 50px;
@@ -11746,6 +11756,33 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   color: #fff;
   box-shadow: 0 14px 38px rgba(3, 10, 12, 0.42);
   padding: 0;
+}
+
+.assistant-coach {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  max-width: min(240px, calc(100vw - 80px));
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-solid) 94%, transparent);
+  box-shadow: 0 12px 28px rgba(3, 10, 12, 0.35);
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 8px 10px;
+}
+
+.assistant-coach button {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--control);
+  color: var(--active-ink);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 8px;
 }
 
 .assistant-launcher.open {
@@ -11876,6 +11913,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .assistant-welcome > div,
+.assistant-welcome-actions,
 .assistant-suggestions {
   display: flex;
   flex-wrap: wrap;
@@ -11884,12 +11922,33 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .assistant-welcome button,
+.assistant-welcome-actions button,
 .assistant-suggestions button {
   min-height: 44px;
   border-radius: 999px;
   color: var(--active-ink);
   font-size: 10px;
   padding: 5px 9px;
+}
+
+.assistant-citation {
+  display: inline;
+  margin: 0 1px;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--active) 55%, transparent);
+  color: var(--active-ink);
+  font: inherit;
+  font-weight: 700;
+  line-height: inherit;
+  padding: 0 3px;
+  cursor: pointer;
+}
+
+.assistant-citation:hover,
+.assistant-citation:focus-visible {
+  background: var(--active);
+  outline: none;
 }
 
 .assistant-turn-context {
@@ -11983,6 +12042,11 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .assistant-evidence-card:focus-within {
   border-color: var(--accent);
   outline: 0;
+}
+
+.assistant-evidence-card.assistant-evidence-card-focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .assistant-evidence-card > a > span {
@@ -12232,6 +12296,18 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   font-size: 11px;
 }
 
+.assistant-stop {
+  margin-left: auto;
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 8px;
+}
+
 .assistant-error span { flex: 1 1 auto; }
 
 .assistant-error button,
@@ -12350,12 +12426,16 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 @media (max-width: 1279px) {
   .assistant-launcher.open { visibility: hidden; }
+  .assistant-launcher-wrap:has(.assistant-launcher.open) .assistant-coach { display: none; }
 }
 
 @media (max-width: 700px) {
-  .assistant-launcher {
+  .assistant-launcher-wrap {
     right: max(12px, env(safe-area-inset-right));
     bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .assistant-launcher {
     width: 48px;
     min-width: 48px;
     height: 48px;
@@ -12924,7 +13004,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     color: var(--active-ink);
   }
 
-  .assistant-launcher {
+  .assistant-launcher-wrap {
     bottom: calc(70px + var(--safe-area-bottom));
   }
 
@@ -13712,6 +13792,22 @@ a:focus-visible {
 .recordings-event-inspector > a { min-height: 34px; border: 1px solid var(--line); border-radius: 3px; }
 .recordings-inspector-message { display: grid; align-content: start; gap: 7px; padding: 14px 4px; color: var(--muted); font-size: 10px; }
 .recordings-inspector-message strong { color: var(--ink); font-size: 12px; }
+.recordings-ask-assistant,
+.incident-ask-assistant {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  width: fit-content;
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--active) 40%, transparent);
+  color: var(--active-ink);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0 10px;
+}
 
 @media (max-width: 1100px) and (min-width: 761px) {
   .recordings-v2-page { grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) clamp(210px, 26dvh, 270px); }

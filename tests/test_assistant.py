@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from pydantic import ValidationError
 
 from survng.app.assistant import (
+    ANSWER_PROMPT,
+    PLANNER_PROMPT,
     AssistantAnswer,
     AssistantChatRequest,
     AssistantEvidence,
@@ -212,6 +214,11 @@ class AssistantProviderTest(unittest.TestCase):
         with patch.object(self.provider, "_complete_json", return_value=response):
             with self.assertRaisesRegex(AuditAiError, "not supplied"):
                 self.provider.answer(self.request, evidence, "deep")
+
+    def test_answer_prompt_sets_calm_investigator_voice(self) -> None:
+        self.assertIn("investigation colleague", ANSWER_PROMPT)
+        self.assertIn("no cheerleading", ANSWER_PROMPT)
+        self.assertIn("Clarify before guessing", PLANNER_PROMPT)
 
     def test_answer_uses_valid_inline_citations(self) -> None:
         response = json.dumps({
