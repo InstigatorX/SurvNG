@@ -20,7 +20,7 @@ For the end-to-end ingest, motion qualification, inference, incident, recording,
 and playback architecture, see [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Keep that
 document synchronized with changes to any video-processing stage.
 
-## What This MVP Does
+## What SurvNG 1.0 Does
 
 - Connects to RTSP, RTMP, HTTP, or file streams through OpenCV/FFmpeg.
 - Records streams to segmented MP4 files with FFmpeg.
@@ -303,6 +303,16 @@ location /survng/ {
 ```
 
 The `proxy_pass` URL intentionally has no trailing slash so nginx forwards `/survng`. SurvNG strips the configured prefix internally for HTTP, SSE, HLS, and WebSocket routes.
+
+### Progressive web app
+
+SurvNG 1.0 ships as an installable online shell. Mobile browsers can Add to Home
+Screen / Install for a standalone experience. Live cameras and APIs still require
+a network connection; the service worker only caches hashed `/static/assets/`
+files and never caches `/api/` or media.
+
+Installability works best over HTTPS behind the reverse proxy above
+(`X-Forwarded-Proto` must remain accurate so WebRTC uses `wss`).
 
 Pages:
 

@@ -40,7 +40,8 @@
     "test:duration": "node tests/duration.mjs",
     "test:media-url": "node tests/media-url.mjs",
     "test:release-interactions": "node tests/release-interactions.mjs",
-    "test:polling-policy": "node tests/polling-policy.mjs"
+    "test:polling-policy": "node tests/polling-policy.mjs",
+    "test:pwa-shell": "node tests/pwa-shell.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

@@ -24,6 +24,7 @@ from .telemetry_interruptions import (
     classify_telemetry_interruptions,
     summarize_interruptions,
 )
+from survng import __version__ as SURVNG_VERSION
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class SystemTelemetryService:
         ]
         payload = {
             "instance_id": self.process_instance_id,
+            "version": SURVNG_VERSION,
             "lifecycle": str((mqtt or {}).get("server_lifecycle") or "running"),
             "uptime_seconds": round(
                 max(0.0, time.monotonic() - self.process_started_monotonic), 1

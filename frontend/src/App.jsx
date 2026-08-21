@@ -22,6 +22,7 @@ import { Shell } from "./shell/Shell.jsx";
 import { AssistantPanel } from "./assistant/AssistantPanel.jsx";
 import { RuntimeStateProvider } from "./shared/runtimeState.jsx";
 import { canonicalWorkspaceUrl, resolveWorkspace } from "./workspaceNavigation.mjs";
+import { registerSurvngServiceWorker } from "./registerServiceWorker.mjs";
 
 function lazyExport(importer, exportName) {
   return lazy(() => importer().then((module) => ({ default: module[exportName] })));
@@ -84,3 +85,4 @@ function App() {
 }
 
 createRoot(document.getElementById("root")).render(<App />);
+registerSurvngServiceWorker();

@@ -50,6 +50,22 @@ class FrontendRouteTest(unittest.TestCase):
         for path in ("/", "/recordings", "/recordings/search", "/config", "/timeline", "/exports", "/search", "/admin", "/people"):
             self.assertEqual(paths[path]["get"].get("parameters", []), [])
 
+    def test_progressive_web_app_routes_are_registered(self) -> None:
+        from survng.app.main import progressive_web_manifest, progressive_web_service_worker
+
+        manifest = progressive_web_manifest()
+        self.assertEqual(manifest.status_code, 200)
+        self.assertIn("application/manifest+json", manifest.media_type)
+        self.assertIn(b'"display": "standalone"', manifest.body)
+        self.assertIn(b'"start_url": "/survng/"', manifest.body)
+
+        worker = progressive_web_service_worker()
+        self.assertEqual(worker.status_code, 200)
+        self.assertIn(b"survng-static-", worker.body)
+        self.assertIn(b"/api/", worker.body)
+        self.assertIn(b"/survng/static/assets/", worker.body)
+        self.assertEqual(worker.headers.get("service-worker-allowed"), "/survng/")
+
 
 if __name__ == "__main__":
     unittest.main()
