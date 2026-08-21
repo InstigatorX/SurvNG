@@ -304,6 +304,17 @@ location /survng/ {
 
 The `proxy_pass` URL intentionally has no trailing slash so nginx forwards `/survng`. SurvNG strips the configured prefix internally for HTTP, SSE, HLS, and WebSocket routes.
 
+### Progressive web app
+
+SurvNG ships as an installable online shell. Mobile browsers can Add to Home
+Screen / Install for a standalone Live experience. Live cameras, recordings,
+and APIs still require a network connection; the service worker only caches
+hashed `/static/assets/` files and never caches `/api/` or media.
+
+Installability works best over HTTPS behind the reverse proxy above
+(`X-Forwarded-Proto` must remain accurate so WebRTC uses `wss`). On iOS, use
+Share → Add to Home Screen. On Android Chrome, use Install app when prompted.
+
 Pages:
 
 - `/` live camera grid and recent events

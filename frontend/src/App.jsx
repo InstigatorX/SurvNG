@@ -139,6 +139,7 @@ import {
   workspaceDefinition,
   workspaceHref,
 } from "./workspaceNavigation.mjs";
+import { registerSurvngServiceWorker } from "./registerServiceWorker.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const MEDIA_STORAGE_ROLES = [
@@ -13613,3 +13614,4 @@ function App() {
 }
 
 createRoot(document.getElementById("root")).render(<App />);
+registerSurvngServiceWorker();

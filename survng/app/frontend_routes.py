@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
+
+from survng.app.pwa import (
+    service_worker_allowed_scope,
+    service_worker_script,
+    web_app_manifest,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class FrontendRouteDependencies:
     frontend_response: Callable[[str], HTMLResponse]
+    base_path: Callable[[], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +48,27 @@ def create_frontend_router(
     def apple_touch_icon() -> FileResponse:
         return FileResponse(Path("survng/static/apple-touch-icon.png"), media_type="image/png")
 
+    @router.get("/manifest.webmanifest", include_in_schema=False)
+    def progressive_web_manifest() -> Response:
+        payload = web_app_manifest(deps.base_path())
+        return Response(
+            json.dumps(payload, indent=2) + "\n",
+            media_type="application/manifest+json",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @router.get("/sw.js", include_in_schema=False)
+    def progressive_web_service_worker() -> Response:
+        base_path = deps.base_path()
+        return Response(
+            service_worker_script(base_path),
+            media_type="application/javascript; charset=utf-8",
+            headers={
+                "Cache-Control": "no-cache",
+                "Service-Worker-Allowed": service_worker_allowed_scope(base_path),
+            },
+        )
+
     pages = {
         "index": ("/", "index.html"),
         "recordings_page": ("/recordings", "recordings.html"),
@@ -59,6 +88,8 @@ def create_frontend_router(
         "health": health,
         "favicon": favicon,
         "apple_touch_icon": apple_touch_icon,
+        "progressive_web_manifest": progressive_web_manifest,
+        "progressive_web_service_worker": progressive_web_service_worker,
     }
     def page_handler(name: str, filename: str) -> Callable[[], HTMLResponse]:
         def render_page() -> HTMLResponse:

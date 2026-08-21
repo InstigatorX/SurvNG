@@ -310,6 +310,7 @@ def public_url(path: str) -> str:
 def frontend_response(filename: str) -> HTMLResponse:
     html = Path("survng/static", filename).read_text(encoding="utf-8")
     html = html.replace('="/static/', f'="{config.base_path}/static/')
+    html = html.replace('href="/manifest.webmanifest"', f'href="{config.base_path}/manifest.webmanifest"')
     runtime_config = f"<script>window.__SURVNG_BASE_PATH__={json.dumps(config.base_path)};</script>"
     html = html.replace("</head>", f"  {runtime_config}\n  </head>")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
@@ -790,12 +791,17 @@ _recording_media_runtime = RecordingMediaRuntime(
 )
 
 _frontend_route_bundle = create_frontend_router(
-    FrontendRouteDependencies(frontend_response=frontend_response)
+    FrontendRouteDependencies(
+        frontend_response=frontend_response,
+        base_path=lambda: config.base_path,
+    )
 )
 app.include_router(_frontend_route_bundle.router)
 health = _frontend_route_bundle.handlers["health"]
 favicon = _frontend_route_bundle.handlers["favicon"]
 apple_touch_icon = _frontend_route_bundle.handlers["apple_touch_icon"]
+progressive_web_manifest = _frontend_route_bundle.handlers["progressive_web_manifest"]
+progressive_web_service_worker = _frontend_route_bundle.handlers["progressive_web_service_worker"]
 index = _frontend_route_bundle.handlers["index"]
 recordings_page = _frontend_route_bundle.handlers["recordings_page"]
 recording_search_page = _frontend_route_bundle.handlers["recording_search_page"]
