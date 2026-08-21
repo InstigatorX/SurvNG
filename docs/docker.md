@@ -111,10 +111,24 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
    no cameras and object detection disabled. Configure cameras and optional
    services through Admin.
 
+5. Edit `/config/go2rtc.yaml` (bind-mounted under `SURVNG_CONFIG_DIR`) to define
+   go2rtc streams, then point each SurvNG camera `stream_url` /
+   `live_stream_url` at `rtsp://127.0.0.1:8554/<stream_name>`. The container
+   starts bundled go2rtc automatically; set `SURVNG_GO2RTC=0` only when an
+   external go2rtc already provides restreams.
+
 The health check calls `/api/health`. It deliberately does not inspect cameras,
 FFmpeg, NFS, databases, or models, so a slow or unavailable external dependency
 cannot make Docker repeatedly restart an otherwise functioning service. Use
 Admin > Telemetry for subsystem health.
+
+## Bundled go2rtc
+
+The image includes go2rtc **v1.9.14**. On first start the entrypoint seeds
+`/config/go2rtc.yaml` from `docker/go2rtc.example.yaml` and launches go2rtc
+before SurvNG. With Compose `network_mode: host`, SurvNG reaches the API at
+`127.0.0.1:1984` and restreams at `rtsp://127.0.0.1:8554/...`. Stream ownership
+stays in go2rtc; SurvNG does not invent transcoding aliases.
 
 ## Intel OpenVINO GPU and QSV/VA-API
 
