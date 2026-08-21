@@ -59,6 +59,27 @@ git status --ignored --short docker-data config.json .env
 Never push a locally exported image if credentials or runtime files were added
 with an ad-hoc Dockerfile or `docker commit`.
 
+## GitHub Container Registry
+
+Pushing a version tag such as `v1.0.1` runs `.github/workflows/docker-publish.yml`
+on the self-hosted runner and publishes both Dockerfile targets to GHCR:
+
+| Image | Target |
+| --- | --- |
+| `ghcr.io/instigatorx/survng:v1.0.1` | `runtime` (CPU) |
+| `ghcr.io/instigatorx/survng:v1.0.1-intel` | `runtime-intel` (OpenVINO GPU / QSV) |
+
+The tag name is taken from the Git tag. Pull requires a GitHub account with
+read access to the package (or a public package). Example CPU deploy from GHCR:
+
+```bash
+docker pull ghcr.io/instigatorx/survng:v1.0.1
+```
+
+Point Compose at the published image instead of building locally by setting
+`image:` under `survng` (and omit `build:` when you want a registry-only pull).
+For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mounts.
+
 ## New installation
 
 1. Copy the non-secret environment template and set host paths and the UID/GID
