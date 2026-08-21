@@ -679,7 +679,7 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   </main>;
 }
 
-export function RecordingsPage({ timeZone, onAssistantContextChange }) {
+export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras: sharedCameras, appConfig } = usePollingData();
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
@@ -1814,7 +1814,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 <div><dt>Camera</dt><dd>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</dd></div>
                 <div><dt>Event ID</dt><dd>{selectedEvent.id}</dd></div>
               </dl> : null}
-              {selectedEvent && timelineInspectorTab === "ai" ? <div className="recordings-inspector-message"><Sparkles size={18} /><strong>No AI summary generated</strong><span>Ask the SurvNG Assistant to analyze this incident using its exact event context.</span></div> : null}
+              {selectedEvent && timelineInspectorTab === "ai" ? <div className="recordings-inspector-message"><Sparkles size={18} /><strong>Ask about this incident</strong><span>The assistant uses this event’s SurvNG context—no separate summary to generate.</span>{onAskAssistant ? <button type="button" className="recordings-ask-assistant" onClick={() => onAskAssistant("Analyze this incident")}>Ask assistant</button> : null}</div> : null}
               {selectedEvent && timelineInspectorTab === "related" ? <div className="recordings-inspector-message"><Images size={18} /><strong>{Math.max(0, nearbyEvents.length - 1)} nearby events</strong><span>These events are close in time; they are not asserted to be the same activity.</span></div> : null}
               {!selectedEvent ? <div className="recordings-inspector-message"><Radar size={18} /><strong>No event selected</strong><span>Choose an event from the timeline or related rail.</span></div> : null}
             </div>

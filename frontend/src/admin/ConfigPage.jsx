@@ -1094,7 +1094,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const auditPageSize = 24;
 
   function adminLocationOptions(section = settingsTab) {
-    if (section === "general") return { subsection: generalSection === "general" ? "" : generalSection };
+    if (section === "general") return {
+      subsection: generalSection === "general" ? "" : generalSection,
+      camera: generalSection === "motion-review" ? selectedId : "",
+    };
     if (section === "cameras") return { subsection: cameraSection === "settings" ? "" : cameraSection, camera: selectedId };
     if (section === "telemetry") return { subsection: telemetrySection === "overview" ? "" : telemetrySection, camera: telemetrySection === "cameras" ? telemetryCamera : "" };
     return {};
@@ -3176,8 +3179,8 @@ export function ProbeResult({ probe }) {
   );
 }
 
-export function MotionAiReviewPanel({ cameras, advisorEnabled }) {
-  const [cameraId, setCameraId] = useState(cameras[0]?.id || "");
+export function MotionAiReviewPanel({ cameras, advisorEnabled, cameraId: controlledCameraId = "", onCameraIdChange = null }) {
+  const [cameraId, setCameraId] = useState(controlledCameraId || cameras[0]?.id || "");
   const [hours, setHours] = useState(24);
   const [imageLimit, setImageLimit] = useState(12);
   const [evaluationHours, setEvaluationHours] = useState(24);
@@ -3188,12 +3191,27 @@ export function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
+  function selectCamera(nextCameraId) {
+    setCameraId(nextCameraId);
+    onCameraIdChange?.(nextCameraId);
+  }
+
   useEffect(() => {
-    if (!cameraId && cameras[0]?.id) setCameraId(cameras[0].id);
-    if (cameraId && !cameras.some((camera) => camera.id === cameraId)) {
-      setCameraId(cameras[0]?.id || "");
+    if (controlledCameraId && cameras.some((camera) => camera.id === controlledCameraId)) {
+      if (controlledCameraId !== cameraId) setCameraId(controlledCameraId);
+      return;
     }
-  }, [cameraId, cameras]);
+    if (!cameraId && cameras[0]?.id) {
+      setCameraId(cameras[0].id);
+      onCameraIdChange?.(cameras[0].id);
+      return;
+    }
+    if (cameraId && !cameras.some((camera) => camera.id === cameraId)) {
+      const next = cameras[0]?.id || "";
+      setCameraId(next);
+      onCameraIdChange?.(next);
+    }
+  }, [cameraId, cameras, controlledCameraId, onCameraIdChange]);
 
   async function loadReview(selectedCameraId, quiet = false) {
     if (!selectedCameraId) return;
@@ -3346,7 +3364,7 @@ export function MotionAiReviewPanel({ cameras, advisorEnabled }) {
       <h3>Camera Intelligence</h3>
       <p className="settings-help">Review how one camera has performed across recent incidents and motion decisions. SurvNG deliberately samples successes, possible misses, visual rescues, and filtered motion, then recommends a change only when multiple images support it. Nothing is applied automatically.</p>
       <div className="field-row motion-ai-review-controls">
-        <label>Camera<select value={cameraId} onChange={(event) => setCameraId(event.target.value)} disabled={running}>
+        <label>Camera<select value={cameraId} onChange={(event) => selectCamera(event.target.value)} disabled={running}>
           {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>)}
         </select></label>
         <label>Review period<select value={hours} onChange={(event) => setHours(Number(event.target.value))} disabled={running}>
@@ -4504,6 +4522,8 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
         <MotionAiReviewPanel
           cameras={config.cameras || []}
           advisorEnabled={config.audit_ai?.enabled ?? false}
+          cameraId={selectedId}
+          onCameraIdChange={setSelectedId}
         />
       ) : null}
     </div>

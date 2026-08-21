@@ -443,7 +443,7 @@
     color: var(--active-ink);
   }
 
-  .assistant-launcher {
+  .assistant-launcher-wrap {
     bottom: calc(70px + var(--safe-area-bottom));
   }
 

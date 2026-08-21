@@ -21,6 +21,9 @@ assert.deepEqual(assistantContextPrompts(incident).slice(0, 2), ["Analyze this i
 
 assert.equal(assistantContextLabel({ page: "search", filters: { query: "white truck" } }), "Search · “white truck”");
 assert.match(assistantContextPrompts({ page: "admin" })[0], /settings/i);
+assert.match(assistantContextPrompts({ page: "people" })[0], /person activity/i);
+assert.match(assistantContextPrompts({ page: "search" })[0], /person incidents/i);
+assert.match(assistantContextPrompts({ page: "exports" })[0], /recording export/i);
 const exportContext = snapshotAssistantContext({ page: "exports", export_id: " job-42 " });
 assert.equal(exportContext.export_id, "job-42");
 assert.equal(assistantContextLabel(exportContext), "Export Center · Export job-42");

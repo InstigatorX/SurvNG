@@ -11,6 +11,14 @@ import {
 import { browserStorage } from "../storage.mjs";
 import { readAssistantHistory, writeAssistantHistory } from "../assistantStorage.mjs";
 import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContext } from "../assistantContext.mjs";
+import {
+  assistantCoachSeen,
+  assistantComposerPlaceholder,
+  assistantThinkingStages,
+  assistantWelcomeCopy,
+  markAssistantCoachSeen,
+  stripAssistantCitationMarkers,
+} from "../assistantMessage.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "../assistantNavigation.mjs";
 import { assistantActiveExportIds, fetchAssistantExportJobs, mergeAssistantExportJobs } from "../exportPolling.mjs";
 import { appUrl, fetch } from "../shared/api.js";
@@ -58,16 +66,22 @@ export function readAssistantMessages() {
   return readAssistantHistory(browserStorage(window), ASSISTANT_STORAGE_KEY);
 }
 
-export function AssistantPanel({ pageContext, timeZone }) {
+function AssistantMessageText({ content }) {
+  return <div className="assistant-message-text">{stripAssistantCitationMarkers(content)}</div>;
+}
+
+export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequestHandled = null }) {
   const [openValue, setOpenValue] = useStoredState("survng.assistantOpen.v1", "false");
   const open = openValue === "true";
   const [messages, setMessages] = useState(readAssistantMessages);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [thinkingStage, setThinkingStage] = useState(0);
   const [applyingEvidenceId, setApplyingEvidenceId] = useState("");
   const [error, setError] = useState(null);
   const [applyReview, setApplyReview] = useState(null);
+  const [showCoach, setShowCoach] = useState(() => !assistantCoachSeen(browserStorage(window)));
   const bodyRef = useRef(null);
   const drawerRef = useRef(null);
   const applyDialogRef = useRef(null);
@@ -77,10 +91,15 @@ export function AssistantPanel({ pageContext, timeZone }) {
   const composerRef = useRef(null);
   const followTranscriptRef = useRef(true);
   const returnFocusRef = useRef(null);
+  const abortRef = useRef(null);
+  const handledAskRef = useRef(null);
   const compactAssistant = useViewportQuery("(max-width: 1279px)");
   const currentContext = useMemo(() => snapshotAssistantContext(pageContext, timeZone), [pageContext, timeZone]);
   const currentContextLabel = assistantContextLabel(currentContext, (epoch) => formatDateTime(epoch, timeZone));
   const quickPrompts = assistantContextPrompts(currentContext).slice(0, 3);
+  const welcomeCopy = assistantWelcomeCopy(currentContextLabel);
+  const thinkingStages = useMemo(() => assistantThinkingStages(currentContextLabel), [currentContextLabel]);
+  const composerPlaceholder = assistantComposerPlaceholder(currentContextLabel);
   const activeExportIds = assistantActiveExportIds(messages).join(",");
 
   useEffect(() => {
@@ -162,8 +181,48 @@ export function AssistantPanel({ pageContext, timeZone }) {
     return () => dialog?.removeEventListener("keydown", trapApplyFocus);
   }, [applyReview]);
 
+  useEffect(() => {
+    if (!busy) {
+      setThinkingStage(0);
+      return undefined;
+    }
+    setThinkingStage(0);
+    const timer = window.setInterval(() => {
+      setThinkingStage((current) => (current + 1) % Math.max(1, thinkingStages.length));
+    }, 2200);
+    return () => window.clearInterval(timer);
+  }, [busy, thinkingStages.length]);
+
+  useEffect(() => {
+    if (!askRequest?.id) return;
+    setOpenValue("true");
+    markAssistantCoachSeen(browserStorage(window));
+    setShowCoach(false);
+  }, [askRequest?.id, setOpenValue]);
+
+  useEffect(() => {
+    if (!askRequest?.id || !open || busy) return;
+    if (handledAskRef.current === askRequest.id) return;
+    handledAskRef.current = askRequest.id;
+    const prompt = String(askRequest.prompt || "").trim() || "Analyze this incident";
+    onAskRequestHandled?.();
+    void sendMessage(prompt);
+  }, [askRequest, open, busy]);
+
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
+
+  function dismissCoach() {
+    markAssistantCoachSeen(browserStorage(window));
+    setShowCoach(false);
+  }
+
+  function cancelInFlight() {
+    abortRef.current?.abort();
+  }
+
   function clearConversation() {
     if (messages.length && !window.confirm("Start a new assistant conversation? The current conversation will be cleared.")) return;
+    abortRef.current?.abort();
     setMessages([]);
     setError(null);
   }
@@ -193,11 +252,15 @@ export function AssistantPanel({ pageContext, timeZone }) {
     setDraft("");
     setError(null);
     followTranscriptRef.current = true;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setBusy(true);
     try {
       const response = await fetch("/api/assistant/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           message: content,
           history: prior.map(({ role, content: historyContent, context: historyContext, evidence: historyEvidence }) => ({
@@ -219,17 +282,20 @@ export function AssistantPanel({ pageContext, timeZone }) {
         evidence: payload.evidence || [],
         citations: payload.citations || [],
         suggestions: payload.suggestions || [],
+        actions: payload.actions || [],
         reasoningTier: payload.reasoning_tier || "fast",
         model: payload.model || "",
         context: submittedContext,
       }].slice(-30));
     } catch (sendError) {
+      if (sendError?.name === "AbortError") return;
       const statusCode = Number(String(sendError.message || "").match(/\((\d+)\)/)?.[1]);
       const message = statusCode === 429 ? "The AI provider is busy. Wait a moment, then retry."
         : [502, 503, 504].includes(statusCode) ? "The AI provider is temporarily unavailable. Retry when it recovers."
           : sendError.message || "Assistant request failed";
       setError({ message, kind: "request", content, context: submittedContext });
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setBusy(false);
     }
   }
@@ -253,13 +319,27 @@ export function AssistantPanel({ pageContext, timeZone }) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Unable to apply the reviewed settings");
-      setMessages((current) => current.map((message) => message.id !== messageId ? message : {
-        ...message,
-        evidence: (message.evidence || []).map((item) => item.id !== evidence.id ? item : {
-          ...item,
-          details: { ...item.details, can_apply: false, applied: payload.applied || [] },
-        }),
-      }));
+      setMessages((current) => {
+        const next = current.map((message) => message.id !== messageId ? message : {
+          ...message,
+          evidence: (message.evidence || []).map((item) => item.id !== evidence.id ? item : {
+            ...item,
+            details: { ...item.details, can_apply: false, applied: payload.applied || [] },
+          }),
+        });
+        const followUp = payload.follow_up;
+        if (!followUp?.message) return next;
+        return [...next, {
+          id: `assistant-apply-${Date.now()}`,
+          role: "assistant",
+          content: followUp.message,
+          evidence: [],
+          suggestions: followUp.suggestions || [],
+          actions: followUp.actions || [],
+          reasoningTier: "fast",
+          model: "",
+        }].slice(-30);
+      });
     } catch (applyError) {
       setError({ message: applyError.message || "Unable to apply the reviewed settings", kind: "apply" });
     } finally {
@@ -269,36 +349,47 @@ export function AssistantPanel({ pageContext, timeZone }) {
 
   return (
     <>
-      <button ref={launcherRef} type="button" className={`assistant-launcher ${open ? "open" : ""}`} onClick={() => setOpenValue(open ? "false" : "true")} aria-label={open ? "Close SurvNG Assistant" : "Open SurvNG Assistant"} aria-expanded={open} aria-controls="survng-assistant" title="SurvNG Assistant">
-        {open ? <X size={22} /> : <Sparkles size={22} />}
-      </button>
+      <div className="assistant-launcher-wrap">
+        <button ref={launcherRef} type="button" className={`assistant-launcher ${open ? "open" : ""}`} onClick={() => { dismissCoach(); setOpenValue(open ? "false" : "true"); }} aria-label={open ? "Close SurvNG Assistant" : "Open SurvNG Assistant"} aria-expanded={open} aria-controls="survng-assistant" title="SurvNG Assistant">
+          {open ? <X size={22} /> : <Sparkles size={22} />}
+        </button>
+        {showCoach && !open ? <div className="assistant-coach" role="status">
+          <span>Ask about this camera or incident</span>
+          <button type="button" onClick={dismissCoach} aria-label="Dismiss tip">Got it</button>
+        </div> : null}
+      </div>
       {open && compactAssistant ? <div className="assistant-backdrop" aria-hidden="true" onClick={() => setOpenValue("false")} /> : null}
       {open ? <aside id="survng-assistant" ref={drawerRef} className="assistant-drawer" role={applyReview ? undefined : compactAssistant ? "dialog" : "complementary"} aria-modal={!applyReview && compactAssistant || undefined} aria-hidden={applyReview || undefined} inert={applyReview || undefined} aria-labelledby="assistant-heading">
         <header className="assistant-head">
-          <div><strong id="assistant-heading"><Sparkles size={17} /> SurvNG Assistant</strong><small>{status?.configured === false ? "AI provider needs setup" : "Grounded in SurvNG evidence"}</small></div>
+          <div><strong id="assistant-heading"><Sparkles size={17} /> SurvNG Assistant</strong><small>{status?.configured === false ? "AI provider needs setup" : "Answers from your cameras & incidents"}</small></div>
           <div>
             <button type="button" onClick={clearConversation} disabled={busy} aria-label="Start a new assistant conversation" title="New conversation"><Trash2 size={16} /></button>
             <button type="button" onClick={() => setOpenValue("false")} aria-label="Close SurvNG Assistant"><X size={17} /></button>
           </div>
         </header>
         <div className="assistant-context" aria-live="polite">
-          <strong>Current view</strong><span>{currentContextLabel}</span>
-          {status ? <span title={status.fast_model === status.reasoning_model ? "Everyday and detailed questions use this model" : `Everyday: ${status.fast_model} · Detailed: ${status.reasoning_model}`}>{status.fast_model === status.reasoning_model ? status.fast_model : "Everyday + detailed AI"}</span> : null}
+          <strong>Using</strong><span>{currentContextLabel}</span>
+          {status ? <span title={status.fast_model === status.reasoning_model ? "Everyday and detailed questions use this model" : `Everyday: ${status.fast_model} · Detailed: ${status.reasoning_model}`}>{status.fast_model === status.reasoning_model ? "Configured AI" : "Everyday + detailed AI"}</span> : null}
         </div>
         <div className="assistant-body" ref={bodyRef} onScroll={(event) => { const body = event.currentTarget; followTranscriptRef.current = body.scrollHeight - body.scrollTop - body.clientHeight < 72; }}>
           {!messages.length ? <div className="assistant-welcome">
             <Sparkles size={26} />
-            <strong>What would you like to know?</strong>
-            <p>I can search incidents, trace related activity, review a selected incident, inspect camera health, explain settings, and create recording exports or timelapses.</p>
+            <strong>{welcomeCopy.title}</strong>
+            <p>{welcomeCopy.body}</p>
+            <div className="assistant-welcome-actions">
+              {quickPrompts.map((suggestion) => <button type="button" key={suggestion} disabled={busy || status?.configured === false} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
+            </div>
           </div> : null}
           {messages.map((message) => <article className={`assistant-message ${message.role}`} key={message.id}>
             {message.role === "user" && message.context ? <small className="assistant-turn-context">Asked about {assistantContextLabel(message.context, (epoch) => formatDateTime(epoch, message.context.time_zone || timeZone))}</small> : null}
-            <div className="assistant-message-text">{message.content}</div>
-            {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier">{message.reasoningTier === "deep" ? "Detailed analysis" : "Quick answer"}{message.model ? ` · ${message.model}` : ""}</small> : null}
+            {message.role === "assistant"
+              ? <AssistantMessageText content={message.content} />
+              : <div className="assistant-message-text">{message.content}</div>}
+            {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier" title={message.model || undefined}>{message.reasoningTier === "deep" ? "Took a closer look" : "Quick answer"}</small> : null}
             {message.evidence?.length ? <div className="assistant-evidence">
-              {message.evidence.map((item) => <div key={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`} tabIndex={-1}>
+              {message.evidence.map((item) => <div key={item.id} data-evidence-id={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`} tabIndex={-1}>
                 {item.image_url ? <a className="assistant-evidence-image" href={appUrl(assistantEvidenceHref(item))} aria-label={`Open ${item.title || "incident"}`} title="Open incident"><img src={appUrl(item.image_url)} alt={item.title || "Incident evidence"} loading="lazy" /></a> : null}
-                {assistantEvidenceHref(item) ? <a href={appUrl(assistantEvidenceHref(item))}><span title={item.id}>Open evidence</span><strong>{item.title}</strong><small>{item.summary}</small></a> : <div className="assistant-evidence-summary"><span>Evidence</span><strong>{item.title}</strong><small>{item.summary}</small></div>}
+                {assistantEvidenceHref(item) ? <a href={appUrl(assistantEvidenceHref(item))}><span title={item.id}>Open in SurvNG</span><strong>{item.title}</strong><small>{item.summary}</small></a> : <div className="assistant-evidence-summary"><span>Evidence</span><strong>{item.title}</strong><small>{item.summary}</small></div>}
                 {item.details?.timeline ? <div className="assistant-timeline">
                   {item.details.timeline.matches?.length ? item.details.timeline.matches.map((match) => <a className="assistant-timeline-link" href={appUrl(assistantIncidentHref(match.event_id))} key={match.event_id} title="Open incident"><span>{formatDateTime(match.start_at, timeZone)}</span><strong>{match.camera_id}</strong><small>{({ confirmed_identity: "Confirmed face", automatic_identity: "Automatic face match", possible_identity: "Possible face", appearance_similarity: `Visually similar ${match.appearance_similarity != null ? `${Math.round(Number(match.appearance_similarity) * 100)}%` : "appearance"}`, context_candidate: "Nearby matching class" })[match.match_strength] || "Possible connection"}</small></a>) : <small>No related incidents were found in this time window.</small>}
                   <p>{item.details.timeline.limitations?.[3]}</p>
@@ -329,21 +420,27 @@ export function AssistantPanel({ pageContext, timeZone }) {
                   {item.details.can_apply && !item.details.applied?.length ? <button type="button" className="assistant-apply" disabled={Boolean(applyingEvidenceId)} onClick={(event) => openApplyReview(message.id, item, event.currentTarget)}>{applyingEvidenceId === item.id ? "Applying…" : "Apply proposed changes"}</button> : null}
                   {item.details.proposals?.length && !item.details.can_apply && !item.details.applied?.length ? <small>Enable “Allow confirmed changes” in Admin to apply these proposals.</small> : null}
                 </div> : null}
+                {item.details?.next_actions?.length ? <div className="assistant-next-actions">
+                  {item.details.next_actions.map((action) => <a key={`${action.href}-${action.label}`} href={appUrl(action.href)}>{action.label}</a>)}
+                </div> : null}
               </div>)}
+            </div> : null}
+            {message.actions?.length ? <div className="assistant-next-actions">
+              {message.actions.map((action) => <a key={`${action.href}-${action.label}`} href={appUrl(action.href)}>{action.label}</a>)}
             </div> : null}
             {message.suggestions?.length ? <div className="assistant-suggestions">
               {message.suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
             </div> : null}
           </article>)}
-          {busy ? <div className="assistant-thinking"><span /><span /><span /> Gathering SurvNG evidence…</div> : null}
+          {busy ? <div className="assistant-thinking" aria-live="polite"><span /><span /><span /> {thinkingStages[thinkingStage] || thinkingStages[0]}{busy ? <button type="button" className="assistant-stop" onClick={cancelInFlight}>Stop</button> : null}</div> : null}
           {error ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>{error.message}</span>{error.kind === "request" ? <button type="button" onClick={() => sendMessage(error.content, error.context, { appendUser: false })}>Retry</button> : error.kind === "status" ? <button type="button" onClick={() => void loadAssistantStatus()}>Retry</button> : null}</div> : null}
           {status && !status.configured ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>Configure and enable the AI provider to use the assistant.</span><a href={appUrl("/admin?section=general&subsection=detection&detail=ai-provider")}>Open AI Provider settings</a></div> : null}
         </div>
-        <div className="assistant-quick-actions" role="group" aria-label={`Suggestions for ${currentContextLabel}`}>
+        {messages.length ? <div className="assistant-quick-actions" role="group" aria-label={`Suggestions for ${currentContextLabel}`}>
           {quickPrompts.map((suggestion) => <button type="button" key={suggestion} disabled={busy} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
-        </div>
+        </div> : null}
         <form className="assistant-compose" onSubmit={(event) => { event.preventDefault(); sendMessage(); }}>
-          <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder="Ask about SurvNG…" rows="2" maxLength="8000" disabled={busy || status?.configured === false} />
+          <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder={composerPlaceholder} rows="2" maxLength="8000" disabled={busy || status?.configured === false} />
           <button type="submit" disabled={busy || !draft.trim()}>Send</button>
         </form>
       </aside> : null}

@@ -9,6 +9,7 @@ import {
   Images,
   ListTree,
   Play,
+  Sparkles,
   X,
 } from "lucide-react";
 import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
@@ -591,7 +592,7 @@ export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loa
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose }) {
+export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -687,6 +688,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
       <div className="incident-inspector-actions">
         {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
         {inspectedEvent.snapshot_path && eventSnapshotDownloadUrl(inspectedEvent) ? <a href={eventSnapshotDownloadUrl(inspectedEvent)}><Download size={15} /> Snapshot</a> : null}
+        {onAskAssistant ? <button type="button" className="incident-ask-assistant" onClick={() => onAskAssistant("Analyze this incident")}><Sparkles size={15} /> Ask assistant</button> : null}
       </div>
     </aside>
   );

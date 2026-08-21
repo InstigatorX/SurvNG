@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .assistant import AssistantAnswer, AssistantChatRequest, AssistantEvidence, AssistantProvider, AssistantToolCall, IncidentVisualReviewer
+from .assistant import AssistantAnswer, AssistantChatRequest, AssistantEvidence, AssistantProvider, AssistantToolCall, IncidentVisualReviewer, strip_assistant_citation_markers
 from .assistant_investigation import correlate_incident_timeline
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, ai_provider_configured, motion_audit_interpretation, motion_paradigm_context, validate_tuning_value
 from .calibration import apply_calibration_changes, build_calibration_report, calibration_configuration_fingerprint, calibration_setting_value
@@ -1143,6 +1143,13 @@ class IntelligenceService:
             people = []
         return {'cameras': [{'id': camera.id, 'name': camera.name} for camera in active_config.cameras], 'object_labels': list(active_manager.detector.labels), 'zones': sorted({zone.name for camera in active_config.cameras for zone in camera.zones if zone.enabled}), 'recognized_faces': [{'id': int(person.get('id') or 0), 'name': str(person.get('name') or '')[:128]} for person in people[:200] if str(person.get('name') or '').strip()]}
 
+    def _assistant_camera_advisor_href(self, camera_id: str = '') -> str:
+        href = '/admin?section=general&subsection=motion-review'
+        cleaned = str(camera_id or '').strip()
+        if cleaned:
+            href = f'{href}&camera={quote(cleaned, safe="")}'
+        return href
+
     def _assistant_system_evidence(self, active_manager: AppManager) -> AssistantEvidence:
         status = self.deps.system_telemetry.system_status(active_manager)
         cameras = active_manager.statuses()
@@ -1153,10 +1160,18 @@ class IntelligenceService:
         retention_plan = retention.get('plan') or {}
         retention_reclaim = retention_plan.get('reclaim') or {}
         last_retention_run = retention.get('last_run') or {}
-        payload = {'cameras': status.get('cameras'), 'unhealthy_cameras': unhealthy, 'storage': status.get('storage'), 'detector': {'enabled': detector.get('enabled'), 'backend': detector.get('loaded_backend'), 'device': detector.get('loaded_device'), 'ready': bool(detector.get('openvino_loaded') or detector.get('coreml_loaded')), 'average_inference_ms': runtime.get('average_inference_ms'), 'queue_depth': runtime.get('queue_depth'), 'failed_inferences': runtime.get('failed_inferences'), 'active_workers': runtime.get('active_workers'), 'configured_workers': runtime.get('configured_workers'), 'reid_ready': bool((detector.get('reid') or {}).get('loaded'))}, 'mqtt': {key: (status.get('mqtt') or {}).get(key) for key in ('enabled', 'connected', 'last_error', 'publish_failures', 'pending_incidents', 'server_lifecycle')}, 'go2rtc': status.get('go2rtc'), 'retention': {'state': retention.get('state'), 'enabled': retention.get('enabled'), 'automatic_cleanup': retention.get('automatic_cleanup'), 'last_plan_at': retention.get('last_plan_at'), 'last_run_at': retention.get('last_run_at'), 'error': retention.get('error'), 'planned_reclaim_bytes': retention_reclaim.get('planned_bytes'), 'last_deleted_files': last_retention_run.get('deleted_files'), 'last_deleted_bytes': last_retention_run.get('deleted_bytes')}}
+        next_actions: list[dict[str, str]] = [{'label': 'Open Telemetry', 'href': '/admin?section=telemetry'}]
+        if unhealthy:
+            first_id = str(unhealthy[0].get('camera_id') or '').strip()
+            if first_id:
+                next_actions.append({'label': f'Open {first_id} live', 'href': f'/?camera={quote(first_id, safe="")}'})
+                next_actions.append({'label': f'Open Camera Advisor for {first_id}', 'href': self._assistant_camera_advisor_href(first_id)})
+        elif int((runtime.get('queue_depth') or 0) or 0) > 0:
+            next_actions.append({'label': 'Open object detection settings', 'href': '/admin?section=general&subsection=detection'})
+        payload = {'cameras': status.get('cameras'), 'unhealthy_cameras': unhealthy, 'storage': status.get('storage'), 'detector': {'enabled': detector.get('enabled'), 'backend': detector.get('loaded_backend'), 'device': detector.get('loaded_device'), 'ready': bool(detector.get('openvino_loaded') or detector.get('coreml_loaded')), 'average_inference_ms': runtime.get('average_inference_ms'), 'queue_depth': runtime.get('queue_depth'), 'failed_inferences': runtime.get('failed_inferences'), 'active_workers': runtime.get('active_workers'), 'configured_workers': runtime.get('configured_workers'), 'reid_ready': bool((detector.get('reid') or {}).get('loaded'))}, 'mqtt': {key: (status.get('mqtt') or {}).get(key) for key in ('enabled', 'connected', 'last_error', 'publish_failures', 'pending_incidents', 'server_lifecycle')}, 'go2rtc': status.get('go2rtc'), 'retention': {'state': retention.get('state'), 'enabled': retention.get('enabled'), 'automatic_cleanup': retention.get('automatic_cleanup'), 'last_plan_at': retention.get('last_plan_at'), 'last_run_at': retention.get('last_run_at'), 'error': retention.get('error'), 'planned_reclaim_bytes': retention_reclaim.get('planned_bytes'), 'last_deleted_files': last_retention_run.get('deleted_files'), 'last_deleted_bytes': last_retention_run.get('deleted_bytes')}, 'next_actions': next_actions}
         total = int((status.get('cameras') or {}).get('total') or 0)
         online = int((status.get('cameras') or {}).get('online') or 0)
-        return AssistantEvidence(evidence_id='E-system', kind='system_health', title='Current SurvNG health', summary=f'{online}/{total} cameras online; {len(unhealthy)} cameras need attention.', data=payload, href='/config#telemetry')
+        return AssistantEvidence(evidence_id='E-system', kind='system_health', title='Current SurvNG health', summary=f'{online}/{total} cameras online; {len(unhealthy)} cameras need attention.', data=payload, href='/admin?section=telemetry', client_data={'next_actions': next_actions})
 
     def _assistant_camera_evidence(self, active_manager: AppManager, camera_id: str) -> list[AssistantEvidence]:
         requested = camera_id.strip().lower()
@@ -1169,13 +1184,21 @@ class IntelligenceService:
             tracking = camera.get('object_tracking') or {}
             data = {'camera_id': current_id, 'name': camera.get('name') or current_id, 'running': bool(camera.get('running')), 'connected': bool(camera.get('connected')), 'frame_fresh': bool(camera.get('frame_fresh')), 'last_frame_age_seconds': camera.get('last_frame_age_seconds'), 'recording': bool(camera.get('recording')), 'sub_recording': bool(camera.get('sub_recording')), 'detection_enabled': bool(camera.get('detection_enabled')), 'onvif': {'enabled': bool(camera.get('onvif_enabled')), 'connected': bool(camera.get('onvif_connected')), 'notifications': int(camera.get('onvif_notifications_received') or 0), 'motion_events': int(camera.get('onvif_motion_events_received') or 0), 'poll_errors': int(camera.get('onvif_poll_errors') or 0), 'poll_timeouts': int(camera.get('onvif_poll_timeouts') or 0), 'last_motion_at': camera.get('onvif_last_motion_event_at'), 'last_error': str(camera.get('onvif_last_error') or '')[:500]}, 'motion': {key: motion.get(key) for key in ('mode', 'sensitivity', 'triggers', 'passed', 'audit_rejected', 'suppressed', 'dropped_triggers', 'queue_depth', 'visual_backup_triggers', 'visual_backup_not_ready', 'visual_backup_uncorrelated_objects')}, 'tracking': {key: tracking.get(key) for key in ('active', 'frames_processed', 'track_count', 'reid_attempts', 'reid_successes', 'reid_failures', 'coverage_incomplete')}}
             healthy = data['running'] and data['frame_fresh']
-            evidence.append(AssistantEvidence(evidence_id=f'E-camera-{current_id}', kind='camera_health', title=str(data['name']), summary=f'{current_id} is {('healthy' if healthy else 'not healthy')}; recording is {('active' if data['recording'] or data['sub_recording'] else 'inactive')}.', data=data, href=f'/?camera={quote(current_id, safe='')}'))
+            label = str(data['name'] or current_id)
+            next_actions = [
+                {'label': f'Open {label} live', 'href': f'/?camera={quote(current_id, safe="")}'},
+                {'label': f'Open Camera Advisor for {label}', 'href': self._assistant_camera_advisor_href(current_id)},
+            ]
+            if not healthy:
+                next_actions.insert(1, {'label': 'Open Telemetry', 'href': '/admin?section=telemetry'})
+            data['next_actions'] = next_actions
+            evidence.append(AssistantEvidence(evidence_id=f'E-camera-{current_id}', kind='camera_health', title=label, summary=f'{current_id} is {('healthy' if healthy else 'not healthy')}; recording is {('active' if data['recording'] or data['sub_recording'] else 'inactive')}.', data=data, href=f'/?camera={quote(current_id, safe="")}', client_data={'next_actions': next_actions, 'camera_id': current_id}))
         return evidence
 
     def _assistant_configuration_evidence(self, active_config: AppConfig) -> AssistantEvidence:
         assistant_provider = AssistantProvider(active_config.audit_ai)
         data = {'ai': {'enabled': active_config.audit_ai.enabled, 'assistant_enabled': active_config.audit_ai.assistant_enabled, 'provider': active_config.audit_ai.provider, 'analysis_and_fast_model': assistant_provider.model_for_tier('fast'), 'deep_reasoning_model': assistant_provider.model_for_tier('deep'), 'deep_reasoning_uses_separate_model': assistant_provider.model_for_tier('deep') != assistant_provider.model_for_tier('fast'), 'assistant_read_only': False, 'supported_actions': ['create_media_export']}, 'recording': {'segment_seconds': active_config.recording_segment_seconds, 'cache_max_gb': active_config.recording_cache_max_gb, 'cache_max_days': active_config.recording_cache_max_days, 'prewarm': active_config.recording_cache_prewarm, 'retention': active_config.retention.model_dump(mode='json')}, 'motion': active_config.motion_qualification.model_dump(mode='json'), 'detector': {'enabled': active_config.detector.enabled, 'backend': active_config.detector.backend, 'device': active_config.detector.device, 'confidence_threshold': active_config.detector.confidence_threshold, 'nms_threshold': active_config.detector.nms_threshold, 'event_confirmation_frames': active_config.detector.event_confirmation_frames, 'event_class_confirmation_frames': active_config.detector.event_class_confirmation_frames, 'event_class_confidence_thresholds': active_config.detector.event_class_confidence_thresholds, 'zone_only_incident_eligibility': active_config.detector.require_incident_zone, 'tracking': active_config.detector.tracking.model_dump(mode='json')}, 'mqtt': {'enabled': active_config.mqtt.enabled, 'tls': active_config.mqtt.tls, 'discovery_enabled': active_config.mqtt.discovery_enabled, 'incident_events_enabled': active_config.mqtt.incident_events_enabled, 'server_status_enabled': active_config.mqtt.server_status_enabled}, 'cameras': [{'id': camera.id, 'name': camera.name, 'record': camera.record, 'record_sub': camera.record_sub, 'retention': camera.retention.model_dump(mode='json'), 'zone_only_incident_eligibility': camera.require_incident_zone, 'motion': camera.motion_qualification.model_dump(mode='json'), 'onvif_enabled': camera.onvif.enabled, 'zone_names': [zone.name for zone in camera.zones if zone.enabled]} for camera in active_config.cameras]}
-        return AssistantEvidence(evidence_id='E-config', kind='configuration', title='Active safe configuration', summary=f'Credential-free configuration for {len(active_config.cameras)} cameras.', data=data, href='/config')
+        return AssistantEvidence(evidence_id='E-config', kind='configuration', title='Active safe configuration', summary=f'Credential-free configuration for {len(active_config.cameras)} cameras.', data=data, href='/admin')
 
     def _assistant_event_objects(self, event: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         objects: list[dict[str, Any]] = []
@@ -1352,7 +1375,9 @@ class IntelligenceService:
         advice_payload = advice.model_dump(mode='json')
         advice_payload['changes'] = [change.model_dump(mode='json') for change in changes]
         configuration_fingerprint = self._assistant_motion_config_fingerprint(active_config, camera)
-        details = {'event_id': event_id, 'source_event_id': source_event_id, 'camera_id': camera.id, 'advice': advice_payload, 'proposals': previews, 'can_apply': bool(previews and active_config.audit_ai.allow_apply_recommendations), 'apply_requires_confirmation': True, 'configuration_fingerprint': configuration_fingerprint, 'recommendation_proof': self._issue_ai_recommendation_token(kind='incident_visual', record_id=event_id, camera_id=camera.id, configuration_fingerprint=configuration_fingerprint, changes=changes)}
+        advisor_href = self._assistant_camera_advisor_href(camera.id)
+        next_actions = [{'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href}]
+        details = {'event_id': event_id, 'source_event_id': source_event_id, 'camera_id': camera.id, 'camera_name': camera.name, 'advice': advice_payload, 'proposals': previews, 'can_apply': bool(previews and active_config.audit_ai.allow_apply_recommendations), 'apply_requires_confirmation': True, 'configuration_fingerprint': configuration_fingerprint, 'recommendation_proof': self._issue_ai_recommendation_token(kind='incident_visual', record_id=event_id, camera_id=camera.id, configuration_fingerprint=configuration_fingerprint, changes=changes), 'next_actions': next_actions, 'camera_advisor_href': advisor_href}
         incident_evidence = self._assistant_incident_evidence(incident, event_id)
         return AssistantEvidence(evidence_id=f'E-visual-{event_id}', kind='incident_visual_review', title=f'Visual review · {camera.name}', summary=f'{advice.verdict.replace('_', ' ')} ({round(advice.confidence * 100)}% confidence); {len(previews)} bounded setting proposal(s).', data={**{key: value for key, value in details.items() if key != 'recommendation_proof'}, 'incident_evidence': incident_evidence.data}, href=incident_evidence.href, image_url=f'/api/events/{source_event_id}/thumbnail.jpg?width=960&quality=82', client_data=details)
 
@@ -1422,8 +1447,8 @@ class IntelligenceService:
 
     def _assistant_media_export_answer(self, evidence: AssistantEvidence) -> AssistantAnswer:
         if evidence.kind == 'media_export_clarification':
-            return AssistantAnswer(answer=f'{evidence.summary} [{evidence.evidence_id}]', citations=[evidence.evidence_id], suggestions=list(evidence.data.get('suggestions') or [])[:4])
-        return AssistantAnswer(answer=f'I started the requested export. It will appear here when the MP4 is ready, and you can leave this panel open while it runs. [{evidence.evidence_id}]', citations=[evidence.evidence_id], suggestions=[])
+            return AssistantAnswer(answer=strip_assistant_citation_markers(evidence.summary), citations=[evidence.evidence_id], suggestions=list(evidence.data.get('suggestions') or [])[:4])
+        return AssistantAnswer(answer='I started the requested export. It will appear here when the MP4 is ready, and you can leave this panel open while it runs.', citations=[evidence.evidence_id], suggestions=[])
 
     def _assistant_search_incidents(self, call: AssistantToolCall, time_zone: str, active_manager: AppManager) -> list[AssistantEvidence]:
         try:
@@ -1540,6 +1565,69 @@ class IntelligenceService:
             followups.append(f'Which incidents did the visual motion check rescue in the {period}?')
         return followups[:3]
 
+    def _assistant_system_followups(self, evidence: AssistantEvidence) -> list[str]:
+        unhealthy = evidence.data.get('unhealthy_cameras') or []
+        followups: list[str] = []
+        if unhealthy:
+            first = str(unhealthy[0].get('camera_id') or '').strip()
+            if first:
+                followups.append(f'Is {first} healthy?')
+            followups.append('What needs attention?')
+        else:
+            followups.append('Summarize recent activity')
+            followups.append('Find person incidents from the last 24 hours')
+        return followups[:3]
+
+    def _assistant_camera_followups(self, evidence: AssistantEvidence) -> list[str]:
+        data = evidence.data
+        name = str(data.get('name') or data.get('camera_id') or 'this camera')
+        followups = [f'Summarize recent activity for {name}']
+        if not (data.get('running') and data.get('frame_fresh')):
+            followups.insert(0, 'Is everything healthy?')
+        else:
+            followups.append(f'Create a timelapse for {name}')
+        return followups[:3]
+
+    def _assistant_visual_followups(self, evidence: AssistantEvidence) -> list[str]:
+        details = evidence.client_data or evidence.data
+        name = str(details.get('camera_name') or details.get('camera_id') or 'this camera')
+        followups = [f'Is {name} healthy?', f'Summarize recent activity for {name}']
+        if details.get('proposals'):
+            followups.append(f'Trace this incident across cameras')
+        return followups[:3]
+
+    def _assistant_closed_loop_actions(self, evidence: list[AssistantEvidence]) -> list[dict[str, str]]:
+        actions: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in evidence:
+            for action in list((item.client_data or {}).get('next_actions') or []) + list((item.data or {}).get('next_actions') or []):
+                if not isinstance(action, dict):
+                    continue
+                label = str(action.get('label') or '').strip()
+                href = str(action.get('href') or '').strip()
+                if not label or not href or href in seen:
+                    continue
+                seen.add(href)
+                actions.append({'label': label[:120], 'href': href[:512]})
+                if len(actions) >= 4:
+                    return actions
+        return actions
+
+    def _assistant_closed_loop_suggestions(self, evidence: list[AssistantEvidence], fallback: list[str]) -> list[str]:
+        activity = next((item for item in evidence if item.kind == 'recent_activity_summary'), None)
+        if activity is not None:
+            return self._assistant_activity_followups(activity)
+        suggestions: list[str] = []
+        for item in evidence:
+            if item.kind == 'system_health':
+                suggestions.extend(self._assistant_system_followups(item))
+            elif item.kind == 'camera_health':
+                suggestions.extend(self._assistant_camera_followups(item))
+            elif item.kind == 'incident_visual_review':
+                suggestions.extend(self._assistant_visual_followups(item))
+        ordered = list(dict.fromkeys([*suggestions, *[str(item).strip() for item in fallback if str(item).strip()]]))
+        return ordered[:4]
+
     def _assistant_prioritize_trace_candidates(self, candidate_summaries: list[dict[str, Any]], appearance_matches: list[dict[str, Any]], appearance_event_ids: set[int], distance_from_anchor: Callable[[dict[str, Any]], float], *, limit: int=500) -> list[dict[str, Any]]:
         """Keep strongest appearance evidence before filling a bounded temporal scan."""
         candidate_summaries = sorted(candidate_summaries, key=distance_from_anchor)
@@ -1620,7 +1708,7 @@ class IntelligenceService:
             if existing is not None:
                 existing.setdefault('reasons', []).append(reason)
                 existing['appearance_similarity'] = round(similarity, 4)
-                if existing.get('match_strength') not in {'confirmed_identity', 'automatic_identity', 'possible_identity'}:
+                if existing.get('match_strength') not in {'confirmed_identity', 'possible_identity'}:
                     existing['match_strength'] = 'appearance_similarity'
                     existing['confidence'] = round(similarity, 3)
                 continue
@@ -1629,15 +1717,14 @@ class IntelligenceService:
             item = {'incident': matched_incident, 'event_id': representative_id, 'camera_id': str(matched_incident.get('camera_id') or appearance.get('camera_id') or ''), 'start_at': matched_at, 'seconds_from_anchor': round(matched_epoch.timestamp() - anchor_at.timestamp() if matched_epoch is not None else 0.0, 1), 'match_strength': 'appearance_similarity', 'confidence': round(similarity, 3), 'appearance_similarity': round(similarity, 4), 'reasons': [reason]}
             matches.append(item)
             matches_by_event_id[representative_id] = item
-        strength_rank = {'confirmed_identity': 5, 'automatic_identity': 4, 'possible_identity': 3, 'appearance_similarity': 2, 'context_candidate': 1}
+        strength_rank = {'confirmed_identity': 4, 'possible_identity': 3, 'appearance_similarity': 2, 'context_candidate': 1}
         matches = sorted(sorted(matches, key=lambda item: (-strength_rank.get(str(item.get('match_strength') or ''), 0), -float(item.get('confidence') or 0.0), abs(float(item.get('seconds_from_anchor') or 0.0))))[:min(call.limit, 12)], key=lambda item: str(item.get('start_at') or ''))
         confirmed = sum((item['match_strength'] == 'confirmed_identity' for item in matches))
-        automatic = sum((item['match_strength'] == 'automatic_identity' for item in matches))
         possible = sum((item['match_strength'] == 'possible_identity' for item in matches))
         contextual = sum((item['match_strength'] == 'context_candidate' for item in matches))
         appearance_similar = sum((item['match_strength'] == 'appearance_similarity' for item in matches))
-        timeline_data = {'anchor_event_id': int(event_id) if event_id else None, 'anchor_camera_id': (anchor or {}).get('camera_id'), 'start_at': start.isoformat(), 'end_at': end.isoformat(), 'object_label': call.object_label, 'face_name': call.face_name, 'matches': [{key: item.get(key) for key in ('event_id', 'camera_id', 'start_at', 'seconds_from_anchor', 'match_strength', 'confidence', 'reasons', 'appearance_similarity')} for item in matches], 'limitations': ['Operator-confirmed faces can link incidents across cameras.', 'Automatic face matches are model decisions and remain distinguishable from operator confirmation.', 'Possible face matches remain uncertain.', 'Shared person, vehicle, or animal labels plus nearby time provide context only.', 'Appearance similarity uses durable, model-versioned ReID vectors and is stronger than a shared class label, but it is not proof of identity.', 'Camera angle, lighting, occlusion, and visually similar subjects can change the score.', 'Only the strongest 12 candidates and at most 24 hours are returned.']}
-        trace = AssistantEvidence(evidence_id=f'E-trace-{event_id or 'search'}', kind='cross_camera_timeline', title='Cross-camera investigation timeline', summary=f'Found {len(matches)} bounded timeline candidate(s): {confirmed} confirmed identity, {automatic} automatic identity, {possible} possible identity, {appearance_similar} appearance-similar, and {contextual} context-only.', data=timeline_data, href=self._assistant_incident_evidence(anchor, int(event_id)).href if anchor and event_id else '/incidents', client_data={'timeline': timeline_data})
+        timeline_data = {'anchor_event_id': int(event_id) if event_id else None, 'anchor_camera_id': (anchor or {}).get('camera_id'), 'start_at': start.isoformat(), 'end_at': end.isoformat(), 'object_label': call.object_label, 'face_name': call.face_name, 'matches': [{key: item.get(key) for key in ('event_id', 'camera_id', 'start_at', 'seconds_from_anchor', 'match_strength', 'confidence', 'reasons', 'appearance_similarity')} for item in matches], 'limitations': ['Confirmed recognized faces can link incidents across cameras.', 'Possible face matches remain uncertain.', 'Shared person, vehicle, or animal labels plus nearby time provide context only.', 'Appearance similarity uses durable, model-versioned ReID vectors and is stronger than a shared class label, but it is not proof of identity.', 'Camera angle, lighting, occlusion, and visually similar subjects can change the score.', 'Only the strongest 12 candidates and at most 24 hours are returned.']}
+        trace = AssistantEvidence(evidence_id=f'E-trace-{event_id or 'search'}', kind='cross_camera_timeline', title='Cross-camera investigation timeline', summary=f'Found {len(matches)} bounded timeline candidate(s): {confirmed} confirmed identity, {possible} possible identity, {appearance_similar} appearance-similar, and {contextual} context-only.', data=timeline_data, href=self._assistant_incident_evidence(anchor, int(event_id)).href if anchor and event_id else '/incidents', client_data={'timeline': timeline_data})
         evidence = [trace]
         if anchor and event_id:
             evidence.append(self._assistant_incident_evidence(anchor, int(event_id)))
@@ -1720,9 +1807,13 @@ class IntelligenceService:
                         evidence.append(item)
             media_export = next((item for item in evidence if item.kind in {'media_export_job', 'media_export_clarification'}), None)
             answer = self._assistant_media_export_answer(media_export) if media_export is not None else provider.answer(request, evidence, plan.reasoning_tier)
-            activity = next((item for item in evidence if item.kind == 'recent_activity_summary'), None)
-            suggestions = self._assistant_activity_followups(activity) if activity is not None else answer.suggestions
-            return {'message': answer.answer, 'citations': answer.citations, 'suggestions': suggestions, 'evidence': [item.client_payload() for item in evidence], 'tools': [call.name for call in plan.tool_calls], 'reasoning_tier': plan.reasoning_tier, 'model': provider.model_for_tier(plan.reasoning_tier), 'read_only': False}
+            suggestions = (
+                list(answer.suggestions)
+                if media_export is not None
+                else self._assistant_closed_loop_suggestions(evidence, answer.suggestions)
+            )
+            actions = [] if media_export is not None else self._assistant_closed_loop_actions(evidence)
+            return {'message': answer.answer, 'citations': answer.citations, 'suggestions': suggestions, 'actions': actions, 'evidence': [item.client_payload() for item in evidence], 'tools': [call.name for call in plan.tool_calls], 'reasoning_tier': plan.reasoning_tier, 'model': provider.model_for_tier(plan.reasoning_tier), 'read_only': False}
         try:
             return await asyncio.to_thread(run)
         except AuditAiError as exc:
@@ -1768,7 +1859,18 @@ class IntelligenceService:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             _effective_config, apply_result = self.deps.apply_config_update(next_config)
-        return {'ok': True, 'event_id': event_id, 'camera_id': camera.id, 'applied': previews, 'workers_restarted': bool(apply_result['camera_workers_restarted']), 'apply_mode': apply_result['apply_mode']}
+        advisor_href = self._assistant_camera_advisor_href(camera.id)
+        applied_count = len(previews)
+        follow_up = {
+            'message': (
+                f'Applied {applied_count} motion setting change{"s" if applied_count != 1 else ""} on {camera.name}. '
+                f'That camera was restarted. This was one incident image—open Camera Advisor to run a multi-sample review '
+                f'and check whether the change helped after 24 hours.'
+            ),
+            'suggestions': [f'Is {camera.name} healthy?', f'Summarize recent activity for {camera.name}'],
+            'actions': [{'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href}],
+        }
+        return {'ok': True, 'event_id': event_id, 'camera_id': camera.id, 'applied': previews, 'workers_restarted': bool(apply_result['camera_workers_restarted']), 'apply_mode': apply_result['apply_mode'], 'follow_up': follow_up}
 
 def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRouteBundle:
     router = APIRouter()
@@ -1803,8 +1905,12 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
         '_ai_recommendation_payload': service._ai_recommendation_payload,
         '_apply_pipeline_ai_change': service._apply_pipeline_ai_change,
         '_assistant_activity_followups': service._assistant_activity_followups,
+        '_assistant_camera_advisor_href': service._assistant_camera_advisor_href,
         '_assistant_camera_evidence': service._assistant_camera_evidence,
+        '_assistant_camera_followups': service._assistant_camera_followups,
         '_assistant_catalog': service._assistant_catalog,
+        '_assistant_closed_loop_actions': service._assistant_closed_loop_actions,
+        '_assistant_closed_loop_suggestions': service._assistant_closed_loop_suggestions,
         '_assistant_configuration_evidence': service._assistant_configuration_evidence,
         '_assistant_event_objects': service._assistant_event_objects,
         '_assistant_execute_tool': service._assistant_execute_tool,
@@ -1822,7 +1928,9 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
         '_assistant_search_incidents': service._assistant_search_incidents,
         '_assistant_semantic_search': service._assistant_semantic_search,
         '_assistant_system_evidence': service._assistant_system_evidence,
+        '_assistant_system_followups': service._assistant_system_followups,
         '_assistant_trace_across_cameras': service._assistant_trace_across_cameras,
+        '_assistant_visual_followups': service._assistant_visual_followups,
         '_assistant_visual_incident_evidence': service._assistant_visual_incident_evidence,
         '_audit_ai_context': service._audit_ai_context,
         '_calibration_camera_review': service._calibration_camera_review,
