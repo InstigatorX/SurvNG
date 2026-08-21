@@ -109,6 +109,15 @@ import { resetLiveDefaultsForServer } from "./liveDefaults.mjs";
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContext } from "./assistantContext.mjs";
+import {
+  assistantCoachSeen,
+  assistantComposerPlaceholder,
+  assistantEvidenceLabel,
+  assistantThinkingStages,
+  assistantWelcomeCopy,
+  markAssistantCoachSeen,
+  splitAssistantCitations,
+} from "./assistantMessage.mjs";
 import { safeMediaUrl } from "./mediaUrl.mjs";
 import { liveMediaShouldRun, liveSnapshotRefreshMs, logPayloadSignature } from "./pollingPolicy.mjs";
 import { useVisiblePolling } from "./visibilityPolling.mjs";
@@ -1387,16 +1396,48 @@ function readAssistantMessages() {
   return readAssistantHistory(browserStorage(window), ASSISTANT_STORAGE_KEY);
 }
 
-function AssistantPanel({ pageContext, timeZone }) {
+function AssistantMessageText({ content, evidence = [], onCite }) {
+  const parts = splitAssistantCitations(content);
+  const evidenceById = useMemo(() => new Map((evidence || []).map((item) => [String(item.id || ""), item])), [evidence]);
+  if (!parts.some((part) => part.type === "citation")) {
+    return <div className="assistant-message-text">{content}</div>;
+  }
+  return (
+    <div className="assistant-message-text">
+      {parts.map((part, index) => {
+        if (part.type !== "citation") return <React.Fragment key={`t-${index}`}>{part.value}</React.Fragment>;
+        const item = evidenceById.get(part.evidenceId);
+        const label = assistantEvidenceLabel(item) || part.evidenceId;
+        if (!item) return <React.Fragment key={`c-${index}`}>{part.value}</React.Fragment>;
+        return (
+          <button
+            key={`c-${index}`}
+            type="button"
+            className="assistant-citation"
+            title={`Show evidence: ${label}`}
+            aria-label={`Show evidence ${label}`}
+            onClick={() => onCite?.(part.evidenceId)}
+          >
+            {part.value}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequestHandled = null }) {
   const [openValue, setOpenValue] = useStoredState("survng.assistantOpen.v1", "false");
   const open = openValue === "true";
   const [messages, setMessages] = useState(readAssistantMessages);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [thinkingStage, setThinkingStage] = useState(0);
   const [applyingEvidenceId, setApplyingEvidenceId] = useState("");
   const [error, setError] = useState(null);
   const [applyReview, setApplyReview] = useState(null);
+  const [showCoach, setShowCoach] = useState(() => !assistantCoachSeen(browserStorage(window)));
   const bodyRef = useRef(null);
   const drawerRef = useRef(null);
   const applyDialogRef = useRef(null);
@@ -1406,10 +1447,15 @@ function AssistantPanel({ pageContext, timeZone }) {
   const composerRef = useRef(null);
   const followTranscriptRef = useRef(true);
   const returnFocusRef = useRef(null);
+  const abortRef = useRef(null);
+  const handledAskRef = useRef(null);
   const compactAssistant = useViewportQuery("(max-width: 1279px)");
   const currentContext = useMemo(() => snapshotAssistantContext(pageContext, timeZone), [pageContext, timeZone]);
   const currentContextLabel = assistantContextLabel(currentContext, (epoch) => formatDateTime(epoch, timeZone));
   const quickPrompts = assistantContextPrompts(currentContext).slice(0, 3);
+  const welcomeCopy = assistantWelcomeCopy(currentContextLabel);
+  const thinkingStages = useMemo(() => assistantThinkingStages(currentContextLabel), [currentContextLabel]);
+  const composerPlaceholder = assistantComposerPlaceholder(currentContextLabel);
   const activeExportIds = [...new Set(messages.flatMap((message) =>
     (message.evidence || [])
       .map((item) => item.details?.media_export)
@@ -1543,8 +1589,57 @@ function AssistantPanel({ pageContext, timeZone }) {
     return () => dialog?.removeEventListener("keydown", trapApplyFocus);
   }, [applyReview]);
 
+  useEffect(() => {
+    if (!busy) {
+      setThinkingStage(0);
+      return undefined;
+    }
+    setThinkingStage(0);
+    const timer = window.setInterval(() => {
+      setThinkingStage((current) => (current + 1) % Math.max(1, thinkingStages.length));
+    }, 2200);
+    return () => window.clearInterval(timer);
+  }, [busy, thinkingStages.length]);
+
+  useEffect(() => {
+    if (!askRequest?.id) return;
+    setOpenValue("true");
+    markAssistantCoachSeen(browserStorage(window));
+    setShowCoach(false);
+  }, [askRequest?.id, setOpenValue]);
+
+  useEffect(() => {
+    if (!askRequest?.id || !open || busy) return;
+    if (handledAskRef.current === askRequest.id) return;
+    handledAskRef.current = askRequest.id;
+    const prompt = String(askRequest.prompt || "").trim() || "Analyze this incident";
+    onAskRequestHandled?.();
+    void sendMessage(prompt);
+  }, [askRequest, open, busy]);
+
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
+
+  function dismissCoach() {
+    markAssistantCoachSeen(browserStorage(window));
+    setShowCoach(false);
+  }
+
+  function focusEvidence(evidenceId) {
+    const card = drawerRef.current?.querySelector(`[data-evidence-id="${CSS.escape(String(evidenceId || ""))}"]`);
+    if (!(card instanceof HTMLElement)) return;
+    card.classList.add("assistant-evidence-card-focus");
+    card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    card.focus({ preventScroll: true });
+    window.setTimeout(() => card.classList.remove("assistant-evidence-card-focus"), 1600);
+  }
+
+  function cancelInFlight() {
+    abortRef.current?.abort();
+  }
+
   function clearConversation() {
     if (messages.length && !window.confirm("Start a new assistant conversation? The current conversation will be cleared.")) return;
+    abortRef.current?.abort();
     setMessages([]);
     setError(null);
   }
@@ -1574,11 +1669,15 @@ function AssistantPanel({ pageContext, timeZone }) {
     setDraft("");
     setError(null);
     followTranscriptRef.current = true;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setBusy(true);
     try {
       const response = await fetch("/api/assistant/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           message: content,
           history: prior.map(({ role, content: historyContent, context: historyContext, evidence: historyEvidence }) => ({
@@ -1605,12 +1704,14 @@ function AssistantPanel({ pageContext, timeZone }) {
         context: submittedContext,
       }].slice(-30));
     } catch (sendError) {
+      if (sendError?.name === "AbortError") return;
       const statusCode = Number(String(sendError.message || "").match(/\((\d+)\)/)?.[1]);
       const message = statusCode === 429 ? "The AI provider is busy. Wait a moment, then retry."
         : [502, 503, 504].includes(statusCode) ? "The AI provider is temporarily unavailable. Retry when it recovers."
           : sendError.message || "Assistant request failed";
       setError({ message, kind: "request", content, context: submittedContext });
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setBusy(false);
     }
   }
@@ -1650,36 +1751,47 @@ function AssistantPanel({ pageContext, timeZone }) {
 
   return (
     <>
-      <button ref={launcherRef} type="button" className={`assistant-launcher ${open ? "open" : ""}`} onClick={() => setOpenValue(open ? "false" : "true")} aria-label={open ? "Close SurvNG Assistant" : "Open SurvNG Assistant"} aria-expanded={open} aria-controls="survng-assistant" title="SurvNG Assistant">
-        {open ? <X size={22} /> : <Sparkles size={22} />}
-      </button>
+      <div className="assistant-launcher-wrap">
+        <button ref={launcherRef} type="button" className={`assistant-launcher ${open ? "open" : ""}`} onClick={() => { dismissCoach(); setOpenValue(open ? "false" : "true"); }} aria-label={open ? "Close SurvNG Assistant" : "Open SurvNG Assistant"} aria-expanded={open} aria-controls="survng-assistant" title="SurvNG Assistant">
+          {open ? <X size={22} /> : <Sparkles size={22} />}
+        </button>
+        {showCoach && !open ? <div className="assistant-coach" role="status">
+          <span>Ask about this camera or incident</span>
+          <button type="button" onClick={dismissCoach} aria-label="Dismiss tip">Got it</button>
+        </div> : null}
+      </div>
       {open && compactAssistant ? <div className="assistant-backdrop" aria-hidden="true" onClick={() => setOpenValue("false")} /> : null}
       {open ? <aside id="survng-assistant" ref={drawerRef} className="assistant-drawer" role={applyReview ? undefined : compactAssistant ? "dialog" : "complementary"} aria-modal={!applyReview && compactAssistant || undefined} aria-hidden={applyReview || undefined} inert={applyReview || undefined} aria-labelledby="assistant-heading">
         <header className="assistant-head">
-          <div><strong id="assistant-heading"><Sparkles size={17} /> SurvNG Assistant</strong><small>{status?.configured === false ? "AI provider needs setup" : "Grounded in SurvNG evidence"}</small></div>
+          <div><strong id="assistant-heading"><Sparkles size={17} /> SurvNG Assistant</strong><small>{status?.configured === false ? "AI provider needs setup" : "Answers from your cameras & incidents"}</small></div>
           <div>
             <button type="button" onClick={clearConversation} disabled={busy} aria-label="Start a new assistant conversation" title="New conversation"><Trash2 size={16} /></button>
             <button type="button" onClick={() => setOpenValue("false")} aria-label="Close SurvNG Assistant"><X size={17} /></button>
           </div>
         </header>
         <div className="assistant-context" aria-live="polite">
-          <strong>Current view</strong><span>{currentContextLabel}</span>
-          {status ? <span title={status.fast_model === status.reasoning_model ? "Everyday and detailed questions use this model" : `Everyday: ${status.fast_model} · Detailed: ${status.reasoning_model}`}>{status.fast_model === status.reasoning_model ? status.fast_model : "Everyday + detailed AI"}</span> : null}
+          <strong>Using</strong><span>{currentContextLabel}</span>
+          {status ? <span title={status.fast_model === status.reasoning_model ? "Everyday and detailed questions use this model" : `Everyday: ${status.fast_model} · Detailed: ${status.reasoning_model}`}>{status.fast_model === status.reasoning_model ? "Configured AI" : "Everyday + detailed AI"}</span> : null}
         </div>
         <div className="assistant-body" ref={bodyRef} onScroll={(event) => { const body = event.currentTarget; followTranscriptRef.current = body.scrollHeight - body.scrollTop - body.clientHeight < 72; }}>
           {!messages.length ? <div className="assistant-welcome">
             <Sparkles size={26} />
-            <strong>What would you like to know?</strong>
-            <p>I can search incidents, trace related activity, review a selected incident, inspect camera health, explain settings, and create recording exports or timelapses.</p>
+            <strong>{welcomeCopy.title}</strong>
+            <p>{welcomeCopy.body}</p>
+            <div className="assistant-welcome-actions">
+              {quickPrompts.map((suggestion) => <button type="button" key={suggestion} disabled={busy || status?.configured === false} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
+            </div>
           </div> : null}
           {messages.map((message) => <article className={`assistant-message ${message.role}`} key={message.id}>
             {message.role === "user" && message.context ? <small className="assistant-turn-context">Asked about {assistantContextLabel(message.context, (epoch) => formatDateTime(epoch, message.context.time_zone || timeZone))}</small> : null}
-            <div className="assistant-message-text">{message.content}</div>
-            {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier">{message.reasoningTier === "deep" ? "Detailed analysis" : "Quick answer"}{message.model ? ` · ${message.model}` : ""}</small> : null}
+            {message.role === "assistant"
+              ? <AssistantMessageText content={message.content} evidence={message.evidence} onCite={focusEvidence} />
+              : <div className="assistant-message-text">{message.content}</div>}
+            {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier" title={message.model || undefined}>{message.reasoningTier === "deep" ? "Took a closer look" : "Quick answer"}</small> : null}
             {message.evidence?.length ? <div className="assistant-evidence">
-              {message.evidence.map((item) => <div key={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`} tabIndex={-1}>
+              {message.evidence.map((item) => <div key={item.id} data-evidence-id={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`} tabIndex={-1}>
                 {item.image_url ? <a className="assistant-evidence-image" href={appUrl(assistantEvidenceHref(item))} aria-label={`Open ${item.title || "incident"}`} title="Open incident"><img src={appUrl(item.image_url)} alt={item.title || "Incident evidence"} loading="lazy" /></a> : null}
-                {assistantEvidenceHref(item) ? <a href={appUrl(assistantEvidenceHref(item))}><span title={item.id}>Open evidence</span><strong>{item.title}</strong><small>{item.summary}</small></a> : <div className="assistant-evidence-summary"><span>Evidence</span><strong>{item.title}</strong><small>{item.summary}</small></div>}
+                {assistantEvidenceHref(item) ? <a href={appUrl(assistantEvidenceHref(item))}><span title={item.id}>Open in SurvNG</span><strong>{item.title}</strong><small>{item.summary}</small></a> : <div className="assistant-evidence-summary"><span>Evidence</span><strong>{item.title}</strong><small>{item.summary}</small></div>}
                 {item.details?.timeline ? <div className="assistant-timeline">
                   {item.details.timeline.matches?.length ? item.details.timeline.matches.map((match) => <a className="assistant-timeline-link" href={appUrl(assistantIncidentHref(match.event_id))} key={match.event_id} title="Open incident"><span>{formatDateTime(match.start_at, timeZone)}</span><strong>{match.camera_id}</strong><small>{({ confirmed_identity: "Confirmed face", possible_identity: "Possible face", appearance_similarity: `Visually similar ${match.appearance_similarity != null ? `${Math.round(Number(match.appearance_similarity) * 100)}%` : "appearance"}`, context_candidate: "Nearby matching class" })[match.match_strength] || "Possible connection"}</small></a>) : <small>No related incidents were found in this time window.</small>}
                   <p>{item.details.timeline.limitations?.[3]}</p>
@@ -1716,15 +1828,15 @@ function AssistantPanel({ pageContext, timeZone }) {
               {message.suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
             </div> : null}
           </article>)}
-          {busy ? <div className="assistant-thinking"><span /><span /><span /> Gathering SurvNG evidence…</div> : null}
+          {busy ? <div className="assistant-thinking" aria-live="polite"><span /><span /><span /> {thinkingStages[thinkingStage] || thinkingStages[0]}{busy ? <button type="button" className="assistant-stop" onClick={cancelInFlight}>Stop</button> : null}</div> : null}
           {error ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>{error.message}</span>{error.kind === "request" ? <button type="button" onClick={() => sendMessage(error.content, error.context, { appendUser: false })}>Retry</button> : error.kind === "status" ? <button type="button" onClick={() => void loadAssistantStatus()}>Retry</button> : null}</div> : null}
           {status && !status.configured ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>Configure and enable the AI provider to use the assistant.</span><a href={appUrl("/admin?section=general&subsection=detection&detail=ai-provider")}>Open AI Provider settings</a></div> : null}
         </div>
-        <div className="assistant-quick-actions" role="group" aria-label={`Suggestions for ${currentContextLabel}`}>
+        {messages.length ? <div className="assistant-quick-actions" role="group" aria-label={`Suggestions for ${currentContextLabel}`}>
           {quickPrompts.map((suggestion) => <button type="button" key={suggestion} disabled={busy} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
-        </div>
+        </div> : null}
         <form className="assistant-compose" onSubmit={(event) => { event.preventDefault(); sendMessage(); }}>
-          <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder="Ask about SurvNG…" rows="2" maxLength="8000" disabled={busy || status?.configured === false} />
+          <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder={composerPlaceholder} rows="2" maxLength="8000" disabled={busy || status?.configured === false} />
           <button type="submit" disabled={busy || !draft.trim()}>Send</button>
         </form>
       </aside> : null}
@@ -3652,7 +3764,7 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
   );
 }
 
-function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose }) {
+function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -3748,6 +3860,7 @@ function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, s
       <div className="incident-inspector-actions">
         {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
         {inspectedEvent.snapshot_path && eventSnapshotDownloadUrl(inspectedEvent) ? <a href={eventSnapshotDownloadUrl(inspectedEvent)}><Download size={15} /> Snapshot</a> : null}
+        {onAskAssistant ? <button type="button" className="incident-ask-assistant" onClick={() => onAskAssistant("Analyze this incident")}><Sparkles size={15} /> Ask assistant</button> : null}
       </div>
     </aside>
   );
@@ -4634,7 +4747,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   ), document.body);
 }
 
-function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
+function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const [eventFilter, setEventFilter] = useState("object");
@@ -5237,7 +5350,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
             </section>
 
             {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
-            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} />
+            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} onAskAssistant={onAskAssistant} />
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
@@ -6681,7 +6794,7 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   </main>;
 }
 
-function RecordingsPage({ timeZone, onAssistantContextChange }) {
+function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssistant = null }) {
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const initialView = useMemo(() => parseTimelineView(initialQuery, today), [initialQuery, today]);
@@ -7761,7 +7874,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 <div><dt>Camera</dt><dd>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</dd></div>
                 <div><dt>Event ID</dt><dd>{selectedEvent.id}</dd></div>
               </dl> : null}
-              {selectedEvent && timelineInspectorTab === "ai" ? <div className="recordings-inspector-message"><Sparkles size={18} /><strong>No AI summary generated</strong><span>Ask the SurvNG Assistant to analyze this incident using its exact event context.</span></div> : null}
+              {selectedEvent && timelineInspectorTab === "ai" ? <div className="recordings-inspector-message"><Sparkles size={18} /><strong>Ask about this incident</strong><span>The assistant uses this event’s SurvNG context—no separate summary to generate.</span>{onAskAssistant ? <button type="button" className="recordings-ask-assistant" onClick={() => onAskAssistant("Analyze this incident")}>Ask assistant</button> : null}</div> : null}
               {selectedEvent && timelineInspectorTab === "related" ? <div className="recordings-inspector-message"><Images size={18} /><strong>{Math.max(0, nearbyEvents.length - 1)} nearby events</strong><span>These events are close in time; they are not asserted to be the same activity.</span></div> : null}
               {!selectedEvent ? <div className="recordings-inspector-message"><Radar size={18} /><strong>No event selected</strong><span>Choose an event from the timeline or related rail.</span></div> : null}
               </div>
@@ -13572,6 +13685,7 @@ function App() {
   const [timeZone, setTimeZone] = useStoredState("survng.timeZone", DEFAULT_TIME_ZONE);
   const [theme, setTheme] = useStoredState("survng.theme", "dark");
   const [recordingContext, setRecordingContext] = useState(null);
+  const [assistantAsk, setAssistantAsk] = useState(null);
   const pathname = appPathname();
   const workspace = resolveWorkspace(pathname);
   const page = workspace?.id || "not-found";
@@ -13579,6 +13693,9 @@ function App() {
   const isExportCenter = pathname.startsWith("/recordings/exports") || pathname.startsWith("/timeline/exports");
   const isSemanticSearch = page === "search";
   const [assistantContext, setAssistantContext] = useState({ page });
+  function askAssistant(prompt) {
+    setAssistantAsk({ id: Date.now(), prompt: String(prompt || "").trim() || "Analyze this incident" });
+  }
   useEffect(() => {
     const nextUrl = appUrl(canonicalPath);
     const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
@@ -13597,17 +13714,17 @@ function App() {
         : page === "timeline"
           ? isExportCenter
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-            : <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+            : <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
           : isSemanticSearch
             ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
           : page === "incidents"
-            ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
+            ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
             : page === "people"
               ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
             : page === "live"
               ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
               : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
-      <AssistantPanel pageContext={{ ...assistantContext, page: isExportCenter ? "exports" : page }} timeZone={timeZone} />
+      <AssistantPanel pageContext={{ ...assistantContext, page: isExportCenter ? "exports" : page }} timeZone={timeZone} askRequest={assistantAsk} onAskRequestHandled={() => setAssistantAsk(null)} />
     </Shell>
   );
 }
