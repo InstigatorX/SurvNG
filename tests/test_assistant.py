@@ -23,6 +23,7 @@ from survng.app.assistant import (
     IncidentVisualReviewer,
     INCIDENT_VISUAL_SCHEMA,
     sanitize_assistant_data,
+    strip_assistant_citation_markers,
 )
 from survng.app.audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError
 from survng.app.intelligence_routes import IncidentAiApplyRequest
@@ -239,6 +240,7 @@ class AssistantProviderTest(unittest.TestCase):
             answer = self.provider.answer(self.request, evidence, "deep")
 
         self.assertEqual(answer.citations, ["E1"])
+        self.assertEqual(answer.answer, "The detector was delayed.")
         self.assertEqual(complete.call_args.kwargs["model_override"], "deep-model")
 
     def test_answer_normalizes_harmless_structured_citation_mismatch(self) -> None:
@@ -258,6 +260,16 @@ class AssistantProviderTest(unittest.TestCase):
             answer = self.provider.answer(self.request, evidence)
 
         self.assertEqual(answer.citations, ["E-activity"])
+        self.assertEqual(answer.answer, "There were several recent incidents.")
+
+    def test_strip_assistant_citation_markers_cleans_reader_text(self) -> None:
+        self.assertEqual(
+            strip_assistant_citation_markers(
+                "All cameras are online [E-system]. Four need attention [E-system]."
+            ),
+            "All cameras are online. Four need attention.",
+        )
+        self.assertEqual(strip_assistant_citation_markers("No markers here."), "No markers here.")
 
     def test_invalid_provider_json_is_reported_as_provider_error(self) -> None:
         with patch.object(self.provider, "_complete_json", return_value="not json"):

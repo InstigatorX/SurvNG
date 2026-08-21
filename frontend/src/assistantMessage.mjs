@@ -1,5 +1,14 @@
 const CITATION_PATTERN = /\[(E[A-Za-z0-9_-]+)\]/g;
 
+/** Remove grounding markers like [E-system] from reader-facing answer text. */
+export function stripAssistantCitationMarkers(text) {
+  return String(text || "")
+    .replace(/\s*\[(E[A-Za-z0-9_-]+)\]/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 /** Split assistant prose into plain text and citation tokens for interactive rendering. */
 export function splitAssistantCitations(text) {
   const source = String(text || "");

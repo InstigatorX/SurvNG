@@ -7,6 +7,7 @@ import {
   assistantWelcomeCopy,
   markAssistantCoachSeen,
   splitAssistantCitations,
+  stripAssistantCitationMarkers,
 } from "../src/assistantMessage.mjs";
 
 assert.deepEqual(splitAssistantCitations(""), []);
@@ -20,6 +21,10 @@ assert.deepEqual(splitAssistantCitations("Gate was busy [E1] and later quiet [E-
   { type: "citation", value: "[E-activity]", evidenceId: "E-activity" },
   { type: "text", value: "." },
 ]);
+assert.equal(
+  stripAssistantCitationMarkers("All cameras are online [E-system]. Four need attention [E-system]."),
+  "All cameras are online. Four need attention.",
+);
 
 assert.equal(assistantEvidenceLabel({ id: "E1", title: "Front Door" }), "Front Door");
 assert.equal(assistantEvidenceLabel({ id: "E1" }), "E1");
