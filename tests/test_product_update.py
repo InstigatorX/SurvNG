@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -12,8 +13,12 @@ from survng.app.operations_routes import (
     OperationsRouteDependencies,
     create_operations_router,
 )
-from survng.app.product_update import ProductUpdateService, resolve_repo_root
-
+from survng.app.product_update import (
+    ProductUpdateService,
+    _format_git_failure,
+    _git_command,
+    resolve_repo_root,
+)
 
 def _endpoint(router, path: str, method: str):
     return next(
@@ -130,6 +135,25 @@ def test_resolve_repo_root_finds_survng_checkout(tmp_path: Path) -> None:
     assert resolve_repo_root(repo / "survng") == repo.resolve()
 
 
+def test_git_commands_allow_survng_checkout_safe_directory(tmp_path: Path) -> None:
+    repo = _init_survng_repo(tmp_path)
+    command = _git_command(repo, ["rev-parse", "--abbrev-ref", "HEAD"])
+    assert command[1:3] == ["-c", f"safe.directory={repo}"]
+    assert command[-3:] == ["rev-parse", "--abbrev-ref", "HEAD"]
+
+
+def test_format_git_failure_prefers_stderr_and_ownership_guidance() -> None:
+    error = subprocess.CalledProcessError(
+        128,
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        stderr="fatal: detected dubious ownership in repository at '/root/SurvNG'\n",
+    )
+    assert "ownership" in _format_git_failure(error).lower()
+
+    missing = FileNotFoundError("git")
+    assert "not installed" in _format_git_failure(missing).lower()
+
+
 def test_product_update_status_reports_behind_commits(tmp_path: Path) -> None:
     repo = _init_survng_repo(tmp_path)
     bare = tmp_path / "remote.git"
@@ -174,6 +198,7 @@ def test_product_update_start_fast_forwards_and_restarts(tmp_path: Path, monkeyp
     restart = Mock(return_value={"ok": True, "status": "restart_scheduled", "instance_id": "abc"})
     service = ProductUpdateService(repo_root=repo, request_server_restart=restart)
     real_run = subprocess.run
+    real_which = shutil.which
 
     def fake_run(command, **kwargs):
         cmd = [str(part) for part in command]
@@ -184,7 +209,10 @@ def test_product_update_start_fast_forwards_and_restarts(tmp_path: Path, monkeyp
         return real_run(command, **kwargs)
 
     monkeypatch.setattr("survng.app.product_update.subprocess.run", fake_run)
-    monkeypatch.setattr("survng.app.product_update.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "survng.app.product_update.shutil.which",
+        lambda name: None if name == "npm" else real_which(name),
+    )
     monkeypatch.setattr("survng.app.product_update.time.sleep", lambda _seconds: None)
 
     started = service.start()

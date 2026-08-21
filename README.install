@@ -345,6 +345,11 @@ reinstalls Python dependencies, rebuilds the frontend when `npm` is available,
 and restarts through `survng.service`. Tracked local changes or divergent local
 commits block the button until the checkout is clean and fast-forwardable.
 
+The SurvNG service needs `git` on `PATH`. If the process working directory is
+not the checkout, set `SURVNG_REPO_ROOT` to that absolute path (for example in
+`deploy/survng.service`). SurvNG passes `safe.directory` for its own checkout so
+common service-user ownership mismatches do not block status checks.
+
 Docker images are immutable, so the same Admin controls report the baked Git SHA
 and point operators at the host script below. To enable an in-app Docker update
 button, mount an executable host helper and set `SURVNG_UPDATE_HELPER` to its
