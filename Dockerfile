@@ -63,7 +63,8 @@ COPY survng/ ./survng/
 COPY config.example.json /usr/share/survng/config.example.json
 COPY docker/config.example.json /usr/share/survng/config.docker.example.json
 COPY docker/go2rtc.example.yaml /usr/share/survng/go2rtc.example.yaml
-COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/survng-entrypoint
+COPY docker/entrypoint.sh /usr/local/bin/survng-entrypoint
+RUN chmod 755 /usr/local/bin/survng-entrypoint
 COPY --from=frontend /build/survng/static/ ./survng/static/
 RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi
 
