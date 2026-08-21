@@ -2638,7 +2638,7 @@ button.status-pill.hud-toggle:disabled {
 
 .camera-open-target {
   position: absolute;
-  z-index: 1;
+  z-index: 3;
   inset: 0;
   width: 100%;
   min-width: 0;
@@ -2660,11 +2660,23 @@ button.status-pill.hud-toggle:disabled {
   outline-offset: -2px;
 }
 
+.camera-tile,
+.camera-tile-chrome,
+.camera-tile-name,
+.camera-tile-name strong,
+.camera-tile-time,
+.camera-tile-live-state {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
 .camera-tile .video-frame,
 .camera-tile .camera-tile-poster,
 .camera-tile .camera-live-layer,
 .camera-tile video,
 .camera-tile img {
+  pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;

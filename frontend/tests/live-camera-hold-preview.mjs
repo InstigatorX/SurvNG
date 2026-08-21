@@ -42,8 +42,13 @@ assert.match(styles, /\.live-overlay\[data-phase="open"\]/);
 assert.match(styles, /\.live-overlay\[data-phase="closing"\]/);
 assert.match(styles, /@keyframes live-overlay-panel-in/);
 assert.match(styles, /-webkit-touch-callout:\s*none/);
+assert.match(styles, /\.camera-tile[\s\S]*?-webkit-touch-callout:\s*none/);
+assert.match(styles, /pointer-events:\s*none/);
 assert.match(livePageSource, /onContextMenu=\{blockBrowserHoldMenu\}/);
 assert.match(livePageSource, /selectstart/);
+assert.match(livePageSource, /onOpenTargetTouchStart/);
+assert.match(livePageSource, /passive:\s*false/);
+assert.match(livePageSource, /draggable=\{false\}/);
 assert.match(contract, /Press-and-hold/);
 
 console.log("live camera hold preview tests passed");
