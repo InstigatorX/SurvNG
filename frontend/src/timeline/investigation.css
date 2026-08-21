@@ -1,13 +1,4 @@
 /* Timeline investigation completion */
-.recordings-camera-group {
-  display: block;
-  margin: 10px 13px 4px;
-  color: var(--muted);
-  font-size: 9px;
-  font-weight: 620;
-  letter-spacing: .025em;
-  text-transform: uppercase;
-}
 
 .recordings-v2-event-filter button:first-child.active {
   background: color-mix(in srgb, var(--accent) 24%, var(--control));

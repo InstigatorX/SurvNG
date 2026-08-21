@@ -242,8 +242,6 @@
     padding: 4px 5px !important;
   }
 
-  .recordings-commandbar-scope,
-  .recordings-section-switcher,
   .recordings-commandbar-day-controls .recordings-playback-rate,
   .recordings-commandbar-export {
     display: none !important;
@@ -321,12 +319,8 @@
   .recordings-v2-events,
   .recordings-event-inspector,
   .recordings-inspector-toggle,
-  .recordings-v2-thumbnail-rail,
-  .recordings-v2-thumbnails,
-  .recordings-thumbnail-rail,
   .recording-grid-companions,
-  .recording-stage-pagination,
-  [class*="recordings"][class*="thumbnail-rail"] {
+  .recording-stage-pagination {
     display: none !important;
   }
 

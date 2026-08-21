@@ -65,42 +65,6 @@
   font-weight: 560;
 }
 
-.recordings-section-switcher {
-  gap: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-}
-
-.recordings-section-switcher a {
-  min-height: 38px;
-  border: 0;
-  border-left: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 560;
-  padding: 0 12px;
-}
-
-.recordings-section-switcher a:first-child {
-  border-left: 0;
-}
-
-.recordings-section-switcher a.active {
-  background: color-mix(in srgb, var(--accent) 18%, var(--control));
-  color: var(--active-ink);
-}
-
-.recordings-commandbar-scope {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 7px;
-  padding-left: 4px;
-}
-
 .timeline-camera-picker {
   position: relative;
   min-width: 0;
@@ -275,14 +239,6 @@
   color: var(--active-ink);
 }
 
-.recordings-commandbar-scope strong {
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 620;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .recordings-commandbar-live {
   display: inline-flex;
   align-items: center;
@@ -292,8 +248,7 @@
   white-space: nowrap;
 }
 
-.recordings-commandbar-live i,
-.recordings-camera-list i.online {
+.recordings-commandbar-live i {
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -539,67 +494,6 @@
   box-shadow: none;
 }
 
-.recordings-camera-header {
-  display: grid;
-  min-height: 104px;
-  gap: 7px;
-  padding: 10px;
-}
-
-.recordings-camera-header select,
-.recordings-camera-header input {
-  width: 100%;
-  min-height: 38px;
-  border-radius: 4px;
-  font-size: 12px;
-}
-
-.recordings-camera-search {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  align-items: center;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--muted);
-  padding: 0 9px;
-}
-
-.recordings-camera-search input {
-  min-height: 34px;
-  border: 0;
-  background: transparent;
-  padding-inline: 0;
-}
-
-.recordings-camera-list {
-  gap: 0;
-  padding: 4px 0 12px;
-}
-
-.recordings-camera-list button {
-  grid-template-columns: 17px minmax(0, 1fr) 8px;
-  min-height: 42px;
-  border: 0;
-  border-left: 3px solid transparent;
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 520;
-  padding: 0 13px;
-}
-
-.recordings-camera-list button:hover:not(.active) {
-  border-color: transparent;
-  background: var(--control);
-}
-
-.recordings-camera-list button.active {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 17%, transparent);
-  color: var(--ink);
-}
-
 .recordings-v2-workspace {
   grid-column: 1;
   grid-row: 2;
@@ -747,17 +641,6 @@
   background: color-mix(in srgb, var(--accent) 18%, var(--control));
 }
 
-.recordings-v2-range {
-  margin-left: 8px;
-  font-weight: 540;
-}
-
-.recordings-v2-range select {
-  min-height: 32px;
-  border-radius: 4px;
-  font-weight: 540;
-}
-
 .recordings-v2-export-toggle {
   min-height: 32px;
   border-radius: 4px;
@@ -769,14 +652,6 @@
   padding: 4px 10px 8px;
 }
 
-.recordings-v2-lane-legend {
-  display: none;
-}
-
-.recordings-v2-lane-legend span::before {
-  border-radius: 50%;
-}
-
 .recordings-v2-track {
   height: 76px;
   border-color: var(--line);
@@ -785,26 +660,6 @@
   touch-action: pan-y;
   overscroll-behavior-x: contain;
 }
-
-.recordings-v2-timeline-page {
-  position: absolute;
-  z-index: 8;
-  top: 50%;
-  display: grid;
-  width: 26px;
-  min-width: 26px;
-  height: 26px;
-  min-height: 26px;
-  padding: 0;
-  place-items: center;
-  transform: translateY(-50%);
-  border-color: color-mix(in srgb, var(--line) 76%, var(--canvas));
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--panel-solid) 84%, transparent);
-}
-
-.recordings-v2-timeline-page.previous { left: 4px; }
-.recordings-v2-timeline-page.next { right: 4px; }
 
 .recordings-v2-event-lane.hidden {
   display: none;
@@ -1218,15 +1073,6 @@
     grid-row: 1;
   }
 
-  .recordings-commandbar-scope {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .recordings-commandbar-time {
-    display: none;
-  }
-
   .recordings-v2-player.selected-camera-stage video {
     width: 100%;
     height: calc(100% - 86px);
@@ -1299,11 +1145,7 @@
 }
 
 @media (max-width: 1279px) and (min-width: 761px) {
-
-  .recordings-section-switcher a,
-  .recordings-camera-list button,
   .recordings-v2-event-filter button,
-  .recordings-v2-range select,
   .recordings-v2-export-toggle,
   .recordings-v2-selected-event a {
     min-height: 44px;
@@ -1394,7 +1236,6 @@
     grid-template-rows: minmax(0, 1fr);
   }
 
-  .recordings-commandbar-scope,
   .recordings-commandbar-day-controls .recordings-playback-rate {
     display: none;
   }
@@ -1431,30 +1272,6 @@
     border-right: 0;
     border-bottom: 1px solid var(--line);
     background: var(--panel-solid);
-  }
-
-  .recordings-camera-header {
-    display: none;
-  }
-
-  .recordings-camera-list {
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    padding: 7px 8px;
-  }
-
-  .recordings-camera-list button {
-    flex: 0 0 auto;
-    min-width: 130px;
-    min-height: 44px;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding-inline: 10px;
-  }
-
-  .recordings-camera-list button.active {
-    border-color: var(--accent);
   }
 
   .recordings-v2-workspace {
@@ -1505,10 +1322,8 @@
     gap: 6px;
     overflow-x: auto;
   }
-
   .recordings-v2-timeline-toolbar>span,
-  .recordings-v2-filter-label,
-  .recordings-v2-range span {
+  .recordings-v2-filter-label {
     display: none;
   }
 

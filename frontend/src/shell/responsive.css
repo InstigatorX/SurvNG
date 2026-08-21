@@ -143,13 +143,11 @@
   .recordings-v2-timeline-toolbar .recordings-v2-date > button,
   .recordings-v2-timeline-toolbar .recordings-v2-date-toggle,
   .recordings-v2-timeline-toolbar .recordings-v2-player-source button,
-  .recordings-v2-range select,
   .recordings-event-inspector-tabs button,
   .recording-grid-tile.primary .recording-grid-camera,
   .recording-grid-tile.companion .recording-grid-camera,
   .search-camera-list button,
-  .settings-section-tree .tree-list button,
-  .settings-tab-list button {
+  .settings-section-tree .tree-list button {
     min-height: 44px;
   }
 
@@ -221,7 +219,6 @@
   .incident-workspace-view-toggle button,
   .faces-filter-group button,
   .faces-toolbar select,
-  .settings-tabs button,
   .settings-section-tree .tree-list button {
     min-height: 44px;
   }
@@ -230,10 +227,6 @@
   .density-control button {
     width: 44px;
     min-width: 44px;
-  }
-
-  .recordings-camera-header select {
-    min-height: 44px;
   }
 
   .recording-grid-tile.primary .recording-grid-camera,
