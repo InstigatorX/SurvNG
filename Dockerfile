@@ -11,6 +11,8 @@ ARG SURVNG_UID=1000
 ARG SURVNG_GID=1000
 # Prototype-qualified FFmpeg 8.1.2 from ubuntuhandbook1/ffmpeg8 (Noble).
 ARG FFMPEG_VERSION=10:8.1.2-0build1~ubuntu24.04
+ARG GO2RTC_VERSION=1.9.14
+ARG GO2RTC_SHA256=32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/survng-venv/bin:$PATH \
@@ -21,6 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         gosu \
         libgl1 \
         libglib2.0-0 \
@@ -36,7 +39,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends "ffmpeg=${FFMPEG_VERSION}" \
     && apt-mark hold ffmpeg \
     && ffmpeg -version | head -1 | grep -E 'ffmpeg version 8\.1\.2' \
-    && apt-get purge -y --auto-remove software-properties-common \
+    && curl -fsSL -o /usr/local/bin/go2rtc \
+        "https://github.com/AlexxIT/go2rtc/releases/download/v${GO2RTC_VERSION}/go2rtc_linux_amd64" \
+    && printf '%s  %s\n' "$GO2RTC_SHA256" /usr/local/bin/go2rtc | sha256sum -c - \
+    && chmod 755 /usr/local/bin/go2rtc \
+    && go2rtc -version | grep -F "$GO2RTC_VERSION" \
+    && apt-get purge -y --auto-remove software-properties-common curl \
     && rm -rf /var/lib/apt/lists/* \
     && existing_group="$(getent group "$SURVNG_GID" | cut -d: -f1)" \
     && if [ -n "$existing_group" ]; then groupmod --new-name survng "$existing_group"; else groupadd --gid "$SURVNG_GID" survng; fi \
@@ -54,6 +62,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY survng/ ./survng/
 COPY config.example.json /usr/share/survng/config.example.json
 COPY docker/config.example.json /usr/share/survng/config.docker.example.json
+COPY docker/go2rtc.example.yaml /usr/share/survng/go2rtc.example.yaml
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/survng-entrypoint
 COPY --from=frontend /build/survng/static/ ./survng/static/
 RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi

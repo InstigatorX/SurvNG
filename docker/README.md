@@ -18,6 +18,7 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `.env.example` | Non-secret host path, identity, timezone, and GPU group settings |
 | `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
 | `docker/config.example.json` | Camera-free initial configuration |
+| `docker/go2rtc.example.yaml` | Seeded go2rtc config for the bundled restreamer |
 
 ## Persistent storage
 
@@ -68,6 +69,25 @@ intentionally qualifying a new build.
 ```bash
 docker exec survng ffmpeg -version | head -1
 docker exec survng ffmpeg -hide_banner -hwaccels
+```
+
+### go2rtc
+
+The image ships **go2rtc v1.9.14** at `/usr/local/bin/go2rtc`. The entrypoint
+starts it by default before SurvNG, using `/config/go2rtc.yaml` (seeded from
+`docker/go2rtc.example.yaml` on first boot).
+
+- API listens on `127.0.0.1:1984` (SurvNG's default adapter port; not published)
+- RTSP listens on `:8554` for restreams
+- Point SurvNG camera `stream_url` / `live_stream_url` at
+  `rtsp://127.0.0.1:8554/<stream_name>`
+- Set `SURVNG_GO2RTC=0` to disable the bundled process and use an external
+  go2rtc instead
+- Override the config path with `SURVNG_GO2RTC_CONFIG` when needed
+
+```bash
+docker exec survng go2rtc -version
+docker exec survng wget -qO- http://127.0.0.1:1984/api/streams || true
 ```
 
 ### Intel GPU userspace

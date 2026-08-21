@@ -1,0 +1,26 @@
+# SurvNG-bundled go2rtc configuration.
+#
+# Stream definitions belong here. Point SurvNG camera stream_url /
+# live_stream_url at rtsp://127.0.0.1:8554/<stream_name> when using the
+# container's embedded go2rtc (Compose host networking).
+#
+# Example:
+# streams:
+#   porch_main: rtsp://user:pass@192.168.1.20:554/h264Preview_01_main
+#   porch_sub: rtsp://user:pass@192.168.1.20:554/h264Preview_01_sub
+
+api:
+  # SurvNG talks to the API on this host:port (default adapter port 1984).
+  # Keep it on localhost; SurvNG proxies WebRTC/MSE to browsers.
+  listen: "127.0.0.1:1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
+
+ffmpeg:
+  bin: "/usr/bin/ffmpeg"
+
+streams: {}
