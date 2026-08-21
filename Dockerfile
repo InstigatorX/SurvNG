@@ -9,6 +9,8 @@ FROM ubuntu:24.04 AS runtime-base
 
 ARG SURVNG_UID=1000
 ARG SURVNG_GID=1000
+# Prototype-qualified FFmpeg 8.1.2 from ubuntuhandbook1/ffmpeg8 (Noble).
+ARG FFMPEG_VERSION=10:8.1.2-0build1~ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/survng-venv/bin:$PATH \
@@ -19,7 +21,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        ffmpeg \
         gosu \
         libgl1 \
         libglib2.0-0 \
@@ -28,7 +29,14 @@ RUN apt-get update \
         procps \
         python3 \
         python3-venv \
+        software-properties-common \
         tini \
+    && add-apt-repository -y ppa:ubuntuhandbook1/ffmpeg8 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "ffmpeg=${FFMPEG_VERSION}" \
+    && apt-mark hold ffmpeg \
+    && ffmpeg -version | head -1 | grep -E 'ffmpeg version 8\.1\.2' \
+    && apt-get purge -y --auto-remove software-properties-common \
     && rm -rf /var/lib/apt/lists/* \
     && existing_group="$(getent group "$SURVNG_GID" | cut -d: -f1)" \
     && if [ -n "$existing_group" ]; then groupmod --new-name survng "$existing_group"; else groupadd --gid "$SURVNG_GID" survng; fi \
@@ -63,12 +71,13 @@ CMD ["uvicorn", "survng.app.main:app", "--host", "0.0.0.0", "--port", "8088", "-
 
 # Optional Intel OpenVINO GPU and VA-API/QSV userspace. Select this target with
 # docker compose -f compose.yaml -f compose.intel-gpu.yaml up -d --build.
+# Pins match the prototype Noble + kobuk-team/intel-graphics stack.
 FROM runtime-base AS runtime-intel
 USER root
-ARG INTEL_COMPUTE_VERSION=26.22.38646.7-1~24.04~ppa1
-ARG INTEL_IGC_VERSION=2.36.5-1~24.04
+ARG INTEL_COMPUTE_VERSION=26.27.39122.14-1~24.04~ppa1
+ARG INTEL_IGC_VERSION=2.38.5-1~24.04
 ARG INTEL_GMMLIB_VERSION=22.10.0-1~24.04~ppa1
-ARG INTEL_LEVEL_ZERO_VERSION=1.28.6-1~24.04~ppa1
+ARG INTEL_LEVEL_ZERO_VERSION=1.32.0-1~24.04~ppa1
 ARG INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1
 ARG INTEL_VPL_VERSION=1:2.16.0-1~24.04~ppa1
 RUN apt-get update \

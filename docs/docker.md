@@ -97,13 +97,14 @@ Admin > Telemetry for subsystem health.
 
 ## Intel OpenVINO GPU and QSV/VA-API
 
-The base image supports CPU inference and software FFmpeg. The Intel override
+The base image supports CPU inference and FFmpeg 8.1.2. The Intel override
 selects an image target with the Intel OpenCL and media userspace packages,
 passes `/dev/dri`, and adds the configured video/render groups to the runtime
 user:
 
 ```bash
 docker compose -f compose.yaml -f compose.intel-gpu.yaml up -d --build
+docker compose exec survng ffmpeg -version | head -1
 docker compose exec survng python -c \
   'from openvino import Core; print(Core().available_devices)'
 docker compose exec survng ffmpeg -hide_banner -hwaccels
