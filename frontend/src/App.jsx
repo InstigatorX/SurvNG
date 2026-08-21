@@ -112,11 +112,10 @@ import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContex
 import {
   assistantCoachSeen,
   assistantComposerPlaceholder,
-  assistantEvidenceLabel,
   assistantThinkingStages,
   assistantWelcomeCopy,
   markAssistantCoachSeen,
-  splitAssistantCitations,
+  stripAssistantCitationMarkers,
 } from "./assistantMessage.mjs";
 import { safeMediaUrl } from "./mediaUrl.mjs";
 import { liveMediaShouldRun, liveSnapshotRefreshMs, logPayloadSignature } from "./pollingPolicy.mjs";
@@ -1396,34 +1395,8 @@ function readAssistantMessages() {
   return readAssistantHistory(browserStorage(window), ASSISTANT_STORAGE_KEY);
 }
 
-function AssistantMessageText({ content, evidence = [], onCite }) {
-  const parts = splitAssistantCitations(content);
-  const evidenceById = useMemo(() => new Map((evidence || []).map((item) => [String(item.id || ""), item])), [evidence]);
-  if (!parts.some((part) => part.type === "citation")) {
-    return <div className="assistant-message-text">{content}</div>;
-  }
-  return (
-    <div className="assistant-message-text">
-      {parts.map((part, index) => {
-        if (part.type !== "citation") return <React.Fragment key={`t-${index}`}>{part.value}</React.Fragment>;
-        const item = evidenceById.get(part.evidenceId);
-        const label = assistantEvidenceLabel(item) || part.evidenceId;
-        if (!item) return <React.Fragment key={`c-${index}`}>{part.value}</React.Fragment>;
-        return (
-          <button
-            key={`c-${index}`}
-            type="button"
-            className="assistant-citation"
-            title={`Show evidence: ${label}`}
-            aria-label={`Show evidence ${label}`}
-            onClick={() => onCite?.(part.evidenceId)}
-          >
-            {part.value}
-          </button>
-        );
-      })}
-    </div>
-  );
+function AssistantMessageText({ content }) {
+  return <div className="assistant-message-text">{stripAssistantCitationMarkers(content)}</div>;
 }
 
 function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequestHandled = null }) {
@@ -1624,15 +1597,6 @@ function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequest
     setShowCoach(false);
   }
 
-  function focusEvidence(evidenceId) {
-    const card = drawerRef.current?.querySelector(`[data-evidence-id="${CSS.escape(String(evidenceId || ""))}"]`);
-    if (!(card instanceof HTMLElement)) return;
-    card.classList.add("assistant-evidence-card-focus");
-    card.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    card.focus({ preventScroll: true });
-    window.setTimeout(() => card.classList.remove("assistant-evidence-card-focus"), 1600);
-  }
-
   function cancelInFlight() {
     abortRef.current?.abort();
   }
@@ -1800,7 +1764,7 @@ function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequest
           {messages.map((message) => <article className={`assistant-message ${message.role}`} key={message.id}>
             {message.role === "user" && message.context ? <small className="assistant-turn-context">Asked about {assistantContextLabel(message.context, (epoch) => formatDateTime(epoch, message.context.time_zone || timeZone))}</small> : null}
             {message.role === "assistant"
-              ? <AssistantMessageText content={message.content} evidence={message.evidence} onCite={focusEvidence} />
+              ? <AssistantMessageText content={message.content} />
               : <div className="assistant-message-text">{message.content}</div>}
             {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier" title={message.model || undefined}>{message.reasoningTier === "deep" ? "Took a closer look" : "Quick answer"}</small> : null}
             {message.evidence?.length ? <div className="assistant-evidence">

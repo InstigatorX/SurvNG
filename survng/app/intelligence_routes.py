@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .assistant import AssistantAnswer, AssistantChatRequest, AssistantEvidence, AssistantProvider, AssistantToolCall, IncidentVisualReviewer
+from .assistant import AssistantAnswer, AssistantChatRequest, AssistantEvidence, AssistantProvider, AssistantToolCall, IncidentVisualReviewer, strip_assistant_citation_markers
 from .assistant_investigation import correlate_incident_timeline
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, ai_provider_configured, motion_audit_interpretation, motion_paradigm_context, validate_tuning_value
 from .calibration import apply_calibration_changes, build_calibration_report, calibration_configuration_fingerprint, calibration_setting_value
@@ -1447,8 +1447,8 @@ class IntelligenceService:
 
     def _assistant_media_export_answer(self, evidence: AssistantEvidence) -> AssistantAnswer:
         if evidence.kind == 'media_export_clarification':
-            return AssistantAnswer(answer=f'{evidence.summary} [{evidence.evidence_id}]', citations=[evidence.evidence_id], suggestions=list(evidence.data.get('suggestions') or [])[:4])
-        return AssistantAnswer(answer=f'I started the requested export. It will appear here when the MP4 is ready, and you can leave this panel open while it runs. [{evidence.evidence_id}]', citations=[evidence.evidence_id], suggestions=[])
+            return AssistantAnswer(answer=strip_assistant_citation_markers(evidence.summary), citations=[evidence.evidence_id], suggestions=list(evidence.data.get('suggestions') or [])[:4])
+        return AssistantAnswer(answer='I started the requested export. It will appear here when the MP4 is ready, and you can leave this panel open while it runs.', citations=[evidence.evidence_id], suggestions=[])
 
     def _assistant_search_incidents(self, call: AssistantToolCall, time_zone: str, active_manager: AppManager) -> list[AssistantEvidence]:
         try:
