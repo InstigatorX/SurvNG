@@ -123,6 +123,27 @@
     grid-row: 2 !important;
   }
 
+  .camera-tile,
+  .camera-tile-chrome,
+  .camera-tile-name,
+  .camera-tile-name strong,
+  .camera-tile-time,
+  .camera-tile .camera-tile-poster,
+  .camera-tile video,
+  .camera-tile img,
+  .camera-open-target {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+    -webkit-touch-callout: none !important;
+  }
+
+  .camera-tile .camera-tile-poster,
+  .camera-tile .camera-live-layer,
+  .camera-tile video,
+  .camera-tile img {
+    pointer-events: none !important;
+  }
+
   .live-camera-grid,
   .camera-grid.live-camera-grid {
     gap: 4px !important;
