@@ -41,6 +41,9 @@ assert.match(livePageSource, /overlayMode/);
 assert.match(styles, /\.live-overlay\[data-phase="open"\]/);
 assert.match(styles, /\.live-overlay\[data-phase="closing"\]/);
 assert.match(styles, /@keyframes live-overlay-panel-in/);
+assert.match(styles, /-webkit-touch-callout:\s*none/);
+assert.match(livePageSource, /onContextMenu=\{blockBrowserHoldMenu\}/);
+assert.match(livePageSource, /selectstart/);
 assert.match(contract, /Press-and-hold/);
 
 console.log("live camera hold preview tests passed");

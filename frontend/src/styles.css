@@ -2767,11 +2767,26 @@ button.status-pill.hud-toggle:disabled {
   padding: 0;
   cursor: pointer;
   touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
 }
 
 .camera-open-target:focus-visible {
   outline: 2px solid var(--active-ink);
   outline-offset: -2px;
+}
+
+.camera-tile .video-frame,
+.camera-tile .camera-tile-poster,
+.camera-tile .camera-live-layer,
+.camera-tile video,
+.camera-tile img {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
 }
 
 .camera-tile[data-hold-preview="pending"] .video-frame,

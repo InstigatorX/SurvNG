@@ -66,6 +66,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   const hoverTimerRef = useRef(null);
   const holdPreviewRef = useRef(null);
   const suppressOpenClickRef = useRef(false);
+  const openTargetRef = useRef(null);
   const tileWasVisibleRef = useRef(true);
   const [tileVisible, setTileVisible] = useState(true);
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
@@ -120,15 +121,22 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
     return hold;
   }
 
+  function suppressBrowserHoldUi() {
+    const selection = window.getSelection?.();
+    selection?.removeAllRanges?.();
+  }
+
   function beginHoldPreview(event) {
     if (!shouldArmLiveCameraHoldPreview({ mobileView, pointerType: event.pointerType })) return;
     if (typeof event.button === "number" && event.button !== 0) return;
     clearHoldPreviewArm();
+    suppressBrowserHoldUi();
     const pointerId = event.pointerId;
     const timer = window.setTimeout(() => {
       const current = holdPreviewRef.current;
       if (!current || current.pointerId !== pointerId) return;
       current.opened = true;
+      suppressBrowserHoldUi();
       setHoldPreviewState("active");
       onPreviewOpen?.(camera);
     }, LIVE_CAMERA_HOLD_PREVIEW_MS);
@@ -146,6 +154,29 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
       // Some browsers reject capture during scrolling; window listeners still close preview.
     }
   }
+
+  function blockBrowserHoldMenu(event) {
+    event.preventDefault();
+    suppressBrowserHoldUi();
+  }
+
+  function bindOpenTarget(node) {
+    if (openTargetRef.current && openTargetRef.current !== node) {
+      openTargetRef.current.removeEventListener("selectstart", blockBrowserHoldMenu);
+      openTargetRef.current.removeEventListener("dragstart", blockBrowserHoldMenu);
+    }
+    openTargetRef.current = node;
+    if (!node) return;
+    node.addEventListener("selectstart", blockBrowserHoldMenu);
+    node.addEventListener("dragstart", blockBrowserHoldMenu);
+  }
+
+  useEffect(() => () => {
+    const node = openTargetRef.current;
+    if (!node) return;
+    node.removeEventListener("selectstart", blockBrowserHoldMenu);
+    node.removeEventListener("dragstart", blockBrowserHoldMenu);
+  }, []);
 
   function moveHoldPreview(event) {
     const hold = holdPreviewRef.current;
@@ -477,12 +508,14 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
         )}
         <button
           type="button"
+          ref={bindOpenTarget}
           className="camera-open-target media-surface-action"
           onClick={openCameraFromTarget}
           onPointerDown={beginHoldPreview}
           onPointerMove={moveHoldPreview}
           onPointerUp={endHoldPreview}
           onPointerCancel={endHoldPreview}
+          onContextMenu={blockBrowserHoldMenu}
           aria-label={mobileView ? `Open ${camera.name} live view. Press and hold to preview.` : `Open ${camera.name} live view`}
         />
         <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
