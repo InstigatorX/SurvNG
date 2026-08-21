@@ -59,20 +59,32 @@ the `survng-buildkit-state` volume. Later builds reuse that worker and cache.
 Only run it against trusted source. The resulting SurvNG application container
 is not privileged.
 
+### FFmpeg
+
+Both image targets install FFmpeg **8.1.2** from `ppa:ubuntuhandbook1/ffmpeg8`
+(`ffmpeg=10:8.1.2-0build1~ubuntu24.04`), held so apt cannot silently roll back
+to Noble's 6.1 package. Override `FFMPEG_VERSION` at build time only when
+intentionally qualifying a new build.
+
+```bash
+docker exec survng ffmpeg -version | head -1
+docker exec survng ffmpeg -hide_banner -hwaccels
+```
+
 ### Intel GPU userspace
 
 The Intel target uses Ubuntu 24.04 and pins the GPU userspace versions verified
-by this deployment: Intel compute runtime 26.22, IGC 2.36.3, Level Zero 1.28.6,
-media driver 26.2.2, and oneVPL 2.16. The kernel driver still comes from the
-Docker host through `/dev/dri`; it is never installed in the image. Update the
-version build arguments together and rebuild when intentionally qualifying a
-new Intel stack.
+on the prototype host: Intel compute runtime **26.27.39122.14**, IGC **2.38.5**,
+Level Zero **1.32.0**, media driver **26.2.2**, and oneVPL **2.16**. The kernel
+driver still comes from the Docker host through `/dev/dri`; it is never installed
+in the image. Update the version build arguments together and rebuild when
+intentionally qualifying a new Intel stack.
 
 After rebuilding, verify the installed packages and OpenVINO device discovery:
 
 ```bash
 docker exec survng dpkg-query -W \
-  intel-opencl-icd libigc2 libze-intel-gpu1 libze1 \
+  ffmpeg intel-opencl-icd libigc2 libze-intel-gpu1 libze1 \
   intel-media-va-driver-non-free libmfx-gen1.2 libvpl2
 
 docker exec survng /opt/survng-venv/bin/python -c \
