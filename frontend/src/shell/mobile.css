@@ -6,7 +6,9 @@
 @media (max-width: 760px) {
 
   .mobile-camera-picker,
-  .recordings-v2-cameras {
+  .recordings-v2-cameras,
+  .timeline-camera-picker,
+  .search-camera-list {
     display: none !important;
   }
 
@@ -72,6 +74,40 @@
   .live-mobile-camera-select {
     grid-column: 1 !important;
     width: min(210px, 66vw);
+  }
+
+  /* SMART SEARCH */
+  .search-commandbar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px !important;
+    min-height: 46px !important;
+    height: 46px !important;
+    padding: 4px 6px !important;
+  }
+
+  .search-commandbar > div:first-child,
+  .search-commandbar .semantic-status {
+    display: none !important;
+  }
+
+  .search-mobile-camera-select {
+    grid-column: 1 !important;
+    width: min(210px, 66vw);
+  }
+
+  .search-scope-panel {
+    display: block;
+    overflow: hidden;
+  }
+
+  .search-scope-heading {
+    display: none !important;
+  }
+
+  .search-scope-panel:not(:has(.search-history-panel)) {
+    display: none !important;
   }
 
   .live-camera-grid,
@@ -200,7 +236,7 @@
     display: none !important;
   }
 
-  .timeline-camera-picker {
+  .timeline-mobile-camera-select {
     grid-column: 1 !important;
     width: 100%;
     max-width: 210px;
@@ -389,7 +425,7 @@
 }
 
 @media (max-width: 430px) {
-  .timeline-camera-picker {
+  .timeline-mobile-camera-select {
     max-width: 148px;
   }
 
@@ -402,6 +438,10 @@
   }
 
   .live-mobile-camera-select {
+    width: min(190px, 66vw);
+  }
+
+  .search-mobile-camera-select {
     width: min(190px, 66vw);
   }
 }

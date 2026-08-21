@@ -47,6 +47,7 @@ import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
+import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
 import { usePollingData } from "../shared/polling.js";
 import { useAppEvents } from "../shared/events.js";
 
@@ -634,6 +635,15 @@ export function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   return <main className="search-page">
     <header className="search-commandbar">
       <div><Search size={18} /><span><strong>Smart Search</strong><small>Find incidents by describing what you remember</small></span></div>
+      <MobileCameraSelect
+        className="search-mobile-camera-select"
+        cameras={cameras}
+        value={cameraId}
+        onChange={selectCamera}
+        ariaLabel="Smart Search camera"
+        allOption={{ value: "", label: "All cameras" }}
+        disabled={loading}
+      />
       {setupError ? <button type="button" className="search-setup-retry" onClick={() => void loadSearchSetup()}><RefreshCcw size={15} />Retry status</button> : <span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span>}
     </header>
     <aside className="search-scope-panel">
@@ -1558,6 +1568,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange }) {
           cameras={cameras}
           value={activeCameraId}
           onChange={(nextCameraId) => { checkpointTimelineView(); setCameraId(nextCameraId); }}
+        />
+        <MobileCameraSelect
+          className="timeline-mobile-camera-select"
+          cameras={cameras}
+          value={activeCameraId}
+          onChange={(nextCameraId) => { checkpointTimelineView(); setCameraId(nextCameraId); }}
+          ariaLabel="Timeline camera"
         />
         <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
         <div className="recordings-commandbar-day-controls">{timelineDayControls()}</div>
