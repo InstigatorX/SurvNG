@@ -37,7 +37,7 @@ export function useViewportQuery(query) {
   return matches;
 }
 
-export function useModalFocus(onClose) {
+export function useModalFocus(onClose, { trapFocus = true } = {}) {
   const modalRef = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -48,19 +48,13 @@ export function useModalFocus(onClose) {
     const previousOverflow = document.body.style.overflow;
     const rootWasInert = root?.inert || false;
     const rootAriaHidden = root?.getAttribute("aria-hidden");
-    document.body.style.overflow = "hidden";
-    if (root) {
-      root.inert = true;
-      root.setAttribute("aria-hidden", "true");
-    }
-    window.requestAnimationFrame(() => (modal?.querySelector("[data-modal-initial]") || modal?.querySelector("button, [href], input, select, textarea"))?.focus());
     function onKeyDown(event) {
       if (event.key === "Escape") {
         event.preventDefault();
         closeRef.current?.();
         return;
       }
-      if (event.key !== "Tab" || !modal) return;
+      if (!trapFocus || event.key !== "Tab" || !modal) return;
       const controls = [...modal.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])')];
       if (!controls.length) return;
       const first = controls[0];
@@ -69,6 +63,15 @@ export function useModalFocus(onClose) {
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }
     document.addEventListener("keydown", onKeyDown);
+    if (!trapFocus) {
+      return () => document.removeEventListener("keydown", onKeyDown);
+    }
+    document.body.style.overflow = "hidden";
+    if (root) {
+      root.inert = true;
+      root.setAttribute("aria-hidden", "true");
+    }
+    window.requestAnimationFrame(() => (modal?.querySelector("[data-modal-initial]") || modal?.querySelector("button, [href], input, select, textarea"))?.focus());
     return () => {
       document.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
@@ -81,6 +84,6 @@ export function useModalFocus(onClose) {
         if (returnTarget instanceof HTMLElement && returnTarget.isConnected) returnTarget.focus();
       });
     };
-  }, []);
+  }, [trapFocus]);
   return modalRef;
 }

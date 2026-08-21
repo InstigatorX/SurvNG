@@ -38,6 +38,13 @@ import { WebRtcLive } from "../shared/media.jsx";
 import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
 import { IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
+import {
+  LIVE_CAMERA_HOLD_PREVIEW_MS,
+  LIVE_CAMERA_OVERLAY_MOTION_MS,
+  liveCameraHoldExceededMove,
+  shouldArmLiveCameraHoldPreview,
+  shouldSuppressLiveCameraOpenClick,
+} from "../liveCameraHoldPreview.mjs";
 
 export function mediaAspect(element) {
   const width = element?.videoWidth || element?.naturalWidth || 0;
@@ -53,10 +60,12 @@ export function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-export function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobileView = false, mobilePrimary = false }) {
+export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, onPreviewClose, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobileView = false, mobilePrimary = false }) {
   const tileRef = useRef(null);
   const controlMenuButtonRef = useRef(null);
   const hoverTimerRef = useRef(null);
+  const holdPreviewRef = useRef(null);
+  const suppressOpenClickRef = useRef(false);
   const tileWasVisibleRef = useRef(true);
   const [tileVisible, setTileVisible] = useState(true);
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
@@ -81,6 +90,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, 
   const [cameraActionError, setCameraActionError] = useState("");
   const [controlMenuOpen, setControlMenuOpen] = useState(false);
   const [hoverPreview, setHoverPreview] = useState(false);
+  const [holdPreviewState, setHoldPreviewState] = useState("");
   const [tileLiveReady, setTileLiveReady] = useState(false);
   const displayedTransport = hoverPreview ? "webrtc" : activeTransport;
   const shouldUseLiveMedia = liveMediaShouldRun({ running: camera.running, streamReady: hoverPreview || streamReady, mediaActive, transport: displayedTransport });
@@ -92,11 +102,105 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, 
     onAspectChange?.(camera.id, mediaAspectRatio(aspect));
   }, [aspect, camera.id, onAspectChange]);
 
-  useEffect(() => () => window.clearTimeout(hoverTimerRef.current), []);
+  useEffect(() => () => {
+    window.clearTimeout(hoverTimerRef.current);
+    window.clearTimeout(holdPreviewRef.current?.timer);
+  }, []);
 
   useEffect(() => {
     if (!shouldUseWebRtc) setTileLiveReady(false);
   }, [shouldUseWebRtc]);
+
+  function clearHoldPreviewArm() {
+    const hold = holdPreviewRef.current;
+    if (!hold) return null;
+    window.clearTimeout(hold.timer);
+    holdPreviewRef.current = null;
+    setHoldPreviewState("");
+    return hold;
+  }
+
+  function beginHoldPreview(event) {
+    if (!shouldArmLiveCameraHoldPreview({ mobileView, pointerType: event.pointerType })) return;
+    if (typeof event.button === "number" && event.button !== 0) return;
+    clearHoldPreviewArm();
+    const pointerId = event.pointerId;
+    const timer = window.setTimeout(() => {
+      const current = holdPreviewRef.current;
+      if (!current || current.pointerId !== pointerId) return;
+      current.opened = true;
+      setHoldPreviewState("active");
+      onPreviewOpen?.(camera);
+    }, LIVE_CAMERA_HOLD_PREVIEW_MS);
+    holdPreviewRef.current = {
+      pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      opened: false,
+      timer,
+    };
+    setHoldPreviewState("pending");
+    try {
+      event.currentTarget.setPointerCapture(pointerId);
+    } catch {
+      // Some browsers reject capture during scrolling; window listeners still close preview.
+    }
+  }
+
+  function moveHoldPreview(event) {
+    const hold = holdPreviewRef.current;
+    if (!hold || hold.pointerId !== event.pointerId || hold.opened) return;
+    if (!liveCameraHoldExceededMove(hold.startX, hold.startY, event.clientX, event.clientY)) return;
+    clearHoldPreviewArm();
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Capture may already be released when the gesture turned into a scroll.
+    }
+  }
+
+  function endHoldPreview(event) {
+    const hold = holdPreviewRef.current;
+    if (!hold || hold.pointerId !== event.pointerId) return;
+    const opened = hold.opened;
+    clearHoldPreviewArm();
+    if (!opened) return;
+    suppressOpenClickRef.current = true;
+    onPreviewClose?.();
+  }
+
+  function openCameraFromTarget(event) {
+    if (shouldSuppressLiveCameraOpenClick({
+      holdOpened: Boolean(holdPreviewRef.current?.opened),
+      suppressClick: suppressOpenClickRef.current,
+    })) {
+      suppressOpenClickRef.current = false;
+      event.preventDefault();
+      return;
+    }
+    onOpen(camera);
+  }
+
+  useEffect(() => {
+    if (!mobileView) return undefined;
+    function onGlobalPointerEnd(event) {
+      const hold = holdPreviewRef.current;
+      if (!hold || hold.pointerId !== event.pointerId) return;
+      const opened = hold.opened;
+      window.clearTimeout(hold.timer);
+      holdPreviewRef.current = null;
+      setHoldPreviewState("");
+      if (!opened) return;
+      suppressOpenClickRef.current = true;
+      onPreviewClose?.();
+    }
+    window.addEventListener("pointerup", onGlobalPointerEnd);
+    window.addEventListener("pointercancel", onGlobalPointerEnd);
+    return () => {
+      window.removeEventListener("pointerup", onGlobalPointerEnd);
+      window.removeEventListener("pointercancel", onGlobalPointerEnd);
+    };
+  }, [camera, mobileView, onPreviewClose]);
 
   useEffect(() => {
     if (!controlMenuOpen) return undefined;
@@ -306,6 +410,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, 
       data-motion-active={motionActive ? "true" : "false"}
       data-camera-id={camera.id}
       data-hover-preview={hoverPreview ? "true" : "false"}
+      data-hold-preview={holdPreviewState || undefined}
       onPointerEnter={beginHoverPreview}
       onPointerLeave={endHoverPreview}
       style={customLayout ? customStyle : layout ? {
@@ -370,7 +475,16 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, 
             ) : null}
           </>
         )}
-        <button type="button" className="camera-open-target media-surface-action" onClick={() => onOpen(camera)} aria-label={`Open ${camera.name} live view`} />
+        <button
+          type="button"
+          className="camera-open-target media-surface-action"
+          onClick={openCameraFromTarget}
+          onPointerDown={beginHoldPreview}
+          onPointerMove={moveHoldPreview}
+          onPointerUp={endHoldPreview}
+          onPointerCancel={endHoldPreview}
+          aria-label={mobileView ? `Open ${camera.name} live view. Press and hold to preview.` : `Open ${camera.name} live view`}
+        />
         <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
         {controlMenuOpen ? <div className="camera-tile-control-menu" role="group" aria-label={`${camera.name} controls`}>
           <div className="tile-controls">
@@ -444,8 +558,9 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, 
   );
 }
 
-export function LiveCameraOverlay({ camera, timeZone, onClose }) {
-  const modalRef = useModalFocus(onClose);
+export function LiveCameraOverlay({ camera, timeZone, onClose, onClosed, mode = "sticky", phase = "open" }) {
+  const preview = mode === "preview";
+  const modalRef = useModalFocus(onClose, { trapFocus: !preview });
   const [source, setSource] = useStoredState(
     `survng.liveOverlaySource.${camera.id}`,
     preferredStreamSource(),
@@ -455,6 +570,7 @@ export function LiveCameraOverlay({ camera, timeZone, onClose }) {
   const activeSource = source === "main" ? "main" : "live";
   const [deliveredSource, setDeliveredSource] = useState(activeSource);
   const [aspect, setAspect] = useState(() => initialCameraAspect(camera, activeSource, browserStorage(window)));
+  const closeFinishedRef = useRef(false);
 
   useEffect(() => {
     setMediaReady(false);
@@ -469,6 +585,20 @@ export function LiveCameraOverlay({ camera, timeZone, onClose }) {
     if (authoritativeOverlayAspect) setAspect(authoritativeOverlayAspect);
   }, [authoritativeOverlayAspect]);
 
+  useEffect(() => {
+    closeFinishedRef.current = false;
+  }, [camera.id, mode]);
+
+  useEffect(() => {
+    if (phase !== "closing") return undefined;
+    const timer = window.setTimeout(() => {
+      if (closeFinishedRef.current) return;
+      closeFinishedRef.current = true;
+      onClosed?.();
+    }, LIVE_CAMERA_OVERLAY_MOTION_MS);
+    return () => window.clearTimeout(timer);
+  }, [onClosed, phase]);
+
   function rememberAspect(media, sourceName = activeSource) {
     const nextAspect = mediaAspect(media);
     if (!cameraSourceAspect(camera, sourceName)) setAspect(nextAspect);
@@ -479,9 +609,26 @@ export function LiveCameraOverlay({ camera, timeZone, onClose }) {
     );
   }
 
+  function handleMotionEnd(event) {
+    if (phase !== "closing") return;
+    if (!String(event.animationName || "").includes("live-overlay-panel-out")) return;
+    if (closeFinishedRef.current) return;
+    closeFinishedRef.current = true;
+    onClosed?.();
+  }
+
   return createPortal((
-    <div ref={modalRef} className="live-overlay" role="dialog" aria-modal="true" aria-label={`${camera.name} full live view`}>
-      <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close live view" />
+    <div
+      ref={modalRef}
+      className="live-overlay"
+      data-mode={mode}
+      data-phase={phase}
+      role="dialog"
+      aria-modal={preview ? undefined : "true"}
+      aria-label={preview ? `${camera.name} live preview` : `${camera.name} full live view`}
+      onAnimationEnd={handleMotionEnd}
+    >
+      <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close live view" tabIndex={preview ? -1 : undefined} />
       <section
         className="live-overlay-panel"
         style={{
@@ -498,14 +645,19 @@ export function LiveCameraOverlay({ camera, timeZone, onClose }) {
               <span className="live-transport-badge" aria-label={`Stream transport ${liveTransportLabel(transport)}`}>
                 {liveTransportLabel(transport)}
               </span>
+              {preview ? <span className="live-preview-hint">Release to close</span> : null}
             </div>
           </div>
-          <button type="button" className="tile-control-button" onClick={() => setSource(activeSource === "main" ? "live" : "main")} aria-label="Switch live stream">
-            <Radio size={15} /> {sourceLabel(activeSource)}
-          </button>
-          <button type="button" className="tile-control-button icon-only" data-modal-initial onClick={onClose} aria-label="Close live view">
-            <X size={18} />
-          </button>
+          {preview ? null : (
+            <button type="button" className="tile-control-button" onClick={() => setSource(activeSource === "main" ? "live" : "main")} aria-label="Switch live stream">
+              <Radio size={15} /> {sourceLabel(activeSource)}
+            </button>
+          )}
+          {preview ? null : (
+            <button type="button" className="tile-control-button icon-only" data-modal-initial onClick={onClose} aria-label="Close live view">
+              <X size={18} />
+            </button>
+          )}
         </div>
         <div className="live-overlay-media" style={liveFramingStyle(camera, deliveredSource)}>
           {!mediaReady ? (
@@ -519,7 +671,7 @@ export function LiveCameraOverlay({ camera, timeZone, onClose }) {
             source={activeSource}
             timeZone={timeZone}
             muted
-            controls
+            controls={!preview}
             onStageChange={(nextTransport, nextSource) => {
               setTransport(nextTransport);
               setDeliveredSource(nextSource);
@@ -601,6 +753,10 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
   } = useIncidentDetails();
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [expandedCamera, setExpandedCamera] = useState(null);
+  const [overlayMode, setOverlayMode] = useState("sticky");
+  const [overlayPhase, setOverlayPhase] = useState("closed");
+  const overlayModeRef = useRef("sticky");
+  const ignoreStickyOpenUntilRef = useRef(0);
   const [liveDefaultsReady, setLiveDefaultsReady] = useState(false);
   const [liveDefaultsInstance, setLiveDefaultsInstance] = useState("");
   const linkedCameraIdRef = useRef(new URLSearchParams(window.location.search).get("camera") || "");
@@ -690,6 +846,52 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     ));
   }, []);
 
+  const clearExpandedCamera = React.useCallback(() => {
+    setExpandedCamera(null);
+    overlayModeRef.current = "sticky";
+    setOverlayMode("sticky");
+    setOverlayPhase("closed");
+  }, []);
+
+  const openExpandedCamera = React.useCallback((camera, mode = "sticky") => {
+    if (!camera) return;
+    const nextMode = mode === "preview" ? "preview" : "sticky";
+    overlayModeRef.current = nextMode;
+    setExpandedCamera(camera);
+    setOverlayMode(nextMode);
+    setOverlayPhase("open");
+  }, []);
+
+  const closeExpandedCamera = React.useCallback(() => {
+    if (overlayModeRef.current === "preview") {
+      ignoreStickyOpenUntilRef.current = Date.now() + 450;
+    }
+    setOverlayPhase((current) => {
+      if (current === "closing" || current === "closed") return current;
+      return "closing";
+    });
+  }, []);
+
+  const openStickyLiveCamera = React.useCallback((camera) => {
+    if (Date.now() < ignoreStickyOpenUntilRef.current) return;
+    openExpandedCamera(camera, "sticky");
+  }, [openExpandedCamera]);
+
+  useEffect(() => {
+    if (overlayMode !== "preview" || overlayPhase !== "open") return undefined;
+    function endPreview() {
+      closeExpandedCamera();
+    }
+    window.addEventListener("pointerup", endPreview);
+    window.addEventListener("pointercancel", endPreview);
+    window.addEventListener("blur", endPreview);
+    return () => {
+      window.removeEventListener("pointerup", endPreview);
+      window.removeEventListener("pointercancel", endPreview);
+      window.removeEventListener("blur", endPreview);
+    };
+  }, [closeExpandedCamera, overlayMode, overlayPhase]);
+
   useLayoutEffect(() => {
     const grid = liveCameraGridRef.current;
     if (!grid) return undefined;
@@ -719,7 +921,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
       const instanceId = String(payload.instance_id || "");
       if (!instanceId) return;
       const reset = resetLiveDefaultsForServer(browserStorage(window), instanceId);
-      if (reset) setExpandedCamera(null);
+      if (reset) clearExpandedCamera();
       setLiveDefaultsInstance(instanceId);
     } catch {
       // A reconnecting server is expected to be temporarily unavailable.
@@ -731,9 +933,9 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     const linkedCameraId = linkedCameraIdRef.current;
     if (!linkedCameraId || !cameras.length) return;
     const linkedCamera = cameras.find((camera) => camera.id === linkedCameraId);
-    if (linkedCamera) setExpandedCamera(linkedCamera);
+    if (linkedCamera) openExpandedCamera(linkedCamera, "sticky");
     linkedCameraIdRef.current = "";
-  }, [cameras]);
+  }, [cameras, openExpandedCamera]);
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
   const incidentObjectOptions = incidentFacets.labels || [];
@@ -1242,7 +1444,9 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
               camera={camera}
               timeZone={timeZone}
               refresh={refreshBase}
-              onOpen={setExpandedCamera}
+              onOpen={openStickyLiveCamera}
+              onPreviewOpen={(camera) => openExpandedCamera(camera, "preview")}
+              onPreviewClose={closeExpandedCamera}
               onAspectChange={updateLiveCameraAspect}
               layout={effectiveLayoutMode === "auto" ? liveCameraLayoutById.get(camera.id) : null}
               customLayout={effectiveLayoutMode === "custom"}
@@ -1347,7 +1551,16 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
         </div>
       </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
-      {expandedCamera ? <LiveCameraOverlay camera={expandedCamera} timeZone={timeZone} onClose={() => setExpandedCamera(null)} /> : null}
+      {expandedCamera ? (
+        <LiveCameraOverlay
+          camera={expandedCamera}
+          timeZone={timeZone}
+          mode={overlayMode}
+          phase={overlayPhase}
+          onClose={closeExpandedCamera}
+          onClosed={clearExpandedCamera}
+        />
+      ) : null}
     </main>
   );
 }
