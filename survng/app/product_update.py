@@ -126,7 +126,7 @@ class ProductUpdateService:
         self._configured_root = repo_root
         self._request_server_restart = request_server_restart
         self._active_storage_tasks = active_storage_tasks or (lambda: ())
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._state: dict[str, Any] = {"status": "idle"}
         self._thread: threading.Thread | None = None
 

@@ -49,6 +49,7 @@ def _init_survng_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "SurvNG"
     repo.mkdir()
     (repo / "survng").mkdir()
+    (repo / "survng" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "requirements.txt").write_text("# test\n", encoding="utf-8")
     _git(repo, "init")
     _git(repo, "config", "user.email", "test@example.com")
