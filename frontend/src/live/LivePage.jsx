@@ -116,6 +116,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
     const hold = holdPreviewRef.current;
     if (!hold) return null;
     window.clearTimeout(hold.timer);
+    if (hold.selectionTimer) window.clearInterval(hold.selectionTimer);
     holdPreviewRef.current = null;
     setHoldPreviewState("");
     return hold;
@@ -124,14 +125,17 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   function suppressBrowserHoldUi() {
     const selection = window.getSelection?.();
     selection?.removeAllRanges?.();
+    try {
+      document.activeElement?.blur?.();
+    } catch {
+      // Ignore hosts that reject blur during gesture handling.
+    }
   }
 
-  function beginHoldPreview(event) {
-    if (!shouldArmLiveCameraHoldPreview({ mobileView, pointerType: event.pointerType })) return;
-    if (typeof event.button === "number" && event.button !== 0) return;
+  function armHoldPreview({ pointerId, startX, startY, currentTarget = null, capturePointer = false } = {}) {
     clearHoldPreviewArm();
     suppressBrowserHoldUi();
-    const pointerId = event.pointerId;
+    const selectionTimer = window.setInterval(suppressBrowserHoldUi, 50);
     const timer = window.setTimeout(() => {
       const current = holdPreviewRef.current;
       if (!current || current.pointerId !== pointerId) return;
@@ -142,17 +146,34 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
     }, LIVE_CAMERA_HOLD_PREVIEW_MS);
     holdPreviewRef.current = {
       pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
+      startX,
+      startY,
       opened: false,
       timer,
+      selectionTimer,
+      fromTouch: !capturePointer,
     };
     setHoldPreviewState("pending");
+    if (!capturePointer || !currentTarget) return;
     try {
-      event.currentTarget.setPointerCapture(pointerId);
+      currentTarget.setPointerCapture(pointerId);
     } catch {
       // Some browsers reject capture during scrolling; window listeners still close preview.
     }
+  }
+
+  function beginHoldPreview(event) {
+    if (!shouldArmLiveCameraHoldPreview({ mobileView, pointerType: event.pointerType })) return;
+    if (typeof event.button === "number" && event.button !== 0) return;
+    // Touch gestures are owned by non-passive touch listeners so iOS callout can be canceled.
+    if (event.pointerType === "touch") return;
+    armHoldPreview({
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      currentTarget: event.currentTarget,
+      capturePointer: true,
+    });
   }
 
   function blockBrowserHoldMenu(event) {
@@ -160,15 +181,60 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
     suppressBrowserHoldUi();
   }
 
+  function onOpenTargetTouchStart(event) {
+    if (!mobileView || event.touches.length !== 1) return;
+    // Required to stop iOS hard-press cut/paste / callout on the tile surface.
+    event.preventDefault();
+    const touch = event.touches[0];
+    armHoldPreview({
+      pointerId: touch.identifier,
+      startX: touch.clientX,
+      startY: touch.clientY,
+    });
+  }
+
+  function onOpenTargetTouchMove(event) {
+    const hold = holdPreviewRef.current;
+    if (!hold || hold.opened || !event.touches.length) return;
+    const touch = event.touches[0];
+    if (hold.pointerId !== touch.identifier) return;
+    if (!liveCameraHoldExceededMove(hold.startX, hold.startY, touch.clientX, touch.clientY)) return;
+    clearHoldPreviewArm();
+  }
+
+  function onOpenTargetTouchEnd(event) {
+    const hold = holdPreviewRef.current;
+    if (!hold) return;
+    event.preventDefault();
+    const opened = hold.opened;
+    clearHoldPreviewArm();
+    if (opened) {
+      suppressOpenClickRef.current = true;
+      onPreviewClose?.();
+      return;
+    }
+    // touchstart preventDefault suppresses the synthetic click; open sticky on tap here.
+    onOpen(camera);
+  }
+
   function bindOpenTarget(node) {
     if (openTargetRef.current && openTargetRef.current !== node) {
-      openTargetRef.current.removeEventListener("selectstart", blockBrowserHoldMenu);
-      openTargetRef.current.removeEventListener("dragstart", blockBrowserHoldMenu);
+      const previous = openTargetRef.current;
+      previous.removeEventListener("selectstart", blockBrowserHoldMenu);
+      previous.removeEventListener("dragstart", blockBrowserHoldMenu);
+      previous.removeEventListener("touchstart", onOpenTargetTouchStart);
+      previous.removeEventListener("touchmove", onOpenTargetTouchMove);
+      previous.removeEventListener("touchend", onOpenTargetTouchEnd);
+      previous.removeEventListener("touchcancel", onOpenTargetTouchEnd);
     }
     openTargetRef.current = node;
     if (!node) return;
     node.addEventListener("selectstart", blockBrowserHoldMenu);
     node.addEventListener("dragstart", blockBrowserHoldMenu);
+    node.addEventListener("touchstart", onOpenTargetTouchStart, { passive: false });
+    node.addEventListener("touchmove", onOpenTargetTouchMove, { passive: true });
+    node.addEventListener("touchend", onOpenTargetTouchEnd, { passive: false });
+    node.addEventListener("touchcancel", onOpenTargetTouchEnd, { passive: false });
   }
 
   useEffect(() => () => {
@@ -176,11 +242,33 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
     if (!node) return;
     node.removeEventListener("selectstart", blockBrowserHoldMenu);
     node.removeEventListener("dragstart", blockBrowserHoldMenu);
+    node.removeEventListener("touchstart", onOpenTargetTouchStart);
+    node.removeEventListener("touchmove", onOpenTargetTouchMove);
+    node.removeEventListener("touchend", onOpenTargetTouchEnd);
+    node.removeEventListener("touchcancel", onOpenTargetTouchEnd);
   }, []);
+
+  useEffect(() => {
+    if (!holdPreviewState) return undefined;
+    function blockDuringHold(event) {
+      event.preventDefault();
+      suppressBrowserHoldUi();
+    }
+    document.addEventListener("selectstart", blockDuringHold, true);
+    document.addEventListener("selectionchange", suppressBrowserHoldUi, true);
+    document.addEventListener("contextmenu", blockDuringHold, true);
+    document.addEventListener("gesturestart", blockDuringHold, true);
+    return () => {
+      document.removeEventListener("selectstart", blockDuringHold, true);
+      document.removeEventListener("selectionchange", suppressBrowserHoldUi, true);
+      document.removeEventListener("contextmenu", blockDuringHold, true);
+      document.removeEventListener("gesturestart", blockDuringHold, true);
+    };
+  }, [holdPreviewState]);
 
   function moveHoldPreview(event) {
     const hold = holdPreviewRef.current;
-    if (!hold || hold.pointerId !== event.pointerId || hold.opened) return;
+    if (!hold || hold.pointerId !== event.pointerId || hold.opened || hold.fromTouch) return;
     if (!liveCameraHoldExceededMove(hold.startX, hold.startY, event.clientX, event.clientY)) return;
     clearHoldPreviewArm();
     try {
@@ -192,7 +280,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
 
   function endHoldPreview(event) {
     const hold = holdPreviewRef.current;
-    if (!hold || hold.pointerId !== event.pointerId) return;
+    if (!hold || hold.pointerId !== event.pointerId || hold.fromTouch) return;
     const opened = hold.opened;
     clearHoldPreviewArm();
     if (!opened) return;
@@ -216,11 +304,9 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
     if (!mobileView) return undefined;
     function onGlobalPointerEnd(event) {
       const hold = holdPreviewRef.current;
-      if (!hold || hold.pointerId !== event.pointerId) return;
+      if (!hold || hold.fromTouch || hold.pointerId !== event.pointerId) return;
       const opened = hold.opened;
-      window.clearTimeout(hold.timer);
-      holdPreviewRef.current = null;
-      setHoldPreviewState("");
+      clearHoldPreviewArm();
       if (!opened) return;
       suppressOpenClickRef.current = true;
       onPreviewClose?.();
@@ -482,6 +568,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
               style={liveFramingStyle(camera, posterSource)}
               src={imageUrl}
               alt={`${camera.name} ${sourceMode === "main" ? "main" : "sub"} live stream`}
+              draggable={false}
               onLoad={(event) => rememberAspect(
                 event.currentTarget,
                 posterSource,
