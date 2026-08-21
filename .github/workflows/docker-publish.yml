@@ -37,6 +37,7 @@ jobs:
 
       - name: Build and push
         env:
+          DOCKER_BUILDKIT: "1"
           IMAGE_TAG: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
           SUFFIX: ${{ matrix.suffix }}
