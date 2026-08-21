@@ -54,9 +54,72 @@ def resolve_repo_root(start: Path | None = None) -> Path | None:
             if path in seen:
                 continue
             seen.add(path)
-            if (path / ".git").exists() and (path / "survng").is_dir():
+            if _looks_like_survng_checkout(path) and _git_is_work_tree(path):
                 return path
     return None
+
+
+def _looks_like_survng_checkout(path: Path) -> bool:
+    return (path / ".git").exists() and (path / "survng").is_dir()
+
+
+def _git_executable() -> str | None:
+    return shutil.which("git")
+
+
+def _git_command(repo_root: Path, args: Sequence[str]) -> list[str]:
+    git = _git_executable()
+    if git is None:
+        raise FileNotFoundError("git")
+    # SurvNG owns this checkout path; allow the service user to inspect it even
+    # when directory ownership does not match the process user.
+    return [
+        git,
+        "-c",
+        f"safe.directory={repo_root}",
+        *args,
+    ]
+
+
+def _git_is_work_tree(repo_root: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            _git_command(repo_root, ["rev-parse", "--is-inside-work-tree"]),
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == "true"
+
+
+def _format_git_failure(error: BaseException) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "Git is not installed or not on PATH for the SurvNG service."
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "Git timed out while inspecting the SurvNG checkout."
+    if isinstance(error, subprocess.CalledProcessError):
+        detail = (error.stderr or error.stdout or "").strip() or str(error)
+        lines = [line.strip() for line in detail.splitlines() if line.strip()]
+        detail = lines[-1] if lines else str(error)
+        if detail.lower().startswith("fatal: "):
+            detail = detail[7:]
+        lowered = detail.lower()
+        if "dubious ownership" in lowered:
+            return (
+                "Git blocked the SurvNG checkout due to directory ownership. "
+                "Fix checkout ownership for the service user, or set SURVNG_REPO_ROOT."
+            )
+        if "not a git repository" in lowered:
+            return (
+                "SurvNG could not open a valid Git checkout. Set SURVNG_REPO_ROOT "
+                "to the repository root that contains .git and survng/."
+            )
+        return detail
+    return str(error)
 
 
 def _run_git(
@@ -67,7 +130,7 @@ def _run_git(
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        _git_command(repo_root, args),
         cwd=repo_root,
         check=check,
         capture_output=True,
@@ -169,7 +232,11 @@ class ProductUpdateService:
             )
 
         if repo_root is None:
-            if mode == "docker":
+            if _git_executable() is None:
+                payload["message"] = (
+                    "Git is not installed or not on PATH for the SurvNG service."
+                )
+            elif mode == "docker":
                 payload["message"] = (
                     "This Docker image is immutable. Run "
                     "scripts/update-from-git.sh on the host checkout, or set "
@@ -177,8 +244,9 @@ class ProductUpdateService:
                 )
             else:
                 payload["message"] = (
-                    "SurvNG is not running from a Git checkout, so in-app "
-                    "updates are unavailable."
+                    "SurvNG is not running from a readable Git checkout. "
+                    "Set SURVNG_REPO_ROOT to the repository root, or use "
+                    "scripts/update-from-git.sh on the host."
                 )
             return payload
 
@@ -289,7 +357,9 @@ class ProductUpdateService:
                 )
         except (OSError, subprocess.SubprocessError, ValueError) as error:
             LOGGER.warning("product update status failed: %s", error)
-            payload["message"] = f"Unable to inspect Git state: {error}"
+            payload["message"] = (
+                f"Unable to inspect Git state: {_format_git_failure(error)}"
+            )
             payload["can_update"] = False
         return payload
 
