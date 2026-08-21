@@ -79,6 +79,7 @@ from .semantic_routes import (
 )
 from .object_tracking import ultralytics_fasttrack_dependency_status
 from .operations_routes import OperationsRouteDependencies, create_operations_router
+from .product_update import ProductUpdateService
 from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .system_telemetry import (
     SystemTelemetryDependencies,
@@ -131,6 +132,10 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+PRODUCT_UPDATE = ProductUpdateService(
+    request_server_restart=lambda: _request_server_restart(),
+    active_storage_tasks=lambda: _active_storage_tasks(get_manager()),
+)
 MODEL_EVALUATION = ModelEvaluationRunner(get_manager, lambda: config)
 SERVER_RESTART_LOCK = threading.Lock()
 SERVER_RESTART_SCHEDULED = False
@@ -941,6 +946,7 @@ app.include_router(
             log_rows=lambda: tuple(LOG_LINES),
             storage_maintenance=STORAGE_MAINTENANCE,
             request_server_restart=_request_server_restart,
+            product_update=PRODUCT_UPDATE,
         )
     )
 )

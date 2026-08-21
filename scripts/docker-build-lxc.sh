@@ -57,10 +57,13 @@ for attempt in {1..30}; do
   sleep 1
 done
 
+GIT_SHA="${SURVNG_GIT_SHA:-$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)}"
+
 docker buildx inspect "$BUILDER_NAME" --bootstrap
 docker buildx build \
   --builder "$BUILDER_NAME" \
   --target "$TARGET" \
+  --build-arg "SURVNG_GIT_SHA=${GIT_SHA}" \
   --load \
   --tag "$IMAGE_NAME" \
   "$REPO_DIR"

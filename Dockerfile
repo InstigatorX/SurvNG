@@ -37,6 +37,8 @@ RUN apt-get update \
     && python3 -m venv /opt/survng-venv
 
 WORKDIR /app
+ARG SURVNG_GIT_SHA=
+ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
@@ -46,6 +48,7 @@ COPY config.example.json /usr/share/survng/config.example.json
 COPY docker/config.example.json /usr/share/survng/config.docker.example.json
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/survng-entrypoint
 COPY --from=frontend /build/survng/static/ ./survng/static/
+RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi
 
 RUN mkdir -p /config /data /models \
     && chown survng:survng /config /data /models

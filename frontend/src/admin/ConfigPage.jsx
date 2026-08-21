@@ -3486,6 +3486,9 @@ export function RetentionSummary({ status }) {
 export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
+  const [productUpdate, setProductUpdate] = useState(null);
+  const [productUpdateBusy, setProductUpdateBusy] = useState(false);
+  const [productUpdateError, setProductUpdateError] = useState("");
   const [apiTokenDraft, setApiTokenDraft] = useState({ id: "", name: "", scopes: ["read"] });
   const [apiTokenSecret, setApiTokenSecret] = useState("");
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
@@ -3745,6 +3748,90 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
     }
   }
 
+  async function loadProductUpdate(refreshRemote = false) {
+    setProductUpdateError("");
+    try {
+      const response = await fetch(`/api/system/update?refresh_remote=${refreshRemote ? "true" : "false"}`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Unable to load update status.");
+      setProductUpdate(payload);
+      return payload;
+    } catch (error) {
+      setProductUpdateError(error.message || "Unable to load update status.");
+      return null;
+    }
+  }
+
+  async function waitForUpdatedInstance(previousInstance) {
+    const deadline = Date.now() + 180_000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+      try {
+        const statusResponse = await fetch(`/api/system/status?update_check=${Date.now()}`, { cache: "no-store" });
+        if (!statusResponse.ok) continue;
+        const status = await statusResponse.json();
+        if (previousInstance && String(status.instance_id || "") === previousInstance) continue;
+        window.location.reload();
+        return true;
+      } catch {
+        // Expected while SurvNG restarts after applying the update.
+      }
+    }
+    return false;
+  }
+
+  async function applyProductUpdate() {
+    if (productUpdateBusy) return;
+    const pending = Number(productUpdate?.behind_count || 0);
+    const confirmText = pending > 0
+      ? `Update SurvNG with ${pending} commit${pending === 1 ? "" : "s"} from Git, then restart? Live view and detection will be briefly unavailable.`
+      : "Update SurvNG from Git and restart? Live view and detection will be briefly unavailable.";
+    if (!window.confirm(confirmText)) return;
+    setProductUpdateBusy(true);
+    setProductUpdateError("");
+    try {
+      const previousInstanceResponse = await fetch("/api/system/status", { cache: "no-store" });
+      const previousStatus = previousInstanceResponse.ok ? await previousInstanceResponse.json() : {};
+      const previousInstance = String(previousStatus.instance_id || "");
+      const response = await fetch("/api/system/update", { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Unable to start product update.");
+      setProductUpdate(payload);
+      const deadline = Date.now() + 900_000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+        const latest = await loadProductUpdate(false);
+        const jobStatus = latest?.status || latest?.job?.status;
+        if (jobStatus === "restarting") {
+          const restarted = await waitForUpdatedInstance(previousInstance);
+          if (!restarted) setProductUpdateError("Update applied, but SurvNG is taking longer than expected to come back. Refresh this page shortly.");
+          return;
+        }
+        if (jobStatus === "complete") {
+          window.location.reload();
+          return;
+        }
+        if (jobStatus === "failed") {
+          throw new Error(latest?.job?.error || latest?.message || "Product update failed.");
+        }
+      }
+      setProductUpdateError("Update is taking longer than expected. Check Admin → Logs, then refresh.");
+    } catch (error) {
+      setProductUpdateError(error.message || "Unable to update SurvNG.");
+    } finally {
+      setProductUpdateBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (section !== "general") return undefined;
+    let cancelled = false;
+    void loadProductUpdate(false).then((payload) => {
+      if (cancelled || !payload) return;
+    });
+    return () => { cancelled = true; };
+  }, [section]);
+
   function toggleApiTokenScope(scope) {
     setApiTokenDraft((current) => ({
       ...current,
@@ -3819,9 +3906,40 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           <p className="admin-action-note">Timezone and theme apply immediately in this browser. Web Base Path is included in Save settings.</p>
           <label>Web Base Path<input value={config.base_path ?? "/survng"} onChange={(event) => updateConfig(["base_path"], event.target.value)} placeholder="/survng" /></label>
           <div className="preference-action general-server-actions">
-            <span><strong>Browser &amp; server actions</strong><small>These actions apply immediately and are not included in Save settings.</small></span>
+            <span>
+              <strong>Browser &amp; server actions</strong>
+              <small>
+                These actions apply immediately and are not included in Save settings.
+                {productUpdate?.current_short_sha
+                  ? ` Running ${productUpdate.current_short_sha}${productUpdate.branch ? ` on ${productUpdate.branch}` : ""}.`
+                  : ""}
+              </small>
+            </span>
             <div className="preference-action-buttons">
               <button type="button" onClick={resetLiveCameraOrder}><RotateCcw size={15} /> Reset Order</button>
+              <button
+                type="button"
+                onClick={() => void loadProductUpdate(true)}
+                disabled={productUpdateBusy || ["running", "restarting"].includes(productUpdate?.status)}
+              >
+                <RefreshCcw size={15} />
+                Check for Updates
+              </button>
+              <button
+                type="button"
+                onClick={() => void applyProductUpdate()}
+                disabled={productUpdateBusy || !productUpdate?.can_update}
+                title={productUpdate?.message || "Update SurvNG from Git"}
+              >
+                {productUpdateBusy || ["running", "restarting"].includes(productUpdate?.status)
+                  ? <RefreshCcw className="spin" size={15} />
+                  : <Download size={15} />}
+                {productUpdateBusy || ["running", "restarting"].includes(productUpdate?.status)
+                  ? (productUpdate?.job?.phase || "Updating...")
+                  : productUpdate?.behind_count
+                    ? `Update (${productUpdate.behind_count})`
+                    : "Update"}
+              </button>
               <button type="button" className="danger" onClick={restartServer} disabled={["requesting", "waiting"].includes(serverRestart.state)}>
                 {serverRestart.state === "requesting" || serverRestart.state === "waiting" ? <RefreshCcw className="spin" size={15} /> : <Power size={15} />}
                 Restart Server
@@ -3829,6 +3947,15 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
           </div>
           {liveOrderReset ? <span className="preference-status"><CircleDot size={13} /> Reset for this browser</span> : null}
+          {productUpdate?.message ? <span className="preference-status" role="status">{productUpdate.message}</span> : null}
+          {productUpdate?.commits_behind?.length ? (
+            <ul className="preference-status product-update-commits">
+              {productUpdate.commits_behind.slice(0, 5).map((commit) => (
+                <li key={commit.sha}><code>{commit.sha}</code> {commit.subject}</li>
+              ))}
+            </ul>
+          ) : null}
+          {productUpdateError ? <span className="preference-status error" role="status">{productUpdateError}</span> : null}
           {serverRestart.text ? <span className={`preference-status ${serverRestart.state === "error" ? "error" : ""}`} role="status">{serverRestart.text}</span> : null}
         </div>
       ) : null}

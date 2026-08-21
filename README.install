@@ -337,6 +337,33 @@ SurvNG is installed from the checked-out Git repository. Pulling commits alone
 does not update a running container: rebuild the image and recreate the service
 after every source update.
 
+### In-app update (native Git installs)
+
+On a native virtualenv/systemd checkout, open **Admin → General** and use
+**Check for Updates** / **Update**. SurvNG fast-forwards from `origin`,
+reinstalls Python dependencies, rebuilds the frontend when `npm` is available,
+and restarts through `survng.service`. Tracked local changes or divergent local
+commits block the button until the checkout is clean and fast-forwardable.
+
+Docker images are immutable, so the same Admin controls report the baked Git SHA
+and point operators at the host script below. To enable an in-app Docker update
+button, mount an executable host helper and set `SURVNG_UPDATE_HELPER` to its
+path inside the container.
+
+### Host script
+
+From the host checkout, the supported one-shot updater is:
+
+```bash
+cd /opt/survng
+scripts/update-from-git.sh
+```
+
+That script performs the same fetch / fast-forward checks, then rebuilds either
+the running Docker Compose deployment or the native venv + systemd service.
+
+### Manual Docker upgrade
+
 First inspect the checkout and review the available commits:
 
 ```bash
