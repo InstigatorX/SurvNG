@@ -110,6 +110,19 @@
     display: none !important;
   }
 
+  /* Keep the query field under the camera select; do not leave a stretched empty row. */
+  .search-page {
+    align-content: start !important;
+  }
+
+  .search-page:not(:has(.search-history-panel)) {
+    grid-template-rows: auto minmax(0, 1fr) !important;
+  }
+
+  .search-page:not(:has(.search-history-panel)) .semantic-search-workspace {
+    grid-row: 2 !important;
+  }
+
   .live-camera-grid,
   .camera-grid.live-camera-grid {
     gap: 4px !important;

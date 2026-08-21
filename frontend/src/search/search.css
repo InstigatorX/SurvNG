@@ -329,12 +329,26 @@
   .faces-page {
     height: auto;
     min-height: var(--workspace-available-height);
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
   }
 
-  .search-page,
+  /* auto/auto/auto + tall min-height stretches an empty camera-scope row into a
+     large gap above the search field when recent-search history is absent. */
   .faces-page {
-    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto auto;
+  }
+
+  .search-page {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .search-page:not(:has(.search-history-panel)) {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .search-page:not(:has(.search-history-panel)) .semantic-search-workspace {
+    grid-row: 2;
   }
 
   .search-commandbar,
