@@ -2648,6 +2648,7 @@ button.status-pill.hud-toggle:disabled {
   background: transparent;
   padding: 0;
   cursor: pointer;
+  pointer-events: auto;
   touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
@@ -2671,7 +2672,6 @@ button.status-pill.hud-toggle:disabled {
   -webkit-touch-callout: none;
 }
 
-.camera-tile .video-frame,
 .camera-tile .camera-tile-poster,
 .camera-tile .camera-live-layer,
 .camera-tile video,

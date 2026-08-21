@@ -42,13 +42,14 @@ assert.match(styles, /\.live-overlay\[data-phase="open"\]/);
 assert.match(styles, /\.live-overlay\[data-phase="closing"\]/);
 assert.match(styles, /@keyframes live-overlay-panel-in/);
 assert.match(styles, /-webkit-touch-callout:\s*none/);
-assert.match(styles, /\.camera-tile[\s\S]*?-webkit-touch-callout:\s*none/);
-assert.match(styles, /pointer-events:\s*none/);
+assert.match(styles, /\.camera-open-target[\s\S]*?pointer-events:\s*auto/);
+assert.match(styles, /\.camera-tile \.camera-tile-poster[\s\S]*?pointer-events:\s*none/);
+assert.doesNotMatch(styles, /\.camera-tile \.video-frame,\s*\n\.camera-tile \.camera-tile-poster/);
 assert.match(livePageSource, /onContextMenu=\{blockBrowserHoldMenu\}/);
 assert.match(livePageSource, /selectstart/);
-assert.match(livePageSource, /onOpenTargetTouchStart/);
-assert.match(livePageSource, /passive:\s*false/);
+assert.match(livePageSource, /selectionTimer/);
 assert.match(livePageSource, /draggable=\{false\}/);
+assert.doesNotMatch(livePageSource, /onOpenTargetTouchStart/);
 assert.match(contract, /Press-and-hold/);
 
 console.log("live camera hold preview tests passed");
