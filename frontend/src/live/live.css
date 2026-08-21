@@ -412,5 +412,18 @@
   .camera-tile-time {
     transition: none !important;
   }
+
+  .camera-tile[data-hold-preview="pending"] .video-frame,
+  .camera-tile[data-hold-preview="active"] .video-frame {
+    transform: none;
+    transition: none !important;
+  }
+
+  .live-overlay[data-phase="open"] .live-overlay-backdrop,
+  .live-overlay[data-phase="open"] .live-overlay-panel,
+  .live-overlay[data-phase="closing"] .live-overlay-backdrop,
+  .live-overlay[data-phase="closing"] .live-overlay-panel {
+    animation: none !important;
+  }
 }
 

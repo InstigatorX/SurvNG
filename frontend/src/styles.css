@@ -2766,11 +2766,18 @@ button.status-pill.hud-toggle:disabled {
   background: transparent;
   padding: 0;
   cursor: pointer;
+  touch-action: manipulation;
 }
 
 .camera-open-target:focus-visible {
   outline: 2px solid var(--active-ink);
   outline-offset: -2px;
+}
+
+.camera-tile[data-hold-preview="pending"] .video-frame,
+.camera-tile[data-hold-preview="active"] .video-frame {
+  transform: scale(0.978);
+  transition: transform 180ms ease;
 }
 
 .live-grid .events-zone .incident-filter-toggle.compact button {
@@ -2904,6 +2911,66 @@ button.live-overlay-backdrop:active {
   background: var(--panel-solid);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
   padding: 0;
+}
+
+.live-overlay[data-phase="open"] .live-overlay-backdrop {
+  animation: live-overlay-backdrop-in 240ms ease-out both;
+}
+
+.live-overlay[data-phase="open"] .live-overlay-panel {
+  animation: live-overlay-panel-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.live-overlay[data-phase="closing"] .live-overlay-backdrop {
+  animation: live-overlay-backdrop-out 180ms ease-in both;
+}
+
+.live-overlay[data-phase="closing"] .live-overlay-panel {
+  animation: live-overlay-panel-out 180ms ease-in both;
+}
+
+.live-overlay[data-mode="preview"] .live-overlay-panel {
+  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.5);
+}
+
+.live-preview-hint {
+  color: color-mix(in srgb, var(--accent) 72%, white);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+@keyframes live-overlay-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes live-overlay-backdrop-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes live-overlay-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes live-overlay-panel-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(10px) scale(0.94);
+  }
 }
 
 .live-overlay-head {
