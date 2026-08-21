@@ -45,11 +45,15 @@ function App() {
   const [timeZone, setTimeZone] = useStoredState("survng.timeZone", DEFAULT_TIME_ZONE);
   const [theme, setTheme] = useStoredState("survng.theme", "dark");
   const [recordingContext, setRecordingContext] = useState(null);
+  const [assistantAsk, setAssistantAsk] = useState(null);
   const pathname = appPathname();
   const workspace = resolveWorkspace(pathname);
   const page = workspace?.id || "not-found";
   const canonicalPath = canonicalWorkspaceUrl(pathname, window.location.search, window.location.hash);
   const [assistantContext, setAssistantContext] = useState({ page });
+  function askAssistant(prompt) {
+    setAssistantAsk({ id: Date.now(), prompt: String(prompt || "").trim() || "Analyze this incident" });
+  }
   useEffect(() => {
     const nextUrl = appUrl(canonicalPath);
     const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
@@ -78,18 +82,18 @@ function App() {
           : page === "exports"
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
             : page === "timeline"
-              ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+              ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
               : page === "search"
                 ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
                 : page === "incidents"
-                  ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
+                  ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
                   : page === "people"
                     ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
                     : page === "live"
                       ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
                       : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       </Suspense>
-      <AssistantPanel pageContext={{ ...assistantContext, page }} timeZone={timeZone} />
+      <AssistantPanel pageContext={{ ...assistantContext, page }} timeZone={timeZone} askRequest={assistantAsk} onAskRequestHandled={() => setAssistantAsk(null)} />
     </Shell></RuntimeStateProvider>
   );
 }

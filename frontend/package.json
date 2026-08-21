@@ -17,6 +17,7 @@
     "test:storage": "node tests/storage.mjs",
     "test:assistant-storage": "node tests/assistant-storage.mjs",
     "test:assistant-context": "node tests/assistant-context.mjs",
+    "test:assistant-message": "node tests/assistant-message.mjs",
     "test:assistant-navigation": "node tests/assistant-navigation.mjs",
     "test:related-incidents": "node tests/related-incidents.mjs",
     "test:face-review": "node tests/face-review.mjs",

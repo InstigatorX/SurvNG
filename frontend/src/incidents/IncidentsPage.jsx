@@ -25,7 +25,7 @@ import { incidentLabels, IncidentObjectBadges, IncidentListItem, EventOverlay } 
 import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
-export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
+export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const [eventFilter, setEventFilter] = useState("object");
@@ -653,7 +653,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
             </section>
 
             {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
-            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} />
+            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} onAskAssistant={onAskAssistant} />
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
