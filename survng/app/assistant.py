@@ -41,6 +41,25 @@ def _is_path_key(key: str) -> bool:
     return key in {"file", "path"} or key.endswith(("_file", "_path"))
 
 
+def _is_safe_app_href(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text.startswith("/") or text.startswith("//") or ".." in text or "\\" in text:
+        return False
+    path = text.split("?", 1)[0].split("#", 1)[0]
+    if path in {"", "/"}:
+        return True
+    return path.startswith((
+        "/admin",
+        "/incidents",
+        "/timeline",
+        "/recordings",
+        "/people",
+        "/search",
+        "/config",
+        "/api/",
+    ))
+
+
 def sanitize_assistant_data(value: Any, *, _depth: int = 0) -> Any:
     """Return bounded, JSON-safe evidence without secrets, URLs, or filesystem paths."""
     if _depth >= MAX_ASSISTANT_VALUE_DEPTH:
@@ -65,6 +84,9 @@ def sanitize_assistant_data(value: Any, *, _depth: int = 0) -> Any:
             if any(part in lowered_key for part in _SENSITIVE_KEY_PARTS):
                 continue
             if _is_path_key(lowered_key):
+                continue
+            if lowered_key in {"href", "camera_advisor_href"} and isinstance(item, str) and _is_safe_app_href(item):
+                result[key] = item.strip()[:512]
                 continue
             result[key] = sanitize_assistant_data(item, _depth=_depth + 1)
         return result

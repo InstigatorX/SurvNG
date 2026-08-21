@@ -122,6 +122,14 @@ class AssistantModelsTest(unittest.TestCase):
         self.assertEqual(sanitized["file_count"], 12)
         self.assertEqual(sanitized["temporal_center_path_ratio"], 0.42)
         self.assertIsNone(sanitized["score"])
+        preserved = sanitize_assistant_data({
+            "next_actions": [{"label": "Open Telemetry", "href": "/admin?section=telemetry"}],
+            "camera_advisor_href": "/admin?section=general&subsection=motion-review&camera=gate",
+            "absolute_path_value": "/mnt/secret.mp4",
+        })
+        self.assertEqual(preserved["next_actions"][0]["href"], "/admin?section=telemetry")
+        self.assertEqual(preserved["camera_advisor_href"], "/admin?section=general&subsection=motion-review&camera=gate")
+        self.assertEqual(preserved["absolute_path_value"], "[filesystem path omitted]")
 
     def test_client_visual_details_receive_the_same_redaction(self) -> None:
         evidence = AssistantEvidence(
@@ -452,6 +460,54 @@ class AssistantApiTest(unittest.TestCase):
             ],
         )
 
+    def test_closed_loop_health_and_visual_suggestions_include_next_actions(self) -> None:
+        from survng.app import main
+
+        service = main._intelligence_route_bundle.service
+        system = AssistantEvidence(
+            "E-system",
+            "system_health",
+            "Current SurvNG health",
+            "1 camera needs attention",
+            {"unhealthy_cameras": [{"camera_id": "gate"}]},
+            "/admin?section=telemetry",
+            client_data={"next_actions": [
+                {"label": "Open Telemetry", "href": "/admin?section=telemetry"},
+                {"label": "Open Camera Advisor for gate", "href": "/admin?section=general&subsection=motion-review&camera=gate"},
+            ]},
+        )
+        visual = AssistantEvidence(
+            "E-visual-42",
+            "incident_visual_review",
+            "Visual review · Gate",
+            "One proposal",
+            {"camera_id": "gate", "camera_name": "Gate", "proposals": [{"setting": "sensitivity"}]},
+            "/incidents",
+            client_data={
+                "camera_id": "gate",
+                "camera_name": "Gate",
+                "proposals": [{"setting": "sensitivity"}],
+                "next_actions": [{"label": "Open Camera Advisor for Gate", "href": "/admin?section=general&subsection=motion-review&camera=gate"}],
+            },
+        )
+
+        self.assertEqual(
+            service._assistant_closed_loop_suggestions([system], []),
+            ["Is gate healthy?", "What needs attention?"],
+        )
+        self.assertEqual(
+            service._assistant_closed_loop_suggestions([visual], ["Ignore me"]),
+            ["Is Gate healthy?", "Summarize recent activity for Gate", "Trace this incident across cameras", "Ignore me"],
+        )
+        self.assertEqual(
+            service._assistant_closed_loop_actions([system, visual])[0]["href"],
+            "/admin?section=telemetry",
+        )
+        self.assertEqual(
+            service._assistant_camera_advisor_href("gate"),
+            "/admin?section=general&subsection=motion-review&camera=gate",
+        )
+
     def test_assistant_catalog_includes_only_safe_face_identity_fields(self) -> None:
         from survng.app import main
 
@@ -537,6 +593,7 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(len(details["configuration_fingerprint"]), 64)
         self.assertTrue(details["recommendation_proof"].startswith("v1."))
         self.assertNotIn("recommendation_proof", evidence.prompt_payload()["data"])
+        self.assertEqual(details["next_actions"][0]["href"], "/admin?section=general&subsection=motion-review&camera=gate")
         self.assertEqual(
             evidence.client_payload()["image_url"],
             "/api/events/42/thumbnail.jpg?width=960&quality=82",
@@ -694,6 +751,12 @@ class AssistantApiTest(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         apply_update.assert_called_once()
+        self.assertIn("Camera Advisor", response["follow_up"]["message"])
+        self.assertEqual(
+            response["follow_up"]["actions"][0]["href"],
+            "/admin?section=general&subsection=motion-review&camera=gate",
+        )
+        self.assertIn("Is Gate healthy?", response["follow_up"]["suggestions"])
 
         altered = request.model_copy(update={
             "changes": [change.model_copy(update={"value": "low"})],
