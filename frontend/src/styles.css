@@ -1806,10 +1806,6 @@ p {
   }
 }
 
-.recordings-grid {
-  grid-template-columns: minmax(240px, 320px) repeat(3, minmax(180px, 1fr));
-}
-
 .config-grid {
   grid-template-columns: minmax(240px, 320px) repeat(3, minmax(180px, 1fr));
 }
@@ -1818,72 +1814,10 @@ p {
   align-items: start;
 }
 
-.settings-tabs {
-  position: sticky;
-  top: var(--topbar-height, 64px);
-  z-index: 4;
-  grid-column: 1 / 5;
-  grid-row: 1;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
-  min-width: 0;
-  max-width: 100%;
-  margin: -8px -8px 0;
-  border-bottom: 1px solid var(--line);
-  background: var(--topbar);
-  padding: 8px;
-  backdrop-filter: blur(18px);
-}
-
-.settings-context,
-.settings-context>span {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.settings-context>span {
-  align-items: flex-start;
-  flex-direction: column;
-  gap: 0;
-}
-
-.settings-context small {
-  color: var(--muted);
-  font-size: 10px;
-  white-space: nowrap;
-}
-
-.settings-tab-list {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-}
-
-.settings-tab-list button {
-  flex: 0 0 auto;
-  min-height: 44px;
-  color: var(--muted);
-}
-
-.settings-tab-list button.active {
-  border-color: rgba(15, 118, 110, 0.35);
-  background: var(--active);
-  color: var(--active-ink);
-}
-
 .settings-header-status {
   flex: 0 1 auto;
   margin-left: auto;
 }
-
-.admin-dirty-indicator,
 .admin-action-status {
   display: inline-flex;
   align-items: center;
@@ -1896,21 +1830,6 @@ p {
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
-}
-
-.admin-dirty-indicator {
-  min-height: 36px;
-  border: 1px solid color-mix(in srgb, var(--warn) 42%, var(--line));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--warn) 10%, var(--control));
-  color: var(--ink);
-  padding: 4px 5px 4px 9px;
-  font-size: 12px;
-  font-weight: 760;
-}
-
-.admin-dirty-indicator button {
-  min-height: 44px;
 }
 
 .admin-action-status {
@@ -2275,49 +2194,12 @@ p {
   justify-content: flex-end;
   gap: 6px;
 }
-
-.camera-command-bar button,
-.camera-save-indicator {
+.camera-command-bar button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
-
-.camera-save-indicator {
-  max-width: min(520px, 58vw);
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--control-muted);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 5px 8px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.camera-save-indicator.saving {
-  border-color: var(--accent);
-  color: var(--accent-strong);
-}
-
-.camera-save-indicator.saved {
-  color: var(--ink);
-}
-
-.camera-save-indicator.error {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
-.camera-save-button {
-  min-width: 126px;
-  justify-content: center;
-}
-
-.spin,
-.camera-save-indicator.saving svg {
+.spin {
   animation: control-spin 850ms linear infinite;
 }
 
@@ -3192,7 +3074,6 @@ button.live-overlay-backdrop:active {
   background: transparent;
 }
 
-
 .incident-preview {
   position: relative;
   display: block;
@@ -3877,7 +3758,6 @@ button.live-overlay-backdrop:active {
   padding: 0;
   aspect-ratio: 4 / 3;
 }
-
 
 .event-card img,
 .empty-thumb {
@@ -6339,8 +6219,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .camera-command-bar button,
-  .camera-save-indicator {
+  .camera-command-bar button {
     width: 100%;
     max-width: none;
     justify-content: center;
@@ -8848,14 +8727,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 @media (max-width: 760px) {
-  .settings-tab-list {
-    overflow-x: auto;
-    padding-bottom: 2px;
-  }
-
-  .settings-tab-list button {
-    flex: 0 0 auto;
-  }
 
   .telemetry-viewer {
     padding: 9px;
@@ -9609,16 +9480,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   box-shadow: var(--shadow);
 }
 
-.recordings-commandbar-time {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 750;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .recordings-v2-cameras {
   display: grid;
   grid-column: 1;
@@ -9631,43 +9492,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   background: var(--panel);
   box-shadow: var(--shadow);
   overflow: hidden;
-}
-
-.recordings-camera-header {
-  display: grid;
-  gap: 2px;
-  border-bottom: 1px solid var(--line);
-  padding: 13px 14px;
-}
-
-.recordings-camera-header.single {
-  min-height: 58px;
-}
-
-.recordings-camera-header strong {
-  color: var(--ink);
-  font-size: 17px;
-}
-
-.recordings-camera-header small {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.recordings-camera-list {
-  display: grid;
-  align-content: start;
-  gap: 6px;
-  min-height: 0;
-  padding: 10px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.recordings-section-switcher {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .search-page {
@@ -10014,74 +9838,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   gap: 7px;
   color: var(--danger);
   margin-top: 10px;
-}
-
-.recordings-section-switcher a {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-width: 0;
-  min-height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--control);
-  color: var(--muted);
-  font-size: 16px;
-  font-weight: 720;
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.recordings-section-switcher a.active {
-  border-color: rgba(15, 118, 110, .35);
-  background: var(--active);
-  color: var(--active-ink);
-}
-
-.recordings-camera-list button {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) 8px;
-  align-items: center;
-  gap: 8px;
-  min-height: 38px;
-  border-color: var(--line);
-  background: var(--control);
-  color: var(--muted);
-  font-size: 16px;
-  font-weight: 720;
-  text-align: left;
-}
-
-.recordings-camera-list button.active {
-  border-color: rgba(15, 118, 110, .35);
-  background: var(--active);
-  color: var(--active-ink);
-}
-
-.recordings-camera-list button:hover:not(.active) {
-  border-color: var(--line);
-  background: var(--control);
-  color: var(--ink);
-}
-
-.recordings-camera-list span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.recordings-camera-list i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--muted);
-}
-
-.recordings-camera-list i.online {
-  background: #24b47e;
-  box-shadow: 0 0 0 3px rgba(36, 180, 126, .12);
 }
 
 .recordings-v2-workspace {
@@ -11033,36 +10789,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   padding-top: 0;
 }
 
-.recordings-v2-lane-legend {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 16px;
-  color: var(--muted);
-  font-size: 9px;
-  font-weight: 850;
-  text-transform: uppercase;
-  letter-spacing: .04em;
-}
-
-.recordings-v2-lane-legend span::before {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-right: 5px;
-  border-radius: 2px;
-  background: #22d3a6;
-  content: "";
-}
-
-.recordings-v2-lane-legend span.motion::before {
-  background: #f59e0b;
-}
-
-.recordings-v2-lane-legend span:not(.active) {
-  opacity: .55;
-}
-
 .recordings-v2-track {
   position: relative;
   height: 70px;
@@ -11490,25 +11216,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   overflow: hidden;
 }
 
-.recordings-v2-incidents-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  border-bottom: 1px solid var(--line);
-  min-height: 38px;
-  padding: 3px 6px;
-}
-
-.recordings-v2-incidents-toolbar>span {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 720;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .recordings-v2-incidents-tools {
   display: flex;
   align-items: center;
@@ -11520,22 +11227,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   color: var(--muted);
   font-size: 10px;
   font-weight: 800;
-}
-
-.recordings-v2-range {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 800;
-}
-
-.recordings-v2-range select {
-  width: 102px;
-  min-height: 30px;
-  padding-block: 3px;
-  font-size: 11px;
 }
 
 .recordings-v2-event-filter {
@@ -11733,49 +11424,10 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     gap: 6px;
   }
 
-  .recordings-commandbar .recordings-section-switcher {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-row: 2;
-  }
-
-  .recordings-commandbar .recordings-section-switcher a {
-    min-height: 44px;
-  }
-
-  .recordings-commandbar-time {
-    display: none;
-  }
-
-  .recordings-section-switcher {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(82px, auto);
-    flex: 0 0 auto;
-  }
-
   .recordings-v2-cameras {
     grid-column: 1;
     grid-row: 2;
     grid-template-rows: auto;
-  }
-
-  .recordings-camera-header {
-    display: none;
-  }
-
-  .recordings-camera-list {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(135px, 1fr);
-    padding: 6px;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .recordings-camera-list button {
-    min-height: 34px;
-    font-size: 12px;
   }
 
   .recordings-v2-workspace {
@@ -11892,12 +11544,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     min-width: 112px;
   }
 
-  .recordings-v2-incidents-toolbar {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 4px;
-  }
-
   .recordings-v2-incidents-tools {
     width: 100%;
     flex-wrap: wrap;
@@ -11905,10 +11551,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   }
 
   .recordings-v2-date {
-    width: 100%;
-  }
-
-  .recordings-v2-incidents-toolbar>span {
     width: 100%;
   }
 
@@ -11974,7 +11616,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   }
 }
 
-
 @media (max-width: 1050px) {
   .live-command-bar {
     grid-column: 1;
@@ -12004,15 +11645,12 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     height: auto !important;
     inset: auto !important;
   }
-
   .live-grid,
-  .recordings-grid,
   .config-grid,
   .incidents-grid {
     grid-template-columns: 1fr;
   }
 
-  .settings-tabs,
   .settings-panel,
   .config-tree,
   .config-editor {
@@ -12206,35 +11844,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     width: 100%;
   }
 
-  .settings-tabs {
-    flex-wrap: wrap;
-    overflow: visible;
-    padding-bottom: 2px;
-  }
-
-  .settings-tab-list {
-    width: 100%;
-    max-width: 100%;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-  }
-
-  .settings-tab-list button {
-    flex: 1 0 max-content;
-    min-height: 44px;
-    font-size: 12px;
-  }
-
-  .settings-context small {
-    display: none;
-  }
-
-  .admin-dirty-indicator {
-    grid-column: 1 / -1;
-    width: 100%;
-    justify-content: space-between;
-  }
-
   .log-command-controls {
     width: 100%;
     align-items: stretch;
@@ -12310,9 +11919,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     border-radius: 8px;
     box-shadow: 0 10px 28px rgba(22, 32, 31, 0.08);
   }
-
   .live-grid,
-  .recordings-grid,
   .incidents-grid {
     padding-top: 6px;
   }
@@ -12660,7 +12267,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .incident-meta {
     padding: 7px;
   }
-
 
   .incident-meta-top {
     gap: 6px;

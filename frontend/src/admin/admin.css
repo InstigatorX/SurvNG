@@ -8,59 +8,6 @@
   padding: 0;
 }
 
-.settings-tabs {
-  top: 58px;
-  min-height: 54px;
-  margin: 0;
-  gap: 10px;
-  background: var(--topbar);
-  padding: 5px 10px;
-  backdrop-filter: none;
-}
-
-.settings-context strong {
-  font-size: 12px;
-  font-weight: 620;
-}
-
-.settings-context small {
-  font-size: 9px;
-}
-
-.settings-tab-list {
-  gap: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-}
-
-.settings-tab-list button {
-  min-height: 38px;
-  border: 0;
-  border-left: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-  font-size: 10px;
-  font-weight: 540;
-  padding-inline: 10px;
-}
-
-.settings-tab-list button:first-child {
-  border-left: 0;
-}
-
-.settings-tab-list button.active {
-  border-color: var(--line);
-  background: color-mix(in srgb, var(--accent) 18%, var(--control));
-}
-
-.admin-dirty-indicator,
-.camera-save-indicator {
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 560;
-}
-
 .settings-grid .config-tree,
 .settings-grid .settings-panel {
   border: 0;
@@ -132,7 +79,6 @@
   border-radius: 3px;
 }
 
-.camera-save-button,
 .camera-command-area button {
   border-radius: 3px;
   font-weight: 560;
@@ -285,10 +231,6 @@
     padding: 8px;
   }
 
-  .settings-tabs {
-    margin: -8px -8px 0;
-  }
-
   .settings-grid .config-tree,
   .settings-grid .settings-panel {
     border: 1px solid var(--line);
@@ -301,26 +243,6 @@
     display: block;
     min-height: var(--workspace-available-height);
     padding: 0;
-  }
-
-  .settings-tabs {
-    top: var(--topbar-height);
-    margin: 0;
-    padding: 5px 8px;
-  }
-
-  .settings-context {
-    display: none;
-  }
-
-  .settings-tab-list {
-    border: 0;
-    border-radius: 0;
-  }
-
-  .settings-tab-list button {
-    min-height: 44px;
-    border: 1px solid var(--line);
   }
 
   .settings-grid .config-tree,
@@ -627,10 +549,8 @@
 details>summary {
   border-radius: 3px;
 }
-
 .pill,
-.status-pill,
-.health-pill {
+.status-pill {
   border-radius: 3px;
   font-weight: 560;
 }
@@ -685,10 +605,6 @@ a.button {
 }
 
 @media (max-width: 760px) {
-  .recordings-camera-group {
-    display: none;
-  }
-
   .recordings-v2-events::before {
     display: none;
   }
