@@ -1699,6 +1699,7 @@ function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequest
         evidence: payload.evidence || [],
         citations: payload.citations || [],
         suggestions: payload.suggestions || [],
+        actions: payload.actions || [],
         reasoningTier: payload.reasoning_tier || "fast",
         model: payload.model || "",
         context: submittedContext,
@@ -1735,13 +1736,27 @@ function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequest
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Unable to apply the reviewed settings");
-      setMessages((current) => current.map((message) => message.id !== messageId ? message : {
-        ...message,
-        evidence: (message.evidence || []).map((item) => item.id !== evidence.id ? item : {
-          ...item,
-          details: { ...item.details, can_apply: false, applied: payload.applied || [] },
-        }),
-      }));
+      setMessages((current) => {
+        const next = current.map((message) => message.id !== messageId ? message : {
+          ...message,
+          evidence: (message.evidence || []).map((item) => item.id !== evidence.id ? item : {
+            ...item,
+            details: { ...item.details, can_apply: false, applied: payload.applied || [] },
+          }),
+        });
+        const followUp = payload.follow_up;
+        if (!followUp?.message) return next;
+        return [...next, {
+          id: `assistant-apply-${Date.now()}`,
+          role: "assistant",
+          content: followUp.message,
+          evidence: [],
+          suggestions: followUp.suggestions || [],
+          actions: followUp.actions || [],
+          reasoningTier: "fast",
+          model: "",
+        }].slice(-30);
+      });
     } catch (applyError) {
       setError({ message: applyError.message || "Unable to apply the reviewed settings", kind: "apply" });
     } finally {
@@ -1822,7 +1837,13 @@ function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequest
                   {item.details.can_apply && !item.details.applied?.length ? <button type="button" className="assistant-apply" disabled={Boolean(applyingEvidenceId)} onClick={(event) => openApplyReview(message.id, item, event.currentTarget)}>{applyingEvidenceId === item.id ? "Applying…" : "Apply proposed changes"}</button> : null}
                   {item.details.proposals?.length && !item.details.can_apply && !item.details.applied?.length ? <small>Enable “Allow confirmed changes” in Admin to apply these proposals.</small> : null}
                 </div> : null}
+                {item.details?.next_actions?.length ? <div className="assistant-next-actions">
+                  {item.details.next_actions.map((action) => <a key={`${action.href}-${action.label}`} href={appUrl(action.href)}>{action.label}</a>)}
+                </div> : null}
               </div>)}
+            </div> : null}
+            {message.actions?.length ? <div className="assistant-next-actions">
+              {message.actions.map((action) => <a key={`${action.href}-${action.label}`} href={appUrl(action.href)}>{action.label}</a>)}
             </div> : null}
             {message.suggestions?.length ? <div className="assistant-suggestions">
               {message.suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
@@ -9754,7 +9775,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const auditPageSize = 24;
 
   function adminLocationOptions(section = settingsTab) {
-    if (section === "general") return { subsection: generalSection === "general" ? "" : generalSection };
+    if (section === "general") return {
+      subsection: generalSection === "general" ? "" : generalSection,
+      camera: generalSection === "motion-review" ? selectedId : "",
+    };
     if (section === "cameras") return { subsection: cameraSection === "settings" ? "" : cameraSection, camera: selectedId };
     if (section === "telemetry") return { subsection: telemetrySection === "overview" ? "" : telemetrySection, camera: telemetrySection === "cameras" ? telemetryCamera : "" };
     return {};
@@ -11768,8 +11792,8 @@ function ProbeResult({ probe }) {
   );
 }
 
-function MotionAiReviewPanel({ cameras, advisorEnabled }) {
-  const [cameraId, setCameraId] = useState(cameras[0]?.id || "");
+function MotionAiReviewPanel({ cameras, advisorEnabled, cameraId: controlledCameraId = "", onCameraIdChange = null }) {
+  const [cameraId, setCameraId] = useState(controlledCameraId || cameras[0]?.id || "");
   const [hours, setHours] = useState(24);
   const [imageLimit, setImageLimit] = useState(12);
   const [evaluationHours, setEvaluationHours] = useState(24);
@@ -11780,12 +11804,27 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
+  function selectCamera(nextCameraId) {
+    setCameraId(nextCameraId);
+    onCameraIdChange?.(nextCameraId);
+  }
+
   useEffect(() => {
-    if (!cameraId && cameras[0]?.id) setCameraId(cameras[0].id);
-    if (cameraId && !cameras.some((camera) => camera.id === cameraId)) {
-      setCameraId(cameras[0]?.id || "");
+    if (controlledCameraId && cameras.some((camera) => camera.id === controlledCameraId)) {
+      if (controlledCameraId !== cameraId) setCameraId(controlledCameraId);
+      return;
     }
-  }, [cameraId, cameras]);
+    if (!cameraId && cameras[0]?.id) {
+      setCameraId(cameras[0].id);
+      onCameraIdChange?.(cameras[0].id);
+      return;
+    }
+    if (cameraId && !cameras.some((camera) => camera.id === cameraId)) {
+      const next = cameras[0]?.id || "";
+      setCameraId(next);
+      onCameraIdChange?.(next);
+    }
+  }, [cameraId, cameras, controlledCameraId, onCameraIdChange]);
 
   async function loadReview(selectedCameraId, quiet = false) {
     if (!selectedCameraId) return;
@@ -11938,7 +11977,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
       <h3>Camera Intelligence</h3>
       <p className="settings-help">Review how one camera has performed across recent incidents and motion decisions. SurvNG deliberately samples successes, possible misses, visual rescues, and filtered motion, then recommends a change only when multiple images support it. Nothing is applied automatically.</p>
       <div className="field-row motion-ai-review-controls">
-        <label>Camera<select value={cameraId} onChange={(event) => setCameraId(event.target.value)} disabled={running}>
+        <label>Camera<select value={cameraId} onChange={(event) => selectCamera(event.target.value)} disabled={running}>
           {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>)}
         </select></label>
         <label>Review period<select value={hours} onChange={(event) => setHours(Number(event.target.value))} disabled={running}>
@@ -12968,6 +13007,8 @@ function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenS
         <MotionAiReviewPanel
           cameras={config.cameras || []}
           advisorEnabled={config.audit_ai?.enabled ?? false}
+          cameraId={selectedId}
+          onCameraIdChange={setSelectedId}
         />
       ) : null}
     </div>

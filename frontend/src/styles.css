@@ -11921,6 +11921,30 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   gap: 6px;
 }
 
+.assistant-next-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.assistant-next-actions a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--active) 28%, transparent);
+  color: var(--active-ink);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 9px;
+  text-decoration: none;
+}
+
+.assistant-evidence-card .assistant-next-actions {
+  padding: 0 7px 7px;
+}
+
 .assistant-welcome button,
 .assistant-welcome-actions button,
 .assistant-suggestions button {
