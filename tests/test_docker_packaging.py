@@ -86,13 +86,21 @@ class DockerPackagingTest(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("FROM ubuntu:24.04 AS runtime-base", dockerfile)
-        self.assertIn("INTEL_COMPUTE_VERSION=26.22.38646.7-1~24.04~ppa1", dockerfile)
-        self.assertIn("INTEL_IGC_VERSION=2.36.5-1~24.04", dockerfile)
+        self.assertIn("INTEL_COMPUTE_VERSION=26.27.39122.14-1~24.04~ppa1", dockerfile)
+        self.assertIn("INTEL_IGC_VERSION=2.38.5-1~24.04", dockerfile)
+        self.assertIn("INTEL_LEVEL_ZERO_VERSION=1.32.0-1~24.04~ppa1", dockerfile)
         self.assertIn("INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1", dockerfile)
         self.assertIn("ppa:kobuk-team/intel-graphics", dockerfile)
         self.assertIn('"libze-intel-gpu1=${INTEL_COMPUTE_VERSION}"', dockerfile)
         self.assertIn('"intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}"', dockerfile)
         self.assertNotIn("intel-media-va-driver \\", dockerfile)
+        # Legacy docker builders reject COPY --chmod (BuildKit-only).
+        self.assertNotIn("COPY --chmod=", dockerfile)
+        self.assertIn(
+            "COPY docker/entrypoint.sh /usr/local/bin/survng-entrypoint",
+            dockerfile,
+        )
+        self.assertIn("RUN chmod 755 /usr/local/bin/survng-entrypoint", dockerfile)
 
     def test_lxc_builder_is_persistent_and_scope_limited(self) -> None:
         script = (ROOT / "scripts" / "docker-build-lxc.sh").read_text(
