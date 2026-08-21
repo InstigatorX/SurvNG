@@ -1952,9 +1952,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         cameras: (current.cameras || []).map((item) => item.id === camera.id ? probeCameraConfig : item),
       }));
     }
-    const host = probeCameraConfig.onvif?.host || probeCameraConfig.baichuan?.host || "";
-    const username = probeCameraConfig.onvif?.username || probeCameraConfig.baichuan?.username || "";
-    const password = probeCameraConfig.onvif?.password || probeCameraConfig.baichuan?.password || "";
+    const host = probeCameraConfig.onvif?.host || "";
+    const username = probeCameraConfig.onvif?.username || "";
+    const password = probeCameraConfig.onvif?.password || "";
     try {
       const response = await fetch("/api/config/probe", {
         method: "POST",
@@ -1965,17 +1965,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           username,
           password,
           onvif_port: probeCameraConfig.onvif?.port || 8000,
-          baichuan_port: probeCameraConfig.baichuan?.port || 9000,
         }),
       });
       if (!response.ok) throw new Error(`Camera probe failed (${response.status})`);
       const result = await response.json();
       setProbe(result);
       if (result.onvif?.reachable) updateCamera(camera.id, ["onvif", "enabled"], true);
-      if (result.baichuan?.reachable) {
-        updateCamera(camera.id, ["baichuan", "enabled"], true);
-        updateCamera(camera.id, ["video_backend"], "baichuan_native");
-      }
     } catch (error) {
       setProbe({ loading: false, error: error.message || "Camera probe failed" });
     }
@@ -3171,7 +3166,6 @@ export function ProbeResult({ probe }) {
   return (
     <div className="probe-result">
       <strong>Auto-detection</strong>
-      <span>Reolink Baichuan: {probe.baichuan?.reachable ? `reachable on ${probe.baichuan.port}` : "not reachable"}</span>
       <span>ONVIF: {probe.onvif?.reachable ? `reachable on ${probe.onvif.port}` : "not reachable"}</span>
       {probe.onvif?.capabilities ? <span>Capabilities: {Object.entries(probe.onvif.capabilities).filter(([, value]) => value).map(([key]) => key).join(", ") || "none reported"}</span> : null}
       {probe.onvif?.error ? <span>{probe.onvif.error}</span> : null}

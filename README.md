@@ -16,6 +16,10 @@ annotation workflow is documented in the [Training samples API](docs/training-ap
 The production Hybrid object tracker, optional FastTrack comparison engine, and
 evidence-based selection process are covered in [Object tracking](README.tracking.md).
 
+SurvNG is licensed under the [MIT License](LICENSE). Third-party notices for
+bundled and notable dependencies are in [NOTICE](NOTICE) and
+[THIRD_PARTY.md](THIRD_PARTY.md).
+
 For the end-to-end ingest, motion qualification, inference, incident, recording,
 and playback architecture, see [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Keep that
 document synchronized with changes to any video-processing stage.
@@ -337,39 +341,11 @@ scripts/run-tests.sh -q
 The complete suite has a three-minute default limit. Override it for an
 intentional long-running campaign with `SURVNG_TEST_TIMEOUT_SECONDS`.
 
-## Reolink Baichuan Video
-
-SurvNG can read Reolink Baichuan video directly from the camera on port `9000`.
-Set the camera backend to native Baichuan:
-
-```json
-{
-  "video_backend": "baichuan_native",
-  "baichuan": {
-    "enabled": true,
-    "host": "CAMERA_IP",
-    "port": 9000,
-    "username": "USER",
-    "password": "PASSWORD",
-    "channel": 0
-  }
-}
-```
-
-The native reader logs into the camera with Baichuan, starts the main or sub
-video stream, parses the Reolink media frames, and pipes H264 into FFmpeg for
-HLS, MSE, and recording.
-
-Keep `stream_url` and `live_stream_url` configured as RTSP fallbacks for
-snapshots, detection frames, and quick rollback. To disable native Baichuan,
-set `video_backend` back to `url`.
-
-The native Baichuan implementation was ported from Neolink.NET protocol behavior
-and should be treated as AGPL-derived code if this app is redistributed.
-
 ## Configure A Camera
 
 Copy `config.example.json` to `config.json` for a clean start, or copy `config.reolink.example.json` to `config.json` and replace the placeholders.
+
+SurvNG ingests cameras over RTSP/RTSPS/HTTP/HTTPS URLs (typically via go2rtc restreams). Native Reolink Baichuan (`reolink://` / port 9000) support has been removed; use the camera’s RTSP main/sub URLs instead.
 
 Common Reolink RTSP shapes are:
 

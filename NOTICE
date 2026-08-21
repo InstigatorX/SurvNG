@@ -1,0 +1,30 @@
+# Notices
+
+SurvNG is licensed under the MIT License. See `LICENSE`.
+
+This product redistributes and depends on third-party software. A summary of
+bundled and notable dependencies, with license and attribution notes, is in
+`THIRD_PARTY.md`.
+
+## Container images
+
+Official SurvNG container images (for example `ghcr.io/instigatorx/survng`)
+include:
+
+- SurvNG application source and built frontend assets (MIT)
+- go2rtc binary (MIT)
+- FFmpeg from the Ubuntu package ecosystem (typically GPL/LGPL components;
+  corresponding source for the packaged FFmpeg build is available through the
+  distribution / PPA used in the `Dockerfile`)
+- Python and Node dependencies listed in `requirements.txt` and
+  `frontend/package-lock.json`
+- Optional Intel GPU userspace packages in the `runtime-intel` image target
+  (vendor redistribution terms apply)
+
+When you redistribute SurvNG container images, retain this notice file (or an
+equivalent) with the image or accompanying documentation, and provide
+corresponding source for GPL-covered components such as FFmpeg as required by
+their licenses.
+
+SurvNG is not affiliated with or endorsed by Reolink, Intel, or other camera
+or silicon vendors.

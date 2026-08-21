@@ -12,21 +12,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ..baichuan_native import (
-    BaichuanFfmpegPipe,
-    ffmpeg_input_args,
-    ffmpeg_timestamp_repair_args,
-    is_native_baichuan,
-    start_ffmpeg_pipe,
-)
 from ..config import CameraConfig, RecordingRetentionConfig
+from ..ffmpeg_input import ffmpeg_input_args, ffmpeg_timestamp_repair_args
 from ..go2rtc import Go2RtcAdapter, Go2RtcError
 from ..media_storage import MediaStorageRegistry
 from ..recording_retention import RecordingRetentionService
 from .index import RecordingIndexMixin
 
 
-ProcessItem = tuple[subprocess.Popen, BaichuanFfmpegPipe | None, threading.Event, threading.Thread]
+ProcessItem = tuple[subprocess.Popen, threading.Event, threading.Thread]
 RecorderKey = tuple[str, str]
 LOGGER = logging.getLogger("survng.app.recorder")
 
@@ -145,7 +139,6 @@ class Recorder(RecordingIndexMixin):
         stop_event = threading.Event()
         keeper: threading.Thread | None = None
         process: subprocess.Popen | None = None
-        pipe: BaichuanFfmpegPipe | None = None
         try:
             self._ensure_recording_dirs(camera_dir)
             keeper = threading.Thread(target=self._keep_recording_dirs, args=(camera_dir, stop_event), daemon=True)
@@ -184,7 +177,6 @@ class Recorder(RecordingIndexMixin):
             ]
             process = subprocess.Popen(
                 command,
-                stdin=subprocess.PIPE if is_native_baichuan(camera) else None,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
@@ -194,22 +186,19 @@ class Recorder(RecordingIndexMixin):
                 name=f"recorder-stderr-{camera.id}-{source}",
                 daemon=True,
             ).start()
-            pipe = start_ffmpeg_pipe(camera, source, process)
             with self._lock:
                 keep_process = key in self._starting and camera.id not in self._disabled_cameras
                 if keep_process:
-                    self.processes[key] = (process, pipe, stop_event, keeper)
+                    self.processes[key] = (process, stop_event, keeper)
                     self._retry_after.pop(key, None)
             if not keep_process:
                 stop_event.set()
-                self._stop_pipe(pipe)
                 if process.poll() is None:
                     self._kill_pid(process.pid)
                 keeper.join(timeout=1)
                 return
         except Exception as error:
             stop_event.set()
-            self._stop_pipe(pipe)
             if process is not None and process.poll() is None:
                 self._kill_pid(process.pid)
             if keeper is not None:
@@ -235,9 +224,7 @@ class Recorder(RecordingIndexMixin):
                     self._audio_stream_cache[cache_key] = info
         if info.known and not info.codec:
             return []
-        if (info.known and info.codec == "aac") or (
-            not info.known and not is_native_baichuan(camera)
-        ):
+        if (info.known and info.codec == "aac") or not info.known:
             return ["-map", "0:a:0?", "-c:a", "copy"]
         bitrate_kbps = 64
         if info.sample_rate > 0:
@@ -245,8 +232,6 @@ class Recorder(RecordingIndexMixin):
         return ["-map", "0:a:0?", "-c:a", "aac", "-b:a", f"{bitrate_kbps}k"]
 
     def _probe_audio_stream(self, camera: CameraConfig, source: str) -> AudioStreamInfo:
-        if is_native_baichuan(camera):
-            return AudioStreamInfo(known=False)
         probe_host = ""
         try:
             stream_ref = self.go2rtc.stream(camera, source)
@@ -462,9 +447,8 @@ class Recorder(RecordingIndexMixin):
             return camera_id not in self._disabled_cameras
 
     def _stop_item(self, item: ProcessItem) -> None:
-        process, pipe, stop_event, keeper = item
+        process, stop_event, keeper = item
         stop_event.set()
-        self._stop_pipe(pipe)
         try:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -478,23 +462,12 @@ class Recorder(RecordingIndexMixin):
                 pass
         keeper.join(timeout=1)
 
-    @staticmethod
-    def _stop_pipe(pipe: BaichuanFfmpegPipe | None) -> None:
-        if pipe is None:
-            return
-        try:
-            pipe.stop()
-        except Exception:
-            # Recorder teardown must still terminate and reap FFmpeg even if a
-            # native camera feeder reports its own shutdown failure.
-            LOGGER.exception("Recorder input pipe shutdown failed")
-
     def status(self, keys: set[RecorderKey] | None = None) -> dict[RecorderKey, bool]:
         stopped_items: list[ProcessItem] = []
         with self._lock:
             stopped = [
                 key
-                for key, (process, _pipe, _stop_event, _keeper) in self.processes.items()
+                for key, (process, _stop_event, _keeper) in self.processes.items()
                 if process.poll() is not None
             ]
             for key in stopped:
@@ -503,11 +476,10 @@ class Recorder(RecordingIndexMixin):
                     stopped_items.append(item)
             tracked = {key: True for key in self.processes}
 
-        # Pipe shutdown and keeper joins may block. Never hold the recorder
-        # state lock while cleaning up a process that has already exited.
-        for _process, pipe, stop_event, keeper in stopped_items:
+        # Keeper joins may block. Never hold the recorder state lock while
+        # cleaning up a process that has already exited.
+        for _process, stop_event, keeper in stopped_items:
             stop_event.set()
-            self._stop_pipe(pipe)
             keeper.join(timeout=1)
 
         if keys:

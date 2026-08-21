@@ -27,7 +27,6 @@ class ConfigProbeRequest(BaseModel):
     username: str = Field(default="", max_length=256)
     password: str = Field(default="", max_length=1024)
     onvif_port: int = Field(default=8000, ge=1, le=65535)
-    baichuan_port: int = Field(default=9000, ge=1, le=65535)
 
 
 class ApiTokenCreateRequest(BaseModel):
@@ -114,7 +113,6 @@ def _camera_uses_masked_secret(camera: CameraConfig) -> bool:
             _encoded_url_password(camera.stream_url) == SECRET_PLACEHOLDER,
             _encoded_url_password(camera.live_stream_url) == SECRET_PLACEHOLDER,
             camera.onvif.password == SECRET_PLACEHOLDER,
-            camera.baichuan.password == SECRET_PLACEHOLDER,
         )
     )
 
@@ -139,11 +137,6 @@ def _restore_camera_secrets(incoming: CameraConfig, current: CameraConfig | None
         current.onvif.password,
         "onvif.password",
     )
-    restored.baichuan.password = _restore_secret(
-        restored.baichuan.password,
-        current.baichuan.password,
-        "baichuan.password",
-    )
     return restored
 
 
@@ -152,12 +145,10 @@ def _camera_secret_identity_matches(incoming: CameraConfig, current: CameraConfi
         return True
     if incoming.live_stream_url and _mask_url_password(incoming.live_stream_url) == _mask_url_password(current.live_stream_url):
         return True
-    return any(
-        incoming_host and incoming_host == current_host and incoming_user == current_user
-        for incoming_host, current_host, incoming_user, current_user in (
-            (incoming.onvif.host, current.onvif.host, incoming.onvif.username, current.onvif.username),
-            (incoming.baichuan.host, current.baichuan.host, incoming.baichuan.username, current.baichuan.username),
-        )
+    return bool(
+        incoming.onvif.host
+        and incoming.onvif.host == current.onvif.host
+        and incoming.onvif.username == current.onvif.username
     )
 
 
@@ -204,7 +195,6 @@ def redacted_camera_payload(camera: CameraConfig) -> dict:
     payload["stream_url"] = _mask_url_password(camera.stream_url)
     payload["live_stream_url"] = _mask_url_password(camera.live_stream_url)
     payload["onvif"]["password"] = SECRET_PLACEHOLDER if camera.onvif.password else ""
-    payload["baichuan"]["password"] = SECRET_PLACEHOLDER if camera.baichuan.password else ""
     return payload
 
 
@@ -239,13 +229,10 @@ def _masked_probe_credentials_match(
     configuration, but the secret placeholder must never turn it into a way to
     forward an already-stored credential to an arbitrary host.
     """
-    service = camera.onvif if camera.onvif.password else camera.baichuan
     return (
-        bool(service.password)
-        and host.casefold() == service.host.strip().casefold()
-        and username == service.username
-        # The password is sent by the ONVIF capability request, even when a
-        # Reolink/Baichuan credential is the configured fallback.
+        bool(camera.onvif.password)
+        and host.casefold() == camera.onvif.host.strip().casefold()
+        and username == camera.onvif.username
         and onvif_port == camera.onvif.port
     )
 
@@ -447,7 +434,7 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
                         status_code=422,
                         detail="masked probe credentials may only be used with the configured camera endpoint",
                     )
-                password = existing.onvif.password or existing.baichuan.password
+                password = existing.onvif.password
             result: dict[str, Any] = {
                 "host": host,
                 "onvif": {
@@ -456,13 +443,7 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
                     "capabilities": {},
                     "error": "",
                 },
-                "baichuan": {
-                    "port": payload.baichuan_port,
-                    "reachable": _tcp_reachable(host, payload.baichuan_port),
-                },
-                "reolink_likely": False,
             }
-            result["reolink_likely"] = bool(result["baichuan"]["reachable"])
             if result["onvif"]["reachable"] and username and password:
                 try:
                     from onvif import ONVIFCamera

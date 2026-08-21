@@ -80,7 +80,7 @@
     {
       "id": "front",
       "name": "Front Camera",
-      "video_backend": "baichuan_native",
+      "video_backend": "url",
       "stream_url": "rtsp://USER:PASSWORD@CAMERA_IP:554/h264Preview_01_main",
       "live_stream_url": "rtsp://USER:PASSWORD@CAMERA_IP:554/h264Preview_01_sub",
       "live_view": {
@@ -94,14 +94,6 @@
         "frame_width": null,
         "borderline_rescue_enabled": null,
         "borderline_margin": null
-      },
-      "baichuan": {
-        "enabled": true,
-        "host": "CAMERA_IP",
-        "port": 9000,
-        "username": "USER",
-        "password": "PASSWORD",
-        "channel": 0
       },
       "onvif": {
         "enabled": true,

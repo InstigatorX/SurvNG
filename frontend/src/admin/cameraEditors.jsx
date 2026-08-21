@@ -12,11 +12,11 @@ import { uniqueCameraId } from "../shared/cameras.js";
 
 export function defaultCamera(cameras, seed = {}) {
   const id = uniqueCameraId(cameras, seed.id || seed.name || "camera");
-  const host = seed.onvif?.host || seed.baichuan?.host || "";
+  const host = seed.onvif?.host || "";
   return {
     id,
     name: seed.name ? `${seed.name} Copy` : "New Camera",
-    video_backend: seed.video_backend || "url",
+    video_backend: "url",
     stream_url: clearMaskedUrlPassword(seed.stream_url),
     live_stream_url: clearMaskedUrlPassword(seed.live_stream_url),
     live_view: structuredClone(seed.live_view || {
@@ -56,14 +56,6 @@ export function defaultCamera(cameras, seed = {}) {
       port: seed.onvif?.port || 8000,
       username: seed.onvif?.username || "",
       password: clearMaskedSecret(seed.onvif?.password),
-    },
-    baichuan: {
-      enabled: seed.baichuan?.enabled || false,
-      host,
-      port: seed.baichuan?.port || 9000,
-      username: seed.baichuan?.username || "",
-      password: clearMaskedSecret(seed.baichuan?.password),
-      channel: seed.baichuan?.channel || 0,
     },
   };
 }

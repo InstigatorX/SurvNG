@@ -7,7 +7,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Literal, Optional
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
@@ -58,15 +58,6 @@ class OnvifConfig(BaseModel):
     port: int = Field(default=8000, ge=1, le=65535)
     username: str = Field(default="", max_length=256)
     password: str = Field(default="", max_length=1024)
-
-
-class BaichuanConfig(BaseModel):
-    enabled: bool = False
-    host: str = Field(default="", max_length=255)
-    port: int = Field(default=9000, ge=1, le=65535)
-    username: str = Field(default="", max_length=256)
-    password: str = Field(default="", max_length=1024)
-    channel: int = Field(default=0, ge=0, le=255)
 
 
 class ZonePoint(BaseModel):
@@ -403,7 +394,6 @@ class CameraConfig(BaseModel):
     object_activity_attribution: Literal["inherit", "off", "shadow", "enforce"] = "inherit"
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
-    baichuan: BaichuanConfig = Field(default_factory=BaichuanConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -412,8 +402,8 @@ class CameraConfig(BaseModel):
             parsed = urlsplit(self.stream_url.strip())
         except ValueError as exc:
             raise ValueError("stream_url must be a valid camera URL") from exc
-        if parsed.scheme.lower() not in {"rtsp", "rtsps", "reolink", "http", "https"}:
-            raise ValueError("stream_url must use RTSP, Reolink, HTTP, or HTTPS")
+        if parsed.scheme.lower() not in {"rtsp", "rtsps", "http", "https"}:
+            raise ValueError("stream_url must use RTSP, HTTP, or HTTPS")
         if not parsed.hostname:
             raise ValueError("stream_url must include a camera host")
         self.stream_url = self.stream_url.strip()
@@ -767,31 +757,8 @@ def apply_stream_url_defaults(camera: CameraConfig) -> None:
             "password": camera.onvif.password or password,
         })
 
-    if scheme == "reolink":
-        query = parse_qs(parsed.query)
-        channel_values = query.get("channel") or query.get("chn") or []
-        try:
-            channel = int(channel_values[0]) if channel_values else camera.baichuan.channel
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Reolink channel must be a whole number") from exc
-        if channel < 0 or channel > 255:
-            raise ValueError("Reolink channel must be between 0 and 255")
-        camera.video_backend = "baichuan_native"
-        camera.baichuan = BaichuanConfig.model_validate({
-            **camera.baichuan.model_dump(mode="json"),
-            "enabled": True,
-            "host": host,
-            "port": parsed.port or camera.baichuan.port or 9000,
-            "username": username or camera.baichuan.username,
-            "password": password or camera.baichuan.password,
-            "channel": channel,
-        })
-    elif camera.video_backend != "baichuan_native":
-        # Non-Reolink URLs use their configured URL backend by default, but an
-        # explicit native Baichuan selection is valid with an RTSP/HTTP URL
-        # retained as the snapshot and detection fallback.
-        camera.video_backend = "url"
-        camera.baichuan.enabled = False
+    # SurvNG only ingests URL-backed streams (RTSP/HTTP via FFmpeg/go2rtc).
+    camera.video_backend = "url"
 
 
 def normalize_config(config: AppConfig, assign_ids: bool = False) -> AppConfig:

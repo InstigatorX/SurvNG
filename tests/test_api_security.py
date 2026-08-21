@@ -16,7 +16,6 @@ from survng.app.config import (
     ApiAuthConfig,
     ApiTokenConfig,
     AuditAiConfig,
-    BaichuanConfig,
     CameraConfig,
     MqttConfig,
     OnvifConfig,
@@ -45,12 +44,6 @@ def camera(camera_id: str = "gate", name: str = "Gate") -> CameraConfig:
             username="viewer",
             password="onvif-secret",
         ),
-        baichuan=BaichuanConfig(
-            enabled=True,
-            host="camera.local",
-            username="viewer",
-            password="baichuan-secret",
-        ),
     )
 
 
@@ -78,7 +71,6 @@ class ApiSecretBoundaryTest(unittest.TestCase):
             "main-secret",
             "live-secret",
             "onvif-secret",
-            "baichuan-secret",
             "mqtt-secret",
             "ai-secret",
             hash_api_token("survng-api-secret"),
@@ -104,8 +96,6 @@ class ApiSecretBoundaryTest(unittest.TestCase):
         replacement.live_stream_url = None
         replacement.onvif.host = "other.local"
         replacement.onvif.username = "other"
-        replacement.baichuan.host = "other.local"
-        replacement.baichuan.username = "other"
 
         with self.assertRaisesRegex(ValueError, "new cameras"):
             restore_config_secrets(AppConfig(cameras=[replacement]), current)
