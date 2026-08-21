@@ -35,9 +35,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Self-hosted runners may lack docker-buildx. Keep the default (legacy)
+      # builder; the Dockerfile avoids BuildKit-only features like COPY --chmod.
       - name: Build and push
         env:
-          DOCKER_BUILDKIT: "1"
           IMAGE_TAG: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
           SUFFIX: ${{ matrix.suffix }}
