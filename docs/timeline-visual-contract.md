@@ -38,9 +38,9 @@ of the viewport; a manual pan suspends follow and offers Return to playhead.
 
 - Tablet keeps a large hero. Companions may become a horizontal strip. The
   inspector must not crush primary evidence.
-- Mobile uses the searchable camera selector, one hero, a horizontal companion
-  strip, a horizontally navigable timeline, and stacked event details when an
-  event is selected.
+- Mobile uses the same compact native camera select as Live, one hero, a
+  horizontal companion strip, a horizontally navigable timeline, and stacked
+  event details when an event is selected. Desktop keeps the searchable picker.
 - Export Center may still use a camera list; that rail is not part of Timeline
   playback.
 
