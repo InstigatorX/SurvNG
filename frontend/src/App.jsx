@@ -23,6 +23,7 @@ import { AssistantPanel } from "./assistant/AssistantPanel.jsx";
 import { RuntimeStateProvider } from "./shared/runtimeState.jsx";
 import { canonicalWorkspaceUrl, resolveWorkspace } from "./workspaceNavigation.mjs";
 import { registerSurvngServiceWorker } from "./registerServiceWorker.mjs";
+import { applyBrowserAppearance } from "./browserAppearance.mjs";
 
 function lazyExport(importer, exportName) {
   return lazy(() => importer().then((module) => ({ default: module[exportName] })));
@@ -58,7 +59,16 @@ function App() {
     setAssistantContext({ page });
   }, [page]);
   useEffect(() => {
-    document.documentElement.dataset.theme = THEMES.includes(theme) ? theme : "auto";
+    applyBrowserAppearance(THEMES.includes(theme) ? theme : "auto");
+    if (theme !== "auto" || typeof window.matchMedia !== "function") return undefined;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const sync = () => applyBrowserAppearance("auto");
+    media.addEventListener?.("change", sync);
+    media.addListener?.(sync);
+    return () => {
+      media.removeEventListener?.("change", sync);
+      media.removeListener?.(sync);
+    };
   }, [theme]);
   return (
     <RuntimeStateProvider><Shell page={page} theme={theme} recordingContext={recordingContext}>

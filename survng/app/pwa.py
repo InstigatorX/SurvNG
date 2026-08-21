@@ -20,8 +20,8 @@ def web_app_manifest(base_path: str) -> dict[str, Any]:
         "scope": start_url,
         "display": "standalone",
         "orientation": "any",
-        "background_color": "#0e1517",
-        "theme_color": "#0e1517",
+        "background_color": "#071015",
+        "theme_color": "#071015",
         "lang": "en",
         "icons": [
             {
