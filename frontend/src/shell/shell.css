@@ -458,11 +458,16 @@
   .search-page {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto minmax(0, 1fr);
+    align-content: start;
     height: auto;
     min-height: calc(100dvh - 52px);
     gap: 8px;
     overflow: visible;
     padding: 8px;
+  }
+
+  .search-page:not(:has(.search-history-panel)) {
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .search-commandbar {
@@ -508,6 +513,10 @@
     grid-row: 3;
     overflow: visible;
     padding: 8px;
+  }
+
+  .search-page:not(:has(.search-history-panel)) .semantic-search-workspace {
+    grid-row: 2;
   }
 
   .semantic-search-workspace form {
