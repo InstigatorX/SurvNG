@@ -40,9 +40,9 @@ class EventStoreJobsMixin:
     """Durable detection-job and motion-trigger ledger on detection-jobs.sqlite3."""
 
     def _connect_jobs(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.jobs_db_path, timeout=2.0)
+        conn = sqlite3.connect(self.jobs_db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("pragma busy_timeout = 2000")
+        conn.execute("pragma busy_timeout = 10000")
         conn.execute("pragma synchronous = full")
         return conn
 
@@ -504,7 +504,7 @@ class EventStoreJobsMixin:
         """Durably admit mandatory delayed object discovery."""
         now_iso = datetime.now(timezone.utc).isoformat()
         payload_json = durable_json_dumps(payload, sort_keys=True)
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             cursor = conn.execute(
                 "insert or ignore into detection_jobs "
                 "(id, camera_id, dedupe_key, payload_json, state, available_at, "
@@ -558,8 +558,22 @@ class EventStoreJobsMixin:
     ) -> dict[str, Any] | None:
         """Claim one due job, reclaiming an expired worker lease atomically."""
         now = time.time()
+        # Idle refiners poll frequently.  Do not acquire SQLite's exclusive
+        # writer reservation until a due job is actually present.
+        with self._jobs_lock, self._connect_jobs() as conn:
+            due = conn.execute(
+                "select 1 from detection_jobs where camera_id = ? and "
+                "((state = 'queued' and available_at <= ?) or "
+                "(state = 'running' and (lease_expires_at <= ? or lease_owner = ?))) "
+                "limit 1",
+                (camera_id, now, now, lease_owner),
+            ).fetchone()
+            if due is None:
+                return None
+
+        now = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute("begin immediate")
             row = conn.execute(
                 "select * from detection_jobs where camera_id = ? and "
@@ -593,7 +607,7 @@ class EventStoreJobsMixin:
         lease_owner: str = "",
     ) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute(
                 "update detection_jobs set state = 'completed', event_id = ?, "
                 "lease_expires_at = null, lease_owner = '', last_error = '', updated_at = ? "
@@ -612,7 +626,7 @@ class EventStoreJobsMixin:
     ) -> bool:
         """Release a failed lease for retry; return False once terminal."""
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             row = conn.execute(
                 "select attempts from detection_jobs where id = ? "
                 "and (lease_owner = ? or ? = '')",
@@ -668,7 +682,7 @@ class EventStoreJobsMixin:
                 datetime.now(timezone.utc)
                 - timedelta(seconds=max(60.0, float(retention_seconds)))
             ).isoformat()
-            with self._connect_jobs() as conn:
+            with self._jobs_lock, self._connect_jobs() as conn:
                 rows = conn.execute(
                     "select id from detection_jobs "
                     "where state in ('completed','failed') and updated_at < ? "
@@ -693,7 +707,7 @@ class EventStoreJobsMixin:
     ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         payload_json = durable_json_dumps(payload, sort_keys=True)
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             cursor = conn.execute(
                 "insert or ignore into motion_trigger_jobs "
                 "(id, camera_id, payload_json, state, available_at, created_at, updated_at) "
@@ -731,8 +745,28 @@ class EventStoreJobsMixin:
         lease_owner: str = "",
     ) -> dict[str, Any] | None:
         now_epoch = time.time()
+        with self._jobs_lock, self._connect_jobs() as conn:
+            if job_id:
+                due = conn.execute(
+                    "select 1 from motion_trigger_jobs where id = ? and camera_id = ? "
+                    "and ((state = 'queued' and available_at <= ?) or "
+                    "(state = 'running' and (lease_expires_at <= ? or lease_owner = ?))) "
+                    "limit 1",
+                    (job_id, camera_id, now_epoch, now_epoch, lease_owner),
+                ).fetchone()
+            else:
+                due = conn.execute(
+                    "select 1 from motion_trigger_jobs where camera_id = ? and "
+                    "((state = 'queued' and available_at <= ?) or "
+                    "(state = 'running' and lease_expires_at <= ?)) limit 1",
+                    (camera_id, now_epoch, now_epoch),
+                ).fetchone()
+            if due is None:
+                return None
+
+        now_epoch = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute("begin immediate")
             if job_id:
                 row = conn.execute(
@@ -759,7 +793,7 @@ class EventStoreJobsMixin:
             return {**dict(row), "payload": json.loads(str(row["payload_json"]))}
 
     def complete_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None:
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute(
                 "delete from motion_trigger_jobs where id = ? "
                 "and (lease_owner = ? or ? = '')",
@@ -769,7 +803,7 @@ class EventStoreJobsMixin:
     def release_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None:
         """Return a graceful-shutdown lease without disturbing another owner."""
         now = datetime.now(timezone.utc).isoformat()
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute(
                 "update motion_trigger_jobs set state = 'queued', "
                 "lease_expires_at = null, lease_owner = '', updated_at = ? "
@@ -787,7 +821,7 @@ class EventStoreJobsMixin:
         lease_owner: str = "",
     ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             row = conn.execute(
                 "select attempts from motion_trigger_jobs where id = ? "
                 "and (lease_owner = ? or ? = '')",
@@ -827,7 +861,7 @@ class EventStoreJobsMixin:
         source_event_id: int,
     ) -> None:
         """Persist route admission so restart recovery cannot replay it."""
-        with self._connect_jobs() as conn:
+        with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute(
                 "insert or ignore into route_watch_consumptions "
                 "(target_camera_id, source_event_id, consumed_at) values (?, ?, ?)",

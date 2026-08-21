@@ -54,6 +54,10 @@ class EventStore(
         self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        # SQLite permits a single writer.  Camera event/refinement workers share
+        # the jobs ledger, so serialize their short local transactions instead
+        # of making them contend through SQLite's busy timeout.
+        self._jobs_lock = threading.RLock()
         self._jobs_maintenance_lock = threading.Lock()
         self._last_detection_job_prune_monotonic = 0.0
         self._init_db()
