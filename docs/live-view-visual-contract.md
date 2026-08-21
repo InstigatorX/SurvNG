@@ -44,6 +44,9 @@ following geometry and interaction rules are product requirements.
   followed by Recent Activity. One stable keyed camera tree owns all media.
 - Camera selection changes focus without changing the meaning of tapping the
   video, which always opens the existing live overlay.
+- Press-and-hold on a camera (touch or stylus) opens a transient live preview
+  with enter motion; releasing closes it with exit motion. A normal tap still
+  opens the sticky live overlay. Mouse pointers keep click-to-open only.
 - Mobile uses the same names and status colors as desktop. Controls are at least
   44 CSS pixels and clear the bottom navigation and safe area.
 
