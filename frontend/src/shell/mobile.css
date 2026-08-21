@@ -137,6 +137,10 @@
     -webkit-touch-callout: none !important;
   }
 
+  .camera-open-target {
+    pointer-events: auto !important;
+  }
+
   .camera-tile .camera-tile-poster,
   .camera-tile .camera-live-layer,
   .camera-tile video,
