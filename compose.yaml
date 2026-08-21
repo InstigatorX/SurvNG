@@ -5,6 +5,8 @@ services:
     build:
       context: .
       target: runtime
+      args:
+        SURVNG_GIT_SHA: ${SURVNG_GIT_SHA:-}
     image: survng:local
     container_name: survng
     restart: unless-stopped

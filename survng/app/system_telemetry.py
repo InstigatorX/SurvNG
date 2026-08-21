@@ -20,6 +20,7 @@ from .config import AppConfig
 from .manager import AppManager
 from .performance_health import camera_performance_health
 from .process_memory import process_memory_status
+from .product_update import ProductUpdateService
 from .telemetry_interruptions import (
     classify_telemetry_interruptions,
     summarize_interruptions,
@@ -94,6 +95,7 @@ class SystemTelemetryService:
             "uptime_seconds": round(
                 max(0.0, time.monotonic() - self.process_started_monotonic), 1
             ),
+            "version": self.product_version(),
             "resources": {
                 "cpu_load_percent": round(
                     min(100.0, max(0.0, (load_1m / cpu_count) * 100.0)), 1
@@ -125,6 +127,16 @@ class SystemTelemetryService:
             "camera_startup": manager.camera_startup_status(),
         }
         return payload
+
+    @staticmethod
+    def product_version() -> dict[str, Any]:
+        snapshot = ProductUpdateService().status(refresh_remote=False)
+        return {
+            "deployment_mode": snapshot.get("deployment_mode"),
+            "sha": snapshot.get("current_sha"),
+            "short_sha": snapshot.get("current_short_sha"),
+            "branch": snapshot.get("branch"),
+        }
 
     @staticmethod
     def linux_memory_status() -> dict[str, int | float]:

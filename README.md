@@ -138,6 +138,11 @@ npm --prefix frontend run build
 
 The React frontend in `frontend/` is the default interface. Its production build is emitted into `survng/static/`, which FastAPI serves for `/` and `/recordings`.
 
+Native installs can pull product updates from Git under **Admin → General →
+Check for Updates / Update**, or by running `scripts/update-from-git.sh` on the
+host. Docker upgrades still rebuild the image from the host checkout; see
+[README.install](README.install) section 10.
+
 ### Intel GPU runtime upgrade
 
 OpenVINO's Intel GPU plug-in depends on the host OpenCL runtime and Intel

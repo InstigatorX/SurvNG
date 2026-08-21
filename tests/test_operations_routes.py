@@ -27,6 +27,7 @@ def _router(request_server_restart: Mock):
         log_rows=lambda: (),
         storage_maintenance=Mock(),
         request_server_restart=request_server_restart,
+        product_update=Mock(),
     ))
 
 

@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from .manager import AppManager
+from .product_update import ProductUpdateService
 from .storage_maintenance import StorageMaintenanceRunner, StorageReconciler
 
 
@@ -30,6 +31,7 @@ class OperationsRouteDependencies:
     log_rows: Callable[[], Sequence[dict[str, Any]]]
     storage_maintenance: StorageMaintenanceRunner
     request_server_restart: Callable[[], dict[str, Any]]
+    product_update: ProductUpdateService
 
 
 def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
@@ -113,6 +115,17 @@ def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
     def restart_server() -> dict[str, Any]:
         try:
             return deps.request_server_restart()
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @router.get("/api/system/update")
+    def product_update_status(refresh_remote: bool = False) -> dict[str, Any]:
+        return deps.product_update.status(refresh_remote=refresh_remote)
+
+    @router.post("/api/system/update", status_code=202)
+    def start_product_update() -> dict[str, Any]:
+        try:
+            return deps.product_update.start()
         except RuntimeError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 

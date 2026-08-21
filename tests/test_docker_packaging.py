@@ -51,12 +51,27 @@ class DockerPackagingTest(unittest.TestCase):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
         self.assertIn("SURVNG_CONFIG_PATH: /config/config.json", compose)
+        self.assertIn("SURVNG_GIT_SHA: ${SURVNG_GIT_SHA:-}", compose)
         self.assertIn(":/config", compose)
         self.assertIn(":/data", compose)
         self.assertIn(":/media", compose)
         self.assertIn(":/models:ro", compose)
         self.assertNotIn("password:", compose.lower())
         self.assertNotIn("api_key:", compose.lower())
+
+    def test_dockerfile_records_optional_git_sha(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG SURVNG_GIT_SHA=", dockerfile)
+        self.assertIn("ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA", dockerfile)
+        self.assertIn("/app/SURVNG_GIT_SHA", dockerfile)
+
+    def test_update_from_git_script_is_executable(self) -> None:
+        script = ROOT / "scripts" / "update-from-git.sh"
+        self.assertTrue(script.is_file())
+        self.assertTrue(os.access(script, os.X_OK))
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("git pull --ff-only", text)
+        self.assertIn("docker compose", text)
 
     def test_lxc_override_is_explicit_and_not_part_of_default_compose(self) -> None:
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
