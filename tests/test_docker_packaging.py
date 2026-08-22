@@ -160,6 +160,9 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("survng:v1.0-model-installer", text)
         self.assertIn("--lxc", text)
         self.assertIn("apparmor=unconfined", text)
+        self.assertIn("download.pytorch.org/whl/cpu", text)
+        self.assertIn("opencv-python-headless", text)
+        self.assertIn("survng-install-venvs", text)
         self.assertIn("THIRD_PARTY_MODELS.md", text)
         self.assertIn("quantize=16", text)
         self.assertNotIn("resolve_survng_root", text)
@@ -353,6 +356,8 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("model-installer", text)
         self.assertIn("THIRD_PARTY_MODELS.md", text)
         self.assertIn("install-docker-models.sh", text)
+        self.assertIn("libxcb1", text)
+        self.assertIn("libgl1", text)
         notice = ROOT / "docker" / "model-installer" / "NOTICE"
         models_doc = ROOT / "docker" / "model-installer" / "THIRD_PARTY_MODELS.md"
         self.assertTrue(notice.is_file())
