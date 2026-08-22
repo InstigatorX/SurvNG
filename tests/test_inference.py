@@ -995,6 +995,34 @@ class InferenceSupervisorTest(unittest.TestCase):
         with self.assertRaisesRegex(InferenceUnavailable, "uint8 BGR"):
             worker._write_frame_locked(np.zeros((10, 10, 3), dtype=np.float32))
 
+    def test_admission_percentiles_and_ipc_copy_bytes_are_reported(self) -> None:
+        self.assertTrue(
+            self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_INITIAL
+            )
+        )
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
+        device_status = self.supervisor.workload_status()["classes"][
+            "incident_initial"
+        ]
+        self.assertIsNotNone(device_status["admission_wait_ms_p95"])
+        self.assertIsNotNone(device_status["admission_wait_ms_p99"])
+
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+            start_enabled=False,
+        )
+        frame = np.zeros((10, 12, 3), dtype=np.uint8)
+        worker._frame_buffer = bytearray(frame.nbytes)
+        worker._write_frame_locked(frame)
+        ipc = worker.isolation_status()["ipc"]
+        self.assertEqual(ipc["frame_copy_bytes_total"], frame.nbytes)
+        self.assertEqual(ipc["samples"], 1)
+        self.assertIsNotNone(ipc["frame_copy_ms_p95"])
+        self.assertIsNotNone(ipc["frame_copy_ms_p99"])
+
     def test_stop_retains_and_reports_worker_that_survives_forced_termination(self) -> None:
         class StubbornProcess:
             exitcode = None

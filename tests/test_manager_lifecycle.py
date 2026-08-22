@@ -48,6 +48,8 @@ def manager_with_mocks() -> AppManager:
     manager.inference.tracking_limiter = Mock()
     manager.inference.tracking_factory = Mock()
     manager.inference.status.return_value = {}
+    manager.motion_object_detector_factory = Mock()
+    manager.motion_object_detector_factory.decode_budget.status.return_value = {}
     manager.recorder = Mock()
     manager.recorder.ffmpeg_path = manager.config.ffmpeg_path
     manager.recorder.hardware_acceleration = manager.config.hardware_acceleration
@@ -305,11 +307,18 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager = manager_with_mocks()
         manager.detector.status.return_value = {"enabled": True}
         manager.inference.status.return_value = {"retired_cleanup_pending": 1}
+        manager.motion_object_detector_factory.decode_budget.status.return_value = {
+            "ffmpeg_attempts": {"hardware": 2, "cpu": 1},
+        }
 
         status = manager.detector_status()
 
         self.assertTrue(status["enabled"])
         self.assertEqual(status["lifecycle"]["retired_cleanup_pending"], 1)
+        self.assertEqual(
+            status["recorded_decode"]["ffmpeg_attempts"],
+            {"hardware": 2, "cpu": 1},
+        )
 
     def test_mqtt_server_health_accepts_loaded_isolated_detector(self) -> None:
         manager = manager_with_mocks()

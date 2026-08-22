@@ -1540,6 +1540,9 @@ class AppManager:
         return {
             **self.detector.status(),
             "lifecycle": self.inference.status(),
+            "recorded_decode": (
+                self.motion_object_detector_factory.decode_budget.status()
+            ),
         }
 
     def go2rtc_status(self) -> dict:

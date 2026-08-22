@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from ..config import DetectorConfig
+from ..perf_samples import RollingLatencySamples
 from .process import load_detector_labels, stop_multiprocessing_resource_tracker
 from .types import (
     INCIDENT_INITIAL_ADMISSION_TIMEOUT_SECONDS,
@@ -54,6 +55,10 @@ class InferenceSupervisor:
                 "wait_total_ms": 0.0,
                 "wait_max_ms": 0.0,
             }
+            for workload in InferenceWorkload
+        }
+        self._device_wait_samples = {
+            workload: RollingLatencySamples()
             for workload in InferenceWorkload
         }
         self._object_workers = self._build_object_workers(config)
@@ -204,6 +209,7 @@ class InferenceSupervisor:
             stats["admitted"] += 1
             stats["wait_total_ms"] += wait_ms
             stats["wait_max_ms"] = max(float(stats["wait_max_ms"]), wait_ms)
+            self._device_wait_samples[workload].add(wait_ms)
             return True
 
     def _leave_device_workload(self, workload: InferenceWorkload) -> None:
@@ -248,6 +254,7 @@ class InferenceSupervisor:
             }
             for workload, raw in self._device_workload_stats.items():
                 admitted = int(raw["admitted"])
+                wait_samples = self._device_wait_samples[workload]
                 result["classes"][workload.name.lower()] = {
                     "admitted": admitted,
                     "completed": int(raw["completed"]),
@@ -257,6 +264,8 @@ class InferenceSupervisor:
                         float(raw["wait_total_ms"]) / max(1, admitted), 3
                     ),
                     "max_wait_ms": round(float(raw["wait_max_ms"]), 3),
+                    "admission_wait_ms_p95": wait_samples.percentile(95),
+                    "admission_wait_ms_p99": wait_samples.percentile(99),
                 }
             return result
 

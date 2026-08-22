@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from ..config import DetectorConfig
+from ..perf_samples import RollingLatencySamples
 from .process import _inference_worker_main
 from .types import (
     INFERENCE_CRASH_WINDOW_SECONDS,
@@ -66,6 +67,12 @@ class _InferenceWorker:
             }
             for workload in InferenceWorkload
         }
+        self._admission_wait_samples = {
+            workload: RollingLatencySamples()
+            for workload in InferenceWorkload
+        }
+        self._ipc_frame_copy_bytes_total = 0
+        self._ipc_frame_copy_samples = RollingLatencySamples()
         self._frame_buffer = None
         self._connection = None
         self._process = None
@@ -394,7 +401,11 @@ class _InferenceWorker:
                 f"inference frame is {byte_count} bytes; maximum is {MAX_INFERENCE_FRAME_BYTES}"
             )
         target = np.frombuffer(self._frame_buffer, dtype=np.uint8, count=byte_count)
+        copy_started = time.perf_counter_ns()
         target[:] = contiguous.view(np.uint8).reshape(-1)
+        copy_ms = (time.perf_counter_ns() - copy_started) / 1_000_000.0
+        self._ipc_frame_copy_bytes_total += byte_count
+        self._ipc_frame_copy_samples.add(copy_ms)
         return {
             "shape": list(contiguous.shape),
             "dtype": str(contiguous.dtype),
@@ -461,6 +472,7 @@ class _InferenceWorker:
                         stats["admitted"] += 1
                         stats["wait_total_ms"] += wait_ms
                         stats["wait_max_ms"] = max(float(stats["wait_max_ms"]), wait_ms)
+                        self._admission_wait_samples[workload].add(wait_ms)
                         break
                     self._admission.wait(remaining)
             remaining = deadline - time.monotonic()
@@ -591,6 +603,7 @@ class _InferenceWorker:
             workload_status = {}
             for workload, raw in self._workload_stats.items():
                 admitted = int(raw["admitted"])
+                wait_samples = self._admission_wait_samples[workload]
                 workload_status[workload.name.lower()] = {
                     "queued": queued_by_workload[workload.name.lower()],
                     "active": int(self._active_workload is workload),
@@ -603,6 +616,8 @@ class _InferenceWorker:
                         float(raw["wait_total_ms"]) / max(1, admitted), 3
                     ),
                     "max_wait_ms": round(float(raw["wait_max_ms"]), 3),
+                    "admission_wait_ms_p95": wait_samples.percentile(95),
+                    "admission_wait_ms_p99": wait_samples.percentile(99),
                     "oldest_wait_ms": round(
                         max(
                             [
@@ -618,6 +633,7 @@ class _InferenceWorker:
                 }
             admission_open = self._admission_open
         with self._lock:
+            copy_samples = self._ipc_frame_copy_samples.snapshot()
             while self._crash_times and now - self._crash_times[0] > INFERENCE_CRASH_WINDOW_SECONDS:
                 self._crash_times.popleft()
             process = self._process
@@ -639,6 +655,12 @@ class _InferenceWorker:
                 "pending_requests": pending,
                 "admission_open": admission_open,
                 "workloads": workload_status,
+                "ipc": {
+                    "frame_copy_bytes_total": self._ipc_frame_copy_bytes_total,
+                    "frame_copy_ms_p95": copy_samples["p95_ms"],
+                    "frame_copy_ms_p99": copy_samples["p99_ms"],
+                    "samples": copy_samples["samples"],
+                },
                 "fallback_active": now < self._fallback_until,
                 "fallback_seconds_remaining": round(max(0.0, self._fallback_until - now), 1),
                 "request_timeout_seconds": (

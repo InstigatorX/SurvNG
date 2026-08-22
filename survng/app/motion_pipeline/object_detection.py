@@ -1871,11 +1871,12 @@ class RecordedMotionObjectDetector:
                     )
                 except subprocess.TimeoutExpired:
                     last_error = f"{backend} timed out"
-                    continue
                 finally:
                     if process_lease is not None:
                         process_lease.release()
                 if result is None or result.returncode != 0 or not result.stdout:
+                    if self.decode_budget is not None:
+                        self.decode_budget.record_ffmpeg(backend, success=False)
                     if result is not None:
                         detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
                         last_error = f"{backend}: {' '.join(detail)[:180]}"
@@ -1883,7 +1884,11 @@ class RecordedMotionObjectDetector:
                 array = np.frombuffer(result.stdout, dtype=np.uint8)
                 frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
                 if frame is not None:
+                    if self.decode_budget is not None:
+                        self.decode_budget.record_ffmpeg(backend, success=True)
                     return frame
+                if self.decode_budget is not None:
+                    self.decode_budget.record_ffmpeg(backend, success=False)
                 last_error = f"{backend}: lossless frame decode returned no frame"
             if deadline is not None and time.monotonic() >= deadline:
                 break
@@ -1991,11 +1996,12 @@ class RecordedMotionObjectDetector:
                 )
             except subprocess.TimeoutExpired:
                 last_error = f"{backend} timed out"
-                continue
             finally:
                 if process_lease is not None:
                     process_lease.release()
             if result is None or result.returncode != 0 or not result.stdout:
+                if self.decode_budget is not None:
+                    self.decode_budget.record_ffmpeg(backend, success=False)
                 if result is not None:
                     detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
                     last_error = f"{backend}: {' '.join(detail)[:180]}"
@@ -2023,7 +2029,11 @@ class RecordedMotionObjectDetector:
                         exact_timestamp=True,
                     )
             if decoded:
+                if self.decode_budget is not None:
+                    self.decode_budget.record_ffmpeg(backend, success=True)
                 return decoded, process_count
+            if self.decode_budget is not None:
+                self.decode_budget.record_ffmpeg(backend, success=False)
             last_error = f"{backend}: batch frame decode returned no frames"
         LOGGER.debug(
             "recorded batch decode failed for %s camera=%s samples=%d%s",

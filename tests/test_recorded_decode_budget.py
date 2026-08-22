@@ -144,6 +144,27 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         self.assertEqual(status["memory_budget_bytes"], 256 << 20)
         self.assertEqual(status["estimated_frame_bytes"], 8 << 20)
 
+    def test_wait_percentiles_and_ffmpeg_outcomes_are_reported(self) -> None:
+        budget = RecordedDecodeBudget(max_processes=1, memory_budget_bytes=16 << 20)
+        process = budget.acquire_process(incident_epoch=1.0)
+        workflow = budget.reserve_workflow(maximum_frames=1, incident_epoch=1.0)
+        self.assertIsNotNone(process)
+        self.assertIsNotNone(workflow)
+        assert process is not None and workflow is not None
+        process.release()
+        workflow.release()
+
+        budget.record_ffmpeg("hardware", success=False)
+        budget.record_ffmpeg("cpu", success=True)
+        status = budget.status()
+
+        self.assertIsNotNone(status["decode_process_wait_ms_p95"])
+        self.assertIsNotNone(status["decode_process_wait_ms_p99"])
+        self.assertIsNotNone(status["decode_memory_wait_ms_p95"])
+        self.assertIsNotNone(status["decode_memory_wait_ms_p99"])
+        self.assertEqual(status["ffmpeg_attempts"], {"hardware": 1, "cpu": 1})
+        self.assertEqual(status["ffmpeg_successes"], {"hardware": 0, "cpu": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

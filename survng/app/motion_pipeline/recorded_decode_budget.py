@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..perf_samples import RollingLatencySamples
+
 
 class RecordedDecodeLease:
     """Exactly-once release wrapper for a recorded-decode budget reservation."""
@@ -59,9 +61,13 @@ class RecordedDecodeBudget:
         self._admitted_workflows = 0
         self._process_wait_ms = 0.0
         self._memory_wait_ms = 0.0
+        self._process_wait_samples = RollingLatencySamples()
+        self._memory_wait_samples = RollingLatencySamples()
         self._process_timeouts = 0
         self._memory_timeouts = 0
         self._cancellations = 0
+        self._ffmpeg_attempts = {"hardware": 0, "cpu": 0}
+        self._ffmpeg_successes = {"hardware": 0, "cpu": 0}
 
     @classmethod
     def from_detector_config(cls, config: Any) -> RecordedDecodeBudget:
@@ -111,7 +117,7 @@ class RecordedDecodeBudget:
             * 1024,
         )
 
-    def status(self) -> dict[str, int | float]:
+    def status(self) -> dict[str, Any]:
         with self._condition:
             return {
                 "max_processes": self._max_processes,
@@ -124,10 +130,25 @@ class RecordedDecodeBudget:
                 "admitted_workflows": self._admitted_workflows,
                 "process_wait_ms": round(self._process_wait_ms, 3),
                 "memory_wait_ms": round(self._memory_wait_ms, 3),
+                "decode_process_wait_ms_p95": self._process_wait_samples.percentile(95),
+                "decode_process_wait_ms_p99": self._process_wait_samples.percentile(99),
+                "decode_memory_wait_ms_p95": self._memory_wait_samples.percentile(95),
+                "decode_memory_wait_ms_p99": self._memory_wait_samples.percentile(99),
                 "process_timeouts": self._process_timeouts,
                 "memory_timeouts": self._memory_timeouts,
                 "cancellations": self._cancellations,
+                "ffmpeg_attempts": dict(self._ffmpeg_attempts),
+                "ffmpeg_successes": dict(self._ffmpeg_successes),
             }
+
+    def record_ffmpeg(self, backend: str, *, success: bool) -> None:
+        normalized = str(backend).strip().lower()
+        if normalized not in self._ffmpeg_attempts:
+            return
+        with self._condition:
+            self._ffmpeg_attempts[normalized] += 1
+            if success:
+                self._ffmpeg_successes[normalized] += 1
 
     def reserve_workflow(
         self,
@@ -195,9 +216,11 @@ class RecordedDecodeBudget:
                         wait_ms = max(0.0, (time.monotonic() - started) * 1000.0)
                         if kind == "process":
                             self._process_wait_ms += wait_ms
+                            self._process_wait_samples.add(wait_ms)
                             self._admitted_processes += 1
                         else:
                             self._memory_wait_ms += wait_ms
+                            self._memory_wait_samples.add(wait_ms)
                             self._admitted_workflows += 1
                         self._condition.notify_all()
                         return RecordedDecodeLease(

@@ -647,7 +647,9 @@ def test_replacement_runtime_same_episode_sequence_queues_distinct_refinement() 
             },
         )
 
-        assert store.detection_job_status("gate") == {"queued": 2}
+        job_status = store.detection_job_status("gate")
+        assert job_status["queued"] == 2
+        assert job_status["oldest_age_ms"] >= 0.0
         with store._connect_jobs() as connection:
             dedupe_keys = {
                 str(row[0])
@@ -690,6 +692,31 @@ def test_failed_refinement_preserves_initial_handoff_and_reports_cause() -> None
     stop.set()
     service.request_stop()
     assert service.wait_stopped(1.0)
+
+
+def test_live_refine_timing_and_oldest_refinement_age_are_reported() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+        processing_timing={"workflow_ms": 12.5, "phases_ms": {}},
+    )
+    refined = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        processing_timing={"workflow_ms": 48.0, "phases_ms": {"frame_decode_ms": 8.0}},
+    )
+    service, *_ = _service(initial)
+
+    service.process("motion", "none", datetime.now(timezone.utc), {})
+    service._record_timing(refined, kind="refine")
+    timing = service.status()["object_detection_timing"]
+
+    assert timing["live_workflow_ms_p95"] == 12.5
+    assert timing["refine_workflow_ms_p95"] == 48.0
+    assert timing["oldest_refinement_age_ms"] >= 0.0
 
 
 def test_refinement_callback_failure_does_not_reclassify_completed_refinement() -> None:
@@ -829,7 +856,9 @@ def test_durable_completion_failure_retries_until_handler_succeeds() -> None:
     assert decision.refine.call_count == 2
     assert service.status()["refinements_completed"] == 1
     assert service.status()["refinement_callback_failures"] == 1
-    assert service.status()["refinement_jobs"] == {"completed": 1}
+    refinement_jobs = service.status()["refinement_jobs"]
+    assert refinement_jobs["completed"] == 1
+    assert refinement_jobs["oldest_age_ms"] == 0.0
     stop.set()
     service.request_stop()
     assert service.wait_stopped(1.0)

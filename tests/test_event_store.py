@@ -47,7 +47,9 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(reclaimed["id"], "job-1")
             self.assertEqual(reclaimed["attempts"], 2)
             recreated.complete_detection_job("job-1", 42)
-            self.assertEqual(recreated.detection_job_status("gate"), {"completed": 1})
+            status = recreated.detection_job_status("gate")
+            self.assertEqual(status["completed"], 1)
+            self.assertEqual(status["oldest_age_ms"], 0.0)
 
     def test_security_work_ledger_is_separate_from_general_event_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,7 +106,9 @@ class EventStoreTest(unittest.TestCase):
 
             store = EventStore(root)
 
-            self.assertEqual(store.detection_job_status("gate"), {"queued": 1})
+            status = store.detection_job_status("gate")
+            self.assertEqual(status["queued"], 1)
+            self.assertEqual(status["oldest_age_ms"], 0.0)
             self.assertEqual(store.motion_trigger_status("gate"), {"queued": 1})
             with store._connect() as connection:
                 remaining = connection.execute(
@@ -207,11 +211,15 @@ class EventStoreTest(unittest.TestCase):
             store.complete_detection_job(
                 "job-1", 10, lease_owner="generation-b"
             )
-            self.assertEqual(store.detection_job_status("gate"), {"running": 1})
+            status = store.detection_job_status("gate")
+            self.assertEqual(status["running"], 1)
+            self.assertGreaterEqual(status["oldest_age_ms"], 0.0)
             store.complete_detection_job(
                 "job-1", 10, lease_owner="generation-a"
             )
-            self.assertEqual(store.detection_job_status("gate"), {"completed": 1})
+            status = store.detection_job_status("gate")
+            self.assertEqual(status["completed"], 1)
+            self.assertEqual(status["oldest_age_ms"], 0.0)
 
     def test_detection_intent_idempotently_links_one_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -316,7 +324,9 @@ class EventStoreTest(unittest.TestCase):
 
             self.assertEqual(store.prune_detection_jobs(limit=2, force=True), 2)
             self.assertEqual(store.prune_detection_jobs(limit=2, force=True), 1)
-            self.assertEqual(store.detection_job_status("gate"), {"queued": 1})
+            status = store.detection_job_status("gate")
+            self.assertEqual(status["queued"], 1)
+            self.assertGreaterEqual(status["oldest_age_ms"], 0.0)
 
     def test_detection_intent_collision_rejects_different_event_occurrence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

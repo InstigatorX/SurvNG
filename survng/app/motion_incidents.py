@@ -17,6 +17,7 @@ import numpy as np
 
 from .durable_payload import durable_json_copy
 from .motion_pipeline.decision_handler import MotionDecisionOutcome
+from .perf_samples import RollingLatencySamples
 from .security import redact_secret_text
 
 
@@ -71,7 +72,7 @@ class DetectionJobStore(Protocol):
         maximum_attempts: int = 5,
         lease_owner: str = "",
     ) -> bool: ...
-    def detection_job_status(self, camera_id: str) -> dict[str, int]: ...
+    def detection_job_status(self, camera_id: str) -> dict[str, int | float]: ...
 
     def refine(
         self,
@@ -236,6 +237,7 @@ class _MemoryDetectionJobStore:
                 "id": job_id, "camera_id": camera_id, "dedupe_key": dedupe_key,
                 "payload": copy.deepcopy(payload), "state": "queued", "attempts": 0,
                 "available_at": time.monotonic(),
+                "created_at_monotonic": time.monotonic(),
             }
             return "queued"
 
@@ -273,10 +275,25 @@ class _MemoryDetectionJobStore:
 
     def detection_job_status(self, camera_id):
         with self._lock:
-            result: dict[str, int] = {}
+            result: dict[str, int | float] = {}
+            now = time.monotonic()
+            oldest_created_at: float | None = None
             for job in self._jobs.values():
                 if job["camera_id"] == camera_id:
                     result[job["state"]] = result.get(job["state"], 0) + 1
+                    if job["state"] in {"queued", "running"}:
+                        created_at = float(job["created_at_monotonic"])
+                        oldest_created_at = (
+                            created_at
+                            if oldest_created_at is None
+                            else min(oldest_created_at, created_at)
+                        )
+            result["oldest_age_ms"] = round(
+                max(0.0, (now - oldest_created_at) * 1000.0)
+                if oldest_created_at is not None
+                else 0.0,
+                3,
+            )
             return result
 
 
@@ -327,6 +344,7 @@ class MotionIncidentService:
         self._refinements_completed = 0
         self._refinements_coalesced = 0
         self._refinement_failures = 0
+        self._refinement_timeouts = 0
         self._last_refinement_failure: dict[str, Any] | None = None
         self._refinement_callback_failures = 0
         self._last_refinement_callback_failure: dict[str, Any] | None = None
@@ -334,6 +352,8 @@ class MotionIncidentService:
         self._timing_totals_ms: dict[str, float] = {}
         self._timing_counts: dict[str, int] = {}
         self._last_timing_ms: dict[str, float] = {}
+        self._live_workflow_samples = RollingLatencySamples()
+        self._refine_workflow_samples = RollingLatencySamples()
 
     def status(self) -> dict[str, Any]:
         durable = self.refinement_store.detection_job_status(self.camera_id)
@@ -355,6 +375,7 @@ class MotionIncidentService:
                 "refinements_completed": self._refinements_completed,
                 "refinements_coalesced": self._refinements_coalesced,
                 "refinement_failures": self._refinement_failures,
+                "refinement_timeouts": self._refinement_timeouts,
                 "last_refinement_failure": (
                     dict(self._last_refinement_failure)
                     if self._last_refinement_failure is not None
@@ -371,6 +392,7 @@ class MotionIncidentService:
                 + int(durable.get("running", 0)),
                 "refinement_durable": True,
                 "refinement_jobs": durable,
+                "oldest_refinement_age_ms": float(durable.get("oldest_age_ms", 0.0)),
                 "refinement_worker_alive": bool(
                     self._refinement_thread and self._refinement_thread.is_alive()
                 ),
@@ -381,6 +403,12 @@ class MotionIncidentService:
                         key: round(value / max(1, self._timing_counts.get(key, 0)), 3)
                         for key, value in self._timing_totals_ms.items()
                     },
+                    "live_workflow_ms_p95": self._live_workflow_samples.percentile(95),
+                    "refine_workflow_ms_p95": self._refine_workflow_samples.percentile(95),
+                    "refinement_timeouts": self._refinement_timeouts,
+                    "oldest_refinement_age_ms": float(
+                        durable.get("oldest_age_ms", 0.0)
+                    ),
                 },
                 "object_activity_attribution": self.decision_processor.activity_status(),
             }
@@ -489,7 +517,7 @@ class MotionIncidentService:
             require_eligible_object=require_eligible_object,
             require_motion_correlation=require_motion_correlation,
         )
-        self._record_timing(outcome)
+        self._record_timing(outcome, kind="live")
         refinement_admission = "not_needed"
         if outcome.refinement_pending:
             # Mandatory delayed discovery is admitted before any optional
@@ -673,6 +701,8 @@ class MotionIncidentService:
                     }
                     with self._status_lock:
                         self._refinement_failures += 1
+                        if self._is_refinement_timeout_error(error):
+                            self._refinement_timeouts += 1
                         self._last_refinement_failure = failure
                     retrying = self.refinement_store.retry_detection_job(
                         job_id,
@@ -697,7 +727,10 @@ class MotionIncidentService:
                             self._refinement_callbacks.pop(job_id, None)
                     continue
 
-                self._record_timing(outcome)
+                self._record_timing(outcome, kind="refine")
+                if self._is_refinement_timeout_outcome(outcome):
+                    with self._status_lock:
+                        self._refinement_timeouts += 1
                 if outcome.object_detected is None:
                     retrying = self.refinement_store.retry_detection_job(
                         job_id,
@@ -805,7 +838,46 @@ class MotionIncidentService:
             except queue.Full:
                 pass
 
-    def _record_timing(self, outcome: MotionDecisionOutcome) -> None:
+    @staticmethod
+    def _is_refinement_timeout_error(error: Exception) -> bool:
+        text = str(error).strip().lower()
+        return any(
+            marker in text
+            for marker in (
+                "timed out",
+                "timeout",
+                "deadline expired",
+                "decode process budget unavailable",
+                "decode budget unavailable",
+            )
+        )
+
+    @staticmethod
+    def _is_refinement_timeout_outcome(outcome: MotionDecisionOutcome) -> bool:
+        timeout_values = {
+            "decode_budget_timeout",
+            "deadline_expired",
+            "refinement_timeout",
+        }
+        if str(outcome.rejection_reason or "").strip().lower() in timeout_values:
+            return True
+        for item in outcome.detected_objects:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            reason = str(item.get("reason") or "").strip().lower()
+            if status in timeout_values or reason in timeout_values:
+                return True
+            if status == "cancelled" and reason == "deadline_expired":
+                return True
+        return False
+
+    def _record_timing(
+        self,
+        outcome: MotionDecisionOutcome,
+        *,
+        kind: str,
+    ) -> None:
         timing = outcome.processing_timing
         if not isinstance(timing, dict):
             return
@@ -821,6 +893,13 @@ class MotionIncidentService:
                     flattened[str(key)] = max(0.0, float(value))
         if not flattened:
             return
+        workflow_ms = flattened.get("workflow_ms")
+        if workflow_ms is not None:
+            (
+                self._refine_workflow_samples
+                if kind == "refine"
+                else self._live_workflow_samples
+            ).add(workflow_ms)
         with self._status_lock:
             self._timing_samples += 1
             self._last_timing_ms = dict(flattened)

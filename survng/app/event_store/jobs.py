@@ -651,14 +651,39 @@ class EventStoreJobsMixin:
             )
             return retry
 
-    def detection_job_status(self, camera_id: str) -> dict[str, int]:
+    def detection_job_status(self, camera_id: str) -> dict[str, int | float]:
         with self._connect_jobs() as conn:
             rows = conn.execute(
                 "select state, count(*) as count from detection_jobs "
                 "where camera_id = ? group by state",
                 (camera_id,),
             ).fetchall()
-        return {str(row["state"]): int(row["count"]) for row in rows}
+            oldest = conn.execute(
+                "select min(created_at) as created_at from detection_jobs "
+                "where camera_id = ? and state in ('queued', 'running')",
+                (camera_id,),
+            ).fetchone()
+        result: dict[str, int | float] = {
+            str(row["state"]): int(row["count"])
+            for row in rows
+        }
+        oldest_age_ms = 0.0
+        created_at = oldest["created_at"] if oldest is not None else None
+        if created_at:
+            try:
+                created = datetime.fromisoformat(str(created_at))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                oldest_age_ms = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - created.astimezone(timezone.utc))
+                    .total_seconds()
+                    * 1000.0,
+                )
+            except (TypeError, ValueError):
+                oldest_age_ms = 0.0
+        result["oldest_age_ms"] = round(oldest_age_ms, 3)
+        return result
 
     def prune_detection_jobs(
         self,
