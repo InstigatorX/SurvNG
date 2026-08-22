@@ -81,6 +81,20 @@ export const THEME_META = {
   light: { label: "Light", icon: Sun },
   dark: { label: "Dark", icon: Moon },
 };
+
+function normalizeDetectorModelPath(value) {
+  return String(value || "").replaceAll("\\", "/").replace(/\/+/g, "/");
+}
+
+export function findDetectorModel(models, activePath) {
+  const active = normalizeDetectorModelPath(activePath);
+  if (!active) return undefined;
+  return (models || []).find((model) => {
+    const path = normalizeDetectorModelPath(model.path);
+    return path === active || path.endsWith(active) || active.endsWith(path);
+  });
+}
+
 export function MotionAnalysisPresetEditor({
   qualification,
   inherited = false,
@@ -1552,7 +1566,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     ? [selectedAudit, ...auditItems]
     : auditItems;
   const activeDetectorPath = config?.detector?.model_path || config?.detector?.model_xml || "";
-  const activeDetectorModel = detectorModels.find((model) => model.path === activeDetectorPath);
+  const activeDetectorModel = findDetectorModel(detectorModels, activeDetectorPath);
   const zoneClassOptions = activeDetectorModel?.classes?.length
     ? activeDetectorModel.classes
     : config?.detector?.labels || [];
@@ -3578,7 +3592,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
     : qsv.listed
       ? "Intel QSV listed by FFmpeg but runtime init failed"
       : "Intel QSV not available to FFmpeg";
-  const activeModel = detectorModels.find((model) => model.path === activeModelPath);
+  const activeModel = findDetectorModel(detectorModels, activeModelPath);
   const eventClassConfirmations = config.detector?.event_class_confirmation_frames || {};
   const eventClassConfidences = config.detector?.event_class_confidence_thresholds || {};
   const eventConfirmationClasses = [...new Set([
@@ -4160,7 +4174,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 <option value="true">Zones</option>
                 <option value="false">Zones + Full Frame</option>
               </select><small>Default for cameras using the global rule.</small></label>
-              <label className="wide-field">Model<select value={detectorModels.some((model) => model.path === activeModelPath) ? activeModelPath : ""} onChange={(event) => selectOpenvinoModel(event.target.value)}>
+              <label className="wide-field">Model<select value={activeModel?.path || ""} onChange={(event) => selectOpenvinoModel(event.target.value)}>
                 <option value="">Custom path</option>
                 {detectorModels.map((model) => {
                   const directory = String(model.path || "").split("/").slice(0, -1).pop();
