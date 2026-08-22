@@ -41,9 +41,13 @@ or the image; they remain in the mode-`0600` configuration bind mount.
 ## Model packages
 
 The GHCR image does not include detector, ReID, or Smart Search weights.
-Download them on the Docker host and bind-mount the directory at `/models`:
+Download them on the Docker host and bind-mount the directory at `/models`.
+No Git checkout is required; copy `scripts/install-docker-models.sh` to the
+host (or run it from the release tarball) and point it at your bind mounts:
 
 ```bash
+SURVNG_MODELS_DIR=/docker-data/models \
+SURVNG_CONFIG_DIR=/docker-data/config \
 scripts/install-docker-models.sh --device GPU
 ```
 

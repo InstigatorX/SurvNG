@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import subprocess
 import threading
@@ -2957,9 +2958,11 @@ class CameraWorkerTest(unittest.TestCase):
             recording = Path(tmpdir) / "segment.mp4"
             recording.touch()
             recorder = DummyRecorder()
+            event_epoch = time.time() - 2.0
             recorder.recording_at = Mock(return_value={
                 "path": str(recording),
-                "start_epoch": time.time() - 1.0,
+                "start_epoch": event_epoch - 1.0,
+                "duration_seconds": 10.0,
             })
             worker = make_worker(
                 camera,
@@ -2970,21 +2973,35 @@ class CameraWorkerTest(unittest.TestCase):
 
             timeouts: list[float] = []
 
-            def timeout_ffmpeg(command, **kwargs):
-                timeout = float(kwargs["timeout"])
-                timeouts.append(timeout)
-                time.sleep(timeout)
-                raise subprocess.TimeoutExpired(command, timeout)
+            class _TimeoutPopen:
+                def __init__(self, command, **kwargs):
+                    self._command = command
+                    self.stdout = io.BytesIO(b"")
+                    self.stderr = io.BytesIO(b"")
+                    self.returncode = -1
+
+                def wait(self, timeout=None):
+                    if timeout is not None:
+                        timeouts.append(float(timeout))
+                        time.sleep(timeout)
+                        raise subprocess.TimeoutExpired(self._command, timeout)
+                    return 1
+
+                def kill(self) -> None:
+                    pass
 
             started = time.monotonic()
             with (
                 patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
                 patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.04),
-                patch("survng.app.motion_pipeline.object_detection.subprocess.run", side_effect=timeout_ffmpeg),
+                patch(
+                    "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                    side_effect=lambda command, **kwargs: _TimeoutPopen(command, **kwargs),
+                ),
                 patch.object(worker, "_get_latest_frame", return_value=fallback.copy()),
             ):
                 frame, objects, recording_path = worker._recorded_motion_frame(
-                    datetime.fromtimestamp(time.time() - 2.0, timezone.utc)
+                    datetime.fromtimestamp(event_epoch, timezone.utc)
                 )
             elapsed = time.monotonic() - started
 
