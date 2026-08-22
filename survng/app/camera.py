@@ -504,16 +504,26 @@ class CameraWorker:
                 capture_generation=frame.generation,
                 lifecycle_generation=lifecycle_generation,
             )
+            # Keep timestamped live history for bridging open main segments.
+            self._remember_tracking_frame(
+                frame.image,
+                frame.captured_at_epoch,
+                source="live",
+            )
         elif frame.source == "main":
-            self._remember_tracking_frame(frame.image, frame.captured_at_epoch)
+            self._remember_tracking_frame(
+                frame.image,
+                frame.captured_at_epoch,
+                source="main",
+            )
 
     def _capture_source_started(self, source: str) -> None:
-        if source == "main":
-            self.tracking_frames.clear()
+        if source in {"main", "live"}:
+            self.tracking_frames.clear(source)
 
     def _capture_source_stopped(self, source: str) -> None:
-        if source == "main":
-            self.tracking_frames.clear()
+        if source in {"main", "live"}:
+            self.tracking_frames.clear(source)
 
     def _get_latest_frame(self, source: str = "live") -> Any:
         source = self.camera.normalized_source(source)
@@ -597,8 +607,14 @@ class CameraWorker:
             "live"
         )
 
-    def _remember_tracking_frame(self, frame: np.ndarray, captured_at: float) -> None:
-        self.tracking_frames.remember(frame, captured_at)
+    def _remember_tracking_frame(
+        self,
+        frame: np.ndarray,
+        captured_at: float,
+        *,
+        source: str = "main",
+    ) -> None:
+        self.tracking_frames.remember(frame, captured_at, source=source)
 
     def _recorded_tracking_frames(
         self,

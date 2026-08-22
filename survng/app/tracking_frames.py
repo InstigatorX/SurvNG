@@ -21,6 +21,8 @@ from .video_frames import DecodedVideoFrame, VideoFrameReference
 LOGGER = logging.getLogger(__name__)
 TRACKING_CATCHUP_SECONDS = 10.0
 TRACKING_CATCHUP_FRAME_WIDTH = 640
+# Bound for bridging an unfinalized main-segment tail from live history.
+TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS = 12.0
 
 
 class TrackingRecorder(Protocol):
@@ -37,7 +39,13 @@ class TrackingRecorder(Protocol):
 
 
 class CameraFrameTimeline:
-    """Authoritative timestamped live and finalized-recording frame timeline."""
+    """Timestamped live/main history merged with finalized recordings.
+
+    Prefer finalized main recordings for catch-up. When the next segment is
+    still open (absent from the index), timestamp-ordered in-memory history
+    bridges the unavailable tail: main samples when warm, otherwise continuous
+    live samples (bounded by TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS).
+    """
 
     def __init__(
         self,
@@ -54,30 +62,40 @@ class CameraFrameTimeline:
         self.stop_event = stop_event
         self.sample_fps = sample_fps
         self._lock = threading.Lock()
-        self._generation = 0
-        self.frames: deque[tuple[float, np.ndarray]] = deque(
-            maxlen=self.buffer_size(sample_fps())
-        )
-        self._last_sample_epoch = 0.0
+        self._main_generation = 0
+        self._live_generation = 0
+        size = self.buffer_size(sample_fps())
+        # Main-stream history (existing callers/tests use ``frames``).
+        self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=size)
+        self.live_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=size)
+        self._last_main_sample_epoch = 0.0
+        self._last_live_sample_epoch = 0.0
 
     @staticmethod
     def buffer_size(sample_fps: float) -> int:
         return max(4, round(sample_fps * TRACKING_CATCHUP_SECONDS) + 2)
 
-    def clear(self) -> None:
+    def clear(self, source: str | None = None) -> None:
+        """Clear retained history for ``main``, ``live``, or both when omitted."""
         with self._lock:
-            self._generation += 1
-            self.frames.clear()
-            self._last_sample_epoch = 0.0
+            if source in (None, "main"):
+                self._main_generation += 1
+                self.frames.clear()
+                self._last_main_sample_epoch = 0.0
+            if source in (None, "live"):
+                self._live_generation += 1
+                self.live_frames.clear()
+                self._last_live_sample_epoch = 0.0
 
     def resize(self, sample_fps: float) -> None:
+        size = self.buffer_size(sample_fps)
         with self._lock:
-            self._generation += 1
-            self.frames = deque(
-                self.frames,
-                maxlen=self.buffer_size(sample_fps),
-            )
-            self._last_sample_epoch = 0.0
+            self._main_generation += 1
+            self._live_generation += 1
+            self.frames = deque(self.frames, maxlen=size)
+            self.live_frames = deque(self.live_frames, maxlen=size)
+            self._last_main_sample_epoch = 0.0
+            self._last_live_sample_epoch = 0.0
 
     def latest(
         self,
@@ -99,13 +117,33 @@ class CameraFrameTimeline:
         """Prefer main detail while using the continuously warm live stream."""
         return self.latest("main") or self.latest("live")
 
-    def remember(self, frame: np.ndarray, captured_at: float) -> None:
+    def remember(
+        self,
+        frame: np.ndarray,
+        captured_at: float,
+        *,
+        source: str = "main",
+    ) -> None:
+        """Retain a timestamped sample for open-segment catch-up bridging.
+
+        ``source="main"`` stores detail frames when main capture is warm.
+        ``source="live"`` stores the continuous live stream so an unfinalized
+        main-segment tail can still be walked in timestamp order without waiting
+        for segment finalization.
+        """
+        normalized = "live" if source == "live" else "main"
         interval = 1.0 / max(0.1, float(self.sample_fps()))
         with self._lock:
-            if captured_at - self._last_sample_epoch < interval * 0.9:
-                return
-            self._last_sample_epoch = captured_at
-            generation = self._generation
+            if normalized == "live":
+                if captured_at - self._last_live_sample_epoch < interval * 0.9:
+                    return
+                self._last_live_sample_epoch = captured_at
+                generation = self._live_generation
+            else:
+                if captured_at - self._last_main_sample_epoch < interval * 0.9:
+                    return
+                self._last_main_sample_epoch = captured_at
+                generation = self._main_generation
         height, width = frame.shape[:2]
         if width > TRACKING_CATCHUP_FRAME_WIDTH:
             scale = TRACKING_CATCHUP_FRAME_WIDTH / width
@@ -117,12 +155,20 @@ class CameraFrameTimeline:
         else:
             stored = frame.copy()
         with self._lock:
-            if (
-                generation != self._generation
-                or captured_at != self._last_sample_epoch
-            ):
-                return
-            self.frames.append((captured_at, stored))
+            if normalized == "live":
+                if (
+                    generation != self._live_generation
+                    or captured_at != self._last_live_sample_epoch
+                ):
+                    return
+                self.live_frames.append((captured_at, stored))
+            else:
+                if (
+                    generation != self._main_generation
+                    or captured_at != self._last_main_sample_epoch
+                ):
+                    return
+                self.frames.append((captured_at, stored))
 
     def recorded_frames(
         self,
@@ -147,13 +193,27 @@ class CameraFrameTimeline:
             ),
         )
         interval = 1.0 / max(0.1, float(sample_fps))
+        live_bridge_start = max(
+            start_epoch,
+            end_epoch - TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS,
+        )
         with self._lock:
-            buffered = tuple(
+            main_buffered = tuple(
                 sorted(
                     (
                         (captured_at, frame)
                         for captured_at, frame in self.frames
                         if start_epoch <= captured_at <= end_epoch
+                    ),
+                    key=lambda sample: sample[0],
+                )
+            )
+            live_buffered = tuple(
+                sorted(
+                    (
+                        (captured_at, frame)
+                        for captured_at, frame in self.live_frames
+                        if live_bridge_start <= captured_at <= end_epoch
                     ),
                     key=lambda sample: sample[0],
                 )
@@ -203,9 +263,12 @@ class CameraFrameTimeline:
                     )
 
         last_epoch = start_epoch - interval
+        # Preference on near-ties: finalized recordings, then main history,
+        # then live history for the open-segment tail only.
         for sample in merge(
             recorded_samples(),
-            buffered,
+            main_buffered,
+            live_buffered,
             key=lambda sample: sample[0],
         ):
             captured_at, _frame = sample

@@ -1571,7 +1571,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 "survng.app.object_track.session.TRACKING_CATCHUP_RETRY_SECONDS",
                 0.01,
             ),
-            self.assertLogs("survng.app.object_tracking", level="WARNING"),
+            self.assertLogs("survng.app.object_tracking", level="INFO") as logs,
         ):
             self.assertTrue(session.start(
                 44,
@@ -1590,6 +1590,87 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             updates[-1]["completion_reason"],
             "missing_media_while_object_active",
         )
+        gap_records = [
+            record
+            for record in logs.records
+            if "coverage gap" in record.getMessage()
+        ]
+        self.assertEqual(len(gap_records), 1)
+        self.assertEqual(gap_records[0].levelname, "INFO")
+        self.assertIn("open recording segment not bridged", gap_records[0].getMessage())
+
+
+    def test_large_unresolved_catchup_gap_logs_warning(self) -> None:
+        frame_processed = threading.Event()
+        updates: list[dict] = []
+        event_at = datetime.fromtimestamp(time.time() - 12.0, timezone.utc)
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detection("car", 0.9, (10, 10, 60, 70))]
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            if int(tracking.get("frames_processed") or 0) >= 1:
+                frame_processed.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=3.0),
+            detector=Detector(),
+            frame_provider=lambda: (
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            ),
+            catchup_frame_provider=lambda *_args: (),
+            update_event=update_event,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        with (
+            patch(
+                "survng.app.object_track.session.TRACKING_CATCHUP_SETTLE_SECONDS",
+                0.05,
+            ),
+            patch(
+                "survng.app.object_track.session.TRACKING_CATCHUP_RETRY_SECONDS",
+                0.01,
+            ),
+            self.assertLogs("survng.app.object_tracking", level="WARNING") as logs,
+        ):
+            self.assertTrue(session.start(
+                45,
+                event_at,
+                [detection("car", 0.95, (10, 10, 60, 70))],
+                np.zeros((100, 100, 3), dtype=np.uint8),
+            ))
+            self.assertTrue(frame_processed.wait(2.0))
+            session.stop()
+
+        self.assertEqual(updates[-1]["state"], "interrupted")
+        self.assertTrue(updates[-1]["coverage_incomplete"])
+        self.assertEqual(updates[-1]["coverage_gap_count"], 1)
+        self.assertEqual(
+            updates[-1]["completion_reason"],
+            "missing_media_while_object_active",
+        )
+        self.assertGreaterEqual(updates[-1]["maximum_coverage_gap_seconds"], 10.0)
+        self.assertTrue(
+            any(
+                record.levelname == "WARNING" and "coverage gap" in record.getMessage()
+                for record in logs.records
+            )
+        )
+
 
     def test_expired_track_after_recorded_catchup_does_not_bridge_to_live(self) -> None:
         terminal = threading.Event()

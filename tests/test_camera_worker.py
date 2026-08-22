@@ -462,6 +462,26 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(int(samples[0][1][0, 0, 0]), 1)
         self.assertEqual(int(samples[1][1][0, 0, 0]), 2)
 
+    def test_live_stream_history_bridges_unfinalized_recording_gap(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            worker.tracking_lifecycle.current().config = ObjectTrackingConfig(sample_fps=2.0)
+            # No main history; live history alone fills the open-segment window.
+            for epoch, value in ((100.0, 7), (100.5, 8), (101.0, 9)):
+                worker._remember_tracking_frame(
+                    np.full((90, 160, 3), value, dtype=np.uint8),
+                    epoch,
+                    source="live",
+                )
+
+            samples = list(worker._recorded_tracking_frames(99.9, 101.2, 2.0, 1280))
+
+        self.assertEqual([sample[0] for sample in samples], [100.0, 100.5, 101.0])
+        self.assertEqual(int(samples[-1][1][0, 0, 0]), 9)
+
+
     def test_main_stream_buffer_respects_tracking_sample_rate(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:

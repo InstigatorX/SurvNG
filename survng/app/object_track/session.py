@@ -45,6 +45,9 @@ LOGGER = logging.getLogger("survng.app.object_tracking")
 TRACKING_STOP_TIMEOUT_SECONDS = 18.0
 TRACKING_CATCHUP_SETTLE_SECONDS = 5.0
 TRACKING_CATCHUP_RETRY_SECONDS = 0.25
+# Small open-segment handoff gaps are expected; escalate only when large
+# or repeated, or when catch-up itself fails (exception path below).
+COVERAGE_GAP_WARNING_SECONDS = 10.0
 
 
 def _adaptive_tracking_fps(
@@ -1155,8 +1158,20 @@ class ObjectTrackingSession:
                             self._maximum_coverage_gap_seconds,
                             coverage_gap,
                         )
-                        LOGGER.warning(
-                            "object tracking coverage gap for %s event %d: %.3fs",
+                        # Persist incomplete coverage either way; only the log
+                        # severity distinguishes common open-segment handoff
+                        # delays from larger/repeated gaps worth paging on.
+                        log = (
+                            LOGGER.warning
+                            if (
+                                coverage_gap >= COVERAGE_GAP_WARNING_SECONDS
+                                or self._coverage_gap_count > 1
+                            )
+                            else LOGGER.info
+                        )
+                        log(
+                            "object tracking coverage gap for %s event %d: %.3fs "
+                            "(open recording segment not bridged)",
                             self.camera.id,
                             event_id,
                             coverage_gap,

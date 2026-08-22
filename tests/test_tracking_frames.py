@@ -328,3 +328,60 @@ def test_recorded_cover_does_not_approximate_when_exact_reference_fails() -> Non
 
     assert selected is None
     fallback.assert_not_called()
+
+def test_live_history_bridges_open_segment_tail_when_recordings_end() -> None:
+    """Finalized segment ends; open next segment is filled from live history."""
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "segment.mp4"
+        path.write_bytes(b"segment")
+        # Only the finalized segment is indexed; the open tail is absent.
+        recorder.recording_rows_between.return_value = [{
+            "path": str(path),
+            "start_epoch": 100.0,
+            "end_epoch": 103.0,
+        }]
+        service = _service(recorder=recorder, sample_fps=2.0)
+        # Live history covers the unfinalized 3.5s tail after recordings end.
+        for epoch, value in (
+            (103.5, 21),
+            (104.0, 22),
+            (104.5, 23),
+            (105.0, 24),
+            (105.5, 25),
+            (106.0, 26),
+        ):
+            service.remember(
+                np.full((10, 20, 3), value, dtype=np.uint8),
+                epoch,
+                source="live",
+            )
+        decoded = [
+            (100.0, np.full((10, 20, 3), 1, dtype=np.uint8)),
+            (101.0, np.full((10, 20, 3), 2, dtype=np.uint8)),
+            (102.0, np.full((10, 20, 3), 3, dtype=np.uint8)),
+            (103.0, np.full((10, 20, 3), 4, dtype=np.uint8)),
+        ]
+        with patch(
+            "survng.app.tracking_frames.sampled_video_frames",
+            return_value=iter(decoded),
+        ):
+            samples = list(service.recorded_frames(100.0, 106.5, 2.0, 640))
+
+    epochs = [sample[0] for sample in samples]
+    assert epochs == [100.0, 101.0, 102.0, 103.0, 103.5, 104.0, 104.5, 105.0, 105.5, 106.0]
+    # Live-bridged samples keep their retained pixels.
+    assert int(samples[-1][1][0, 0, 0]) == 26
+    assert int(samples[4][1][0, 0, 0]) == 21
+
+
+def test_main_clear_preserves_live_bridge_history() -> None:
+    service = _service(sample_fps=2.0)
+    frame = np.zeros((10, 20, 3), dtype=np.uint8)
+    service.remember(frame, 100.0, source="main")
+    service.remember(frame, 100.5, source="live")
+    service.clear("main")
+    assert not service.frames
+    assert [sample[0] for sample in service.live_frames] == [100.5]
+
