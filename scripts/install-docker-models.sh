@@ -274,13 +274,15 @@ install_cpu_torch() {
     --index-url https://download.pytorch.org/whl/cpu
 }
 
-# Ultralytics/OpenCLIP may pull CUDA torch or full opencv-python; put CPU +
-# headless wheels back so the slim installer image keeps working.
+# Ultralytics may pull CUDA torch or opencv-python 5.x / headless mixes.
+# Reassert CPU torch and a single full opencv-python 4.x build. Ultralytics
+# imports cv2.imshow at module load; headless has no imshow. System libs in
+# Dockerfile.model-installer cover the .so deps (libxcb, libGL, …).
 finalize_export_venv() {
   local venv_dir="$1"
   install_cpu_torch "$venv_dir"
-  "$venv_dir/bin/python" -m pip uninstall -y opencv-python >/dev/null 2>&1 || true
-  "$venv_dir/bin/python" -m pip install 'opencv-python-headless>=4.8,<5'
+  "$venv_dir/bin/python" -m pip uninstall -y opencv-python-headless >/dev/null 2>&1 || true
+  "$venv_dir/bin/python" -m pip install 'opencv-python>=4.8,<5'
 }
 
 ensure_venv() {
@@ -382,9 +384,10 @@ install_detector() {
   mkdir -p "$work"
   ensure_venv "$venv"
   install_cpu_torch "$venv"
-  # opencv-python-headless avoids X11/xcb deps in the slim installer image.
+  # Full opencv-python: Ultralytics requires cv2.imshow at import time.
+  # Pin <5 to stay on the manylinux builds exercised with libxcb in the image.
   ensure_venv "$venv" \
-    'opencv-python-headless>=4.8,<5' \
+    'opencv-python>=4.8,<5' \
     'ultralytics>=8.4,<9' \
     'openvino>=2025.1'
   finalize_export_venv "$venv"
