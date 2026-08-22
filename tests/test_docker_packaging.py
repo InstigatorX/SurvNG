@@ -158,6 +158,8 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("raw.githubusercontent.com/InstigatorX/SurvNG", text)
         self.assertIn("--native", text)
         self.assertIn("survng:v1.0-model-installer", text)
+        self.assertIn("--lxc", text)
+        self.assertIn("apparmor=unconfined", text)
         self.assertIn("THIRD_PARTY_MODELS.md", text)
         self.assertIn("quantize=16", text)
         self.assertNotIn("resolve_survng_root", text)

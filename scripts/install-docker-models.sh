@@ -26,6 +26,7 @@ ENABLE=1
 WRITE_CONFIG=1
 FORCE=0
 NATIVE=0
+LXC_APPARMOR=0
 DO_DETECTOR=1
 DO_PERSON_REID=1
 DO_VEHICLE_REID=1
@@ -64,6 +65,9 @@ Options:
   --python PATH        Python used for venvs and config patching (--native only)
   --native             Run on this host (requires python3 + venvs); skip installer image
   --installer-image IMG  Override installer image (default: ghcr.io/.../survng:v1.0-model-installer)
+  --lxc                Proxmox/LXC nested Docker: pass --security-opt apparmor=unconfined
+                       to the installer container. Weakens isolation; opt-in only
+                       (same trade-off as compose.lxc.yaml for the SurvNG service).
   --force              Re-download / re-export even when files already exist
   --no-enable          Write model paths but leave enabled flags unchanged
   --skip-config        Download only; do not create or patch config.json
@@ -91,6 +95,9 @@ Examples:
   SURVNG_MODELS_DIR=/docker-data/models \
   SURVNG_CONFIG_DIR=/docker-data/config \
   ./install-docker-models.sh --device GPU
+
+  # Proxmox/LXC nested Docker (AppArmor unconfined; intentional isolation trade-off)
+  ./install-docker-models.sh --lxc --device GPU
 
   # Dev checkout / air-gapped: run inline
   ./install-docker-models.sh --native --device CPU
@@ -122,6 +129,9 @@ run_installer_container() {
   mkdir -p "$models_host" "$config_host" "$cache_host"
 
   local -a docker_run=(docker run --rm --user "$(id -u):$(id -g)")
+  if [[ "$LXC_APPARMOR" -eq 1 ]]; then
+    docker_run+=(--security-opt apparmor=unconfined)
+  fi
   docker_run+=(
     -v "$models_host:/models-out"
     -v "$config_host:/config-out"
@@ -145,6 +155,9 @@ run_installer_container() {
   log "  models mount: $models_host -> /models-out"
   log "  config mount: $config_host -> /config-out"
   log "  cache mount:  $cache_host -> /cache"
+  if [[ "$LXC_APPARMOR" -eq 1 ]]; then
+    log "  security:   apparmor=unconfined (Proxmox/LXC nested Docker; weakens isolation)"
+  fi
   log "License notices for downloaded models: docker/model-installer/THIRD_PARTY_MODELS.md"
   if ! docker pull "$INSTALLER_IMAGE"; then
     err "Could not pull $INSTALLER_IMAGE"
@@ -647,6 +660,7 @@ while [[ $# -gt 0 ]]; do
     --python) PYTHON_BIN="$2"; shift 2 ;;
     --native) NATIVE=1; shift ;;
     --installer-image) INSTALLER_IMAGE="$2"; shift 2 ;;
+    --lxc) LXC_APPARMOR=1; shift ;;
     --force) FORCE=1; shift ;;
     --no-enable) ENABLE=0; shift ;;
     --skip-config) WRITE_CONFIG=0; shift ;;
