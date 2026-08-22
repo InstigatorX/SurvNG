@@ -60,6 +60,7 @@ from .motion_pipeline import (
     build_builtin_motion_registry,
     resolve_motion_pipeline_graphs,
 )
+from .motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
 from .motion_analysis import FairMotionAnalysisLimiter
 from .recording_lifecycle import RecordingLifecycle
 from .state_events import StateEventBroker
@@ -293,6 +294,7 @@ class AppManager:
         self.motion_object_detector_factory = RecordedMotionObjectDetectorFactory(
             detector=self.detector,
             recorder=self.recorder,
+            decode_budget=RecordedDecodeBudget.from_detector_config(config.detector),
         )
         try:
             self.mqtt = MqttLifecycle(config.mqtt, self._build_mqtt_service)
@@ -1089,6 +1091,7 @@ class AppManager:
     def reconfigure_detector_policy(self, config: AppConfig) -> None:
         """Apply policy-only detector settings without disturbing camera workers."""
         self.inference.reconfigure_policy(config.detector)
+        self.motion_object_detector_factory.reconfigure_decode_budget(config.detector)
         cameras = {camera.id: camera for camera in config.cameras}
         for worker in self.camera_fleet.workers.values():
             camera = cameras.get(worker.camera.id)

@@ -559,6 +559,9 @@ class DetectorConfig(BaseModel):
     backend: Literal["openvino", "coreml"] = "openvino"
     object_worker_count: int = Field(default=1, ge=1, le=4)
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
+    recorded_decode_max_processes: int = Field(default=2, ge=1, le=16)
+    recorded_decode_memory_budget_mb: int = Field(default=256, ge=32, le=8192)
+    recorded_decode_estimated_frame_mb: int = Field(default=8, ge=1, le=64)
     model_path: str = ""
     model_xml: str = ""
     coreml_model_path: str = ""

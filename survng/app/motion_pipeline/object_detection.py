@@ -20,6 +20,7 @@ from ..ffmpeg_hw import recorded_frame_hw_args
 from ..visual_quality import VisualQuality, image_quality
 from ..zones import apply_detection_zones, detection_threshold
 from .context import Frame
+from .recorded_decode_budget import RecordedDecodeBudget
 
 
 LOGGER = logging.getLogger(__name__)
@@ -919,6 +920,7 @@ class RecordedMotionObjectDetector:
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
+        decode_budget: RecordedDecodeBudget | None = None,
     ) -> None:
         self.camera = camera
         self.detector = detector
@@ -927,6 +929,7 @@ class RecordedMotionObjectDetector:
         self.timestamped_live_frame_provider = timestamped_live_frame_provider
         self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
         self.stop_requested = stop_requested
+        self.decode_budget = decode_budget
 
     def detect(self, event_at: datetime) -> RecordedDetectionResult:
         return self._detect(
@@ -1115,6 +1118,7 @@ class RecordedMotionObjectDetector:
             "recording_fallback_samples": 0.0,
             "recording_samples_requested": 0.0,
             "recording_samples_decoded": 0.0,
+            "decode_budget_wait_ms": 0.0,
         }
         event_epoch = event_at.timestamp()
         initial_offsets = stages[0]
@@ -1126,6 +1130,72 @@ class RecordedMotionObjectDetector:
             timing["temporal_confirmation_wait_ms"] += slept * 1000.0
 
         deadline = time.monotonic() + max(0.0, retry_seconds)
+        memory_lease = None
+        budget = self.decode_budget
+        if budget is not None:
+            maximum_frames = len({
+                round(max(0.0, float(offset)), 3)
+                for stage in stages
+                for offset in stage
+            })
+            budget_wait_started = time.monotonic()
+            memory_lease = budget.reserve_workflow(
+                maximum_frames=maximum_frames,
+                incident_epoch=event_epoch,
+                deadline=deadline,
+                cancelled=self.stop_requested,
+            )
+            timing["decode_budget_wait_ms"] += (
+                time.monotonic() - budget_wait_started
+            ) * 1000.0
+            if memory_lease is None:
+                if self.stop_requested():
+                    return self._result(
+                        None,
+                        [{"status": "cancelled"}],
+                        "",
+                        timing,
+                        workflow_started,
+                        refinement_pending=False,
+                    )
+                return self._result(
+                    None,
+                    [{"status": "no_recorded_frame", "reason": "decode_budget_timeout"}],
+                    "",
+                    timing,
+                    workflow_started,
+                    refinement_pending=refinement_pending,
+                )
+
+        try:
+            return self._detect_with_budget(
+                event_at,
+                stages=stages,
+                retry_seconds=retry_seconds,
+                allow_representative_refinement=allow_representative_refinement,
+                refinement_pending=refinement_pending,
+                workflow_started=workflow_started,
+                timing=timing,
+                event_epoch=event_epoch,
+                deadline=deadline,
+            )
+        finally:
+            if memory_lease is not None:
+                memory_lease.release()
+
+    def _detect_with_budget(
+        self,
+        event_at: datetime,
+        *,
+        stages: tuple[tuple[float, ...], ...],
+        retry_seconds: float,
+        allow_representative_refinement: bool,
+        refinement_pending: bool,
+        workflow_started: float,
+        timing: dict[str, float],
+        event_epoch: float,
+        deadline: float,
+    ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
         default_required = max(
@@ -1165,11 +1235,40 @@ class RecordedMotionObjectDetector:
             timing["recording_wait_ms"] += (
                 time.monotonic() - lookup_started
             ) * 1000.0
+
+        def frame_reader(
+            path: Path,
+            offset_seconds: float,
+            *,
+            deadline: float | None = None,
+        ) -> Frame | None:
+            return self._read_recorded_frame(
+                path,
+                offset_seconds,
+                deadline=deadline,
+                incident_epoch=event_epoch,
+                budget_wait_sink=timing,
+            )
+
+        def batch_frame_reader(
+            path: Path,
+            offsets_seconds: list[float],
+            *,
+            deadline: float | None = None,
+        ) -> tuple[dict[float, _DecodedRecordedFrame], int]:
+            return self._read_recorded_frames(
+                path,
+                offsets_seconds,
+                deadline=deadline,
+                incident_epoch=event_epoch,
+                budget_wait_sink=timing,
+            )
+
         sampler = _EventRecordedSampler(
             camera_id=self.camera.id,
             recorder=self.recorder,
-            frame_reader=self._read_recorded_frame,
-            batch_frame_reader=self._read_recorded_frames,
+            frame_reader=frame_reader,
+            batch_frame_reader=batch_frame_reader,
             rows=prefetched_rows,
         )
 
@@ -1672,12 +1771,41 @@ class RecordedMotionObjectDetector:
         union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - intersection
         return intersection / union if union > 0 else 0.0
 
+    def _acquire_decode_process(
+        self,
+        *,
+        incident_epoch: float | None,
+        deadline: float | None,
+        budget_wait_sink: dict[str, float] | None,
+    ):
+        budget = self.decode_budget
+        if budget is None:
+            return None
+        wait_started = time.monotonic()
+        lease = budget.acquire_process(
+            incident_epoch=(
+                float(incident_epoch)
+                if incident_epoch is not None
+                else time.time()
+            ),
+            deadline=deadline,
+            cancelled=self.stop_requested,
+        )
+        if budget_wait_sink is not None:
+            budget_wait_sink["decode_budget_wait_ms"] = (
+                float(budget_wait_sink.get("decode_budget_wait_ms") or 0.0)
+                + (time.monotonic() - wait_started) * 1000.0
+            )
+        return lease
+
     def _read_recorded_frame(
         self,
         path: Path,
         offset_seconds: float,
         *,
         deadline: float | None = None,
+        incident_epoch: float | None = None,
+        budget_wait_sink: dict[str, float] | None = None,
     ) -> Frame | None:
         if not path.exists():
             return None
@@ -1724,6 +1852,15 @@ class RecordedMotionObjectDetector:
                     "bmp",
                     "pipe:1",
                 ]
+                process_lease = self._acquire_decode_process(
+                    incident_epoch=incident_epoch,
+                    deadline=deadline,
+                    budget_wait_sink=budget_wait_sink,
+                )
+                if self.decode_budget is not None and process_lease is None:
+                    last_error = "decode process budget unavailable"
+                    break
+                result = None
                 try:
                     result = subprocess.run(
                         command,
@@ -1735,9 +1872,13 @@ class RecordedMotionObjectDetector:
                 except subprocess.TimeoutExpired:
                     last_error = f"{backend} timed out"
                     continue
-                if result.returncode != 0 or not result.stdout:
-                    detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
-                    last_error = f"{backend}: {' '.join(detail)[:180]}"
+                finally:
+                    if process_lease is not None:
+                        process_lease.release()
+                if result is None or result.returncode != 0 or not result.stdout:
+                    if result is not None:
+                        detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
+                        last_error = f"{backend}: {' '.join(detail)[:180]}"
                     continue
                 array = np.frombuffer(result.stdout, dtype=np.uint8)
                 frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
@@ -1761,6 +1902,8 @@ class RecordedMotionObjectDetector:
         offsets_seconds: list[float],
         *,
         deadline: float | None = None,
+        incident_epoch: float | None = None,
+        budget_wait_sink: dict[str, float] | None = None,
     ) -> tuple[dict[float, _DecodedRecordedFrame], int]:
         """Decode several ordered samples from one segment in one process.
 
@@ -1828,6 +1971,15 @@ class RecordedMotionObjectDetector:
                 "bmp",
                 "pipe:1",
             ]
+            process_lease = self._acquire_decode_process(
+                incident_epoch=incident_epoch,
+                deadline=deadline,
+                budget_wait_sink=budget_wait_sink,
+            )
+            if self.decode_budget is not None and process_lease is None:
+                last_error = "decode process budget unavailable"
+                break
+            result = None
             try:
                 process_count += 1
                 result = subprocess.run(
@@ -1840,9 +1992,13 @@ class RecordedMotionObjectDetector:
             except subprocess.TimeoutExpired:
                 last_error = f"{backend} timed out"
                 continue
-            if result.returncode != 0 or not result.stdout:
-                detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
-                last_error = f"{backend}: {' '.join(detail)[:180]}"
+            finally:
+                if process_lease is not None:
+                    process_lease.release()
+            if result is None or result.returncode != 0 or not result.stdout:
+                if result is not None:
+                    detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
+                    last_error = f"{backend}: {' '.join(detail)[:180]}"
                 continue
             encoded_frames = self._split_bmp_stream(result.stdout)
             actual_offsets = [
@@ -1894,14 +2050,20 @@ class RecordedMotionObjectDetector:
             cursor += frame_size
         return frames
 
+
 class RecordedMotionObjectDetectorFactory:
     def __init__(
         self,
         detector: MotionObjectDetectorBackend,
         recorder: MotionRecordingProvider,
+        decode_budget: RecordedDecodeBudget | None = None,
     ) -> None:
         self.detector = detector
         self.recorder = recorder
+        self.decode_budget = decode_budget or RecordedDecodeBudget()
+
+    def reconfigure_decode_budget(self, config: Any) -> None:
+        self.decode_budget.reconfigure_from_detector_config(config)
 
     def create(
         self,
@@ -1919,4 +2081,5 @@ class RecordedMotionObjectDetectorFactory:
             timestamped_live_frame_provider=timestamped_live_frame_provider,
             timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
             stop_requested=stop_requested,
+            decode_budget=self.decode_budget,
         )
