@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
+import inspect
 import os
 import signal
 import subprocess
@@ -402,6 +403,13 @@ class JsonGZipResponder(GZipResponder):
         media_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
         return media_type == "application/json" or media_type.endswith("+json")
 
+    async def _compress(self, body: bytes, *, more_body: bool) -> bytes:
+        """Support Starlette versions with either sync or async compression."""
+        result = self.apply_compression(body, more_body=more_body)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     async def send_with_compression(self, message: dict) -> None:
         message_type = message["type"]
         if message_type == "http.response.start":
@@ -424,7 +432,7 @@ class JsonGZipResponder(GZipResponder):
                 await self.send(self.initial_message)
                 await self.send(message)
             elif not more_body:
-                body = await self.apply_compression(body, more_body=False)
+                body = await self._compress(body, more_body=False)
                 headers = MutableHeaders(raw=self.initial_message["headers"])
                 headers.add_vary_header("Accept-Encoding")
                 if body != message["body"]:
@@ -434,7 +442,7 @@ class JsonGZipResponder(GZipResponder):
                 await self.send(self.initial_message)
                 await self.send(message)
             else:
-                body = await self.apply_compression(body, more_body=True)
+                body = await self._compress(body, more_body=True)
                 headers = MutableHeaders(raw=self.initial_message["headers"])
                 headers.add_vary_header("Accept-Encoding")
                 if body != message["body"]:
@@ -445,7 +453,7 @@ class JsonGZipResponder(GZipResponder):
                 await self.send(message)
         elif message_type == "http.response.body":
             body = message.get("body", b"")
-            message["body"] = await self.apply_compression(
+            message["body"] = await self._compress(
                 body,
                 more_body=message.get("more_body", False),
             )
