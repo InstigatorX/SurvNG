@@ -62,10 +62,15 @@ class ModelEvaluationRunner:
     @staticmethod
     def _validated_model_path(value: str) -> str:
         path = Path(value).expanduser().resolve()
-        model_root = Path("models").resolve()
+        model_roots = []
+        for root in (Path("models"), Path("/models")):
+            try:
+                model_roots.append(root.resolve())
+            except OSError:
+                continue
         if path.suffix.lower() not in {".xml", ".onnx"} or not path.is_file():
             raise ValueError("model must be an existing OpenVINO XML or ONNX file")
-        if path != model_root and model_root not in path.parents:
+        if not any(path == root or root in path.parents for root in model_roots):
             raise ValueError("model must be stored under the SurvNG models directory")
         if path.suffix.lower() == ".xml" and not path.with_suffix(".bin").is_file():
             raise ValueError("OpenVINO model is missing its BIN weights file")

@@ -150,6 +150,9 @@ Prepare isolated configuration and model mounts:
 cd /root/SurvNG
 
 install -d -m 700 docker-data/config docker-data/models
+# Detector packages must be named *_openvino_model and live under the
+# SURVNG_MODELS_DIR mount (container path /models):
+#   docker-data/models/yolo26s_openvino_model/{yolo26s.xml,yolo26s.bin,metadata.yaml}
 install -m 600 config.json docker-data/config/config.json
 
 cp -a \
