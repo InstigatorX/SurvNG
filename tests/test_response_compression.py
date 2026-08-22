@@ -102,6 +102,45 @@ class JsonResponseCompressionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(headers[b"content-encoding"], b"gzip")
                 self.assertEqual(gzip.decompress(messages[1]["body"]), body)
 
+    async def test_streaming_json_chunks_are_awaited_and_gzipped(self) -> None:
+        """Starlette 1.6+ apply_compression is async; chunked bodies must await it."""
+        chunks = [b'{"items":[', b'"' + (b"x" * 80) + b'",', b'"' + (b"y" * 80) + b'"]}']
+
+        async def inner(_scope, _receive, send) -> None:
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(sum(len(chunk) for chunk in chunks)).encode()),
+                ],
+            })
+            for index, chunk in enumerate(chunks):
+                await send({
+                    "type": "http.response.body",
+                    "body": chunk,
+                    "more_body": index < len(chunks) - 1,
+                })
+
+        messages: list[dict] = []
+        middleware = JsonGZipMiddleware(inner, minimum_size=64, compresslevel=5)
+        await middleware(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/example",
+                "headers": [(b"accept-encoding", b"gzip")],
+            },
+            self._receive,
+            self._collector(messages),
+        )
+
+        headers = dict(messages[0]["headers"])
+        self.assertEqual(headers[b"content-encoding"], b"gzip")
+        self.assertNotIn(b"content-length", headers)
+        compressed = b"".join(message["body"] for message in messages[1:])
+        self.assertEqual(gzip.decompress(compressed), b"".join(chunks))
+
 
 if __name__ == "__main__":
     unittest.main()
