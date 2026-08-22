@@ -995,6 +995,42 @@ class InferenceSupervisorTest(unittest.TestCase):
         with self.assertRaisesRegex(InferenceUnavailable, "uint8 BGR"):
             worker._write_frame_locked(np.zeros((10, 10, 3), dtype=np.float32))
 
+    def test_object_worker_downscales_ipc_frame_and_restores_boxes(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {"input_shape": [640, 640]},
+            start_enabled=False,
+        )
+        frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+
+        ipc_frame, scale = worker._prepare_object_frame_locked(frame)
+        result = worker._restore_object_boxes(
+            [{"box": {"x1": 100, "y1": 50, "x2": 500, "y2": 300}}],
+            scale,
+        )
+
+        self.assertEqual(ipc_frame.shape, (720, 1280, 3))
+        self.assertEqual(scale, (3.0, 3.0))
+        self.assertEqual(
+            result[0]["box"],
+            {"x1": 300.0, "y1": 150.0, "x2": 1500.0, "y2": 900.0},
+        )
+
+    def test_object_worker_keeps_frame_when_model_shape_is_unknown(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+            start_enabled=False,
+        )
+        frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+
+        ipc_frame, scale = worker._prepare_object_frame_locked(frame)
+
+        self.assertIs(ipc_frame, frame)
+        self.assertIsNone(scale)
+
     def test_admission_percentiles_and_ipc_copy_bytes_are_reported(self) -> None:
         self.assertTrue(
             self.supervisor._enter_device_workload(

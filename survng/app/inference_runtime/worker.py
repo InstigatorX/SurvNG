@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Any
 
+import cv2
 import numpy as np
 
 from ..config import DetectorConfig
@@ -412,6 +413,74 @@ class _InferenceWorker:
             "byte_count": byte_count,
         }
 
+    def _prepare_object_frame_locked(
+        self,
+        frame: np.ndarray,
+    ) -> tuple[np.ndarray, tuple[float, float] | None]:
+        """Bound object-detection IPC while leaving backend preprocessing isolated."""
+        if (
+            self.role != "object"
+            or not isinstance(frame, np.ndarray)
+            or frame.dtype != np.uint8
+            or frame.ndim != 3
+            or frame.shape[2] != 3
+            or any(value <= 0 for value in frame.shape)
+        ):
+            return frame, None
+        input_shape = self._status.get("input_shape")
+        if (
+            not isinstance(input_shape, (list, tuple))
+            or len(input_shape) != 2
+        ):
+            return frame, None
+        try:
+            model_side = max(int(input_shape[0]), int(input_shape[1]))
+        except (TypeError, ValueError):
+            return frame, None
+        source_height, source_width = frame.shape[:2]
+        max_ipc_side = model_side * 2
+        source_side = max(source_width, source_height)
+        if model_side <= 0 or source_side <= max_ipc_side:
+            return frame, None
+        scale = max_ipc_side / float(source_side)
+        target_width = max(1, int(round(source_width * scale)))
+        target_height = max(1, int(round(source_height * scale)))
+        resized = cv2.resize(
+            frame,
+            (target_width, target_height),
+            interpolation=cv2.INTER_AREA,
+        )
+        return resized, (
+            source_width / float(target_width),
+            source_height / float(target_height),
+        )
+
+    @staticmethod
+    def _restore_object_boxes(
+        result: Any,
+        scale: tuple[float, float] | None,
+    ) -> Any:
+        if scale is None or not isinstance(result, list):
+            return result
+        scale_x, scale_y = scale
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            box = item.get("box")
+            if not isinstance(box, dict):
+                continue
+            for key, factor in (
+                ("x1", scale_x),
+                ("x2", scale_x),
+                ("y1", scale_y),
+                ("y2", scale_y),
+            ):
+                try:
+                    box[key] = float(box[key]) * factor
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return result
+
     def request(
         self,
         operation: str,
@@ -493,8 +562,12 @@ class _InferenceWorker:
                     )
                 self._request_id += 1
                 request = {"id": self._request_id, "op": operation, **payload}
+                box_scale = None
                 if frame is not None:
-                    request.update(self._write_frame_locked(frame))
+                    ipc_frame = frame
+                    if operation == "detect":
+                        ipc_frame, box_scale = self._prepare_object_frame_locked(frame)
+                    request.update(self._write_frame_locked(ipc_frame))
                 try:
                     connection.send(request)
                     remaining = deadline - time.monotonic()
@@ -523,7 +596,7 @@ class _InferenceWorker:
                     raise RuntimeError(str(response.get("error") or f"{operation} failed"))
                 self._last_error = ""
                 completed = True
-                return response.get("result")
+                return self._restore_object_boxes(response.get("result"), box_scale)
             finally:
                 self._lock.release()
         finally:
