@@ -319,6 +319,13 @@ class ManagerLifecycleTest(unittest.TestCase):
             status["recorded_decode"]["ffmpeg_attempts"],
             {"hardware": 2, "cpu": 1},
         )
+        recommendation = status["object_worker_recommendation"]
+        self.assertIn("recommended", recommendation)
+        self.assertIn("current", recommendation)
+        self.assertIn("reasons", recommendation)
+        self.assertIn("signals", recommendation)
+        self.assertGreaterEqual(recommendation["recommended"], 1)
+        self.assertLessEqual(recommendation["recommended"], 4)
 
     def test_mqtt_server_health_accepts_loaded_isolated_detector(self) -> None:
         manager = manager_with_mocks()

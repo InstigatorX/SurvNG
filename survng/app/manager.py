@@ -36,6 +36,7 @@ from .detector import objects_to_json
 from .detection_watch import RouteDetectionWatch
 from .go2rtc import Go2RtcAdapter
 from .inference_lifecycle import InferenceLifecycle
+from .inference_runtime.worker_topology import object_worker_recommendation_from_status
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .identity_projection import apply_event_identity
@@ -1537,13 +1538,19 @@ class AppManager:
         ]
 
     def detector_status(self) -> dict:
-        return {
+        recorded_decode = self.motion_object_detector_factory.decode_budget.status()
+        status = {
             **self.detector.status(),
             "lifecycle": self.inference.status(),
-            "recorded_decode": (
-                self.motion_object_detector_factory.decode_budget.status()
-            ),
+            "recorded_decode": recorded_decode,
         }
+        status["object_worker_recommendation"] = (
+            object_worker_recommendation_from_status(
+                status,
+                recorded_decode=recorded_decode,
+            )
+        )
+        return status
 
     def go2rtc_status(self) -> dict:
         return self.go2rtc.status(list(self._unique_cameras()))
