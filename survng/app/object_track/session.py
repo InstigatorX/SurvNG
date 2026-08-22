@@ -1021,17 +1021,19 @@ class ObjectTrackingSession:
                             catchup=True,
                             frame_reference=frame_reference,
                         )
+                        # Count deferred/failed attempts toward the tick budget
+                        # so shed inference cannot monopolize catch-up replay.
+                        processed_this_tick += 1
                         if processed:
                             # Track expiry is based only on successfully
                             # analyzed media, never on a deferred/failed cursor.
                             captured_at = sample_epoch
                             advanced = True
-                            processed_this_tick += 1
-                            if (
-                                processed_this_tick
-                                >= self.config.max_catchup_frames_per_tick
-                            ):
-                                break
+                        if (
+                            processed_this_tick
+                            >= self.config.max_catchup_frames_per_tick
+                        ):
+                            break
                 finally:
                     close_catchup = getattr(catchup_frames, "close", None)
                     if callable(close_catchup):

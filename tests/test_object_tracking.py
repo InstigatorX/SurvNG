@@ -1323,6 +1323,66 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         self.assertEqual(updates[-1]["catchup_frames_processed"], 2)
 
+    def test_deferred_catchup_attempts_count_toward_tick_cap(self) -> None:
+        catchup_ready = threading.Event()
+        event_at = datetime.fromtimestamp(time.time() - 5.0, timezone.utc)
+        detect_calls = {"count": 0}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                detect_calls["count"] += 1
+                if detect_calls["count"] >= 2:
+                    catchup_ready.set()
+                return [{"status": "inference_deferred"}]
+
+        def catchup_provider(start_epoch, end_epoch, sample_fps, frame_width):
+            del frame_width
+            captured_at = start_epoch
+            while captured_at <= end_epoch:
+                yield captured_at, np.zeros((100, 100, 3), dtype=np.uint8)
+                captured_at += 1.0 / sample_fps
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            config=ObjectTrackingConfig(
+                sample_fps=2.0,
+                max_session_seconds=3.0,
+                max_catchup_frames_per_tick=2,
+                persist_interval_seconds=0.0,
+            ),
+            detector=Detector(),
+            frame_provider=lambda: None,
+            catchup_frame_provider=catchup_provider,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        self.assertTrue(session.start(
+            42,
+            event_at,
+            [detection("person", 0.95, (10, 10, 40, 80))],
+            np.zeros((100, 100, 3), dtype=np.uint8),
+        ))
+        self.assertTrue(catchup_ready.wait(2.0))
+        # Deferred backlog must stop after the per-tick cap instead of draining
+        # the full provider range in one burst.
+        time.sleep(0.2)
+        calls_after_cap = detect_calls["count"]
+        session.stop()
+
+        self.assertEqual(calls_after_cap, 2)
+
     def test_recorded_catchup_preserves_identity_across_processing_delay(self) -> None:
         catchup_ready = threading.Event()
         updates: list[dict] = []

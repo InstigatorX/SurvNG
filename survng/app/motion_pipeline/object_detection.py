@@ -1625,9 +1625,12 @@ class RecordedMotionObjectDetector:
         frame = selected.frame
         if frame is None:
             raise ValueError("selected recorded frame was released too early")
-        face_candidates = self._face_candidates(samples)
+        # Dedicated face enrichment runs only after consensus. Collect
+        # face_candidates afterward so persistence sees those faces.
         if any(item.get("temporal_consensus") is True for item in objects):
             objects = self._enrich_selected_faces(frame, objects, timing=timing)
+            selected.objects = list(objects)
+        face_candidates = self._face_candidates(samples)
         self._release_nonselected_frames(samples, selected)
         return self._result(
             frame,

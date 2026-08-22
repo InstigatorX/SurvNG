@@ -1035,6 +1035,13 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(detector.object_calls, 3)
         self.assertEqual(detector.face_calls, 2)
         self.assertTrue(any(item.get("label") == "face" for item in result.objects))
+        self.assertTrue(
+            any(
+                candidate.detection_source == "dedicated_face"
+                for candidate in result.face_candidates
+            ),
+            "post-consensus dedicated faces must be included in face_candidates",
+        )
 
     def test_detector_uses_sparse_late_stage_when_object_appears_after_trigger(self) -> None:
         event_epoch = 1_800_000_000.0
