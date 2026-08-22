@@ -559,6 +559,7 @@ class DetectorConfig(BaseModel):
     backend: Literal["openvino", "coreml"] = "openvino"
     object_worker_count: int = Field(default=1, ge=1, le=4)
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
+    recorded_adaptive_sampling: bool = True
     recorded_decode_max_processes: int = Field(default=2, ge=1, le=16)
     recorded_decode_memory_budget_mb: int = Field(default=256, ge=32, le=8192)
     recorded_decode_estimated_frame_mb: int = Field(default=8, ge=1, le=64)
@@ -577,6 +578,7 @@ class DetectorConfig(BaseModel):
     face_detection_model_path: str = Field(default="", max_length=4096)
     face_recognition_device: str = Field(default="AUTO", min_length=1, max_length=64)
     face_detection_threshold: float = Field(default=0.60, ge=0.01, le=0.99)
+    face_enrich_max_people: int = Field(default=4, ge=1, le=16)
     face_match_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
     face_unknown_cluster_threshold: float = Field(default=0.55, ge=0.20, le=0.90)
     face_auto_identify_enabled: bool = False

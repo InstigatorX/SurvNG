@@ -4,6 +4,7 @@ import logging
 import math
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -52,10 +53,10 @@ REPRESENTATIVE_MIN_QUALITY_SCORE = 0.25
 SEMANTIC_RESCUE_THRESHOLD_FRACTION = 0.5
 
 
-@dataclass(frozen=True)
+@dataclass
 class _RecordedDetectionSample:
     offset: float
-    frame: Frame
+    frame: Frame | None
     objects: list[dict[str, Any]]
     recording_path: str
     requested_offset: float | None = None
@@ -175,6 +176,8 @@ def _sample_image_quality(
     sample_index: int,
 ) -> _ImageQuality:
     """Prefer object-crop quality so timestamps and static scenery cannot win."""
+    if sample.frame is None:
+        return _ImageQuality(0.0, 0.0, 0.0, 0.0, 0.0)
     regions: list[Frame] = []
     height, width = sample.frame.shape[:2]
     for track in visible:
@@ -329,7 +332,10 @@ def _temporal_motion_metrics(
         box = _box(detected)
         if box is None or sample_index >= len(samples):
             continue
-        height, width = samples[sample_index].frame.shape[:2]
+        frame = samples[sample_index].frame
+        if frame is None:
+            continue
+        height, width = frame.shape[:2]
         if width <= 0 or height <= 0:
             continue
         x1, y1, x2, y2 = box
@@ -501,6 +507,8 @@ def _temporal_consensus(
         item: tuple[int, _RecordedDetectionSample],
     ) -> tuple[int, int, float, float, int, int, float, float, float, float, float]:
         sample_index, sample = item
+        if sample.frame is None:
+            raise ValueError("recorded consensus samples must retain frames")
         visible = [
             track
             for track in evidence
@@ -555,6 +563,8 @@ def _temporal_consensus(
         )
 
     selected_index, selected = max(enumerate(samples), key=sample_score)
+    if selected.frame is None:
+        raise ValueError("recorded consensus samples must retain frames")
     selected_quality = quality_by_sample[selected_index]
     annotated: list[dict[str, Any]] = []
     for detected in selected.objects:
@@ -1122,7 +1132,24 @@ class RecordedMotionObjectDetector:
         }
         event_epoch = event_at.timestamp()
         initial_offsets = stages[0]
-        newest_needed = event_epoch + max(initial_offsets) + RECORDED_EVENT_SETTLE_SECONDS
+        adaptive_initial_offsets = tuple(
+            offset for offset in (0.0, 0.5, -0.5) if offset in initial_offsets
+        )
+        newest_initial_offset = (
+            max(adaptive_initial_offsets)
+            if adaptive_initial_offsets
+            and getattr(
+                self.detector.config,
+                "recorded_adaptive_sampling",
+                True,
+            )
+            else max(initial_offsets)
+        )
+        newest_needed = (
+            event_epoch
+            + newest_initial_offset
+            + RECORDED_EVENT_SETTLE_SECONDS
+        )
         wait_seconds = max(0.0, newest_needed - time.time())
         if wait_seconds > 0:
             slept = min(wait_seconds, 3.0)
@@ -1273,6 +1300,25 @@ class RecordedMotionObjectDetector:
         )
 
         for stage_index, stage_offsets in enumerate(stages):
+            adaptive_stage = bool(
+                stage_index == 0
+                and getattr(
+                    self.detector.config,
+                    "recorded_adaptive_sampling",
+                    True,
+                )
+            )
+            if adaptive_stage:
+                preferred_order = (0.0, 0.5, -0.5, -1.0, 1.0)
+                ordered_stage_offsets = tuple(
+                    offset for offset in preferred_order if offset in stage_offsets
+                ) + tuple(
+                    offset for offset in stage_offsets if offset not in preferred_order
+                )
+                adaptive_limit = 1
+            else:
+                ordered_stage_offsets = stage_offsets
+                adaptive_limit = len(stage_offsets)
             while True:
                 if self.stop_requested():
                     return self._result(
@@ -1292,7 +1338,8 @@ class RecordedMotionObjectDetector:
                 recording_missing = False
                 future_sample = False
                 pending_by_path: dict[Path, list[tuple[float, float, dict[str, Any]]]] = {}
-                for sample_offset in stage_offsets:
+                requested_stage_offsets = ordered_stage_offsets[:adaptive_limit]
+                for sample_offset in requested_stage_offsets:
                     if sample_offset in samples_by_offset:
                         continue
                     if time.monotonic() >= stage_deadline:
@@ -1338,6 +1385,7 @@ class RecordedMotionObjectDetector:
                         objects = self._detect_objects(
                             decoded.frame,
                             timing=timing,
+                            enrich_faces=False,
                             workload="refinement",
                         )
                         row_start = float(row.get("start_epoch") or 0.0)
@@ -1374,6 +1422,38 @@ class RecordedMotionObjectDetector:
                             stage_index == 0
                             and _representative_needs_refinement(objects)
                         )
+                        causal_context_ready = bool(
+                            stage_index != 0
+                            or any(
+                                sample.requested_offset is not None
+                                and sample.requested_offset < 0.0
+                                for sample in samples
+                            )
+                        )
+                        confirmed_labels = {
+                            str(item.get("label") or "").strip().lower()
+                            for item in objects
+                            if item.get("temporal_consensus") is True
+                        }
+                        unresolved_candidate = any(
+                            _candidate_detection(item)
+                            and not item.get("auxiliary_detection")
+                            and str(item.get("label") or "").strip().lower()
+                            not in confirmed_labels
+                            for sample in samples
+                            for item in sample.objects
+                        )
+                        if (
+                            adaptive_stage
+                            and (
+                                not causal_context_ready
+                                or representative_needs_refinement
+                                or unresolved_candidate
+                            )
+                            and adaptive_limit < len(ordered_stage_offsets)
+                        ):
+                            adaptive_limit += 1
+                            continue
                         if allow_representative_refinement and representative_needs_refinement:
                             refinement_deadline = min(
                                 deadline,
@@ -1391,20 +1471,23 @@ class RecordedMotionObjectDetector:
                                 self.camera.id,
                                 max(stage_offsets),
                             )
-                        return self._result(
-                            selected.frame,
+                        return self._recorded_result(
+                            selected,
                             objects,
-                            selected.recording_path,
+                            samples,
                             timing,
                             workflow_started,
                             refinement_pending=bool(
                                 refinement_pending and representative_needs_refinement
                             ),
-                            face_candidates=self._face_candidates(samples),
-                            frame_captured_at_epoch=event_epoch + selected.offset,
-                            frame_source="recorded_main",
-                            frame_timestamp_exact=selected.exact_timestamp,
+                            event_epoch=event_epoch,
                         )
+                if (
+                    adaptive_stage
+                    and adaptive_limit < len(ordered_stage_offsets)
+                ):
+                    adaptive_limit += 1
+                    continue
                 if all(offset in samples_by_offset for offset in stage_offsets):
                     break
                 remaining = deadline - time.monotonic()
@@ -1437,17 +1520,14 @@ class RecordedMotionObjectDetector:
                 default_required,
                 class_confirmations,
             )
-            return self._result(
-                selected.frame,
+            return self._recorded_result(
+                selected,
                 objects,
-                selected.recording_path,
+                samples,
                 timing,
                 workflow_started,
                 refinement_pending=refinement_pending,
-                face_candidates=self._face_candidates(samples),
-                frame_captured_at_epoch=event_epoch + selected.offset,
-                frame_source="recorded_main",
-                frame_timestamp_exact=selected.exact_timestamp,
+                event_epoch=event_epoch,
             )
 
         fallback_sample = (
@@ -1528,7 +1608,48 @@ class RecordedMotionObjectDetector:
                 objects=tuple(sample.objects),
             )
             for sample in samples
+            if sample.frame is not None
         )
+
+    def _recorded_result(
+        self,
+        selected: _RecordedDetectionSample,
+        objects: list[dict[str, Any]],
+        samples: list[_RecordedDetectionSample],
+        timing: dict[str, float],
+        workflow_started: float,
+        *,
+        refinement_pending: bool,
+        event_epoch: float,
+    ) -> RecordedDetectionResult:
+        frame = selected.frame
+        if frame is None:
+            raise ValueError("selected recorded frame was released too early")
+        face_candidates = self._face_candidates(samples)
+        if any(item.get("temporal_consensus") is True for item in objects):
+            objects = self._enrich_selected_faces(frame, objects, timing=timing)
+        self._release_nonselected_frames(samples, selected)
+        return self._result(
+            frame,
+            objects,
+            selected.recording_path,
+            timing,
+            workflow_started,
+            refinement_pending=refinement_pending,
+            face_candidates=face_candidates,
+            frame_captured_at_epoch=event_epoch + selected.offset,
+            frame_source="recorded_main",
+            frame_timestamp_exact=selected.exact_timestamp,
+        )
+
+    @staticmethod
+    def _release_nonselected_frames(
+        samples: list[_RecordedDetectionSample],
+        selected: _RecordedDetectionSample,
+    ) -> None:
+        for sample in samples:
+            if sample is not selected:
+                sample.frame = None
 
     @staticmethod
     def _result(
@@ -1612,6 +1733,7 @@ class RecordedMotionObjectDetector:
                 frame,
                 objects,
                 detect_faces,
+                max_people=8,
             )
             objects = self._merge_dedicated_faces(objects, dedicated_faces)
         for detected in objects:
@@ -1660,11 +1782,83 @@ class RecordedMotionObjectDetector:
             )
         return objects
 
+    def _enrich_selected_faces(
+        self,
+        frame: Frame,
+        objects: list[dict[str, Any]],
+        *,
+        timing: dict[str, float] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run bounded face enrichment only after recorded consensus."""
+        detect_faces = getattr(self.detector, "detect_faces", None)
+        if not callable(detect_faces):
+            return objects
+        enrichment_started = time.monotonic()
+        confirmed_objects = [
+            item
+            for item in objects
+            if item.get("temporal_consensus") is True
+        ]
+        dedicated_faces = self._detect_faces_in_people(
+            frame,
+            confirmed_objects,
+            detect_faces,
+            max_people=max(
+                1,
+                int(getattr(self.detector.config, "face_enrich_max_people", 4)),
+            ),
+        )
+        merged = self._merge_dedicated_faces(objects, dedicated_faces)
+        frame_height, frame_width = frame.shape[:2]
+        candidate_threshold = float(getattr(
+            self.detector.config,
+            "event_candidate_confidence_threshold",
+            self.detector.config.confidence_threshold,
+        ))
+        for detected in merged:
+            if (
+                not isinstance(detected, dict)
+                or str(detected.get("label") or "").strip().lower() != "face"
+            ):
+                continue
+            detected.setdefault("detection_source", "dedicated_face")
+            detected["detection_frame_width"] = int(frame_width)
+            detected["detection_frame_height"] = int(frame_height)
+            detected["confidence_eligible"] = True
+            detected["incident_eligible"] = False
+            detected["zone_eligible"] = False
+            detected["temporal_eligible"] = False
+            detected["temporal_consensus"] = False
+            detected["auxiliary_detection"] = True
+            detected["temporal_candidate_threshold"] = candidate_threshold
+            detected["temporal_candidate_eligible"] = bool(
+                _confidence(detected) >= candidate_threshold
+            )
+            box = _box(detected)
+            if box is None:
+                continue
+            x1, y1, x2, y2 = box
+            left = max(0, min(frame_width, int(math.floor(x1))))
+            top = max(0, min(frame_height, int(math.floor(y1))))
+            right = max(left, min(frame_width, int(math.ceil(x2))))
+            bottom = max(top, min(frame_height, int(math.ceil(y2))))
+            quality = _image_quality(frame[top:bottom, left:right])
+            detected["face_quality_score"] = round(quality.score, 4)
+            detected["face_sharpness_score"] = round(quality.sharpness, 4)
+            detected["face_exposure_score"] = round(quality.exposure, 4)
+        if timing is not None:
+            timing["detection_enrichment_ms"] += (
+                time.monotonic() - enrichment_started
+            ) * 1000.0
+        return merged
+
     @staticmethod
     def _detect_faces_in_people(
         frame: Frame,
         objects: list[dict[str, Any]],
         detect_faces: Callable[[Frame], list[dict[str, Any]]],
+        *,
+        max_people: int,
     ) -> list[dict[str, Any]]:
         """Run the 300px face model where CCTV faces retain useful resolution."""
         frame_height, frame_width = frame.shape[:2]
@@ -1676,7 +1870,7 @@ class RecordedMotionObjectDetector:
             and str(item.get("label") or "").strip().lower() == "person"
             and _box(item) is not None
         ]
-        for person in sorted(people, key=_confidence, reverse=True)[:8]:
+        for person in sorted(people, key=_confidence, reverse=True)[:max_people]:
             box = _box(person)
             if box is None:
                 continue
@@ -1984,50 +2178,94 @@ class RecordedMotionObjectDetector:
             if self.decode_budget is not None and process_lease is None:
                 last_error = "decode process budget unavailable"
                 break
-            result = None
+            process: subprocess.Popen[bytes] | None = None
+            decoded_frames: list[Frame] = []
+            stderr_chunks: list[bytes] = []
+            stream_errors: list[Exception] = []
+            stdout_thread: threading.Thread | None = None
+            stderr_thread: threading.Thread | None = None
             try:
                 process_count += 1
-                result = subprocess.run(
+                process = subprocess.Popen(
                     command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=timeout,
-                    check=False,
                 )
+                assert process.stdout is not None and process.stderr is not None
+
+                def read_stdout() -> None:
+                    try:
+                        decoded_frames.extend(
+                            self._decode_bmp_stream(process.stdout)
+                        )
+                    except Exception as exc:
+                        stream_errors.append(exc)
+
+                def read_stderr() -> None:
+                    try:
+                        stderr_chunks.append(process.stderr.read())
+                    except Exception as exc:
+                        stream_errors.append(exc)
+
+                stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+                stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+                stdout_thread.start()
+                stderr_thread.start()
+                process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 last_error = f"{backend} timed out"
+                if process is not None:
+                    process.kill()
+                    process.wait()
+            except OSError as exc:
+                last_error = f"{backend}: {exc}"
             finally:
+                if stdout_thread is not None:
+                    stdout_thread.join()
+                if stderr_thread is not None:
+                    stderr_thread.join()
+                if process is not None:
+                    if process.stdout is not None:
+                        process.stdout.close()
+                    if process.stderr is not None:
+                        process.stderr.close()
                 if process_lease is not None:
                     process_lease.release()
-            if result is None or result.returncode != 0 or not result.stdout:
+            stderr = b"".join(stderr_chunks)
+            if (
+                process is None
+                or process.returncode != 0
+                or not decoded_frames
+                or stream_errors
+            ):
                 if self.decode_budget is not None:
                     self.decode_budget.record_ffmpeg(backend, success=False)
-                if result is not None:
-                    detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
+                if process is not None:
+                    detail = stderr.decode(
+                        "utf-8",
+                        errors="replace",
+                    ).strip().splitlines()[0:2]
                     last_error = f"{backend}: {' '.join(detail)[:180]}"
                 continue
-            encoded_frames = self._split_bmp_stream(result.stdout)
             actual_offsets = [
                 float(match.group(1))
                 for match in re.finditer(
                     rb"showinfo@event_sample[^\r\n]*\bpts_time:([-+0-9.eE]+)",
-                    result.stderr,
+                    stderr,
                 )
             ]
             decoded: dict[float, _DecodedRecordedFrame] = {}
-            for offset, encoded, actual_offset in zip(
+            for offset, frame, actual_offset in zip(
                 offsets,
-                encoded_frames,
+                decoded_frames,
                 actual_offsets,
                 strict=False,
             ):
-                frame = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
-                if frame is not None:
-                    decoded[offset] = _DecodedRecordedFrame(
-                        frame=frame,
-                        actual_offset=actual_offset,
-                        exact_timestamp=True,
-                    )
+                decoded[offset] = _DecodedRecordedFrame(
+                    frame=frame,
+                    actual_offset=actual_offset,
+                    exact_timestamp=True,
+                )
             if decoded:
                 if self.decode_budget is not None:
                     self.decode_budget.record_ffmpeg(backend, success=True)
@@ -2058,6 +2296,42 @@ class RecordedMotionObjectDetector:
                 break
             frames.append(payload[cursor:cursor + frame_size])
             cursor += frame_size
+        return frames
+
+    @staticmethod
+    def _decode_bmp_stream(stream: Any) -> list[Frame]:
+        """Read and decode concatenated BMP records without buffering stdout."""
+        frames: list[Frame] = []
+
+        def read_exact(size: int) -> bytes:
+            chunks: list[bytes] = []
+            remaining = size
+            while remaining > 0:
+                chunk = stream.read(remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+
+        while True:
+            header = read_exact(6)
+            if not header:
+                break
+            if len(header) != 6 or header[:2] != b"BM":
+                break
+            frame_size = int.from_bytes(header[2:6], "little")
+            if frame_size < 54:
+                break
+            encoded = header + read_exact(frame_size - len(header))
+            if len(encoded) != frame_size:
+                break
+            frame = cv2.imdecode(
+                np.frombuffer(encoded, dtype=np.uint8),
+                cv2.IMREAD_COLOR,
+            )
+            if frame is not None:
+                frames.append(frame)
         return frames
 
 

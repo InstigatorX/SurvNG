@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -506,33 +507,57 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             recording = Path(tmpdir) / "sample.mp4"
             recording.touch()
-            completed = SimpleNamespace(
-                returncode=0,
-                stdout=encoded_first.tobytes() + encoded_second.tobytes(),
-                stderr=(
-                    b"[showinfo@event_sample] n: 0 pts: 45000 pts_time:0.5\n"
-                    b"[showinfo@event_sample] n: 1 pts: 94500 pts_time:1.05\n"
-                ),
-            )
+            class Process:
+                def __init__(self) -> None:
+                    self.returncode = None
+                    self.stdout = BytesIO(
+                        encoded_first.tobytes() + encoded_second.tobytes()
+                    )
+                    self.stderr = BytesIO(
+                        b"[showinfo@event_sample] n: 0 pts: 45000 pts_time:0.5\n"
+                        b"[showinfo@event_sample] n: 1 pts: 94500 pts_time:1.05\n"
+                    )
+
+                def wait(self, timeout=None):
+                    self.returncode = 0
+                    return 0
+
+                def kill(self):
+                    self.returncode = -9
+
             with patch(
-                "survng.app.motion_pipeline.object_detection.subprocess.run",
-                return_value=completed,
-            ) as run:
+                "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                return_value=Process(),
+            ) as popen:
                 frames, process_count = backend._read_recorded_frames(
                     recording, [0.5, 1.0]
                 )
 
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(popen.call_count, 1)
         self.assertEqual(process_count, 1)
         self.assertTrue(np.array_equal(frames[0.5].frame, first))
         self.assertTrue(np.array_equal(frames[1.0].frame, second))
         self.assertEqual(frames[0.5].actual_offset, 0.5)
         self.assertEqual(frames[1.0].actual_offset, 1.05)
         self.assertTrue(frames[1.0].exact_timestamp)
-        command = run.call_args.args[0]
+        command = popen.call_args.args[0]
         self.assertIn("-fps_mode", command)
         self.assertIn("select=", " ".join(command))
         self.assertIn("showinfo@event_sample", " ".join(command))
+
+    def test_nonselected_recorded_frames_are_released(self) -> None:
+        samples = [
+            sample(-0.5, [detected("car", 0.8, (2, 2, 12, 12))]),
+            sample(0.0, [detected("car", 0.85, (2, 2, 12, 12))]),
+            sample(0.5, [detected("car", 0.82, (2, 2, 12, 12))]),
+        ]
+        selected = samples[1]
+
+        RecordedMotionObjectDetector._release_nonselected_frames(samples, selected)
+
+        self.assertIsNotNone(selected.frame)
+        self.assertIsNone(samples[0].frame)
+        self.assertIsNone(samples[2].frame)
 
     def test_per_class_confidence_sets_inference_floor_and_object_eligibility(self) -> None:
         class Detector:
@@ -886,6 +911,130 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertGreaterEqual(calls_by_offset[0.0], 2)
         self.assertTrue(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["temporal_observations"], 2)
+
+    def test_adaptive_stage_stops_after_three_causal_confirmations(self) -> None:
+        event_epoch = 1_800_000_000.0
+        requested_offsets: list[float] = []
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                offset = round(epoch - event_epoch, 1)
+                requested_offsets.append(offset)
+                return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+                recorded_adaptive_sampling=True,
+            )
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                return [detected("car", 0.85, (20, 20, 70, 70))]
+
+        detector = Detector()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector,
+            Recorder(),
+            lambda: None,
+        )
+        rows, columns = np.indices((100, 100))
+        checker = (((rows // 4) + (columns // 4)) % 2 * 200).astype(np.uint8)
+        frame = np.repeat(checker[..., None], 3, axis=2)
+        with (
+            patch(
+                "survng.app.motion_pipeline.object_detection.time.time",
+                return_value=event_epoch + 20.0,
+            ),
+            patch.object(
+                backend,
+                "_read_recorded_frame",
+                return_value=frame,
+            ),
+        ):
+            result = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertEqual(detector.calls, 3)
+        self.assertEqual(requested_offsets, [0.0, 0.5, -0.5])
+        self.assertTrue(result.objects[0]["temporal_consensus"])
+
+    def test_recorded_face_enrichment_runs_after_consensus_with_cap(self) -> None:
+        event_epoch = 1_800_000_000.0
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                offset = round(epoch - event_epoch, 1)
+                return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                event_candidate_confidence_threshold=0.25,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+                recorded_adaptive_sampling=True,
+                face_enrich_max_people=2,
+            )
+
+            def __init__(self) -> None:
+                self.object_calls = 0
+                self.face_calls = 0
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.object_calls += 1
+                return [
+                    detected(
+                        "person",
+                        0.9 - index * 0.01,
+                        (index * 30 + 5, 10, index * 30 + 31, 90),
+                    )
+                    for index in range(6)
+                ]
+
+            def detect_faces(self, _frame):
+                self.face_calls += 1
+                return [detected("face", 0.8, (2, 2, 15, 15))]
+
+        detector = Detector()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector,
+            Recorder(),
+            lambda: None,
+        )
+        rows, columns = np.indices((100, 200))
+        checker = (((rows // 4) + (columns // 4)) % 2 * 200).astype(np.uint8)
+        frame = np.repeat(checker[..., None], 3, axis=2)
+        with (
+            patch(
+                "survng.app.motion_pipeline.object_detection.time.time",
+                return_value=event_epoch + 20.0,
+            ),
+            patch.object(
+                backend,
+                "_read_recorded_frame",
+                return_value=frame,
+            ),
+        ):
+            result = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertEqual(detector.object_calls, 3)
+        self.assertEqual(detector.face_calls, 2)
+        self.assertTrue(any(item.get("label") == "face" for item in result.objects))
 
     def test_detector_uses_sparse_late_stage_when_object_appears_after_trigger(self) -> None:
         event_epoch = 1_800_000_000.0
