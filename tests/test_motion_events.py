@@ -123,6 +123,47 @@ def test_durable_trigger_overflow_survives_coordinator_restart() -> None:
         assert second.message == "2"
 
 
+def test_route_trigger_replay_with_capture_drift_is_idempotent() -> None:
+    """Repeated route replays must not raise or create a second durable job."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        coordinator = MotionEventCoordinator(
+            queue_size=4,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        route_id = "route:gate:lower-garage:53952"
+        first = MotionTrigger(
+            topic="adaptive/visual_backup",
+            message="route watch replay",
+            event_at=datetime(2026, 8, 22, 18, 10, 1, tzinfo=timezone.utc),
+            received_at=100.0,
+            episode_id=route_id,
+            detection_intent_id=route_id,
+            lifecycle_generation=4,
+        )
+        replay = MotionTrigger(
+            topic="adaptive/visual_backup",
+            message="route watch replay",
+            event_at=datetime(2026, 8, 22, 18, 10, 7, tzinfo=timezone.utc),
+            received_at=106.0,
+            episode_id=route_id,
+            detection_intent_id=route_id,
+            lifecycle_generation=5,
+        )
+        assert coordinator.enqueue(first, evict_oldest=False)
+        # Same route identity with drifted capture/lifecycle metadata.
+        assert coordinator.enqueue(replay, evict_oldest=False)
+        assert store.motion_trigger_status("gate") == {"queued": 1}
+        with pytest.raises(RuntimeError, match="different occurrence"):
+            store.enqueue_motion_trigger(
+                job_id=route_id,
+                camera_id="porch",
+                payload=first.durable_payload(),
+            )
+
+
 def test_durable_wake_eviction_is_not_reported_as_trigger_loss() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = EventStore(Path(tmpdir))

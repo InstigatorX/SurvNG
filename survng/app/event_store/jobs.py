@@ -36,6 +36,57 @@ def _motion_trigger_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _route_motion_trigger_identity(
+    job_id: str,
+    payload: dict[str, Any],
+) -> str | None:
+    """Return the stable route key when this trigger is route-derived.
+
+    Route delivery jobs are keyed by target/source/source-event identity, for
+    example ``route:<target>:<source>:<event_id>``. Future prefixes such as
+    ``route:v2:...`` remain compatible because comparison uses the full
+    identity string carried by the job/intent/episode fields.
+    """
+    for candidate in (
+        str(payload.get("detection_intent_id") or "").strip(),
+        str(payload.get("episode_id") or "").strip(),
+        str(job_id or "").strip(),
+    ):
+        if candidate.startswith("route:"):
+            return candidate
+    return None
+
+
+def _route_motion_trigger_equivalent(
+    job_id: str,
+    existing_payload: dict[str, Any],
+    payload: dict[str, Any],
+) -> bool:
+    """Whether two payloads are the same route occurrence despite capture drift.
+
+    Repeated Gate EMA replay for one Lower-Garage source event can rebuild the
+    same ``route:...`` job with a different captured ``event_at`` or worker
+    ``lifecycle_generation``. Those fields are not part of the durable route
+    identity, so treat them as an idempotent no-op while still rejecting
+    different cameras, topics, or route identities.
+    """
+    route_identity = _route_motion_trigger_identity(job_id, payload)
+    existing_identity = _route_motion_trigger_identity(job_id, existing_payload)
+    if (
+        route_identity is None
+        or existing_identity is None
+        or route_identity != existing_identity
+    ):
+        return False
+    return (
+        str(existing_payload.get("topic") or "") == str(payload.get("topic") or "")
+        and str(existing_payload.get("episode_id") or "")
+        == str(payload.get("episode_id") or "")
+        and str(existing_payload.get("detection_intent_id") or "")
+        == str(payload.get("detection_intent_id") or "")
+    )
+
+
 class EventStoreJobsMixin:
     """Durable detection-job and motion-trigger ledger on detection-jobs.sqlite3."""
 
@@ -753,8 +804,15 @@ class EventStoreJobsMixin:
                 existing_payload = {}
             if (
                 str(existing["camera_id"]) != camera_id
-                or _motion_trigger_occurrence(existing_payload)
-                != _motion_trigger_occurrence(payload)
+                or (
+                    _motion_trigger_occurrence(existing_payload)
+                    != _motion_trigger_occurrence(payload)
+                    and not _route_motion_trigger_equivalent(
+                        job_id,
+                        existing_payload,
+                        payload,
+                    )
+                )
             ):
                 raise RuntimeError(
                     "motion trigger identity collision with different occurrence"

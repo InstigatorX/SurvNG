@@ -156,6 +156,72 @@ class EventStoreTest(unittest.TestCase):
                     },
                 )
 
+    def test_route_motion_trigger_replay_is_idempotent_across_capture_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            route_id = "route:gate:lower-garage:53952"
+            payload = {
+                "topic": "adaptive/visual_backup",
+                "event_at": "2026-08-22T18:10:01+00:00",
+                "episode_id": route_id,
+                "detection_intent_id": route_id,
+                "lifecycle_generation": 4,
+            }
+            self.assertTrue(
+                store.enqueue_motion_trigger(
+                    job_id=route_id,
+                    camera_id="gate",
+                    payload=payload,
+                )
+            )
+            # Same route identity with a later EMA capture time / worker
+            # generation must coalesce instead of raising.
+            self.assertFalse(
+                store.enqueue_motion_trigger(
+                    job_id=route_id,
+                    camera_id="gate",
+                    payload={
+                        **payload,
+                        "event_at": "2026-08-22T18:10:07+00:00",
+                        "lifecycle_generation": 5,
+                    },
+                )
+            )
+            self.assertEqual(store.motion_trigger_status("gate"), {"queued": 1})
+            with self.assertRaisesRegex(RuntimeError, "different occurrence"):
+                store.enqueue_motion_trigger(
+                    job_id=route_id,
+                    camera_id="porch",
+                    payload=payload,
+                )
+            other_route = "route:gate:lower-garage:53953"
+            with self.assertRaisesRegex(RuntimeError, "different occurrence"):
+                store.enqueue_motion_trigger(
+                    job_id=route_id,
+                    camera_id="gate",
+                    payload={
+                        **payload,
+                        "episode_id": other_route,
+                        "detection_intent_id": other_route,
+                    },
+                )
+            # route:v2: identities remain distinct from legacy route: keys for
+            # the same target/source/event tuple until an explicit migration
+            # rewrites persisted jobs.
+            migrated = "route:v2:gate:lower-garage:53952"
+            self.assertTrue(
+                store.enqueue_motion_trigger(
+                    job_id=migrated,
+                    camera_id="gate",
+                    payload={
+                        **payload,
+                        "episode_id": migrated,
+                        "detection_intent_id": migrated,
+                    },
+                )
+            )
+            self.assertEqual(store.motion_trigger_status("gate")["queued"], 2)
+
     def test_motion_trigger_lease_owner_prevents_stale_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
