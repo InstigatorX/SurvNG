@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -153,8 +154,54 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("mobileclip2-b-openvino-fp16", text)
         self.assertIn("AGPL-3.0", text)
         self.assertIn("Apple", text)
-        self.assertIn("SURVNG_REPO_ROOT", text)
+        self.assertIn("No SurvNG Git checkout is required", text)
+        self.assertIn("raw.githubusercontent.com/InstigatorX/SurvNG", text)
         self.assertIn("quantize=16", text)
+        self.assertNotIn("resolve_survng_root", text)
+
+    def test_install_docker_models_runs_without_repo_checkout(self) -> None:
+        script = ROOT / "scripts" / "install-docker-models.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            standalone = tmp_path / "install-docker-models.sh"
+            shutil.copy2(script, standalone)
+            standalone.chmod(0o755)
+            models = tmp_path / "models"
+            config_path = tmp_path / "config" / "config.json"
+            models.mkdir()
+            (models / "yolo26s_openvino_model").mkdir()
+            (models / "yolo26s_openvino_model" / "yolo26s.xml").write_text(
+                "<net name='det'></net>\n", encoding="utf-8"
+            )
+            (models / "yolo26s_openvino_model" / "yolo26s.bin").write_bytes(b"det")
+            (models / "yolo26s_openvino_model" / "classes.txt").write_text(
+                "person\n", encoding="utf-8"
+            )
+            completed = subprocess.run(
+                [
+                    str(standalone),
+                    "--models-dir",
+                    str(models),
+                    "--config",
+                    str(config_path),
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                    "--skip-detector",
+                    "--skip-reid",
+                    "--skip-semantic",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=str(tmp_path),
+            )
+            self.assertIn("SurvNG Docker model installer", completed.stdout)
+            self.assertNotIn("Could not locate SurvNG repository root", completed.stdout)
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["detector"]["model_path"],
+                "/models/yolo26s_openvino_model/yolo26s.xml",
+            )
 
     def test_install_docker_models_patches_config_without_wiping_cameras(self) -> None:
         script = ROOT / "scripts" / "install-docker-models.sh"

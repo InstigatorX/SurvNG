@@ -2,13 +2,15 @@
 # Download SurvNG Docker model packages into the host models directory and
 # point docker-data/config/config.json at the matching container paths.
 #
+# Standalone: does not require a SurvNG Git checkout. Set SURVNG_MODELS_DIR and
+# SURVNG_CONFIG_DIR (or pass --models-dir / --config) for Docker host paths.
+#
 # None of these weights ship in the public MIT GHCR image. YOLO26s is
 # Ultralytics AGPL-3.0; MobileCLIP2-B is Apple ML Research (non-commercial);
 # person ReID is Intel Open Model Zoo Apache-2.0; vehicle ReID is MIT.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT_OVERRIDE=""
 
 MODELS_DIR="${SURVNG_MODELS_DIR:-}"
 CONFIG_DIR="${SURVNG_CONFIG_DIR:-}"
@@ -24,27 +26,31 @@ DO_PERSON_REID=1
 DO_VEHICLE_REID=1
 DO_SEMANTIC=1
 PYTHON_BIN=""
+SEMANTIC_EXPORTER_REF="${SURVNG_INSTALLER_REF:-v1.0}"
 
 PERSON_NAME="person-reidentification-retail-0286"
 PERSON_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/person-reidentification-retail-0286/FP16"
 VEHICLE_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/public/2022.1/vehicle-reid-0001/osnet_ain_x1_0_vehicle_reid.onnx"
 VEHICLE_SHA256="4aaad3e5db648618b0df3d2ff21c61323985ff9e50194c3d2edd4fb87c92d91f"
+SEMANTIC_EXPORTER_URL="https://raw.githubusercontent.com/InstigatorX/SurvNG/${SEMANTIC_EXPORTER_REF}/scripts/export-mobileclip2-openvino.py"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/install-docker-models.sh [options]
+Usage: install-docker-models.sh [options]
 
 Download object-detection, person/vehicle ReID, and Smart Search models into
 the Docker models directory, then patch config.json with container paths
 under /models. Existing cameras and unrelated settings are left untouched.
 
+No SurvNG Git checkout is required. Typical Docker host layout:
+
+  SURVNG_MODELS_DIR=/docker-data/models
+  SURVNG_CONFIG_DIR=/docker-data/config
+
 Options:
-  --models-dir DIR     Host models directory (default: $SURVNG_MODELS_DIR or
-                       docker-data/models)
-  --config PATH        Host config.json (default: $SURVNG_CONFIG_DIR/config.json)
+  --models-dir DIR     Host models directory (default: ./docker-data/models)
+  --config PATH        Host config.json (default: ./docker-data/config/config.json)
   --cache-dir DIR      Download/export cache (default: MODELS_DIR/.download-cache)
-  --repo-root DIR      SurvNG checkout root (default: script parent or
-                       $SURVNG_REPO_ROOT; required for MobileCLIP export)
   --device CPU|GPU     Inference device written to config.json (default: CPU)
   --yolo NAME          Ultralytics detect weights to export (default: yolo26s)
   --python PATH        Python used for venvs and config patching
@@ -58,6 +64,10 @@ Options:
   --skip-semantic      Skip MobileCLIP2-B Smart Search export
   -h, --help           Show this help
 
+Environment:
+  SURVNG_MODELS_DIR, SURVNG_CONFIG_DIR, SURVNG_HOST_CONFIG_PATH
+  SURVNG_INSTALLER_REF   Git ref for bundled exporter download (default: v1.0)
+
 Licenses (not SurvNG MIT; not baked into GHCR images):
   YOLO26s              Ultralytics AGPL-3.0
   MobileCLIP2-B        Apple ML Research Model terms (research/non-commercial)
@@ -65,7 +75,9 @@ Licenses (not SurvNG MIT; not baked into GHCR images):
   vehicle-reid-0001    MIT (OSNet / Open Model Zoo public)
 
 Example:
-  scripts/install-docker-models.sh --device GPU
+  SURVNG_MODELS_DIR=/docker-data/models \
+  SURVNG_CONFIG_DIR=/docker-data/config \
+  ./install-docker-models.sh --device GPU
 
 Default layout under the models directory (container /models):
   yolo26s_openvino_model/yolo26s.xml
@@ -87,61 +99,11 @@ normalize_path() {
   printf '%s\n' "$path"
 }
 
-is_survng_repo_root() {
-  local candidate="$1"
-  [[ -f "$candidate/requirements-semantic-export.txt" \
-    && -f "$candidate/scripts/export-mobileclip2-openvino.py" \
-    && -f "$candidate/docker/config.example.json" ]]
-}
-
-resolve_survng_root() {
-  local candidate="" override="${1:-}"
-
-  if [[ -n "$override" ]]; then
-    candidate="$(normalize_path "$override")"
-    if is_survng_repo_root "$candidate"; then
-      (cd "$candidate" && pwd)
-      return 0
-    fi
-    err "Not a SurvNG checkout: $override"
-    exit 1
-  fi
-
-  if [[ -n "${SURVNG_REPO_ROOT:-}" ]]; then
-    candidate="$(normalize_path "${SURVNG_REPO_ROOT}")"
-    if is_survng_repo_root "$candidate"; then
-      (cd "$candidate" && pwd)
-      return 0
-    fi
-    err "SURVNG_REPO_ROOT is not a SurvNG checkout: ${SURVNG_REPO_ROOT}"
-    exit 1
-  fi
-
-  candidate="$(cd "$SCRIPT_DIR/.." && pwd)"
-  if is_survng_repo_root "$candidate"; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-
-  candidate="$SCRIPT_DIR"
-  while [[ "$candidate" != "/" ]]; do
-    if is_survng_repo_root "$candidate"; then
-      (cd "$candidate" && pwd)
-      return 0
-    fi
-    candidate="$(dirname "$candidate")"
-  done
-
-  err "Could not locate SurvNG repository root."
-  err "Run scripts/install-docker-models.sh from the checkout or set SURVNG_REPO_ROOT=/path/to/SurvNG"
-  exit 1
-}
-
 absolute_path() {
   local raw="$1"
   raw="$(normalize_path "$raw")"
   if [[ "$raw" != /* ]]; then
-    raw="$(normalize_path "$ROOT/${raw#./}")"
+    raw="$(normalize_path "$(pwd)/${raw#./}")"
   fi
   mkdir -p "$(dirname "$raw")"
   if [[ -d "$raw" ]]; then
@@ -175,8 +137,8 @@ pick_python() {
   if [[ -n "$PYTHON_BIN" ]]; then
     return
   fi
-  if [[ -x "$ROOT/.venv/bin/python" ]]; then
-    PYTHON_BIN="$ROOT/.venv/bin/python"
+  if [[ -x "$(pwd)/.venv/bin/python" ]]; then
+    PYTHON_BIN="$(pwd)/.venv/bin/python"
   elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python3)"
   else
@@ -219,6 +181,23 @@ ensure_venv() {
   fi
   "$venv_dir/bin/pip" install --upgrade pip >/dev/null
   "$venv_dir/bin/pip" install "$@"
+}
+
+semantic_exporter_path() {
+  local sibling="$SCRIPT_DIR/export-mobileclip2-openvino.py"
+  local cached="$CACHE_DIR/export-mobileclip2-openvino.py"
+  if [[ -f "$sibling" ]]; then
+    printf '%s\n' "$sibling"
+    return 0
+  fi
+  if [[ -f "$cached" && "$FORCE" -eq 0 ]]; then
+    printf '%s\n' "$cached"
+    return 0
+  fi
+  need_cmd curl
+  log "Fetching MobileCLIP exporter (${SEMANTIC_EXPORTER_REF})..."
+  download_file "$SEMANTIC_EXPORTER_URL" "$cached"
+  printf '%s\n' "$cached"
 }
 
 write_classes_from_metadata() {
@@ -281,7 +260,6 @@ install_detector() {
   (
     cd "$work"
     "$venv/bin/python" - "$YOLO_NAME" <<'PY'
-import shutil
 import sys
 from pathlib import Path
 
@@ -294,8 +272,7 @@ exported = YOLO(f"{name}.pt").export(
     quantize=16,
     nms=False,
 )
-exported_path = Path(exported)
-print(exported_path)
+print(Path(exported))
 PY
   )
   local exported
@@ -365,20 +342,22 @@ install_vehicle_reid() {
 
 install_semantic() {
   local model_dir="$MODELS_DIR/mobileclip2-b-openvino-fp16"
-  local requirements="$ROOT/requirements-semantic-export.txt"
-  local exporter="$ROOT/scripts/export-mobileclip2-openvino.py"
+  local exporter
   if [[ -f "$model_dir/semantic_model.json" && -f "$model_dir/image_encoder.xml" && "$FORCE" -eq 0 ]]; then
     log "Smart Search package already present: $model_dir"
     return
   fi
-  if [[ ! -f "$requirements" || ! -f "$exporter" ]]; then
-    err "Smart Search export requires a SurvNG checkout at $ROOT"
-    err "Set SURVNG_REPO_ROOT=/path/to/SurvNG or pass --repo-root"
-    exit 1
-  fi
+  exporter="$(semantic_exporter_path)"
   log "Exporting MobileCLIP2-B OpenVINO package (Apple ML Research terms)..."
   local venv="$CACHE_DIR/semantic-venv"
-  ensure_venv "$venv" -r "$requirements" 'openvino>=2025.1'
+  ensure_venv "$venv" \
+    'open_clip_torch>=3.2,<4' \
+    'timm>=1.0.20,<2' \
+    'torch>=2.5,<3' \
+    'torchvision>=0.20,<1' \
+    'huggingface_hub>=0.34,<2' \
+    'Pillow>=10,<13' \
+    'openvino>=2025.1'
   local force_flag=()
   if [[ "$FORCE" -eq 1 ]]; then
     force_flag=(--force)
@@ -392,7 +371,6 @@ install_semantic() {
 
 patch_config() {
   pick_python
-  local example="$ROOT/docker/config.example.json"
   local detector_xml="$MODELS_DIR/${YOLO_NAME}_openvino_model/${YOLO_NAME}.xml"
   local labels="$MODELS_DIR/${YOLO_NAME}_openvino_model/classes.txt"
   local person_xml="$MODELS_DIR/person_reid_model/${PERSON_NAME}.xml"
@@ -415,25 +393,123 @@ patch_config() {
   fi
 
   mkdir -p "$(dirname "$CONFIG_PATH")"
-  "$PYTHON_BIN" - "$CONFIG_PATH" "$example" "$DEVICE" "$ENABLE" \
+  "$PYTHON_BIN" - "$CONFIG_PATH" "$DEVICE" "$ENABLE" \
     "$detector_container" "$labels_container" "$person_container" \
     "$vehicle_container" "$semantic_container" <<'PY'
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
 config_path = Path(sys.argv[1])
-example_path = Path(sys.argv[2])
-device = sys.argv[3]
-enable = sys.argv[4] == "1"
-detector_xml, labels, person_xml, vehicle_onnx, semantic_dir = sys.argv[5:10]
+device = sys.argv[2]
+enable = sys.argv[3] == "1"
+detector_xml, labels, person_xml, vehicle_onnx, semantic_dir = sys.argv[4:9]
 
-if not config_path.exists():
-    shutil.copyfile(example_path, config_path)
+DOCKER_DEFAULT = {
+    "base_path": "/survng",
+    "storage_dir": "/media",
+    "database_dir": "/data/database",
+    "recording_index_dir": "/data/recording-index",
+    "ffmpeg_path": "/usr/bin/ffmpeg",
+    "hardware_acceleration": "auto",
+    "recording_segment_seconds": 10.0,
+    "recording_cache_prewarm": True,
+    "image_storage": {"format": "webp", "quality": 95},
+    "retention": {
+        "enabled": True,
+        "automatic_cleanup": False,
+        "storage_limit_tb": 1.0,
+        "minimum_free_percent": 15.0,
+        "target_free_percent": 20.0,
+        "emergency_free_percent": 5.0,
+        "main_days": 7,
+        "live_days": 21,
+        "cleanup_batch_files": 2000,
+    },
+    "motion_qualification": {
+        "mode": "camera",
+        "sensitivity": "balanced",
+        "frame_width": 320,
+        "sample_fps": 5.0,
+        "temporal_filter_threshold": 0.005,
+        "window_seconds": 1.6,
+        "post_trigger_seconds": 2.5,
+        "burst_quiet_seconds": 0.5,
+        "rejected_sample_rate": 1.0,
+        "borderline_rescue_enabled": True,
+        "borderline_margin": 0.03,
+        "pipeline": {"qualification": [], "observation": [], "fusion": []},
+    },
+    "audit_ai": {
+        "enabled": False,
+        "provider": "openai",
+        "api_key": "",
+        "base_url": "",
+        "model": "",
+        "timeout_seconds": 45.0,
+        "allow_apply_recommendations": False,
+    },
+    "mqtt": {
+        "enabled": False,
+        "host": "",
+        "port": 1883,
+        "username": "",
+        "password": "",
+        "client_id": "survng",
+        "topic_prefix": "survng",
+        "qos": 0,
+        "tls": False,
+        "discovery_enabled": True,
+        "discovery_prefix": "homeassistant",
+        "incident_events_enabled": True,
+    },
+    "detector": {
+        "enabled": False,
+        "model_path": "/models/detector/model.xml",
+        "labels_path": "/models/detector/classes.txt",
+        "device": "CPU",
+        "cache_enabled": True,
+        "cache_dir": "/data/openvino-cache",
+        "confidence_threshold": 0.45,
+        "nms_threshold": 0.45,
+        "event_confirmation_frames": 2,
+        "event_class_confirmation_frames": {},
+        "event_class_confidence_thresholds": {},
+        "labels": [],
+        "tracking": {
+            "enabled": True,
+            "implementation": "survng_hybrid",
+            "excluded_labels": ["face"],
+            "sample_fps": 2.0,
+            "max_session_seconds": 15.0,
+            "lost_timeout_seconds": 3.0,
+            "min_confirmations": 2,
+            "low_confidence_threshold": 0.25,
+            "match_iou_threshold": 0.2,
+            "match_center_distance_ratio": 0.65,
+            "max_active_cameras": 2,
+            "max_tracks_per_session": 100,
+            "reid_enabled": False,
+            "reid_model_path": "",
+            "reid_device": "AUTO",
+            "reid_match_threshold": 0.7,
+            "reid_max_age_seconds": 30.0,
+            "reid_max_embeddings_per_frame": 8,
+            "reid_refresh_interval_frames": 8,
+            "botsort_match_threshold": 0.8,
+            "botsort_proximity_threshold": 0.1,
+            "botsort_fuse_score": True,
+        },
+    },
+    "cameras": [],
+}
 
-payload = json.loads(config_path.read_text(encoding="utf-8"))
+if config_path.exists():
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+else:
+    payload = json.loads(json.dumps(DOCKER_DEFAULT))
+
 if not isinstance(payload, dict):
     raise SystemExit("config.json must contain a JSON object")
 
@@ -492,7 +568,6 @@ while [[ $# -gt 0 ]]; do
     --models-dir) MODELS_DIR="$2"; shift 2 ;;
     --config) CONFIG_PATH="$2"; shift 2 ;;
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
-    --repo-root) REPO_ROOT_OVERRIDE="$2"; shift 2 ;;
     --device)
       DEVICE="${2^^}"
       if [[ "$DEVICE" != "CPU" && "$DEVICE" != "GPU" ]]; then
@@ -520,11 +595,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-ROOT="$(resolve_survng_root "$REPO_ROOT_OVERRIDE")"
-cd "$ROOT"
-
-[[ -n "$MODELS_DIR" ]] || MODELS_DIR="$ROOT/docker-data/models"
-[[ -n "$CONFIG_DIR" ]] || CONFIG_DIR="$ROOT/docker-data/config"
+[[ -n "$MODELS_DIR" ]] || MODELS_DIR="./docker-data/models"
+[[ -n "$CONFIG_DIR" ]] || CONFIG_DIR="./docker-data/config"
 [[ -n "$CONFIG_PATH" ]] || CONFIG_PATH="$CONFIG_DIR/config.json"
 
 MODELS_DIR="$(absolute_path "$MODELS_DIR")"
@@ -536,7 +608,6 @@ CACHE_DIR="$(absolute_path "$CACHE_DIR")"
 mkdir -p "$MODELS_DIR" "$CACHE_DIR"
 
 log "SurvNG Docker model installer"
-log "  repo:   $ROOT"
 log "  models: $MODELS_DIR  (container /models)"
 log "  config: $CONFIG_PATH"
 log "  device: $DEVICE"

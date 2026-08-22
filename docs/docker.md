@@ -108,9 +108,12 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
 
 3. Download detector, ReID, and optional Smart Search models into the host
    models directory and patch `config.json`. These weights are not in the
-   GHCR image (YOLO26s is AGPL-3.0; MobileCLIP2-B is Apple research/non-commercial):
+   GHCR image (YOLO26s is AGPL-3.0; MobileCLIP2-B is Apple research/non-commercial).
+   No SurvNG Git checkout is required:
 
    ```bash
+   SURVNG_MODELS_DIR=/docker-data/models \
+   SURVNG_CONFIG_DIR=/docker-data/config \
    scripts/install-docker-models.sh --device GPU
    ```
 
