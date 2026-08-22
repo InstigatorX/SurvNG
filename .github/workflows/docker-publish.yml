@@ -2,6 +2,8 @@ name: Publish Docker image
 
 on:
   push:
+    branches:
+      - v1.0
     tags:
       - "v*"
 
@@ -10,8 +12,9 @@ permissions:
   packages: write
 
 concurrency:
+  # Branch tip builds: keep only the newest commit. Release tags: never cancel.
   group: docker-ghcr-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
 
 jobs:
   publish:
@@ -39,19 +42,35 @@ jobs:
       # builder; the Dockerfile avoids BuildKit-only features like COPY --chmod.
       - name: Build and push
         env:
-          IMAGE_TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
           SUFFIX: ${{ matrix.suffix }}
           GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           image="ghcr.io/$(printf '%s' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
-          full_tag="${image}:${IMAGE_TAG}${SUFFIX}"
-          echo "Building ${TARGET} as ${full_tag}"
+          short_sha="$(printf '%.7s' "${GIT_SHA}")"
+          tags=()
+          if [ "${REF_TYPE}" = "tag" ]; then
+            tags+=("${image}:${REF_NAME}${SUFFIX}")
+          else
+            # Moving tip for the release line, plus an immutable commit pin.
+            tags+=("${image}:v1.0${SUFFIX}")
+            tags+=("${image}:sha-${short_sha}${SUFFIX}")
+          fi
+
+          primary="${tags[0]}"
+          echo "Building ${TARGET} as ${primary}"
           docker build \
             --target "${TARGET}" \
             --build-arg "SURVNG_GIT_SHA=${GIT_SHA}" \
-            --tag "${full_tag}" \
+            --tag "${primary}" \
             .
-          docker push "${full_tag}"
-          echo "Pushed ${full_tag}"
+          for tag in "${tags[@]:1}"; do
+            docker tag "${primary}" "${tag}"
+          done
+          for tag in "${tags[@]}"; do
+            docker push "${tag}"
+            echo "Pushed ${tag}"
+          done

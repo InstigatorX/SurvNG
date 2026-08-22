@@ -17,7 +17,7 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `compose.lxc.yaml` | Explicit AppArmor compatibility override for nested Docker |
 | `.env.example` | Non-secret host path, identity, timezone, and GPU group settings |
 | `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
-| `.github/workflows/docker-publish.yml` | Build and push both image targets to GHCR on `v*` tags |
+| `.github/workflows/docker-publish.yml` | Build and push both image targets to GHCR on `v1.0` commits and `v*` tags |
 | `docker/config.example.json` | Camera-free initial configuration |
 | `docker/go2rtc.example.yaml` | Seeded go2rtc config for the bundled restreamer |
 
