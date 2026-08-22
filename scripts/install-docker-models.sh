@@ -64,6 +64,13 @@ Licenses (not SurvNG MIT; not baked into GHCR images):
 
 Example:
   scripts/install-docker-models.sh --device GPU
+
+Default layout under the models directory (container /models):
+  yolo26s_openvino_model/yolo26s.xml
+  yolo26s_openvino_model/classes.txt
+  person_reid_model/person-reidentification-retail-0286.xml
+  vehicle_reid_model/vehicle-reid-0001.onnx
+  mobileclip2-b-openvino-fp16/
 EOF
 }
 
