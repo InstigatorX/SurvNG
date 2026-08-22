@@ -246,19 +246,64 @@ require_openvino_ir() {
   fi
 }
 
+# Host-native and container runs must not share venvs: shebangs and symlinks
+# break across environments. Keep HF/download caches on CACHE_DIR; put venvs
+# in a local path when running inside the installer image.
+venv_root() {
+  if [[ "$IN_CONTAINER" -eq 1 ]]; then
+    printf '/var/tmp/survng-install-venvs\n'
+  else
+    printf '%s\n' "$CACHE_DIR"
+  fi
+}
+
+venv_usable() {
+  local venv_dir="$1"
+  [[ -x "$venv_dir/bin/python" ]] || return 1
+  "$venv_dir/bin/python" -c 'import sys' 2>/dev/null || return 1
+}
+
+install_cpu_torch() {
+  local venv_dir="$1"
+  # Export needs torch for Ultralytics/OpenCLIP, not CUDA. Default PyPI torch
+  # pulls multi-GB NVIDIA wheels; pin the CPU index instead.
+  "$venv_dir/bin/python" -m pip install --upgrade pip >/dev/null
+  "$venv_dir/bin/python" -m pip install \
+    'torch>=2.5,<3' \
+    'torchvision>=0.20,<1' \
+    --index-url https://download.pytorch.org/whl/cpu
+}
+
+# Ultralytics/OpenCLIP may pull CUDA torch or full opencv-python; put CPU +
+# headless wheels back so the slim installer image keeps working.
+finalize_export_venv() {
+  local venv_dir="$1"
+  install_cpu_torch "$venv_dir"
+  "$venv_dir/bin/python" -m pip uninstall -y opencv-python >/dev/null 2>&1 || true
+  "$venv_dir/bin/python" -m pip install 'opencv-python-headless>=4.8,<5'
+}
+
 ensure_venv() {
   local venv_dir="$1"
   shift
   pick_python
-  if [[ ! -x "$venv_dir/bin/python" ]]; then
+  if ! venv_usable "$venv_dir"; then
     if ! "$PYTHON_BIN" -c 'import venv' 2>/dev/null; then
       err "Python venv support is required. Install python3-venv and retry."
       exit 1
     fi
+    rm -rf "$venv_dir"
+    mkdir -p "$(dirname "$venv_dir")"
     "$PYTHON_BIN" -m venv "$venv_dir"
   fi
-  "$venv_dir/bin/pip" install --upgrade pip >/dev/null
-  "$venv_dir/bin/pip" install "$@"
+  if ! venv_usable "$venv_dir"; then
+    err "Failed to create a usable Python venv at $venv_dir"
+    exit 1
+  fi
+  "$venv_dir/bin/python" -m pip install --upgrade pip >/dev/null
+  if [[ "$#" -gt 0 ]]; then
+    "$venv_dir/bin/python" -m pip install "$@"
+  fi
 }
 
 semantic_exporter_path() {
@@ -331,10 +376,18 @@ install_detector() {
   fi
   need_cmd curl
   log "Exporting ${YOLO_NAME} to OpenVINO FP16 (Ultralytics AGPL-3.0)..."
-  local venv="$CACHE_DIR/yolo-venv"
+  local venv
+  venv="$(venv_root)/yolo-venv"
   local work="$CACHE_DIR/yolo-export"
   mkdir -p "$work"
-  ensure_venv "$venv" 'ultralytics>=8.4,<9' 'openvino>=2025.1'
+  ensure_venv "$venv"
+  install_cpu_torch "$venv"
+  # opencv-python-headless avoids X11/xcb deps in the slim installer image.
+  ensure_venv "$venv" \
+    'opencv-python-headless>=4.8,<5' \
+    'ultralytics>=8.4,<9' \
+    'openvino>=2025.1'
+  finalize_export_venv "$venv"
   (
     cd "$work"
     "$venv/bin/python" - "$YOLO_NAME" <<'PY'
@@ -429,15 +482,17 @@ install_semantic() {
   fi
   exporter="$(semantic_exporter_path)"
   log "Exporting MobileCLIP2-B OpenVINO package (Apple ML Research terms)..."
-  local venv="$CACHE_DIR/semantic-venv"
+  local venv
+  venv="$(venv_root)/semantic-venv"
+  ensure_venv "$venv"
+  install_cpu_torch "$venv"
   ensure_venv "$venv" \
     'open_clip_torch>=3.2,<4' \
     'timm>=1.0.20,<2' \
-    'torch>=2.5,<3' \
-    'torchvision>=0.20,<1' \
     'huggingface_hub>=0.34,<2' \
     'Pillow>=10,<13' \
     'openvino>=2025.1'
+  finalize_export_venv "$venv"
   local force_flag=()
   if [[ "$FORCE" -eq 1 ]]; then
     force_flag=(--force)
