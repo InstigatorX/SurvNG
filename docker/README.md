@@ -55,8 +55,10 @@ scripts/install-docker-models.sh --device GPU
 By default the script runs the published **`survng-model-installer`** container
 (`ghcr.io/instigatorx/survng:v1.0-model-installer`) so the host does not need
 PyTorch or Ultralytics venvs. Pass `--native` to run inline on a dev checkout.
-License summaries for downloaded models:
-`docker/model-installer/THIRD_PARTY_MODELS.md`.
+On Proxmox/LXC nested Docker hosts, pass `--lxc` so the installer container gets
+`--security-opt apparmor=unconfined` (same intentional isolation trade-off as
+`compose.lxc.yaml`; not enabled by default). License summaries for downloaded
+models: `docker/model-installer/THIRD_PARTY_MODELS.md`.
 
 Omit `--device GPU` on CPU-only hosts. The installer is idempotent: existing
 files are left in place unless you pass `--force`. It writes container paths
