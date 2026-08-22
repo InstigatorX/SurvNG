@@ -17,6 +17,7 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `compose.lxc.yaml` | Explicit AppArmor compatibility override for nested Docker |
 | `.env.example` | Non-secret host path, identity, timezone, and GPU group settings |
 | `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
+| `scripts/install-docker-models.sh` | Download detector/ReID/Smart Search models and patch `config.json` |
 | `.github/workflows/docker-publish.yml` | Build and push both image targets to GHCR on `v1.0` commits and `v*` tags |
 | `docker/config.example.json` | Camera-free initial configuration |
 | `docker/go2rtc.example.yaml` | Seeded go2rtc config for the bundled restreamer |
@@ -36,6 +37,33 @@ or model binaries. Compose supplies these locations:
 Keep `/config` and `/data` on local storage. Mount NFS on the Docker host and
 bind that mount to `/media`. Never put camera, MQTT, or AI credentials in `.env`
 or the image; they remain in the mode-`0600` configuration bind mount.
+
+## Model packages
+
+The GHCR image does not include detector, ReID, or Smart Search weights.
+Download them on the Docker host and bind-mount the directory at `/models`:
+
+```bash
+scripts/install-docker-models.sh --device GPU
+```
+
+Omit `--device GPU` on CPU-only hosts. The installer is idempotent: existing
+files are left in place unless you pass `--force`. It writes container paths
+into `docker-data/config/config.json` (creating that file from
+`docker/config.example.json` when needed) and does not replace cameras or
+other settings.
+
+| Host path under `SURVNG_MODELS_DIR` | Container path | License |
+| --- | --- | --- |
+| `yolo26s_openvino_model/yolo26s.xml` | `/models/yolo26s_openvino_model/yolo26s.xml` | Ultralytics AGPL-3.0 |
+| `person_reid_model/person-reidentification-retail-0286.xml` | `/models/person_reid_model/person-reidentification-retail-0286.xml` | Intel OMZ Apache-2.0 |
+| `vehicle_reid_model/vehicle-reid-0001.onnx` | `/models/vehicle_reid_model/vehicle-reid-0001.onnx` | MIT |
+| `mobileclip2-b-openvino-fp16/` | `/models/mobileclip2-b-openvino-fp16` | Apple ML Research (non-commercial) |
+
+The detector folder name must end in `_openvino_model`. Use `--skip-semantic`
+to omit MobileCLIP2-B, `--skip-detector` if you already have a custom OpenVINO
+detector, and `--no-enable` to write paths without turning the features on.
+Face models remain optional via `scripts/install-face-model.sh`.
 
 ## Build
 

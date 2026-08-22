@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -125,6 +128,116 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("SURVNG_MEDIA_DIR=", readme)
         self.assertIn("OpenVINO should report both `CPU` and `GPU`", readme)
         self.assertNotIn("privileged: true", readme)
+        self.assertIn("scripts/install-docker-models.sh", readme)
+        self.assertIn("yolo26s_openvino_model", readme)
+
+    def test_install_docker_models_script_is_executable(self) -> None:
+        script = ROOT / "scripts" / "install-docker-models.sh"
+        self.assertTrue(script.is_file())
+        self.assertTrue(os.access(script, os.X_OK))
+        text = script.read_text(encoding="utf-8")
+        self.assertIn(
+            "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/person-reidentification-retail-0286/FP16",
+            text,
+        )
+        self.assertIn(
+            "https://storage.openvinotoolkit.org/repositories/open_model_zoo/public/2022.1/vehicle-reid-0001/osnet_ain_x1_0_vehicle_reid.onnx",
+            text,
+        )
+        self.assertIn(
+            "4aaad3e5db648618b0df3d2ff21c61323985ff9e50194c3d2edd4fb87c92d91f",
+            text,
+        )
+        self.assertIn("yolo26s_openvino_model", text)
+        self.assertIn("/models/", text)
+        self.assertIn("mobileclip2-b-openvino-fp16", text)
+        self.assertIn("AGPL-3.0", text)
+        self.assertIn("Apple", text)
+
+    def test_install_docker_models_patches_config_without_wiping_cameras(self) -> None:
+        script = ROOT / "scripts" / "install-docker-models.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            models = tmp_path / "models"
+            config_path = tmp_path / "config" / "config.json"
+            detector = models / "yolo26s_openvino_model"
+            person = models / "person_reid_model"
+            vehicle = models / "vehicle_reid_model"
+            semantic = models / "mobileclip2-b-openvino-fp16"
+            detector.mkdir(parents=True)
+            person.mkdir()
+            vehicle.mkdir()
+            semantic.mkdir()
+            (detector / "yolo26s.xml").write_text("<net name='det'></net>\n", encoding="utf-8")
+            (detector / "yolo26s.bin").write_bytes(b"det")
+            (detector / "classes.txt").write_text("person\ncar\n", encoding="utf-8")
+            (person / "person-reidentification-retail-0286.xml").write_text(
+                "<net name='reid'></net>\n", encoding="utf-8"
+            )
+            (person / "person-reidentification-retail-0286.bin").write_bytes(b"reid")
+            (vehicle / "vehicle-reid-0001.onnx").write_bytes(b"onnx")
+            (semantic / "semantic_model.json").write_text("{}\n", encoding="utf-8")
+            (semantic / "image_encoder.xml").write_text("<net></net>\n", encoding="utf-8")
+
+            payload = json.loads(
+                (ROOT / "docker" / "config.example.json").read_text(encoding="utf-8")
+            )
+            payload["cameras"] = [{"name": "front-gate", "enabled": False}]
+            payload["mqtt"]["host"] = "keep-this-broker.example"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    str(script),
+                    "--models-dir",
+                    str(models),
+                    "--config",
+                    str(config_path),
+                    "--device",
+                    "GPU",
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("Updated", completed.stdout)
+
+            updated = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["cameras"], payload["cameras"])
+            self.assertEqual(updated["mqtt"]["host"], "keep-this-broker.example")
+            self.assertTrue(updated["detector"]["enabled"])
+            self.assertEqual(
+                updated["detector"]["model_path"],
+                "/models/yolo26s_openvino_model/yolo26s.xml",
+            )
+            self.assertEqual(
+                updated["detector"]["labels_path"],
+                "/models/yolo26s_openvino_model/classes.txt",
+            )
+            self.assertEqual(updated["detector"]["device"], "GPU")
+            self.assertEqual(updated["detector"]["cache_dir"], "/data/openvino-cache")
+            tracking = updated["detector"]["tracking"]
+            self.assertTrue(tracking["reid_enabled"])
+            self.assertEqual(
+                tracking["reid_model_path"],
+                "/models/person_reid_model/person-reidentification-retail-0286.xml",
+            )
+            self.assertTrue(tracking["vehicle_reid_enabled"])
+            self.assertEqual(
+                tracking["vehicle_reid_model_path"],
+                "/models/vehicle_reid_model/vehicle-reid-0001.onnx",
+            )
+            self.assertTrue(updated["semantic_search"]["enabled"])
+            self.assertEqual(
+                updated["semantic_search"]["model_dir"],
+                "/models/mobileclip2-b-openvino-fp16",
+            )
+            self.assertEqual(updated["semantic_search"]["device"], "GPU")
+            mode = stat.S_IMODE(config_path.stat().st_mode)
+            self.assertEqual(mode, 0o600)
 
 
 if __name__ == "__main__":

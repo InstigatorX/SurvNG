@@ -106,7 +106,19 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
    example. `.env` is ignored by Git and the Docker build, but it should contain
    paths and numeric IDs only—not passwords.
 
-3. Build and start the CPU-compatible image:
+3. Download detector, ReID, and optional Smart Search models into the host
+   models directory and patch `config.json`. These weights are not in the
+   GHCR image (YOLO26s is AGPL-3.0; MobileCLIP2-B is Apple research/non-commercial):
+
+   ```bash
+   scripts/install-docker-models.sh --device GPU
+   ```
+
+   Drop `--device GPU` on CPU-only hosts. Add `--skip-semantic` to skip the
+   MobileCLIP2-B export. The script preserves any cameras already in
+   `docker-data/config/config.json`.
+
+4. Build and start the CPU-compatible image:
 
    ```bash
    docker compose build
@@ -115,11 +127,11 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
    docker compose logs --tail=100 survng
    ```
 
-4. Open `http://SERVER:8088/survng/`. The generated configuration starts with
-   no cameras and object detection disabled. Configure cameras and optional
-   services through Admin.
+5. Open `http://SERVER:8088/survng/`. If you skipped the model installer, the
+   generated configuration starts with no cameras and object detection
+   disabled. Configure cameras and optional services through Admin.
 
-5. Edit `/config/go2rtc.yaml` (bind-mounted under `SURVNG_CONFIG_DIR`) to define
+6. Edit `/config/go2rtc.yaml` (bind-mounted under `SURVNG_CONFIG_DIR`) to define
    go2rtc streams, then point each SurvNG camera `stream_url` /
    `live_stream_url` at `rtsp://127.0.0.1:8554/<stream_name>`. The container
    starts bundled go2rtc automatically; set `SURVNG_GO2RTC=0` only when an
