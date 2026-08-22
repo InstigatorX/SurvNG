@@ -17,7 +17,8 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `compose.lxc.yaml` | Explicit AppArmor compatibility override for nested Docker |
 | `.env.example` | Non-secret host path, identity, timezone, and GPU group settings |
 | `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
-| `scripts/install-docker-models.sh` | Download detector/ReID/Smart Search models and patch `config.json` |
+| `scripts/install-docker-models.sh` | Download detector/ReID/Smart Search models and patch `config.json` (uses `survng-model-installer` container by default) |
+| `Dockerfile.model-installer` | One-shot installer image published as `ghcr.io/.../survng:v1.0-model-installer` |
 | `.github/workflows/docker-publish.yml` | Build and push both image targets to GHCR on `v1.0` commits and `v*` tags |
 | `docker/config.example.json` | Camera-free initial configuration |
 | `docker/go2rtc.example.yaml` | Seeded go2rtc config for the bundled restreamer |
@@ -40,7 +41,7 @@ or the image; they remain in the mode-`0600` configuration bind mount.
 
 ## Model packages
 
-The GHCR image does not include detector, ReID, or Smart Search weights.
+The GHCR **runtime** image does not include detector, ReID, or Smart Search weights.
 Download them on the Docker host and bind-mount the directory at `/models`.
 No Git checkout is required; copy `scripts/install-docker-models.sh` to the
 host (or run it from the release tarball) and point it at your bind mounts:
@@ -50,6 +51,12 @@ SURVNG_MODELS_DIR=/docker-data/models \
 SURVNG_CONFIG_DIR=/docker-data/config \
 scripts/install-docker-models.sh --device GPU
 ```
+
+By default the script runs the published **`survng-model-installer`** container
+(`ghcr.io/instigatorx/survng:v1.0-model-installer`) so the host does not need
+PyTorch or Ultralytics venvs. Pass `--native` to run inline on a dev checkout.
+License summaries for downloaded models:
+`docker/model-installer/THIRD_PARTY_MODELS.md`.
 
 Omit `--device GPU` on CPU-only hosts. The installer is idempotent: existing
 files are left in place unless you pass `--force`. It writes container paths
@@ -64,9 +71,17 @@ other settings.
 | `vehicle_reid_model/vehicle-reid-0001.onnx` | `/models/vehicle_reid_model/vehicle-reid-0001.onnx` | MIT |
 | `mobileclip2-b-openvino-fp16/` | `/models/mobileclip2-b-openvino-fp16` | Apple ML Research (non-commercial) |
 
+Person ReID uses Intel OMZ **OpenVINO IR** (`xml` + `bin`) because Intel publishes
+pre-converted FP16 binaries. Vehicle ReID stays a **single ONNX file** because
+Open Model Zoo only ships `vehicle-reid-0001` that way; OpenVINO loads ONNX
+directly. Optional face models (`scripts/install-face-model.sh`) use IR after
+converting ArcFace ONNX with `ovc`.
+
 The detector folder name must end in `_openvino_model`. Use `--skip-semantic`
 to omit MobileCLIP2-B, `--skip-detector` if you already have a custom OpenVINO
 detector, and `--no-enable` to write paths without turning the features on.
+If Smart Search export fails, detector and ReID paths are still written to
+`config.json` (re-run or pass `--skip-semantic` after fixing the error).
 Face models remain optional via `scripts/install-face-model.sh`.
 
 ## Build

@@ -1,0 +1,17 @@
+# SurvNG model installer image
+
+This container image downloads third-party model weights for SurvNG Docker
+deployments. It does not include SurvNG application code or runtime weights.
+
+The installer image itself is MIT-licensed (same as SurvNG). The models it
+downloads are **not** MIT and are **not** redistributed inside the GHCR runtime
+image. You must comply with each model's license when downloading and using them.
+
+See `THIRD_PARTY_MODELS.md` in this directory (also at `/opt/install/` in the
+image) for license summaries and attribution requirements.
+
+When you redistribute this installer image, retain this notice and
+`THIRD_PARTY_MODELS.md` with the image or in accompanying documentation.
+
+SurvNG is not affiliated with or endorsed by Ultralytics, Apple, Intel, or
+other model vendors.
