@@ -434,22 +434,12 @@ class AppConfigTest(unittest.TestCase):
         self.assertTrue(normalized.cameras[2].id.endswith("-2"))
         AppConfig.model_validate(normalized.model_dump(mode="json"))
 
-    def test_reolink_url_preserves_explicit_credentials_and_bounds_channel(self) -> None:
-        camera = CameraConfig(
-            id="gate",
-            name="Gate",
-            stream_url="reolink://camera.local/stream?channel=3",
-            baichuan={"username": "configured", "password": "secret", "channel": 1},
-        )
-
-        self.assertEqual(camera.baichuan.username, "configured")
-        self.assertEqual(camera.baichuan.password, "secret")
-        self.assertEqual(camera.baichuan.channel, 3)
-        with self.assertRaisesRegex(ValidationError, "between 0 and 255"):
+    def test_reolink_scheme_urls_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "RTSP, HTTP, or HTTPS"):
             CameraConfig(
-                id="invalid",
-                name="Invalid",
-                stream_url="reolink://camera.local/stream?channel=999",
+                id="gate",
+                name="Gate",
+                stream_url="reolink://camera.local/stream?channel=3",
             )
 
     def test_url_derived_credentials_cannot_bypass_nested_field_limits(self) -> None:
@@ -461,38 +451,28 @@ class AppConfigTest(unittest.TestCase):
                 stream_url=f"rtsp://{oversized_username}:secret@camera.local/main",
             )
 
-        with self.assertRaises(ValidationError):
-            CameraConfig(
-                id="reolink",
-                name="Reolink",
-                stream_url=f"reolink://{oversized_username}:secret@camera.local/main",
-                onvif={"username": "configured"},
-            )
+    def test_legacy_baichuan_config_keys_are_ignored_and_backend_is_url(self) -> None:
+        camera = CameraConfig.model_validate(
+            {
+                "id": "gate",
+                "name": "Gate",
+                "stream_url": "rtsps://camera.local/main",
+                "video_backend": "baichuan_native",
+                "baichuan": {"enabled": True, "host": "camera.local"},
+            }
+        )
 
-    def test_non_reolink_urls_preserve_explicit_native_backend_selection(self) -> None:
-        for scheme in ("rtsp", "rtsps", "https"):
-            with self.subTest(scheme=scheme):
-                camera = CameraConfig(
-                    id="gate",
-                    name="Gate",
-                    stream_url=f"{scheme}://camera.local/main",
-                    video_backend="baichuan_native",
-                    baichuan={"enabled": True, "host": "camera.local"},
-                )
-
-                self.assertEqual(camera.video_backend, "baichuan_native")
-                self.assertTrue(camera.baichuan.enabled)
+        self.assertEqual(camera.video_backend, "url")
+        self.assertNotIn("baichuan", camera.model_dump())
 
     def test_non_reolink_urls_keep_default_url_backend(self) -> None:
         camera = CameraConfig(
             id="gate",
             name="Gate",
             stream_url="rtsps://camera.local/main",
-            baichuan={"enabled": True, "host": "camera.local"},
         )
 
         self.assertEqual(camera.video_backend, "url")
-        self.assertFalse(camera.baichuan.enabled)
 
     def test_failed_config_serialization_preserves_previous_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -15,3 +15,9 @@ progressive web app shell.
 
 Requires a network connection for live cameras and API access. The service
 worker caches hashed static assets only.
+
+## Unreleased
+
+- Removed native Reolink Baichuan (`reolink://` / port 9000) ingest; use RTSP
+  URLs instead. Legacy `baichuan` config keys are ignored.
+- Added MIT `LICENSE`, `NOTICE`, and `THIRD_PARTY.md` for redistribution.

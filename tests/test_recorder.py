@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from survng.app.baichuan_native import ffmpeg_input_args, ffmpeg_timestamp_repair_args
 from survng.app.config import CameraConfig, MediaStorageConfig, MediaStorageLocationConfig
+from survng.app.ffmpeg_input import ffmpeg_input_args, ffmpeg_timestamp_repair_args
 from survng.app.go2rtc import Go2RtcError
 from survng.app.media_storage import MediaStorageRegistry
 from survng.app.recorder import AudioStreamInfo, Recorder
@@ -198,20 +198,6 @@ class RecorderTest(unittest.TestCase):
         self.assertIn("PREV_OUTPTS", repair_args[1])
         self.assertIn("PREV_OUTDTS", repair_args[1])
 
-    def test_native_recording_allows_ffmpeg_to_probe_h264_or_h265(self) -> None:
-        camera = CameraConfig.model_validate(
-            {
-                "id": "gate",
-                "name": "Gate",
-                "stream_url": "reolink://admin:password@camera.local?channel=0",
-            }
-        )
-
-        args = ffmpeg_input_args(camera, "main")
-
-        self.assertEqual(args[-2:], ["-i", "pipe:0"])
-        self.assertNotIn("h264", args)
-
     def test_persistent_non_monotonic_dts_schedules_epoch_rollover(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -278,7 +264,7 @@ class RecorderTest(unittest.TestCase):
         old_process.poll.return_value = None
         replacement = Mock(pid=5678)
         replacement.poll.return_value = None
-        item = (old_process, None, Mock(), Mock())
+        item = (old_process, Mock(), Mock())
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             recorder.processes[key] = item
@@ -288,7 +274,7 @@ class RecorderTest(unittest.TestCase):
                 recorder.processes.pop(key, None)
 
             def start(_camera, _source):
-                recorder.processes[key] = (replacement, None, Mock(), Mock())
+                recorder.processes[key] = (replacement, Mock(), Mock())
 
             with patch.object(recorder, "stop", side_effect=stop) as stop_recorder, patch.object(
                 recorder,
@@ -326,7 +312,7 @@ class RecorderTest(unittest.TestCase):
         replacement.poll.return_value = None
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
-            recorder.processes[key] = (replacement, None, Mock(), Mock())
+            recorder.processes[key] = (replacement, Mock(), Mock())
             recorder._timestamp_rollover_pending[key] = (1234, "invalid_dts")
 
             with patch.object(recorder, "stop") as stop_recorder, patch.object(
@@ -472,13 +458,15 @@ class RecorderTest(unittest.TestCase):
             process = Mock(pid=4321, stderr=iter(()))
             process.poll.return_value = None
 
-            def cancel_start(*_args):
+            def popen_and_cancel(*_args, **_kwargs):
                 recorder.stop(camera.id, "main")
-                return None
+                return process
 
             with (
-                patch("survng.app.recording_process.recorder.subprocess.Popen", return_value=process),
-                patch("survng.app.recording_process.recorder.start_ffmpeg_pipe", side_effect=cancel_start),
+                patch(
+                    "survng.app.recording_process.recorder.subprocess.Popen",
+                    side_effect=popen_and_cancel,
+                ),
                 patch.object(
                     recorder,
                     "_probe_audio_stream",
@@ -580,49 +568,39 @@ class RecorderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             with patch("survng.app.recording_process.recorder.os.killpg"):
-                recorder._stop_item((process, None, stop_event, keeper))
+                recorder._stop_item((process, stop_event, keeper))
 
         stop_event.set.assert_called_once_with()
         keeper.join.assert_called_once_with(timeout=1)
 
-    def test_stop_item_reaps_ffmpeg_when_native_pipe_stop_fails(self) -> None:
+    def test_stop_item_reaps_ffmpeg_after_sigterm(self) -> None:
         process = Mock(pid=4321)
         process.poll.return_value = None
         process.wait.return_value = 0
-        pipe = Mock()
-        pipe.stop.side_effect = RuntimeError("camera feeder stuck")
         stop_event = Mock()
         keeper = Mock()
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             with patch("survng.app.recording_process.recorder.os.killpg") as killpg:
-                recorder._stop_item((process, pipe, stop_event, keeper))
+                recorder._stop_item((process, stop_event, keeper))
 
-        pipe.stop.assert_called_once_with()
         killpg.assert_called_once_with(4321, __import__("signal").SIGTERM)
         process.wait.assert_called_once_with(timeout=5)
+        stop_event.set.assert_called_once_with()
         keeper.join.assert_called_once_with(timeout=1)
 
-    def test_status_cleans_up_stopped_pipe_without_holding_state_lock(self) -> None:
+    def test_status_cleans_up_stopped_process_without_holding_state_lock(self) -> None:
         process = Mock()
         process.poll.return_value = 1
         stop_event = Mock()
         keeper = Mock()
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
-            pipe = Mock()
-            pipe.stop.side_effect = lambda: recorder.camera_enabled("gate")
-            recorder.processes[("gate", "main")] = (
-                process,
-                pipe,
-                stop_event,
-                keeper,
-            )
+            recorder.processes[("gate", "main")] = (process, stop_event, keeper)
 
             status = recorder.status()
 
         self.assertEqual(status, {})
-        pipe.stop.assert_called_once_with()
         stop_event.set.assert_called_once_with()
         keeper.join.assert_called_once_with(timeout=1)
 
@@ -1003,7 +981,7 @@ class RecorderTest(unittest.TestCase):
                 clip.write_bytes(b"x")
             process = Mock()
             process.poll.return_value = None
-            recorder.processes[("front-door", "main")] = (process, None, Mock(), Mock())
+            recorder.processes[("front-door", "main")] = (process, Mock(), Mock())
 
             rows = recorder._recording_rows_for_files("front-door", "main", clips)
 
@@ -1024,7 +1002,7 @@ class RecorderTest(unittest.TestCase):
             clip.write_bytes(b"still growing")
             process = Mock()
             process.poll.return_value = None
-            recorder.processes[("front-door", "live")] = (process, None, Mock(), Mock())
+            recorder.processes[("front-door", "live")] = (process, Mock(), Mock())
 
             with patch("survng.app.recording_process.index.time.time", return_value=now_epoch):
                 rows = recorder._recording_rows_for_files("front-door", "live", [clip])
@@ -1143,7 +1121,7 @@ class RecorderTest(unittest.TestCase):
                 clip.write_bytes(b"x" * 2048)
             process = Mock()
             process.poll.return_value = None
-            recorder.processes[("front-door", "main")] = (process, None, Mock(), Mock())
+            recorder.processes[("front-door", "main")] = (process, Mock(), Mock())
 
             indexed = recorder.refresh_recording_edge(
                 "front-door",

@@ -132,10 +132,9 @@ Each camera can expose two logical sources:
   distinct live URL exists, camera source normalization can resolve it to the
   available source.
 
-RTSP streams are normally provided through the configured go2rtc restream. A
-Reolink `reolink://` source can use the native Baichuan integration. URL and
-Baichuan behavior is normalized by the camera configuration before workers are
-started.
+RTSP streams are normally provided through the configured go2rtc restream. Camera
+URLs are normalized by configuration before workers start (`video_backend` is
+always URL-backed).
 
 Process startup uses a camera-level admission coordinator instead of launching
 every OpenCV capture, ONVIF listener, and recorder at once. By default, two
