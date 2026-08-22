@@ -242,13 +242,15 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
         active_manager = deps.get_manager()
         active_config = deps.get_config()
         models: list[dict] = []
-        search_roots = sorted({
-            Path("models/openvino_model"),
-            *Path("models").glob("*_openvino_model"),
-            Path("openvino_model"),
-            *Path(".").glob("*_openvino_model"),
-        })
-        for root in search_roots:
+        search_roots: set[Path] = set()
+        for base in (Path("models"), Path("/models")):
+            if not base.exists():
+                continue
+            search_roots.add(base / "openvino_model")
+            search_roots.update(base.glob("*_openvino_model"))
+        search_roots.add(Path("openvino_model"))
+        search_roots.update(Path(".").glob("*_openvino_model"))
+        for root in sorted(search_roots):
             if not root.exists():
                 continue
             for xml_path in sorted(root.rglob("*.xml")):
