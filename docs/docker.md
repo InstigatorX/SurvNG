@@ -123,7 +123,8 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
    nested Docker hosts, pass `--lxc` to run the installer with
    `apparmor=unconfined` (opt-in; same trade-off as `compose.lxc.yaml`).
    Drop `--device GPU` on CPU-only hosts. Add `--skip-semantic` to skip the
-   MobileCLIP2-B export. The script preserves any cameras already in
+   MobileCLIP2-B export, or `--skip-face` to skip ArcFace / landmarks / face
+   detector. The script preserves any cameras already in
    `docker-data/config/config.json` and still patches paths for models that
    installed successfully even when another step fails.
 

@@ -165,6 +165,9 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("uninstall -y opencv-python-headless", text)
         self.assertIn("survng-install-venvs", text)
         self.assertIn("ensure_models_readable", text)
+        self.assertIn("--skip-face", text)
+        self.assertIn("face-recognition-resnet100-arcface-onnx", text)
+        self.assertIn("face-detection-retail-0004", text)
         self.assertIn("THIRD_PARTY_MODELS.md", text)
         self.assertIn("quantize=16", text)
         self.assertNotIn("resolve_survng_root", text)
@@ -200,6 +203,7 @@ class DockerPackagingTest(unittest.TestCase):
                     "--skip-detector",
                     "--skip-reid",
                     "--skip-semantic",
+                    "--skip-face",
                 ],
                 check=True,
                 capture_output=True,
@@ -224,10 +228,14 @@ class DockerPackagingTest(unittest.TestCase):
             person = models / "person_reid_model"
             vehicle = models / "vehicle_reid_model"
             semantic = models / "mobileclip2-b-openvino-fp16"
+            face = models / "face_model"
+            face_det = models / "face_detector"
             detector.mkdir(parents=True)
             person.mkdir()
             vehicle.mkdir()
             semantic.mkdir()
+            face.mkdir()
+            face_det.mkdir()
             (detector / "yolo26s.xml").write_text("<net name='det'></net>\n", encoding="utf-8")
             (detector / "yolo26s.bin").write_bytes(b"det")
             (detector / "classes.txt").write_text("person\ncar\n", encoding="utf-8")
@@ -238,6 +246,18 @@ class DockerPackagingTest(unittest.TestCase):
             (vehicle / "vehicle-reid-0001.onnx").write_bytes(b"onnx")
             (semantic / "semantic_model.json").write_text("{}\n", encoding="utf-8")
             (semantic / "image_encoder.xml").write_text("<net></net>\n", encoding="utf-8")
+            (face / "face-recognition-resnet100-arcface-onnx.xml").write_text(
+                "<net name='arc'></net>\n", encoding="utf-8"
+            )
+            (face / "face-recognition-resnet100-arcface-onnx.bin").write_bytes(b"arc")
+            (face / "landmarks-regression-retail-0009.xml").write_text(
+                "<net name='lm'></net>\n", encoding="utf-8"
+            )
+            (face / "landmarks-regression-retail-0009.bin").write_bytes(b"lm")
+            (face_det / "face-detection-retail-0004.xml").write_text(
+                "<net name='fd'></net>\n", encoding="utf-8"
+            )
+            (face_det / "face-detection-retail-0004.bin").write_bytes(b"fd")
 
             payload = json.loads(
                 (ROOT / "docker" / "config.example.json").read_text(encoding="utf-8")
@@ -297,6 +317,19 @@ class DockerPackagingTest(unittest.TestCase):
                 "/models/mobileclip2-b-openvino-fp16",
             )
             self.assertEqual(updated["semantic_search"]["device"], "GPU")
+            self.assertTrue(updated["detector"]["face_recognition_enabled"])
+            self.assertEqual(
+                updated["detector"]["face_embedding_model_path"],
+                "/models/face_model/face-recognition-resnet100-arcface-onnx.xml",
+            )
+            self.assertEqual(
+                updated["detector"]["face_landmark_model_path"],
+                "/models/face_model/landmarks-regression-retail-0009.xml",
+            )
+            self.assertEqual(
+                updated["detector"]["face_detection_model_path"],
+                "/models/face_detector/face-detection-retail-0004.xml",
+            )
             mode = stat.S_IMODE(config_path.stat().st_mode)
             self.assertEqual(mode, 0o600)
 
@@ -334,6 +367,7 @@ class DockerPackagingTest(unittest.TestCase):
                     "--skip-detector",
                     "--skip-reid",
                     "--skip-semantic",
+                    "--skip-face",
                 ],
                 check=True,
                 capture_output=True,
@@ -350,6 +384,7 @@ class DockerPackagingTest(unittest.TestCase):
             self.assertTrue(tracking["reid_enabled"])
             self.assertTrue(tracking["vehicle_reid_enabled"])
             self.assertNotIn("semantic_search", updated)
+            self.assertFalse(updated["detector"].get("face_recognition_enabled", False))
 
     def test_model_installer_dockerfile_and_notices_exist(self) -> None:
         dockerfile = ROOT / "Dockerfile.model-installer"
@@ -366,6 +401,7 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertTrue(models_doc.is_file())
         self.assertIn("vehicle-reid-0001", models_doc.read_text(encoding="utf-8"))
         self.assertIn("ONNX", models_doc.read_text(encoding="utf-8"))
+        self.assertIn("ArcFace", models_doc.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

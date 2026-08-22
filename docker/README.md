@@ -71,20 +71,24 @@ other settings.
 | `yolo26s_openvino_model/yolo26s.xml` | `/models/yolo26s_openvino_model/yolo26s.xml` | Ultralytics AGPL-3.0 |
 | `person_reid_model/person-reidentification-retail-0286.xml` | `/models/person_reid_model/person-reidentification-retail-0286.xml` | Intel OMZ Apache-2.0 |
 | `vehicle_reid_model/vehicle-reid-0001.onnx` | `/models/vehicle_reid_model/vehicle-reid-0001.onnx` | MIT |
+| `face_model/face-recognition-resnet100-arcface-onnx.xml` | `/models/face_model/...` | Intel OMZ |
+| `face_model/landmarks-regression-retail-0009.xml` | `/models/face_model/...` | Intel OMZ Apache-2.0 |
+| `face_detector/face-detection-retail-0004.xml` | `/models/face_detector/...` | Intel OMZ Apache-2.0 |
 | `mobileclip2-b-openvino-fp16/` | `/models/mobileclip2-b-openvino-fp16` | Apple ML Research (non-commercial) |
 
 Person ReID uses Intel OMZ **OpenVINO IR** (`xml` + `bin`) because Intel publishes
 pre-converted FP16 binaries. Vehicle ReID stays a **single ONNX file** because
 Open Model Zoo only ships `vehicle-reid-0001` that way; OpenVINO loads ONNX
-directly. Optional face models (`scripts/install-face-model.sh`) use IR after
-converting ArcFace ONNX with `ovc`.
+directly. Face ArcFace is converted from ONNX to IR with `ovc` inside the
+installer container; landmarks and the face detector are OMZ IR downloads.
 
 The detector folder name must end in `_openvino_model`. Use `--skip-semantic`
-to omit MobileCLIP2-B, `--skip-detector` if you already have a custom OpenVINO
-detector, and `--no-enable` to write paths without turning the features on.
+to omit MobileCLIP2-B, `--skip-face` to omit face recognition, `--skip-detector`
+if you already have a custom OpenVINO detector, and `--no-enable` to write paths
+without turning the features on.
 If Smart Search export fails, detector and ReID paths are still written to
 `config.json` (re-run or pass `--skip-semantic` after fixing the error).
-Face models remain optional via `scripts/install-face-model.sh`.
+The standalone `scripts/install-face-model.sh` remains for native checkouts.
 
 ## Build
 

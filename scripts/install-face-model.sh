@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Native/dev helper to install face models into a Git checkout.
+# For Docker hosts prefer: scripts/install-docker-models.sh (includes face by
+# default; pass --skip-face to omit).
 set -euo pipefail
 
 model_dir="${1:-models/face_model}"

@@ -10,7 +10,8 @@
 #
 # None of these weights ship in the public MIT GHCR image. YOLO26s is
 # Ultralytics AGPL-3.0; MobileCLIP2-B is Apple ML Research (non-commercial);
-# person ReID is Intel Open Model Zoo Apache-2.0; vehicle ReID is MIT.
+# person ReID is Intel Open Model Zoo Apache-2.0; vehicle ReID is MIT;
+# face ArcFace/landmarks/detector are Intel OMZ (Apache-2.0 / OMZ terms).
 # License summaries: docker/model-installer/THIRD_PARTY_MODELS.md
 set -euo pipefail
 
@@ -31,6 +32,7 @@ DO_DETECTOR=1
 DO_PERSON_REID=1
 DO_VEHICLE_REID=1
 DO_SEMANTIC=1
+DO_FACE=1
 PYTHON_BIN=""
 SEMANTIC_EXPORTER_REF="${SURVNG_INSTALLER_REF:-v1.0}"
 IN_CONTAINER="${SURVNG_INSTALLER_IN_CONTAINER:-0}"
@@ -41,15 +43,22 @@ PERSON_NAME="person-reidentification-retail-0286"
 PERSON_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/person-reidentification-retail-0286/FP16"
 VEHICLE_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/public/2022.1/vehicle-reid-0001/osnet_ain_x1_0_vehicle_reid.onnx"
 VEHICLE_SHA256="4aaad3e5db648618b0df3d2ff21c61323985ff9e50194c3d2edd4fb87c92d91f"
+FACE_ARCFACE_NAME="face-recognition-resnet100-arcface-onnx"
+FACE_ARCFACE_ONNX_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/public/2022.1/face-recognition-resnet100-arcface-onnx/arcfaceresnet100-8.onnx"
+FACE_LANDMARK_NAME="landmarks-regression-retail-0009"
+FACE_LANDMARK_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/${FACE_LANDMARK_NAME}/FP16"
+FACE_DETECTOR_NAME="face-detection-retail-0004"
+FACE_DETECTOR_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/${FACE_DETECTOR_NAME}/FP16"
 SEMANTIC_EXPORTER_URL="https://raw.githubusercontent.com/InstigatorX/SurvNG/${SEMANTIC_EXPORTER_REF}/scripts/export-mobileclip2-openvino.py"
 
 usage() {
   cat <<'EOF'
 Usage: install-docker-models.sh [options]
 
-Download object-detection, person/vehicle ReID, and Smart Search models into
-the Docker models directory, then patch config.json with container paths
-under /models. Existing cameras and unrelated settings are left untouched.
+Download object-detection, person/vehicle ReID, face recognition, and Smart
+Search models into the Docker models directory, then patch config.json with
+container paths under /models. Existing cameras and unrelated settings are
+left untouched.
 
 No SurvNG Git checkout is required. Typical Docker host layout:
 
@@ -76,6 +85,7 @@ Options:
   --skip-person-reid   Skip person ReID only
   --skip-vehicle-reid  Skip vehicle ReID only
   --skip-semantic      Skip MobileCLIP2-B Smart Search export
+  --skip-face          Skip ArcFace embedding, landmarks, and face detector
   -h, --help           Show this help
 
 Environment:
@@ -89,6 +99,7 @@ Licenses (not SurvNG MIT; not baked into GHCR images):
   MobileCLIP2-B        Apple ML Research Model terms (research/non-commercial)
   person-reid-0286     Intel Open Model Zoo Apache-2.0
   vehicle-reid-0001    MIT (OSNet / Open Model Zoo public)
+  face ArcFace/landmarks/detector  Intel Open Model Zoo (Apache-2.0 / OMZ terms)
 
 Examples:
   # Default: installer container (no host PyTorch/Ultralytics)
@@ -107,6 +118,9 @@ Default layout under the models directory (container /models):
   yolo26s_openvino_model/classes.txt
   person_reid_model/person-reidentification-retail-0286.xml
   vehicle_reid_model/vehicle-reid-0001.onnx
+  face_model/face-recognition-resnet100-arcface-onnx.xml
+  face_model/landmarks-regression-retail-0009.xml
+  face_detector/face-detection-retail-0004.xml
   mobileclip2-b-openvino-fp16/
 EOF
 }
@@ -150,6 +164,7 @@ run_installer_container() {
   [[ "$DO_PERSON_REID" -eq 0 ]] && inner+=(--skip-person-reid)
   [[ "$DO_VEHICLE_REID" -eq 0 ]] && inner+=(--skip-vehicle-reid)
   [[ "$DO_SEMANTIC" -eq 0 ]] && inner+=(--skip-semantic)
+  [[ "$DO_FACE" -eq 0 ]] && inner+=(--skip-face)
 
   log "Running installer container: $INSTALLER_IMAGE"
   log "  models mount: $models_host -> /models-out"
@@ -461,7 +476,7 @@ install_vehicle_reid() {
   need_cmd curl
   log "Downloading vehicle ReID vehicle-reid-0001.onnx (MIT)..."
   log "  OMZ publishes vehicle-reid-0001 as ONNX only; OpenVINO loads it directly."
-  log "  Person ReID uses pre-built IR (xml+bin). Face models (optional) are IR too."
+  log "  Person ReID uses pre-built IR (xml+bin). Face models convert ArcFace ONNX to IR."
   mkdir -p "$model_dir"
   download_file "$VEHICLE_URL" "$onnx"
   local actual
@@ -507,6 +522,61 @@ install_semantic() {
   log "Installed Smart Search package: $model_dir"
 }
 
+install_face() {
+  local face_dir="$MODELS_DIR/face_model"
+  local detector_dir="$MODELS_DIR/face_detector"
+  local arcface_xml="$face_dir/${FACE_ARCFACE_NAME}.xml"
+  local arcface_bin="$face_dir/${FACE_ARCFACE_NAME}.bin"
+  local landmark_xml="$face_dir/${FACE_LANDMARK_NAME}.xml"
+  local landmark_bin="$face_dir/${FACE_LANDMARK_NAME}.bin"
+  local detector_xml="$detector_dir/${FACE_DETECTOR_NAME}.xml"
+  local detector_bin="$detector_dir/${FACE_DETECTOR_NAME}.bin"
+  if [[ -f "$arcface_xml" && -f "$arcface_bin" \
+      && -f "$landmark_xml" && -f "$landmark_bin" \
+      && -f "$detector_xml" && -f "$detector_bin" \
+      && "$FORCE" -eq 0 ]]; then
+    log "Face models already present: $face_dir and $detector_dir"
+    return
+  fi
+  need_cmd curl
+  log "Installing face recognition stack (Intel OMZ ArcFace + landmarks + detector)..."
+  mkdir -p "$face_dir" "$detector_dir" "$CACHE_DIR/face-export"
+  local onnx="$CACHE_DIR/face-export/arcfaceresnet100-8.onnx"
+  download_file "$FACE_ARCFACE_ONNX_URL" "$onnx"
+
+  local venv
+  venv="$(venv_root)/face-venv"
+  ensure_venv "$venv" 'openvino>=2025.1'
+  local ovc_bin="$venv/bin/ovc"
+  if [[ ! -x "$ovc_bin" ]]; then
+    err "OpenVINO converter (ovc) missing from $venv after openvino install"
+    exit 1
+  fi
+  (
+    cd "$face_dir"
+    "$ovc_bin" "$onnx" \
+      --output_model "${FACE_ARCFACE_NAME}.xml" \
+      --output fc1 \
+      --compress_to_fp16=True
+  )
+  rm -f "$onnx"
+  if [[ ! -f "$arcface_xml" || ! -f "$arcface_bin" ]]; then
+    err "ArcFace ovc conversion did not produce $arcface_xml / $arcface_bin"
+    exit 1
+  fi
+
+  download_file "${FACE_LANDMARK_URL}/${FACE_LANDMARK_NAME}.xml" "$landmark_xml"
+  download_file "${FACE_LANDMARK_URL}/${FACE_LANDMARK_NAME}.bin" "$landmark_bin"
+  download_file "${FACE_DETECTOR_URL}/${FACE_DETECTOR_NAME}.xml" "$detector_xml"
+  download_file "${FACE_DETECTOR_URL}/${FACE_DETECTOR_NAME}.bin" "$detector_bin"
+  require_openvino_ir "$arcface_xml"
+  require_openvino_ir "$landmark_xml"
+  require_openvino_ir "$detector_xml"
+  log "Installed face embedding: $arcface_xml"
+  log "Installed face landmarks: $landmark_xml"
+  log "Installed face detector: $detector_xml"
+}
+
 # Model packages must be readable by the SurvNG container user, which may differ
 # from the installer UID (e.g. root installer, SURVNG_UID=1000). mkdtemp-based
 # exports start as 0700 and would otherwise cause PermissionError on /models.
@@ -542,9 +612,13 @@ patch_config() {
   local person_xml="$MODELS_DIR/person_reid_model/${PERSON_NAME}.xml"
   local vehicle_onnx="$MODELS_DIR/vehicle_reid_model/vehicle-reid-0001.onnx"
   local semantic_dir="$MODELS_DIR/mobileclip2-b-openvino-fp16"
+  local face_embed="$MODELS_DIR/face_model/${FACE_ARCFACE_NAME}.xml"
+  local face_landmark="$MODELS_DIR/face_model/${FACE_LANDMARK_NAME}.xml"
+  local face_detector="$MODELS_DIR/face_detector/${FACE_DETECTOR_NAME}.xml"
 
   local detector_container="" labels_container="" person_container=""
   local vehicle_container="" semantic_container=""
+  local face_embed_container="" face_landmark_container="" face_detector_container=""
   [[ -f "$detector_xml" ]] && detector_container="$(container_path "$detector_xml")"
   [[ -f "$labels" ]] && labels_container="$(container_path "$labels")"
   [[ -f "$person_xml" ]] && person_container="$(container_path "$person_xml")"
@@ -552,8 +626,11 @@ patch_config() {
   if [[ -f "$semantic_dir/semantic_model.json" ]]; then
     semantic_container="$(container_path "$semantic_dir")"
   fi
+  [[ -f "$face_embed" ]] && face_embed_container="$(container_path "$face_embed")"
+  [[ -f "$face_landmark" ]] && face_landmark_container="$(container_path "$face_landmark")"
+  [[ -f "$face_detector" ]] && face_detector_container="$(container_path "$face_detector")"
 
-  if [[ -z "$detector_container$person_container$vehicle_container$semantic_container" ]]; then
+  if [[ -z "$detector_container$person_container$vehicle_container$semantic_container$face_embed_container" ]]; then
     err "No installed models found under $MODELS_DIR; not writing config.json"
     exit 1
   fi
@@ -561,7 +638,8 @@ patch_config() {
   mkdir -p "$(dirname "$CONFIG_PATH")"
   "$PYTHON_BIN" - "$CONFIG_PATH" "$DEVICE" "$ENABLE" \
     "$detector_container" "$labels_container" "$person_container" \
-    "$vehicle_container" "$semantic_container" <<'PY'
+    "$vehicle_container" "$semantic_container" \
+    "$face_embed_container" "$face_landmark_container" "$face_detector_container" <<'PY'
 import json
 import os
 import sys
@@ -570,7 +648,16 @@ from pathlib import Path
 config_path = Path(sys.argv[1])
 device = sys.argv[2]
 enable = sys.argv[3] == "1"
-detector_xml, labels, person_xml, vehicle_onnx, semantic_dir = sys.argv[4:9]
+(
+    detector_xml,
+    labels,
+    person_xml,
+    vehicle_onnx,
+    semantic_dir,
+    face_embed,
+    face_landmark,
+    face_detector,
+) = sys.argv[4:12]
 
 DOCKER_DEFAULT = {
     "base_path": "/survng",
@@ -721,6 +808,18 @@ if semantic_dir:
     if enable:
         semantic["enabled"] = True
 
+if face_embed or face_landmark or face_detector:
+    detector = section("detector")
+    if face_embed:
+        detector["face_embedding_model_path"] = face_embed
+    if face_landmark:
+        detector["face_landmark_model_path"] = face_landmark
+    if face_detector:
+        detector["face_detection_model_path"] = face_detector
+    detector.setdefault("face_recognition_device", "AUTO")
+    if enable and face_embed and face_landmark:
+        detector["face_recognition_enabled"] = True
+
 temporary = config_path.with_name(config_path.name + ".tmp")
 temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 os.replace(temporary, config_path)
@@ -755,6 +854,7 @@ while [[ $# -gt 0 ]]; do
     --skip-person-reid) DO_PERSON_REID=0; shift ;;
     --skip-vehicle-reid) DO_VEHICLE_REID=0; shift ;;
     --skip-semantic) DO_SEMANTIC=0; shift ;;
+    --skip-face) DO_FACE=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       err "Unknown option: $1"
@@ -809,6 +909,9 @@ if [[ "$DO_VEHICLE_REID" -eq 1 ]]; then
 fi
 if [[ "$DO_SEMANTIC" -eq 1 ]]; then
   install_semantic || note_step_failure "MobileCLIP2-B export"
+fi
+if [[ "$DO_FACE" -eq 1 ]]; then
+  install_face || note_step_failure "face model install"
 fi
 
 ensure_models_readable || note_step_failure "model permission fix"
