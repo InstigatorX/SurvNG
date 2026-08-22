@@ -22,6 +22,10 @@ from survng.app.object_tracking import (
     ultralytics_deepocsort_dependency_status,
     ultralytics_fasttrack_dependency_status,
 )
+from survng.app.object_track.session import (
+    _adaptive_tracking_fps,
+    _tracking_persistence_due,
+)
 from survng.app.video_frames import VideoFrameReference
 
 
@@ -571,6 +575,62 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
 
 class ObjectTrackingSessionTest(unittest.TestCase):
+    def test_adaptive_sampling_slows_stable_tracks_and_boosts_uncertainty(self) -> None:
+        config = ObjectTrackingConfig(
+            sample_fps=3.0,
+            stable_sample_fps=0.75,
+            adaptive_stable_frames=2,
+        )
+        tracked = [{"track_id": 1, "track_state": "confirmed"}]
+        summaries = [{"track_id": 1, "state": "confirmed"}]
+
+        first_fps, stable_frames = _adaptive_tracking_fps(
+            config,
+            tracked,
+            summaries,
+            important_transition=False,
+            stable_frames=0,
+        )
+        stable_fps, stable_frames = _adaptive_tracking_fps(
+            config,
+            tracked,
+            summaries,
+            important_transition=False,
+            stable_frames=stable_frames,
+        )
+        uncertain_fps, stable_frames = _adaptive_tracking_fps(
+            config,
+            [{"track_id": 2, "track_state": "tentative"}],
+            summaries,
+            important_transition=True,
+            stable_frames=stable_frames,
+        )
+
+        self.assertEqual(first_fps, 3.0)
+        self.assertEqual(stable_fps, 0.75)
+        self.assertEqual(uncertain_fps, 3.0)
+        self.assertEqual(stable_frames, 0)
+
+    def test_tracking_persistence_uses_cadence_and_transitions(self) -> None:
+        self.assertFalse(_tracking_persistence_due(
+            1.0,
+            10.0,
+            10.9,
+            important_transition=False,
+        ))
+        self.assertTrue(_tracking_persistence_due(
+            1.0,
+            10.0,
+            10.1,
+            important_transition=True,
+        ))
+        self.assertTrue(_tracking_persistence_due(
+            0.0,
+            10.0,
+            10.01,
+            important_transition=False,
+        ))
+
     def test_tracking_promotes_materially_larger_fully_framed_seed_subject(self) -> None:
         promoted: dict = {}
 
@@ -1208,6 +1268,60 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(updates[0]["frame_height"], 100)
         self.assertEqual(updates[0]["lost_timeout_seconds"], 3.0)
         self.assertFalse(session.status()["active"])
+
+    def test_catchup_processing_is_capped_per_tick(self) -> None:
+        catchup_ready = threading.Event()
+        updates: list[dict] = []
+        event_at = datetime.fromtimestamp(time.time() - 5.0, timezone.utc)
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detection("person", 0.9, (10, 10, 40, 80))]
+
+        def catchup_provider(start_epoch, end_epoch, sample_fps, frame_width):
+            captured_at = start_epoch
+            while captured_at <= end_epoch:
+                yield captured_at, np.zeros((100, 100, 3), dtype=np.uint8)
+                captured_at += 1.0 / sample_fps
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            if int(tracking.get("catchup_frames_processed") or 0) >= 2:
+                catchup_ready.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(
+                sample_fps=2.0,
+                max_session_seconds=3.0,
+                max_catchup_frames_per_tick=2,
+                persist_interval_seconds=0.0,
+            ),
+            detector=Detector(),
+            frame_provider=lambda: None,
+            catchup_frame_provider=catchup_provider,
+            update_event=update_event,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        self.assertTrue(session.start(
+            41,
+            event_at,
+            [detection("person", 0.95, (10, 10, 40, 80))],
+            np.zeros((100, 100, 3), dtype=np.uint8),
+        ))
+        self.assertTrue(catchup_ready.wait(2.0))
+        session.stop()
+
+        self.assertEqual(updates[-1]["catchup_frames_processed"], 2)
 
     def test_recorded_catchup_preserves_identity_across_processing_delay(self) -> None:
         catchup_ready = threading.Event()

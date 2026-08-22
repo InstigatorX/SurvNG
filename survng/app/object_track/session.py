@@ -47,6 +47,46 @@ TRACKING_CATCHUP_SETTLE_SECONDS = 5.0
 TRACKING_CATCHUP_RETRY_SECONDS = 0.25
 
 
+def _adaptive_tracking_fps(
+    config: ObjectTrackingConfig,
+    tracked_objects: list[dict[str, Any]],
+    summaries: list[dict[str, Any]],
+    *,
+    important_transition: bool,
+    stable_frames: int,
+) -> tuple[float, int]:
+    uncertain = (
+        important_transition
+        or not tracked_objects
+        or any(
+            item.get("track_state") != "confirmed"
+            for item in tracked_objects
+        )
+        or any(item.get("state") != "confirmed" for item in summaries)
+    )
+    next_stable_frames = 0 if uncertain else stable_frames + 1
+    if (
+        config.adaptive_sampling_enabled
+        and next_stable_frames >= config.adaptive_stable_frames
+    ):
+        return config.stable_sample_fps, next_stable_frames
+    return config.sample_fps, next_stable_frames
+
+
+def _tracking_persistence_due(
+    interval_seconds: float,
+    last_persisted_at: float,
+    now: float,
+    *,
+    important_transition: bool,
+) -> bool:
+    return (
+        important_transition
+        or interval_seconds == 0
+        or now - last_persisted_at >= interval_seconds
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _TrackingCoverCandidate:
     captured_at: float
@@ -122,6 +162,7 @@ class ObjectTrackingSession:
         self._coverage_gap_count = 0
         self._maximum_coverage_gap_seconds = 0.0
         self._completion_reason = ""
+        self._effective_sample_fps = config.sample_fps
         self._cover_baseline: _TrackingCoverCandidate | None = None
         self._cover_candidate: _TrackingCoverCandidate | None = None
         self._cover_promotion: dict[str, Any] | None = None
@@ -135,6 +176,7 @@ class ObjectTrackingSession:
             "track_count": 0,
             "confirmed_tracks": 0,
             "frames_processed": 0,
+            "effective_sample_fps": 0.0,
             "catchup_frames_processed": 0,
             "coverage_gap_count": 0,
             "maximum_coverage_gap_seconds": 0.0,
@@ -686,6 +728,7 @@ class ObjectTrackingSession:
                 "implementation": self.config.implementation,
                 "state": "skipped_capacity",
                 "sample_fps": self.config.sample_fps,
+                "effective_sample_fps": self.config.sample_fps,
                 "lost_timeout_seconds": self.config.lost_timeout_seconds,
                 "frames_processed": 0,
                 "catchup_frames_processed": 0,
@@ -731,6 +774,7 @@ class ObjectTrackingSession:
             self._coverage_gap_count = 0
             self._maximum_coverage_gap_seconds = 0.0
             self._completion_reason = ""
+            self._effective_sample_fps = self.config.sample_fps
             self._cover_baseline = None
             self._cover_candidate = None
             self._cover_promotion = None
@@ -799,8 +843,18 @@ class ObjectTrackingSession:
                 "active",
                 capacity_wait_seconds=capacity_wait_seconds,
             )
-            interval = 1.0 / self.config.sample_fps
+            last_persisted_at = time.monotonic()
+            stable_frames = 0
+            latest_tracked_objects = initial_tracked
+            track_states = {
+                int(item["track_id"]): str(item.get("track_state") or "confirmed")
+                for item in initial_tracked
+                if item.get("track_id") is not None
+            }
             consecutive_failures = 0
+
+            def interval() -> float:
+                return 1.0 / max(0.01, self._effective_sample_fps)
 
             def process_frame(
                 frame: np.ndarray,
@@ -810,6 +864,8 @@ class ObjectTrackingSession:
                 frame_reference: VideoFrameReference | None = None,
             ) -> bool:
                 nonlocal consecutive_failures, frames_processed
+                nonlocal last_persisted_at, latest_tracked_objects
+                nonlocal stable_frames, track_states
                 source_height = int(frame.shape[0])
                 source_width = int(frame.shape[1])
                 if self._frame_width <= 0 or self._frame_height <= 0:
@@ -855,6 +911,35 @@ class ObjectTrackingSession:
                     self._frame_height,
                 )
                 tracked = tracker.update(objects, sample_epoch)
+                latest_tracked_objects = tracked
+                summaries = tracker.summaries(sample_epoch)
+                next_track_states = {
+                    int(item["track_id"]): str(item.get("state") or "")
+                    for item in summaries
+                    if item.get("track_id") is not None
+                }
+                next_track_states.update({
+                    int(item["track_id"]): str(item.get("track_state") or "")
+                    for item in tracked
+                    if item.get("track_id") is not None
+                })
+                important_transition = any(
+                    track_id not in track_states
+                    or track_states[track_id] != state
+                    for track_id, state in next_track_states.items()
+                )
+                important_transition = important_transition or any(
+                    track_id not in next_track_states
+                    for track_id in track_states
+                )
+                self._effective_sample_fps, stable_frames = _adaptive_tracking_fps(
+                    self.config,
+                    tracked,
+                    summaries,
+                    important_transition=important_transition,
+                    stable_frames=stable_frames,
+                )
+                track_states = next_track_states
                 self._consider_cover_candidate(
                     frame,
                     sample_epoch,
@@ -865,7 +950,35 @@ class ObjectTrackingSession:
                 frames_processed += 1
                 if catchup:
                     self._catchup_frames_processed += 1
-                self._persist(event_id, tracker, sample_epoch, tracked, frames_processed, "active")
+                now_monotonic = time.monotonic()
+                persist_due = _tracking_persistence_due(
+                    self.config.persist_interval_seconds,
+                    last_persisted_at,
+                    now_monotonic,
+                    important_transition=important_transition,
+                )
+                self._set_status(
+                    enabled=True,
+                    active=True,
+                    event_id=event_id,
+                    track_count=len(summaries),
+                    confirmed_tracks=sum(
+                        item.get("state") == "confirmed" for item in summaries
+                    ),
+                    frames_processed=frames_processed,
+                    effective_sample_fps=self._effective_sample_fps,
+                    catchup_frames_processed=self._catchup_frames_processed,
+                )
+                if persist_due:
+                    self._persist(
+                        event_id,
+                        tracker,
+                        sample_epoch,
+                        tracked,
+                        frames_processed,
+                        "active",
+                    )
+                    last_persisted_at = now_monotonic
                 return True
 
             def process_catchup_until(target_epoch: float) -> bool:
@@ -876,13 +989,15 @@ class ObjectTrackingSession:
                 previous segment while the next segment is still being written. This
                 helper is safe to call repeatedly as segments become available.
                 """
-                nonlocal captured_at
+                nonlocal captured_at, last_persisted_at
                 if self.catchup_frame_provider is None or initial_frame is None:
                     return False
-                catchup_start = captured_at + interval
+                catchup_interval = 1.0 / self.config.sample_fps
+                catchup_start = captured_at + catchup_interval
                 if target_epoch <= catchup_start:
                     return False
                 advanced = False
+                persisted_before_batch = last_persisted_at
                 catchup_frames = iter(
                     self.catchup_frame_provider(
                         catchup_start,
@@ -892,6 +1007,7 @@ class ObjectTrackingSession:
                     )
                 )
                 try:
+                    processed_this_tick = 0
                     for sample in catchup_frames:
                         sample_epoch, frame = sample
                         frame_reference = getattr(sample, "reference", None)
@@ -910,17 +1026,39 @@ class ObjectTrackingSession:
                             # analyzed media, never on a deferred/failed cursor.
                             captured_at = sample_epoch
                             advanced = True
+                            processed_this_tick += 1
+                            if (
+                                processed_this_tick
+                                >= self.config.max_catchup_frames_per_tick
+                            ):
+                                break
                 finally:
                     close_catchup = getattr(catchup_frames, "close", None)
                     if callable(close_catchup):
                         close_catchup()
+                if (
+                    advanced
+                    and self.config.persist_interval_seconds > 0
+                    and last_persisted_at == persisted_before_batch
+                ):
+                    # A replay batch can finish before the wall-clock cadence
+                    # elapses. Flush once at its boundary, never once per frame.
+                    self._persist(
+                        event_id,
+                        tracker,
+                        captured_at,
+                        latest_tracked_objects,
+                        frames_processed,
+                        "active",
+                    )
+                    last_persisted_at = time.monotonic()
                 return advanced
 
             catchup_until = time.time()
             if (
                 self.catchup_frame_provider is not None
                 and initial_frame is not None
-                and catchup_until - captured_at > interval * 1.5
+                and catchup_until - captured_at > interval() * 1.5
             ):
                 # Start immediately after the actual selected sample. The
                 # provider and loop still reject non-increasing timestamps.
@@ -959,11 +1097,11 @@ class ObjectTrackingSession:
                 if sample is None:
                     if time.monotonic() >= frame_acquisition_deadline and not tracker.has_live_tracks(now_epoch):
                         break
-                    next_sample = time.monotonic() + interval
+                    next_sample = time.monotonic() + interval()
                     continue
                 frame, sample_epoch, frame_token = sample
                 if self._catchup_frames_processed and sample_epoch <= captured_at:
-                    next_sample = time.monotonic() + interval
+                    next_sample = time.monotonic() + interval()
                     continue
                 coverage_gap = sample_epoch - captured_at
                 gap_backfilled = False
@@ -982,7 +1120,7 @@ class ObjectTrackingSession:
                     )
                     while (
                         not stop.is_set()
-                        and sample_epoch - captured_at > interval * 1.5
+                        and sample_epoch - captured_at > interval() * 1.5
                         and time.monotonic() < settle_deadline
                     ):
                         try:
@@ -997,7 +1135,7 @@ class ObjectTrackingSession:
                                 event_id,
                             )
                             break
-                        if sample_epoch - captured_at <= interval * 1.5:
+                        if sample_epoch - captured_at <= interval() * 1.5:
                             break
                         wait_for = min(
                             TRACKING_CATCHUP_RETRY_SECONDS,
@@ -1025,24 +1163,24 @@ class ObjectTrackingSession:
                     elif not tracker.has_live_tracks(captured_at):
                         self._completion_reason = "object_exited_during_catchup"
                         break
-                if gap_backfilled and sample_epoch <= captured_at + interval * 0.5:
+                if gap_backfilled and sample_epoch <= captured_at + interval() * 0.5:
                     last_frame_token = frame_token
-                    next_sample = time.monotonic() + interval
+                    next_sample = time.monotonic() + interval()
                     continue
                 if last_frame_token is not None and frame_token <= last_frame_token:
                     if not tracker.has_live_tracks(now_epoch):
                         break
-                    next_sample = time.monotonic() + interval
+                    next_sample = time.monotonic() + interval()
                     continue
                 last_frame_token = frame_token
                 if not process_frame(frame, sample_epoch, catchup=False):
-                    next_sample = time.monotonic() + interval
+                    next_sample = time.monotonic() + interval()
                     continue
                 captured_at = sample_epoch
                 if not tracker.has_live_tracks(sample_epoch):
                     self._completion_reason = "object_exited_live_window"
                     break
-                next_sample = max(next_sample + interval, time.monotonic())
+                next_sample = max(next_sample + interval(), time.monotonic())
             final_epoch = time.time()
             final_state = "interrupted" if self._coverage_gap_count else "complete"
             if not self._completion_reason:
@@ -1111,6 +1249,7 @@ class ObjectTrackingSession:
             "implementation": self.config.implementation,
             "state": state,
             "sample_fps": self.config.sample_fps,
+            "effective_sample_fps": self._effective_sample_fps,
             "capacity_wait_seconds": round(
                 float(
                     capacity_wait_seconds
@@ -1170,6 +1309,7 @@ class ObjectTrackingSession:
             track_count=len(tracks),
             confirmed_tracks=len(tracks),
             frames_processed=frames_processed,
+            effective_sample_fps=self._effective_sample_fps,
             catchup_frames_processed=self._catchup_frames_processed,
             coverage_gap_count=self._coverage_gap_count,
             maximum_coverage_gap_seconds=round(
@@ -1264,6 +1404,7 @@ class ObjectTrackingSession:
             "implementation": self.config.implementation,
             "state": "failed",
             "sample_fps": self.config.sample_fps,
+            "effective_sample_fps": self._effective_sample_fps,
             "capacity_wait_seconds": round(
                 float(self._status.get("capacity_wait_seconds_last") or 0.0),
                 3,

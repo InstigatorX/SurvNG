@@ -457,6 +457,11 @@ class ObjectTrackingConfig(BaseModel):
     implementation: str = Field(default="survng_hybrid", min_length=1, max_length=64)
     excluded_labels: list[str] = Field(default_factory=lambda: ["face"], max_length=128)
     sample_fps: float = Field(default=2.0, ge=0.5, le=5.0)
+    adaptive_sampling_enabled: bool = True
+    stable_sample_fps: float = Field(default=0.75, ge=0.5, le=1.0)
+    adaptive_stable_frames: int = Field(default=3, ge=1, le=30)
+    max_catchup_frames_per_tick: int = Field(default=8, ge=1, le=120)
+    persist_interval_seconds: float = Field(default=1.0, ge=0.0, le=60.0)
     max_session_seconds: float = Field(default=15.0, ge=3.0, le=120.0)
     lost_timeout_seconds: float = Field(default=3.0, ge=0.5, le=15.0)
     min_confirmations: int = Field(default=2, ge=1, le=10)
