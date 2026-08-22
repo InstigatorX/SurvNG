@@ -153,6 +153,8 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("mobileclip2-b-openvino-fp16", text)
         self.assertIn("AGPL-3.0", text)
         self.assertIn("Apple", text)
+        self.assertIn("SURVNG_REPO_ROOT", text)
+        self.assertIn("quantize=16", text)
 
     def test_install_docker_models_patches_config_without_wiping_cameras(self) -> None:
         script = ROOT / "scripts" / "install-docker-models.sh"
