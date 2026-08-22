@@ -31,5 +31,24 @@ class SemanticExporterTest(unittest.TestCase):
                 0.99,
             )
 
+    def test_make_tree_world_readable_relaxes_mkdtemp_mode(self) -> None:
+        import stat
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "pkg"
+            root.mkdir(mode=0o700)
+            nested = root / "tokenizer"
+            nested.mkdir(mode=0o700)
+            file_path = nested / "semantic_model.json"
+            file_path.write_text("{}\n", encoding="utf-8")
+            file_path.chmod(0o600)
+
+            EXPORTER._make_tree_world_readable(root)
+
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(nested.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(file_path.stat().st_mode), 0o644)
+
 if __name__ == "__main__":
     unittest.main()

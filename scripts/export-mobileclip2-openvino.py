@@ -104,6 +104,15 @@ def _validate_pair(
     }
 
 
+def _make_tree_world_readable(root: Path) -> None:
+    """mkdtemp creates 0700 dirs; SurvNG often runs as a different UID than the installer."""
+    for path in [root, *root.rglob("*")]:
+        if path.is_dir():
+            path.chmod(0o755)
+        elif path.is_file():
+            path.chmod(0o644)
+
+
 def build_package(
     output_dir: Path,
     *,
@@ -242,6 +251,7 @@ def build_package(
         if output_dir.exists():
             shutil.rmtree(output_dir)
         os.replace(temporary, output_dir)
+        _make_tree_world_readable(output_dir)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise

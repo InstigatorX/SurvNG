@@ -164,6 +164,7 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("opencv-python>=4.8,<5", text)
         self.assertIn("uninstall -y opencv-python-headless", text)
         self.assertIn("survng-install-venvs", text)
+        self.assertIn("ensure_models_readable", text)
         self.assertIn("THIRD_PARTY_MODELS.md", text)
         self.assertIn("quantize=16", text)
         self.assertNotIn("resolve_survng_root", text)

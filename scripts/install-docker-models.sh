@@ -507,6 +507,34 @@ install_semantic() {
   log "Installed Smart Search package: $model_dir"
 }
 
+# Model packages must be readable by the SurvNG container user, which may differ
+# from the installer UID (e.g. root installer, SURVNG_UID=1000). mkdtemp-based
+# exports start as 0700 and would otherwise cause PermissionError on /models.
+ensure_models_readable() {
+  pick_python
+  "$PYTHON_BIN" - "$MODELS_DIR" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+if not root.is_dir():
+    raise SystemExit(0)
+for path in [root, *root.rglob("*")]:
+    name = path.name
+    if name == ".download-cache" or ".download-cache" in path.parts:
+        continue
+    try:
+        if path.is_dir():
+            path.chmod(0o755)
+        elif path.is_file():
+            path.chmod(0o644)
+    except OSError as exc:
+        print(f"Warning: could not chmod {path}: {exc}", file=sys.stderr)
+print(f"Made model files under {root} world-readable (dirs 0755, files 0644)")
+PY
+}
+
 patch_config() {
   pick_python
   local detector_xml="$MODELS_DIR/${YOLO_NAME}_openvino_model/${YOLO_NAME}.xml"
@@ -782,6 +810,8 @@ fi
 if [[ "$DO_SEMANTIC" -eq 1 ]]; then
   install_semantic || note_step_failure "MobileCLIP2-B export"
 fi
+
+ensure_models_readable || note_step_failure "model permission fix"
 
 if [[ "$WRITE_CONFIG" -eq 1 ]]; then
   if ! patch_config; then
