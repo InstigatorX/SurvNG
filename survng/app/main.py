@@ -424,7 +424,7 @@ class JsonGZipResponder(GZipResponder):
                 await self.send(self.initial_message)
                 await self.send(message)
             elif not more_body:
-                body = self.apply_compression(body, more_body=False)
+                body = await self.apply_compression(body, more_body=False)
                 headers = MutableHeaders(raw=self.initial_message["headers"])
                 headers.add_vary_header("Accept-Encoding")
                 if body != message["body"]:
@@ -434,7 +434,7 @@ class JsonGZipResponder(GZipResponder):
                 await self.send(self.initial_message)
                 await self.send(message)
             else:
-                body = self.apply_compression(body, more_body=True)
+                body = await self.apply_compression(body, more_body=True)
                 headers = MutableHeaders(raw=self.initial_message["headers"])
                 headers.add_vary_header("Accept-Encoding")
                 if body != message["body"]:
@@ -445,7 +445,7 @@ class JsonGZipResponder(GZipResponder):
                 await self.send(message)
         elif message_type == "http.response.body":
             body = message.get("body", b"")
-            message["body"] = self.apply_compression(
+            message["body"] = await self.apply_compression(
                 body,
                 more_body=message.get("more_body", False),
             )
