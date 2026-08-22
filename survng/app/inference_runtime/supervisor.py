@@ -112,6 +112,10 @@ class InferenceSupervisor:
     def _security_workload(workload: InferenceWorkload) -> bool:
         return workload <= InferenceWorkload.INCIDENT_REFINEMENT
 
+    def _max_concurrent_refinements(self) -> int:
+        with self._config_lock:
+            return int(self.config.max_concurrent_refinements)
+
     def _enter_device_workload(
         self,
         workload: InferenceWorkload,
@@ -133,14 +137,28 @@ class InferenceSupervisor:
                 if initial:
                     self._initial_waiting += 1
                 try:
-                    while self._optional_active or (
-                        initial and self._refinement_active
-                    ) or (
-                        not initial and (self._initial_waiting or self._initial_active)
-                    ):
+                    # Initials may enter while refinements are already active so
+                    # they can reach the worker priority heap. Refinements still
+                    # yield to waiting/active initials and are capped so a burst
+                    # cannot monopolize device admission.
+                    while True:
                         if not self._device_accepting:
                             self._device_workload_stats[workload]["shed"] += 1
                             return False
+                        blocked_by_optional = self._optional_active > 0
+                        blocked_by_initial = (not initial) and (
+                            self._initial_waiting > 0 or self._initial_active > 0
+                        )
+                        blocked_by_refinement_cap = (not initial) and (
+                            self._refinement_active
+                            >= self._max_concurrent_refinements()
+                        )
+                        if not (
+                            blocked_by_optional
+                            or blocked_by_initial
+                            or blocked_by_refinement_cap
+                        ):
+                            break
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             self._device_workload_stats[workload]["timed_out"] += 1
@@ -222,6 +240,7 @@ class InferenceSupervisor:
                 "initial_waiting": self._initial_waiting,
                 "initial_active": self._initial_active,
                 "refinement_active": self._refinement_active,
+                "max_concurrent_refinements": self._max_concurrent_refinements(),
                 "optional_active": self._optional_active,
                 "offline_active": self._offline_active,
                 "accepting": self._device_accepting,

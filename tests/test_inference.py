@@ -289,17 +289,13 @@ class InferenceSupervisorTest(unittest.TestCase):
 
         initial_thread = threading.Thread(target=enter_initial)
         initial_thread.start()
-        with self.supervisor._device_condition:
-            self.assertTrue(self.supervisor._device_condition.wait_for(
-                lambda: self.supervisor._initial_waiting == 1,
-                timeout=1.0,
-            ))
+        self.assertTrue(initial_entered.wait(1.0))
         refinement_thread = threading.Thread(target=enter_refinement)
         refinement_thread.start()
+        self.assertFalse(refinement_entered.wait(0.05))
         self.supervisor._leave_device_workload(
             InferenceWorkload.INCIDENT_REFINEMENT
         )
-        self.assertTrue(initial_entered.wait(1.0))
         self.assertFalse(refinement_entered.is_set())
         self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
         self.assertTrue(refinement_entered.wait(1.0))
@@ -309,6 +305,110 @@ class InferenceSupervisorTest(unittest.TestCase):
         initial_thread.join(timeout=1.0)
         refinement_thread.join(timeout=1.0)
         self.assertEqual(order, ["initial", "refinement"])
+
+    def test_initial_admits_while_refinement_active(self) -> None:
+        self.assertTrue(
+            self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_REFINEMENT
+            )
+        )
+        self.assertTrue(
+            self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_INITIAL,
+                timeout=0.2,
+            )
+        )
+        status = self.supervisor.workload_status()
+        self.assertGreaterEqual(status["refinement_active"], 1)
+        self.assertEqual(status["initial_active"], 1)
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_REFINEMENT)
+
+    def test_refinement_burst_does_not_timeout_initial(self) -> None:
+        held = 3
+        for _ in range(held):
+            self.assertTrue(
+                self.supervisor._enter_device_workload(
+                    InferenceWorkload.INCIDENT_REFINEMENT
+                )
+            )
+        admitted = threading.Event()
+
+        def enter_initial() -> None:
+            if self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_INITIAL,
+                timeout=0.5,
+            ):
+                admitted.set()
+
+        thread = threading.Thread(target=enter_initial)
+        thread.start()
+        self.assertTrue(admitted.wait(1.0))
+        status = self.supervisor.workload_status()
+        self.assertEqual(status["initial_active"], 1)
+        self.assertEqual(status["refinement_active"], held)
+        self.assertEqual(status["classes"]["incident_initial"]["timed_out"], 0)
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
+        for _ in range(held):
+            self.supervisor._leave_device_workload(
+                InferenceWorkload.INCIDENT_REFINEMENT
+            )
+        thread.join(timeout=1.0)
+
+    def test_optional_still_sheds_behind_concurrent_initial_and_refinement(self) -> None:
+        self.assertTrue(
+            self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_REFINEMENT
+            )
+        )
+        self.assertTrue(
+            self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_INITIAL
+            )
+        )
+        self.assertFalse(
+            self.supervisor._enter_device_workload(InferenceWorkload.ENRICHMENT)
+        )
+        self.assertFalse(
+            self.supervisor._enter_device_workload(InferenceWorkload.TRACKING)
+        )
+        status = self.supervisor.workload_status()
+        self.assertEqual(status["classes"]["enrichment"]["shed"], 1)
+        self.assertEqual(status["classes"]["tracking"]["shed"], 1)
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_REFINEMENT)
+
+    def test_refinement_admission_bounded_under_burst(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, max_concurrent_refinements=2)
+        )
+        self.addCleanup(supervisor.stop)
+        self.assertTrue(
+            supervisor._enter_device_workload(InferenceWorkload.INCIDENT_REFINEMENT)
+        )
+        self.assertTrue(
+            supervisor._enter_device_workload(InferenceWorkload.INCIDENT_REFINEMENT)
+        )
+        self.assertFalse(
+            supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_REFINEMENT,
+                timeout=0.05,
+            )
+        )
+        self.assertTrue(
+            supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_INITIAL,
+                timeout=0.2,
+            )
+        )
+        status = supervisor.workload_status()
+        self.assertEqual(status["refinement_active"], 2)
+        self.assertEqual(status["max_concurrent_refinements"], 2)
+        self.assertEqual(status["initial_active"], 1)
+        self.assertEqual(status["classes"]["incident_refinement"]["timed_out"], 1)
+        supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
+        supervisor._leave_device_workload(InferenceWorkload.INCIDENT_REFINEMENT)
+        supervisor._leave_device_workload(InferenceWorkload.INCIDENT_REFINEMENT)
 
     def test_runtime_config_update_reaches_supervisor_and_future_worker_respawns(self) -> None:
         updated = DetectorConfig(
