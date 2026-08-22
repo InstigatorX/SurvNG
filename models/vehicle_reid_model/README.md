@@ -22,3 +22,7 @@ Expected SHA-256:
 Configure `vehicle_reid_model/vehicle-reid-0001.onnx` as the vehicle ReID
 model in Config → Object Detection → Advanced object tracking. The ONNX model
 uses RGB input; SurvNG performs the conversion from OpenCV's BGR crops.
+
+Intel Open Model Zoo publishes this model as ONNX only (not pre-converted IR).
+Person ReID uses OMZ FP16 IR (`xml` + `bin`) because Intel ships those binaries.
+OpenVINO loads both formats via `read_model()`.

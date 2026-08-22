@@ -156,6 +156,9 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("Apple", text)
         self.assertIn("No SurvNG Git checkout is required", text)
         self.assertIn("raw.githubusercontent.com/InstigatorX/SurvNG", text)
+        self.assertIn("--native", text)
+        self.assertIn("survng-model-installer", text)
+        self.assertIn("THIRD_PARTY_MODELS.md", text)
         self.assertIn("quantize=16", text)
         self.assertNotIn("resolve_survng_root", text)
 
@@ -180,6 +183,7 @@ class DockerPackagingTest(unittest.TestCase):
             completed = subprocess.run(
                 [
                     str(standalone),
+                    "--native",
                     "--models-dir",
                     str(models),
                     "--config",
@@ -239,6 +243,7 @@ class DockerPackagingTest(unittest.TestCase):
             completed = subprocess.run(
                 [
                     str(script),
+                    "--native",
                     "--models-dir",
                     str(models),
                     "--config",
@@ -287,6 +292,71 @@ class DockerPackagingTest(unittest.TestCase):
             self.assertEqual(updated["semantic_search"]["device"], "GPU")
             mode = stat.S_IMODE(config_path.stat().st_mode)
             self.assertEqual(mode, 0o600)
+
+    def test_install_docker_models_patches_config_without_semantic(self) -> None:
+        script = ROOT / "scripts" / "install-docker-models.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            models = tmp_path / "models"
+            config_path = tmp_path / "config" / "config.json"
+            detector = models / "yolo26s_openvino_model"
+            person = models / "person_reid_model"
+            vehicle = models / "vehicle_reid_model"
+            detector.mkdir(parents=True)
+            person.mkdir()
+            vehicle.mkdir()
+            (detector / "yolo26s.xml").write_text("<net name='det'></net>\n", encoding="utf-8")
+            (detector / "yolo26s.bin").write_bytes(b"det")
+            (detector / "classes.txt").write_text("person\ncar\n", encoding="utf-8")
+            (person / "person-reidentification-retail-0286.xml").write_text(
+                "<net name='reid'></net>\n", encoding="utf-8"
+            )
+            (person / "person-reidentification-retail-0286.bin").write_bytes(b"reid")
+            (vehicle / "vehicle-reid-0001.onnx").write_bytes(b"onnx")
+
+            completed = subprocess.run(
+                [
+                    str(script),
+                    "--native",
+                    "--models-dir",
+                    str(models),
+                    "--config",
+                    str(config_path),
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                    "--skip-detector",
+                    "--skip-reid",
+                    "--skip-semantic",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("Updated", completed.stdout)
+            updated = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(updated["detector"]["enabled"])
+            self.assertEqual(
+                updated["detector"]["model_path"],
+                "/models/yolo26s_openvino_model/yolo26s.xml",
+            )
+            tracking = updated["detector"]["tracking"]
+            self.assertTrue(tracking["reid_enabled"])
+            self.assertTrue(tracking["vehicle_reid_enabled"])
+            self.assertNotIn("semantic_search", updated)
+
+    def test_model_installer_dockerfile_and_notices_exist(self) -> None:
+        dockerfile = ROOT / "Dockerfile.model-installer"
+        self.assertTrue(dockerfile.is_file())
+        text = dockerfile.read_text(encoding="utf-8")
+        self.assertIn("model-installer", text)
+        self.assertIn("THIRD_PARTY_MODELS.md", text)
+        self.assertIn("install-docker-models.sh", text)
+        notice = ROOT / "docker" / "model-installer" / "NOTICE"
+        models_doc = ROOT / "docker" / "model-installer" / "THIRD_PARTY_MODELS.md"
+        self.assertTrue(notice.is_file())
+        self.assertTrue(models_doc.is_file())
+        self.assertIn("vehicle-reid-0001", models_doc.read_text(encoding="utf-8"))
+        self.assertIn("ONNX", models_doc.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

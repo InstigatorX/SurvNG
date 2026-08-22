@@ -108,8 +108,10 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
 
 3. Download detector, ReID, and optional Smart Search models into the host
    models directory and patch `config.json`. These weights are not in the
-   GHCR image (YOLO26s is AGPL-3.0; MobileCLIP2-B is Apple research/non-commercial).
-   No SurvNG Git checkout is required:
+   GHCR runtime image (YOLO26s is AGPL-3.0; MobileCLIP2-B is Apple research/non-commercial).
+   No SurvNG Git checkout is required. The script uses the
+   `survng-model-installer` container by default (see
+   `docker/model-installer/THIRD_PARTY_MODELS.md` for attributions):
 
    ```bash
    SURVNG_MODELS_DIR=/docker-data/models \
@@ -117,9 +119,11 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
    scripts/install-docker-models.sh --device GPU
    ```
 
-   Drop `--device GPU` on CPU-only hosts. Add `--skip-semantic` to skip the
-   MobileCLIP2-B export. The script preserves any cameras already in
-   `docker-data/config/config.json`.
+   Pass `--native` on a dev checkout to run without Docker. Drop `--device GPU`
+   on CPU-only hosts. Add `--skip-semantic` to skip the MobileCLIP2-B export.
+   The script preserves any cameras already in `docker-data/config/config.json`
+   and still patches paths for models that installed successfully even when
+   another step fails.
 
 4. Build and start the CPU-compatible image:
 

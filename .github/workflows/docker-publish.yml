@@ -26,8 +26,13 @@ jobs:
         include:
           - target: runtime
             suffix: ""
+            dockerfile: Dockerfile
           - target: runtime-intel
             suffix: "-intel"
+            dockerfile: Dockerfile
+          - target: model-installer
+            suffix: "-model-installer"
+            dockerfile: Dockerfile.model-installer
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +52,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           SUFFIX: ${{ matrix.suffix }}
           GIT_SHA: ${{ github.sha }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
         run: |
           set -euo pipefail
           image="ghcr.io/$(printf '%s' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
@@ -63,6 +69,7 @@ jobs:
           primary="${tags[0]}"
           echo "Building ${TARGET} as ${primary}"
           docker build \
+            --file "${DOCKERFILE}" \
             --target "${TARGET}" \
             --build-arg "SURVNG_GIT_SHA=${GIT_SHA}" \
             --tag "${primary}" \

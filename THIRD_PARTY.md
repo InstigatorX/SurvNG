@@ -45,6 +45,13 @@ CC-BY-4.0); retain those notices when redistributing the corresponding files.
 | Ultralytics (optional tracking comparison) | AGPL-3.0 — only if you install and use it; not part of the default SurvNG MIT distribution. See `VIDEO_PIPELINE.md` |
 | OpenAI / other AI providers | Used only when configured; subject to their API terms |
 
+## Model installer image (`survng-model-installer`)
+
+The GHCR tag `ghcr.io/instigatorx/survng:v1.0-model-installer` (see
+`Dockerfile.model-installer`) downloads third-party weights at install time.
+It does not ship those weights in the image layer. License summaries:
+`docker/model-installer/THIRD_PARTY_MODELS.md` and `docker/model-installer/NOTICE`.
+
 ## Source offers
 
 For GPL-covered binaries shipped in SurvNG images (notably FFmpeg), corresponding

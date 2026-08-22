@@ -2,12 +2,16 @@
 # Download SurvNG Docker model packages into the host models directory and
 # point docker-data/config/config.json at the matching container paths.
 #
+# Default: runs the published survng-model-installer container so the host
+# does not need PyTorch/Ultralytics venvs. Pass --native to run inline (dev).
+#
 # Standalone: does not require a SurvNG Git checkout. Set SURVNG_MODELS_DIR and
 # SURVNG_CONFIG_DIR (or pass --models-dir / --config) for Docker host paths.
 #
 # None of these weights ship in the public MIT GHCR image. YOLO26s is
 # Ultralytics AGPL-3.0; MobileCLIP2-B is Apple ML Research (non-commercial);
 # person ReID is Intel Open Model Zoo Apache-2.0; vehicle ReID is MIT.
+# License summaries: docker/model-installer/THIRD_PARTY_MODELS.md
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,12 +25,16 @@ YOLO_NAME="yolo26s"
 ENABLE=1
 WRITE_CONFIG=1
 FORCE=0
+NATIVE=0
 DO_DETECTOR=1
 DO_PERSON_REID=1
 DO_VEHICLE_REID=1
 DO_SEMANTIC=1
 PYTHON_BIN=""
 SEMANTIC_EXPORTER_REF="${SURVNG_INSTALLER_REF:-v1.0}"
+IN_CONTAINER="${SURVNG_INSTALLER_IN_CONTAINER:-0}"
+INSTALLER_IMAGE="${SURVNG_MODEL_INSTALLER_IMAGE:-ghcr.io/instigatorx/survng-model-installer:v1.0}"
+INSTALL_FAILURES=0
 
 PERSON_NAME="person-reidentification-retail-0286"
 PERSON_URL="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/person-reidentification-retail-0286/FP16"
@@ -53,7 +61,9 @@ Options:
   --cache-dir DIR      Download/export cache (default: MODELS_DIR/.download-cache)
   --device CPU|GPU     Inference device written to config.json (default: CPU)
   --yolo NAME          Ultralytics detect weights to export (default: yolo26s)
-  --python PATH        Python used for venvs and config patching
+  --python PATH        Python used for venvs and config patching (--native only)
+  --native             Run on this host (requires python3 + venvs); skip installer image
+  --installer-image IMG  Override ghcr.io/.../survng-model-installer tag
   --force              Re-download / re-export even when files already exist
   --no-enable          Write model paths but leave enabled flags unchanged
   --skip-config        Download only; do not create or patch config.json
@@ -66,7 +76,9 @@ Options:
 
 Environment:
   SURVNG_MODELS_DIR, SURVNG_CONFIG_DIR, SURVNG_HOST_CONFIG_PATH
-  SURVNG_INSTALLER_REF   Git ref for bundled exporter download (default: v1.0)
+  SURVNG_INSTALLER_REF          Git ref for bundled exporter download (default: v1.0)
+  SURVNG_MODEL_INSTALLER_IMAGE    Installer container image (default: ghcr.io/.../v1.0)
+  SURVNG_INSTALLER_IN_CONTAINER   Set by the installer image entrypoint (do not set on host)
 
 Licenses (not SurvNG MIT; not baked into GHCR images):
   YOLO26s              Ultralytics AGPL-3.0
@@ -74,10 +86,14 @@ Licenses (not SurvNG MIT; not baked into GHCR images):
   person-reid-0286     Intel Open Model Zoo Apache-2.0
   vehicle-reid-0001    MIT (OSNet / Open Model Zoo public)
 
-Example:
+Examples:
+  # Default: installer container (no host PyTorch/Ultralytics)
   SURVNG_MODELS_DIR=/docker-data/models \
   SURVNG_CONFIG_DIR=/docker-data/config \
   ./install-docker-models.sh --device GPU
+
+  # Dev checkout / air-gapped: run inline
+  ./install-docker-models.sh --native --device CPU
 
 Default layout under the models directory (container /models):
   yolo26s_openvino_model/yolo26s.xml
@@ -90,6 +106,48 @@ EOF
 
 log() { printf '%s\n' "$*"; }
 err() { printf '%s\n' "$*" >&2; }
+
+note_step_failure() {
+  local step="$1"
+  err "FAILED: $step (continuing; config.json will reflect any models that did install)"
+  INSTALL_FAILURES=1
+}
+
+run_installer_container() {
+  need_cmd docker
+  local models_host config_host cache_host
+  models_host="$(absolute_path "$MODELS_DIR")"
+  config_host="$(absolute_path "$CONFIG_DIR")"
+  cache_host="$(absolute_path "$CACHE_DIR")"
+  mkdir -p "$models_host" "$config_host" "$cache_host"
+
+  local -a docker_run=(docker run --rm --user "$(id -u):$(id -g)")
+  docker_run+=(
+    -v "$models_host:/models-out"
+    -v "$config_host:/config-out"
+    -v "$cache_host:/cache"
+    -e "SURVNG_INSTALLER_IN_CONTAINER=1"
+    -e "SURVNG_INSTALLER_REF=${SEMANTIC_EXPORTER_REF}"
+  )
+
+  local -a inner=(--native --device "$DEVICE" --yolo "$YOLO_NAME")
+  [[ -n "$CACHE_DIR" ]] && inner+=(--cache-dir /cache)
+  [[ "$FORCE" -eq 1 ]] && inner+=(--force)
+  [[ "$ENABLE" -eq 0 ]] && inner+=(--no-enable)
+  [[ "$WRITE_CONFIG" -eq 0 ]] && inner+=(--skip-config)
+  [[ "$DO_DETECTOR" -eq 0 ]] && inner+=(--skip-detector)
+  [[ "$DO_PERSON_REID" -eq 0 && "$DO_VEHICLE_REID" -eq 0 ]] && inner+=(--skip-reid)
+  [[ "$DO_PERSON_REID" -eq 0 ]] && inner+=(--skip-person-reid)
+  [[ "$DO_VEHICLE_REID" -eq 0 ]] && inner+=(--skip-vehicle-reid)
+  [[ "$DO_SEMANTIC" -eq 0 ]] && inner+=(--skip-semantic)
+
+  log "Running installer container: $INSTALLER_IMAGE"
+  log "  models mount: $models_host -> /models-out"
+  log "  config mount: $config_host -> /config-out"
+  log "  cache mount:  $cache_host -> /cache"
+  log "License notices for downloaded models: docker/model-installer/THIRD_PARTY_MODELS.md"
+  "${docker_run[@]}" "$INSTALLER_IMAGE" "${inner[@]}"
+}
 
 normalize_path() {
   local path="$1"
@@ -326,6 +384,8 @@ install_vehicle_reid() {
   fi
   need_cmd curl
   log "Downloading vehicle ReID vehicle-reid-0001.onnx (MIT)..."
+  log "  OMZ publishes vehicle-reid-0001 as ONNX only; OpenVINO loads it directly."
+  log "  Person ReID uses pre-built IR (xml+bin). Face models (optional) are IR too."
   mkdir -p "$model_dir"
   download_file "$VEHICLE_URL" "$onnx"
   local actual
@@ -578,6 +638,8 @@ while [[ $# -gt 0 ]]; do
       ;;
     --yolo) YOLO_NAME="$2"; shift 2 ;;
     --python) PYTHON_BIN="$2"; shift 2 ;;
+    --native) NATIVE=1; shift ;;
+    --installer-image) INSTALLER_IMAGE="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --no-enable) ENABLE=0; shift ;;
     --skip-config) WRITE_CONFIG=0; shift ;;
@@ -599,8 +661,21 @@ done
 [[ -n "$CONFIG_DIR" ]] || CONFIG_DIR="./docker-data/config"
 [[ -n "$CONFIG_PATH" ]] || CONFIG_PATH="$CONFIG_DIR/config.json"
 
+if [[ "$NATIVE" -eq 0 && "$IN_CONTAINER" -eq 0 ]]; then
+  if [[ -z "${CACHE_DIR}" ]]; then
+    CACHE_DIR="$MODELS_DIR/.download-cache"
+  fi
+  run_installer_container
+  exit $?
+fi
+
 MODELS_DIR="$(absolute_path "$MODELS_DIR")"
 CONFIG_PATH="$(absolute_path "$CONFIG_PATH")"
+if [[ "$IN_CONTAINER" -eq 1 ]]; then
+  MODELS_DIR="/models-out"
+  CONFIG_PATH="/config-out/config.json"
+  [[ -z "$CACHE_DIR" ]] && CACHE_DIR="/cache"
+fi
 if [[ -z "$CACHE_DIR" ]]; then
   CACHE_DIR="$MODELS_DIR/.download-cache"
 fi
@@ -611,14 +686,35 @@ log "SurvNG Docker model installer"
 log "  models: $MODELS_DIR  (container /models)"
 log "  config: $CONFIG_PATH"
 log "  device: $DEVICE"
+log "  mode:   $([[ "$IN_CONTAINER" -eq 1 ]] && echo container || echo native)"
 log "YOLO26s is AGPL-3.0. MobileCLIP2-B is Apple research/non-commercial."
 log "Person ReID is Apache-2.0. Vehicle ReID is MIT. These are not in GHCR."
+log "Attributions: docker/model-installer/THIRD_PARTY_MODELS.md"
 
-[[ "$DO_DETECTOR" -eq 1 ]] && install_detector
-[[ "$DO_PERSON_REID" -eq 1 ]] && install_person_reid
-[[ "$DO_VEHICLE_REID" -eq 1 ]] && install_vehicle_reid
-[[ "$DO_SEMANTIC" -eq 1 ]] && install_semantic
-[[ "$WRITE_CONFIG" -eq 1 ]] && patch_config
+if [[ "$DO_DETECTOR" -eq 1 ]]; then
+  install_detector || note_step_failure "detector export"
+fi
+if [[ "$DO_PERSON_REID" -eq 1 ]]; then
+  install_person_reid || note_step_failure "person ReID download"
+fi
+if [[ "$DO_VEHICLE_REID" -eq 1 ]]; then
+  install_vehicle_reid || note_step_failure "vehicle ReID download"
+fi
+if [[ "$DO_SEMANTIC" -eq 1 ]]; then
+  install_semantic || note_step_failure "MobileCLIP2-B export"
+fi
+
+if [[ "$WRITE_CONFIG" -eq 1 ]]; then
+  if ! patch_config; then
+    note_step_failure "config.json patch"
+  fi
+fi
+
+if [[ "$INSTALL_FAILURES" -ne 0 ]]; then
+  err "One or more install steps failed. config.json was updated for models that exist."
+  err "Fix errors above and re-run, or pass --skip-* for steps you do not need."
+  exit 1
+fi
 
 log "Done. Restart the container if it is already running so it reloads config.json:"
 log "  docker compose restart survng"

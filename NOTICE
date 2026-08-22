@@ -26,5 +26,13 @@ equivalent) with the image or accompanying documentation, and provide
 corresponding source for GPL-covered components such as FFmpeg as required by
 their licenses.
 
+## Model installer image
+
+The optional `ghcr.io/instigatorx/survng:v1.0-model-installer` image downloads
+third-party model weights at runtime into host bind mounts. It includes install
+tooling only, not SurvNG application weights. See `docker/model-installer/NOTICE`
+and `docker/model-installer/THIRD_PARTY_MODELS.md` for license summaries of
+models fetched by that installer.
+
 SurvNG is not affiliated with or endorsed by Reolink, Intel, or other camera
 or silicon vendors.
