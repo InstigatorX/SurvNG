@@ -73,7 +73,17 @@ class CameraFrameTimeline:
 
     @staticmethod
     def buffer_size(sample_fps: float) -> int:
-        return max(4, round(sample_fps * TRACKING_CATCHUP_SECONDS) + 2)
+        return max(
+            4,
+            round(
+                sample_fps
+                * max(
+                    TRACKING_CATCHUP_SECONDS,
+                    TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS,
+                )
+            )
+            + 2,
+        )
 
     def clear(self, source: str | None = None) -> None:
         """Clear retained history for ``main``, ``live``, or both when omitted."""

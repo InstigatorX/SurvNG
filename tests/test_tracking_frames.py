@@ -70,7 +70,7 @@ def test_buffer_sampling_is_bounded_resized_and_cleared() -> None:
 
     assert [sample[0] for sample in service.frames] == [100.0, 100.5]
     assert service.frames[0][1].shape == (360, 640, 3)
-    assert service.frames.maxlen == 32
+    assert service.frames.maxlen == 38
     service.clear()
     assert not service.frames
 
@@ -376,6 +376,13 @@ def test_live_history_bridges_open_segment_tail_when_recordings_end() -> None:
     assert int(samples[4][1][0, 0, 0]) == 21
 
 
+def test_history_capacity_covers_the_open_segment_bridge_window() -> None:
+    """The retained deque must not be shorter than the advertised bridge."""
+    for sample_fps in (1.0, 2.0, 3.0, 5.0):
+        size = CameraFrameTimeline.buffer_size(sample_fps)
+        assert (size - 1) / sample_fps >= 12.0
+
+
 def test_main_clear_preserves_live_bridge_history() -> None:
     service = _service(sample_fps=2.0)
     frame = np.zeros((10, 20, 3), dtype=np.uint8)
@@ -384,4 +391,3 @@ def test_main_clear_preserves_live_bridge_history() -> None:
     service.clear("main")
     assert not service.frames
     assert [sample[0] for sample in service.live_frames] == [100.5]
-

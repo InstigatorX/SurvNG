@@ -48,6 +48,10 @@ TRACKING_CATCHUP_RETRY_SECONDS = 0.25
 # Small open-segment handoff gaps are expected; escalate only when large
 # or repeated, or when catch-up itself fails (exception path below).
 COVERAGE_GAP_WARNING_SECONDS = 10.0
+# A live-history bridge is intentionally short.  When an incident has waited
+# longer than this without finalized recording coverage, attempting to replay
+# it pins a tracker on stale media and prevents newer handoffs from starting.
+TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS = 20.0
 
 
 def _adaptive_tracking_fps(
@@ -149,6 +153,9 @@ class ObjectTrackingSession:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._event_id: int | None = None
+        self._pending_start: tuple[
+            int, datetime, list[dict[str, Any]], np.ndarray | None
+        ] | None = None
         self._deadline = 0.0
         self._accepting = False
         self._status: dict[str, Any] = self._idle_status()
@@ -239,7 +246,6 @@ class ObjectTrackingSession:
             for item in initial_objects
         ):
             return False
-        previous_thread: threading.Thread | None = None
         with self._lock:
             if not self._accepting:
                 return False
@@ -248,16 +254,21 @@ class ObjectTrackingSession:
                     self._deadline = max(self._deadline, time.monotonic() + self.config.max_session_seconds)
                     return True
                 self._stop.set()
-                previous_thread = self._thread
-        if previous_thread is not None:
-            previous_thread.join(timeout=TRACKING_STOP_TIMEOUT_SECONDS)
-            if previous_thread.is_alive():
-                LOGGER.warning(
-                    "object tracking for %s is still stopping; skipped event %d",
+                # A blocked detector/catch-up read can take longer than the
+                # handoff caller may wait.  Preserve only the newest incident;
+                # the retiring worker starts it after its own cleanup.
+                self._pending_start = (
+                    event_id,
+                    event_at,
+                    [dict(item) for item in initial_objects],
+                    initial_frame.copy() if initial_frame is not None else None,
+                )
+                LOGGER.info(
+                    "object tracking for %s is stopping; queued latest event %d",
                     self.camera.id,
                     event_id,
                 )
-                return False
+                return True
         with self._lock:
             if not self._accepting:
                 return False
@@ -302,6 +313,8 @@ class ObjectTrackingSession:
     def set_accepting(self, accepting: bool) -> None:
         with self._lock:
             self._accepting = bool(accepting and self.config.enabled)
+            if not self._accepting:
+                self._pending_start = None
         if not accepting:
             self.stop()
 
@@ -313,6 +326,7 @@ class ObjectTrackingSession:
         """Stop accepting work and signal the session without joining it."""
         with self._lock:
             self._accepting = False
+            self._pending_start = None
             self._stop.set()
 
     def wait_stopped(self, timeout: float) -> bool:
@@ -1060,6 +1074,7 @@ class ObjectTrackingSession:
                 return advanced
 
             catchup_until = time.time()
+            initial_catchup_advanced = False
             if (
                 self.catchup_frame_provider is not None
                 and initial_frame is not None
@@ -1068,13 +1083,43 @@ class ObjectTrackingSession:
                 # Start immediately after the actual selected sample. The
                 # provider and loop still reject non-increasing timestamps.
                 try:
-                    process_catchup_until(catchup_until)
+                    initial_catchup_advanced = process_catchup_until(catchup_until)
                 except Exception:
                     LOGGER.exception(
                         "recorded tracking catch-up failed for %s event %d; continuing live",
                         self.camera.id,
                         event_id,
                     )
+            if (
+                self.catchup_frame_provider is not None
+                and initial_frame is not None
+                and catchup_until - captured_at
+                > TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS
+                and not initial_catchup_advanced
+            ):
+                # Do not turn minutes of queue delay into a fabricated
+                # open-segment warning.  There is neither finalized coverage
+                # nor enough retained live history to reconstruct this event.
+                self._completion_reason = "stale_handoff_without_recorded_coverage"
+                final_epoch = time.time()
+                self._persist(
+                    event_id,
+                    tracker,
+                    final_epoch,
+                    None,
+                    frames_processed,
+                    "interrupted",
+                )
+                self._set_status(
+                    enabled=True,
+                    active=False,
+                    event_id=event_id,
+                    track_count=len(tracker.summaries(final_epoch)),
+                    confirmed_tracks=len(tracker.summaries(final_epoch)),
+                    frames_processed=frames_processed,
+                    catchup_frames_processed=self._catchup_frames_processed,
+                )
+                return
 
             next_sample = time.monotonic()
             frame_acquisition_deadline = min(
@@ -1234,10 +1279,17 @@ class ObjectTrackingSession:
             LOGGER.exception("object tracking failed for %s event %d", self.camera.id, event_id)
         finally:
             self.limiter.release()
-            with self._lock:
-                if self._thread is threading.current_thread():
-                    self._thread = None
-                    self._event_id = None
+            with self._transition_lock:
+                pending_start = None
+                with self._lock:
+                    if self._thread is threading.current_thread():
+                        self._thread = None
+                        self._event_id = None
+                        if self._accepting:
+                            pending_start = self._pending_start
+                        self._pending_start = None
+                if pending_start is not None:
+                    self._start_session(*pending_start)
 
     def _persist(
         self,

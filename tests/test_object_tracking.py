@@ -1212,7 +1212,9 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         replacement.join(2.0)
         closer.join(2.0)
 
-        self.assertEqual(start_result, [False])
+        # The handoff was accepted and queued, then correctly discarded when
+        # admission closed before the retiring worker finished.
+        self.assertEqual(start_result, [True])
         self.assertFalse(session.running())
 
     def test_processes_live_frames_and_finishes_cleanly(self) -> None:
@@ -1382,6 +1384,42 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         session.stop()
 
         self.assertEqual(calls_after_cap, 2)
+
+    def test_stale_handoff_without_recorded_coverage_finishes_without_live_gap(self) -> None:
+        """A delayed refinement must not pin tracking on unavailable history."""
+        updates: list[dict] = []
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def detect(self, _frame, confidence_threshold=None):
+                return []
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=3.0),
+            detector=Detector(),
+            frame_provider=lambda: None,
+            catchup_frame_provider=lambda *_args: iter(()),
+            update_event=lambda _event_id, tracking, _tracked: updates.append(tracking) or {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        self.assertTrue(session.start(
+            44,
+            datetime.fromtimestamp(time.time() - 30.0, timezone.utc),
+            [detection("person", 0.95, (10, 10, 40, 80))],
+            np.zeros((100, 100, 3), dtype=np.uint8),
+        ))
+        self.assertTrue(session.wait_stopped(2.0))
+
+        self.assertEqual(
+            updates[-1]["completion_reason"],
+            "stale_handoff_without_recorded_coverage",
+        )
+        self.assertFalse(updates[-1]["coverage_incomplete"])
 
     def test_recorded_catchup_preserves_identity_across_processing_delay(self) -> None:
         catchup_ready = threading.Event()
