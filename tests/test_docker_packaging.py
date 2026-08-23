@@ -69,6 +69,12 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("ARG SURVNG_GIT_SHA=", dockerfile)
         self.assertIn("ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA", dockerfile)
         self.assertIn("/app/SURVNG_GIT_SHA", dockerfile)
+        self.assertIn("add-apt-ppa-retry", dockerfile)
+
+    def test_add_apt_ppa_retry_script_is_executable(self) -> None:
+        script = ROOT / "docker" / "add-apt-ppa-retry.sh"
+        self.assertTrue(script.is_file())
+        self.assertTrue(os.access(script, os.X_OK))
 
     def test_update_from_git_script_is_executable(self) -> None:
         script = ROOT / "scripts" / "update-from-git.sh"
