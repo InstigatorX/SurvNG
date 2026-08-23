@@ -668,9 +668,10 @@ class EventStoreJobsMixin:
         *,
         maximum_age_seconds: float,
     ) -> int:
-        """Terminally mark queued evidence that can no longer be time-accurate."""
+        """Terminally mark stale queued or reclaimable evidence jobs."""
+        now = time.time()
         cutoff = datetime.fromtimestamp(
-            time.time() - max(0.0, float(maximum_age_seconds)),
+            now - max(0.0, float(maximum_age_seconds)),
             timezone.utc,
         ).isoformat()
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -678,8 +679,9 @@ class EventStoreJobsMixin:
             cursor = conn.execute(
                 "update detection_jobs set state = 'failed', lease_expires_at = null, "
                 "lease_owner = '', last_error = 'stale_refinement', updated_at = ? "
-                "where camera_id = ? and state = 'queued' and created_at <= ?",
-                (now_iso, camera_id, cutoff),
+                "where camera_id = ? and created_at <= ? and (state = 'queued' "
+                "or (state = 'running' and lease_expires_at <= ?))",
+                (now_iso, camera_id, cutoff, now),
             )
             return max(0, int(cursor.rowcount))
 

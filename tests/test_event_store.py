@@ -133,6 +133,32 @@ class EventStoreTest(unittest.TestCase):
                 ).fetchone()
             self.assertEqual((row["state"], row["last_error"]), ("failed", "stale_refinement"))
 
+    def test_stale_expired_lease_does_not_block_fresh_detection_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            for job_id in ("zombie", "fresh"):
+                store.enqueue_detection_job(
+                    job_id=job_id,
+                    camera_id="gate",
+                    dedupe_key=f"episode:{job_id}",
+                    payload={"event_at": "2026-08-22T20:00:00+00:00"},
+                )
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set state = 'running', "
+                    "lease_expires_at = 0, lease_owner = 'dead-worker', "
+                    "created_at = ? where id = 'zombie'",
+                    ("2026-08-22T19:00:00+00:00",),
+                )
+
+            self.assertEqual(
+                store.expire_stale_detection_jobs("gate", maximum_age_seconds=1.0),
+                1,
+            )
+            claimed = store.claim_detection_job("gate", lease_owner="refiner-a")
+
+            self.assertEqual(claimed["id"], "fresh")
+
     def test_security_work_ledger_is_separate_from_general_event_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
