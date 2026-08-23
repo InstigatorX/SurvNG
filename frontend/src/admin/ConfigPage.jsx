@@ -62,6 +62,7 @@ import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hoo
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
 import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
+import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
   cameras: Camera,
@@ -794,7 +795,7 @@ export function MaintenanceViewer({ state }) {
   );
 }
 
-export function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
+export function CalibrationLab({ cameras, runtimeStatus = [], timeZone, onCommandBarChange = null }) {
   const [runs, setRuns] = useState([]);
   const [changeSets, setChangeSets] = useState([]);
   const [section, setSection] = useStoredState("survng.detectionTuneup.section.v1", "tuneup");
@@ -869,6 +870,15 @@ export function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
     setSelectedCameras((current) => current.filter((id) => ids.has(id)));
   }, [cameras]);
   useEffect(() => { setPreview(null); }, [selectedRunId, selectedRecommendations]);
+
+  const calibrationSectionLabel = section === "monitoring" ? "Monitoring" : section === "history" ? "Tune-Up History" : "Detection Tune-Up";
+  useEffect(() => {
+    onCommandBarChange?.({
+      sectionLabel: calibrationSectionLabel,
+      refresh: () => { void loadCalibration(); },
+    });
+    return () => onCommandBarChange?.(null);
+  }, [calibrationSectionLabel, onCommandBarChange]);
 
   function chooseCameraScope(choice) {
     setCameraChoice(choice);
@@ -1009,7 +1019,6 @@ export function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
   const total = Number(selectedRun?.result?.progress?.total || selectedRun?.camera_ids?.length || 0);
   return <>
     <section className="bento-card camera-tree config-tree settings-section-tree calibration-tree">
-      <div className="section-head compact"><div><h2>Detection Tune-Up</h2><p>Choose, review, decide, and monitor</p></div></div>
       <div className="tree-list tuneup-section-list" role="tablist" aria-label="Detection Tune-Up sections" onKeyDown={(event) => { const next = nextTabId(["tuneup", "monitoring", "history"], section, event.key); if (!next) return; event.preventDefault(); setSection(next); window.requestAnimationFrame(() => document.getElementById(`tuneup-tab-${next}`)?.focus()); }}>
         <button id="tuneup-tab-tuneup" type="button" tabIndex={section === "tuneup" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "tuneup" ? "active" : ""} onClick={() => setSection("tuneup")} role="tab" aria-selected={section === "tuneup"}><Sparkles size={16} /><span>Tune-Up</span></button>
         <button id="tuneup-tab-monitoring" type="button" tabIndex={section === "monitoring" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "monitoring" ? "active" : ""} onClick={() => setSection("monitoring")} role="tab" aria-selected={section === "monitoring"}><Activity size={16} /><span>Monitoring{monitoringSets.length ? <em>{monitoringSets.length}</em> : null}</span></button>
@@ -1018,7 +1027,6 @@ export function CalibrationLab({ cameras, runtimeStatus = [], timeZone }) {
       {activeRun ? <button type="button" className="tuneup-resume-card" onClick={() => { setSelectedRunId(activeRun.id); setSection("tuneup"); setWizardStep(3); }}><RefreshCcw className="spin" size={16} /><span><strong>Review in progress</strong><small>{tuneupHistoryTitle(activeRun, cameras)}</small></span></button> : null}
     </section>
     <section id="admin-panel-calibration" className="bento-card config-editor settings-panel calibration-panel" aria-labelledby="admin-destination-tuneup">
-      <div className="section-head"><div><h2>{section === "tuneup" ? "Detection Tune-Up" : section === "monitoring" ? "Monitoring" : "Tune-Up History"}</h2><p>{section === "tuneup" ? "SurvNG reviews evidence; you approve every change" : section === "monitoring" ? "See how applied changes perform and undo them at any time" : "Past reviews, decisions, and results"}</p></div><button onClick={() => void loadCalibration()}><RefreshCcw size={16} /> Refresh</button></div>
       {error ? <div className="error-banner">{error}</div> : null}
       <div id="tuneup-section-panel" role="tabpanel" aria-labelledby={`tuneup-tab-${section}`}>
         {section === "tuneup" ? <div className="tuneup-workflow">
@@ -1108,6 +1116,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [maintenance, setMaintenance] = useState(null);
   const [maintenanceError, setMaintenanceError] = useState("");
   const [adminNavOpen, setAdminNavOpen] = useState(false);
+  const [calibrationCommandBar, setCalibrationCommandBar] = useState(null);
   const [apiTokenSecretVisible, setApiTokenSecretVisible] = useState(false);
   const configLoadSequence = useRef(0);
   const adminHistoryWriteRef = useRef(true);
@@ -2035,6 +2044,164 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     }
   }
 
+  const auditCategoryTitle = auditCategory === "visual_backup"
+    ? "Visual Backup"
+    : auditCategory === "active_followup"
+      ? "Active-Event Follow-Up"
+      : auditCategory === "qualification"
+        ? "Filtered Motion"
+        : "Motion Decisions";
+  const generalDestinationIcon = ADMIN_DESTINATION_ICONS[activeAdminDestination.id] || Cog;
+  const adminCommandBar = useMemo(() => {
+    if (settingsTab === "cameras") {
+      return {
+        scope: (
+          <CameraScopePicker
+            className="section-title-picker"
+            cameras={cameras}
+            runtimeStatus={runtimeStatus}
+            value={selectedCamera?.id || ""}
+            onChange={selectConfigCamera}
+            ariaLabel="Configure camera"
+          />
+        ),
+        actions: (
+          <div className="camera-command-bar">
+            {cameraOrderEditing ? (
+              <>
+                <button type="button" onClick={() => moveSelectedCameraBy(-1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) <= 0}>Up</button>
+                <button type="button" onClick={() => moveSelectedCameraBy(1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) >= cameras.length - 1}>Down</button>
+                <button type="button" onClick={cancelCameraOrderEdit} disabled={cameraOrderSaving}>Done</button>
+              </>
+            ) : (
+              <>
+                <button type="button" onClick={startCameraOrderEdit}><GripVertical size={16} /> Edit Order</button>
+                <button type="button" onClick={() => addCamera()}><Plus size={16} /> Add</button>
+              </>
+            )}
+            {selectedCamera ? <>
+              <button type="button" onClick={() => cloneCamera(selectedCamera)} disabled={cameraSaving}><Copy size={16} /> Clone</button>
+              <button type="button" onClick={() => probeCamera(selectedCamera)} disabled={cameraSaving}><Radar size={16} /> Auto-detect</button>
+              <button type="button" className="danger" onClick={() => deleteCamera(selectedCamera)} disabled={cameraSaving}><Trash2 size={16} /> Remove</button>
+            </> : null}
+          </div>
+        ),
+      };
+    }
+    if (settingsTab === "telemetry") {
+      if (telemetrySection === "diagnostics") {
+        return {
+          scope: <AdminCommandLabel icon={Wrench}>Diagnostics</AdminCommandLabel>,
+          actions: <button type="button" onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>,
+        };
+      }
+      return {
+        scope: (
+          <CameraScopePicker
+            className="section-title-picker"
+            cameras={cameras}
+            runtimeStatus={runtimeStatus}
+            value={telemetryCamera}
+            onChange={selectTelemetryCamera}
+            allOption={{ value: "", label: "All cameras" }}
+            ariaLabel="Health camera scope"
+          />
+        ),
+        meta: <TelemetryContinuity data={telemetry} />,
+        actions: <button type="button" onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>,
+      };
+    }
+    if (settingsTab === "general") {
+      if (generalSection === "motion-review") {
+        return {
+          scope: (
+            <CameraScopePicker
+              className="section-title-picker"
+              cameras={cameras}
+              runtimeStatus={runtimeStatus}
+              value={selectedId}
+              onChange={setSelectedId}
+              ariaLabel="Camera Advisor camera"
+            />
+          ),
+          meta: <span className="admin-action-kind">Advisor actions apply immediately</span>,
+        };
+      }
+      return {
+        scope: <AdminCommandLabel icon={generalDestinationIcon}>{GENERAL_SECTION_LABELS[generalSection] || "Server"}</AdminCommandLabel>,
+      };
+    }
+    if (settingsTab === "audit") {
+      return {
+        scope: (
+          <CameraScopePicker
+            className="section-title-picker"
+            cameras={cameras}
+            runtimeStatus={runtimeStatus}
+            value={auditCamera}
+            onChange={selectAuditCamera}
+            allOption={{ value: "", label: "All cameras" }}
+            ariaLabel="Motion Audit camera"
+          />
+        ),
+        meta: <AdminCommandLabel>{auditCategoryTitle}</AdminCommandLabel>,
+        actions: <button type="button" onClick={() => loadMotionAudit(auditPage)} disabled={auditLoading}><RefreshCcw className={auditLoading ? "spin" : ""} size={16} /> Refresh</button>,
+      };
+    }
+    if (settingsTab === "maintenance") {
+      return {
+        scope: <AdminCommandLabel icon={Wrench}>Storage Reconciliation</AdminCommandLabel>,
+        actions: (
+          <div className="maintenance-actions">
+            {["running", "cancelling"].includes(maintenance?.status) ? <button type="button" onClick={() => void cancelMaintenance()} disabled={maintenance?.status === "cancelling"}><X size={16} /> {maintenance?.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : <><button type="button" onClick={() => void startMaintenance(false, false)}><RefreshCcw size={16} /> Quick Check</button><button type="button" onClick={() => void startMaintenance(false, true)}><Search size={16} /> Full Scan</button><button type="button" className="primary" onClick={() => void startMaintenance(true, maintenance?.result?.full === true)}><Wrench size={16} /> Repair Database</button></>}
+          </div>
+        ),
+      };
+    }
+    if (settingsTab === "logs") {
+      return {
+        scope: <AdminCommandLabel icon={ListTree}>Logs</AdminCommandLabel>,
+        actions: (
+          <div className="log-command-controls">
+            <label>Minimum severity<select value={logLevel} onChange={(event) => setLogLevel(event.target.value)}>{[["DEBUG", "Debug+"], ["INFO", "Info+"], ["WARNING", "Warning+"], ["ERROR", "Error+"], ["CRITICAL", "Critical"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+            <button type="button" onClick={loadLogs}><RefreshCcw size={16} /> Refresh</button>
+          </div>
+        ),
+      };
+    }
+    if (settingsTab === "calibration" && calibrationCommandBar) {
+      return {
+        scope: <AdminCommandLabel icon={Sparkles}>{calibrationCommandBar.sectionLabel}</AdminCommandLabel>,
+        actions: <button type="button" onClick={() => calibrationCommandBar.refresh()}><RefreshCcw size={16} /> Refresh</button>,
+      };
+    }
+    return null;
+  }, [
+    auditCamera,
+    auditCategoryTitle,
+    auditLoading,
+    auditPage,
+    calibrationCommandBar,
+    cameraOrderEditing,
+    cameraOrderSaving,
+    cameraSaving,
+    cameras,
+    generalDestinationIcon,
+    generalSection,
+    loadLogs,
+    loadMotionAudit,
+    loadTelemetry,
+    maintenance,
+    runtimeStatus,
+    selectedCamera,
+    selectedId,
+    settingsTab,
+    telemetry,
+    telemetryCamera,
+    telemetryLoading,
+    telemetrySection,
+  ]);
+
   return (
     <main className="bento-grid config-grid settings-grid">
       <button type="button" className={`admin-navigation-backdrop${adminNavOpen ? " open" : ""}`} aria-label="Close Admin menu" onClick={() => setAdminNavOpen(false)} />
@@ -2059,13 +2226,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         <span><small>Admin</small><strong>{activeAdminDestination.label}</strong></span>
         {currentAdminDirty ? <em>Unsaved</em> : null}
       </header>
+      <AdminCommandBar scope={adminCommandBar?.scope} meta={adminCommandBar?.meta} actions={adminCommandBar?.actions} />
 
       <div className={`admin-workspace-surface admin-workspace-${settingsTab}`}>
 
         {settingsTab === "general" ? (
           <>
             <section className="bento-card camera-tree config-tree settings-section-tree">
-              <div className="section-head compact"><div><h2>Settings</h2><p>Choose a configuration area</p></div></div>
               <div className="tree-list">
                 <span className="tree-group-label">System</span>
                 <button type="button" aria-current={generalSection === "general" ? "page" : undefined} className={generalSection === "general" ? "active" : ""} onClick={() => selectAdminSubsection("general", setGeneralSection, "general")}><Cog size={16} /><span>Server</span></button>
@@ -2078,10 +2245,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
               </div>
             </section>
             <section id="admin-panel-general" className="bento-card config-editor settings-panel" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
-              <div className="section-head">
-                <div><h2>{GENERAL_SECTION_LABELS[generalSection] || "Server"}</h2><p>{generalSection === "general" ? "Server preferences, updates, and restart" : generalSection === "storage" ? "Media placement and retention" : generalSection === "mqtt" ? "API access, MQTT integration, and AI provider" : generalSection === "detection" ? "Models, inference, and object policy" : "Camera intelligence review and recommendations"}</p></div>
-                {generalSection === "motion-review" ? <span className="admin-action-kind">Advisor actions apply immediately</span> : null}
-              </div>
               <GeneralSettings
                 config={config}
                 updateConfig={updateConfig}
@@ -2110,16 +2273,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         ) : settingsTab === "audit" ? (
           <>
             <section className="bento-card camera-tree config-tree settings-section-tree motion-audit-filters">
-              <div className="section-head compact"><div><h2>Motion Audit</h2><p>{auditTotal.toLocaleString()} matching decisions</p></div></div>
               <div className="motion-audit-filter-fields">
-                <CameraScopePicker
-                  cameras={cameras}
-                  runtimeStatus={runtimeStatus}
-                  value={auditCamera}
-                  onChange={selectAuditCamera}
-                  allOption={{ value: "", label: "All cameras" }}
-                  ariaLabel="Motion Audit camera"
-                />
                 <label>Category<select value={auditCategory} onChange={(event) => { setAuditCategory(event.target.value); setAuditPage(0); }}>
                   <option value="all">All categories</option>
                   <option value="visual_backup">Visual backup</option>
@@ -2139,10 +2293,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
               </div>
             </section>
             <section id="admin-panel-audit" className="bento-card config-editor settings-panel motion-audit-panel" aria-labelledby="admin-destination-audit">
-              <div className="section-head">
-                <div><h2>{auditCategory === "visual_backup" ? "Visual Backup" : auditCategory === "active_followup" ? "Active-Event Follow-Up" : auditCategory === "qualification" ? "Filtered Motion" : "Motion Decisions"}</h2><p>Qualifier decisions, backup triggers, and detector outcomes</p></div>
-                <button onClick={() => loadMotionAudit(auditPage)} disabled={auditLoading}><RefreshCcw className={auditLoading ? "spin" : ""} size={16} /> Refresh</button>
-              </div>
               <MotionAuditViewer
                 items={auditItems}
                 total={auditTotal}
@@ -2157,25 +2307,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             </section>
           </>
         ) : settingsTab === "calibration" ? (
-          <CalibrationLab cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} />
+          <CalibrationLab cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
         ) : settingsTab === "telemetry" ? (
           <>
             <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
-              <div className="section-head telemetry-panel-head">
-                {telemetrySection !== "diagnostics" ? (
-                  <CameraScopePicker
-                    className="section-title-picker"
-                    cameras={cameras}
-                    runtimeStatus={runtimeStatus}
-                    value={telemetryCamera}
-                    onChange={selectTelemetryCamera}
-                    allOption={{ value: "", label: "All cameras" }}
-                    ariaLabel="Health camera scope"
-                  />
-                ) : <h2>Diagnostics</h2>}
-                {telemetrySection !== "diagnostics" ? <TelemetryContinuity data={telemetry} /> : null}
-                <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
-              </div>
               {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
               <div id="telemetry-view-panel" className="telemetry-tab-panel" role="tabpanel">{telemetrySection === "diagnostics" ? <div className="telemetry-diagnostics">
                 <ModelsAndHardwarePanel config={config} updateConfig={updateConfig} detectorModels={detectorModels} accelerator={accelerator} />
@@ -2207,22 +2342,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           </>
         ) : settingsTab === "maintenance" ? (
           <section id="admin-panel-maintenance" className="bento-card config-editor settings-panel settings-panel-wide maintenance-panel" aria-labelledby="admin-destination-maintenance">
-            <div className="section-head">
-              <div><h2>Storage Reconciliation</h2><p>Find missing references, stale recording rows, and unlinked media</p></div>
-              <div className="camera-command-area maintenance-actions">
-                {["running", "cancelling"].includes(maintenance?.status) ? <button onClick={() => void cancelMaintenance()} disabled={maintenance?.status === "cancelling"}><X size={16} /> {maintenance?.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : <><button onClick={() => void startMaintenance(false, false)}><RefreshCcw size={16} /> Quick Check</button><button onClick={() => void startMaintenance(false, true)}><Search size={16} /> Full Scan</button><button className="primary" onClick={() => void startMaintenance(true, maintenance?.result?.full === true)}><Wrench size={16} /> Repair Database</button></>}
-              </div>
-            </div>
             <details className="maintenance-explanation"><summary>What these checks do</summary><div><p>Quick Check is bounded to recent media and the newest index rows, so it will not saturate network storage.</p><p>Full Scan checks the entire library, reports progress, and can be cancelled. Repair Database also checks a small bounded batch of older recording metadata. Repairs never delete media or incident history.</p></div></details>
             {maintenanceError ? <div className="error-banner">{maintenanceError}</div> : null}
             <MaintenanceViewer state={maintenance} />
           </section>
         ) : settingsTab === "logs" ? (
           <section id="admin-panel-logs" className="bento-card config-editor settings-panel settings-panel-wide log-panel" aria-labelledby="admin-destination-logs">
-            <div className="section-head">
-              <div><h2>Logs</h2><p>Live application log stream</p></div>
-              <div className="log-command-controls"><label>Minimum severity<select value={logLevel} onChange={(event) => setLogLevel(event.target.value)}>{[["DEBUG", "Debug+"], ["INFO", "Info+"], ["WARNING", "Warning+"], ["ERROR", "Error+"], ["CRITICAL", "Critical"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><button onClick={loadLogs}><RefreshCcw size={16} /> Refresh</button></div>
-            </div>
             <LogViewer
               lines={logLines}
               filter={logFilter}
@@ -2235,37 +2360,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         ) : (
           <>
             <section id="admin-panel-cameras" className="bento-card config-editor settings-panel settings-panel-wide admin-workspace-cameras">
-              <div className="section-head camera-config-head">
-                <CameraScopePicker
-                  className="section-title-picker"
-                  cameras={cameras}
-                  runtimeStatus={runtimeStatus}
-                  value={selectedCamera?.id || ""}
-                  onChange={selectConfigCamera}
-                  ariaLabel="Configure camera"
-                />
-                <div className="camera-command-area">
-                  <div className="camera-command-bar">
-                    {cameraOrderEditing ? (
-                      <>
-                        <button type="button" onClick={() => moveSelectedCameraBy(-1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) <= 0}>Up</button>
-                        <button type="button" onClick={() => moveSelectedCameraBy(1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) >= cameras.length - 1}>Down</button>
-                        <button type="button" onClick={cancelCameraOrderEdit} disabled={cameraOrderSaving}>Done</button>
-                      </>
-                    ) : (
-                      <>
-                        <button type="button" onClick={startCameraOrderEdit}><GripVertical size={16} /> Edit Order</button>
-                        <button type="button" onClick={() => addCamera()}><Plus size={16} /> Add</button>
-                      </>
-                    )}
-                    {selectedCamera ? <>
-                      <button type="button" onClick={() => cloneCamera(selectedCamera)} disabled={cameraSaving}><Copy size={16} /> Clone</button>
-                      <button type="button" onClick={() => probeCamera(selectedCamera)} disabled={cameraSaving}><Radar size={16} /> Auto-detect</button>
-                      <button type="button" className="danger" onClick={() => deleteCamera(selectedCamera)} disabled={cameraSaving}><Trash2 size={16} /> Remove</button>
-                    </> : null}
-                  </div>
-                </div>
-              </div>
 
               {cameraOrderEditing ? <section className="sub-panel camera-order-panel" aria-label="Camera order">
                 <div className="tree-list">
@@ -3252,7 +3346,7 @@ export function ProbeResult({ probe }) {
   );
 }
 
-export function MotionAiReviewPanel({ cameras, runtimeStatus = [], advisorEnabled, cameraId: controlledCameraId = "", onCameraIdChange = null }) {
+export function MotionAiReviewPanel({ cameras, runtimeStatus = [], advisorEnabled, cameraId: controlledCameraId = "", onCameraIdChange = null, hideScopePicker = false }) {
   const [cameraId, setCameraId] = useState(controlledCameraId || cameras[0]?.id || "");
   const [hours, setHours] = useState(24);
   const [imageLimit, setImageLimit] = useState(12);
@@ -3437,14 +3531,16 @@ export function MotionAiReviewPanel({ cameras, runtimeStatus = [], advisorEnable
       <h3>Camera Intelligence</h3>
       <p className="settings-help">Review how one camera has performed across recent incidents and motion decisions. SurvNG deliberately samples successes, possible misses, visual rescues, and filtered motion, then recommends a change only when multiple images support it. Nothing is applied automatically.</p>
       <div className="field-row motion-ai-review-controls">
-        <CameraScopePicker
-          cameras={cameras}
-          runtimeStatus={runtimeStatus}
-          value={cameraId}
-          onChange={selectCamera}
-          ariaLabel="Camera Advisor camera"
-          disabled={running}
-        />
+        {hideScopePicker ? null : (
+          <CameraScopePicker
+            cameras={cameras}
+            runtimeStatus={runtimeStatus}
+            value={cameraId}
+            onChange={selectCamera}
+            ariaLabel="Camera Advisor camera"
+            disabled={running}
+          />
+        )}
         <label>Review period<select value={hours} onChange={(event) => setHours(Number(event.target.value))} disabled={running}>
           <option value={24}>Last 24 hours</option>
           <option value={72}>Last 3 days</option>
@@ -4409,6 +4505,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           advisorEnabled={config.audit_ai?.enabled ?? false}
           cameraId={advisorCameraId}
           onCameraIdChange={onAdvisorCameraIdChange}
+          hideScopePicker={Boolean(onAdvisorCameraIdChange)}
         />
       ) : null}
     </div>
