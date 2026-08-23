@@ -6,6 +6,7 @@ on:
       - v1.0
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,6 +23,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - target: runtime
@@ -42,6 +44,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          docker system df || true
+          docker builder prune -af || true
+          docker image prune -af --filter "until=24h" || true
+          docker container prune -f || true
+          df -h /
 
       # Self-hosted runners may lack docker-buildx. Keep the default (legacy)
       # builder; the Dockerfile avoids BuildKit-only features like COPY --chmod.
@@ -81,3 +93,5 @@ jobs:
             docker push "${tag}"
             echo "Pushed ${tag}"
           done
+          docker rmi "${primary}" $(printf ' %s' "${tags[@]:1}") 2>/dev/null || true
+          docker builder prune -af || true
