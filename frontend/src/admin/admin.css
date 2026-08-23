@@ -794,9 +794,35 @@ a.button {
   width: 100%;
 }
 
-.telemetry-panel-head .camera-scope-picker {
+.telemetry-panel-head .section-title-picker,
+.camera-config-head .section-title-picker {
   flex: 0 1 auto;
-  min-width: min(240px, 100%);
+  min-width: min(280px, 100%);
+}
+
+.telemetry-panel-head>h2,
+.camera-config-head .camera-command-area {
+  margin-left: auto;
+}
+
+.section-title-picker .timeline-camera-picker {
+  min-width: min(280px, 100%);
+}
+
+.section-title-picker .timeline-camera-picker-toggle {
+  min-height: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -.015em;
+}
+
+.section-title-picker .timeline-camera-picker-toggle strong {
+  font-size: inherit;
+  font-weight: inherit;
 }
 
 .tree-list button i.camera-status-dot {
@@ -853,11 +879,6 @@ a.button {
 .camera-config-head {
   flex-wrap: wrap;
   gap: 10px;
-}
-
-.camera-config-head .camera-scope-picker {
-  flex: 0 1 auto;
-  min-width: min(240px, 100%);
 }
 
 .camera-order-panel {

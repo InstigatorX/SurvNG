@@ -2162,9 +2162,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           <>
             <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
               <div className="section-head telemetry-panel-head">
-                <div><h2>{telemetrySection === "diagnostics" ? "Diagnostics" : "Health"}</h2><p>{telemetrySection === "diagnostics" ? "Models, hardware, and temporary capture sessions" : "System and camera health with optional camera scope"}</p></div>
                 {telemetrySection !== "diagnostics" ? (
                   <CameraScopePicker
+                    className="section-title-picker"
                     cameras={cameras}
                     runtimeStatus={runtimeStatus}
                     value={telemetryCamera}
@@ -2172,7 +2172,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                     allOption={{ value: "", label: "All cameras" }}
                     ariaLabel="Health camera scope"
                   />
-                ) : null}
+                ) : <h2>Diagnostics</h2>}
                 {telemetrySection !== "diagnostics" ? <TelemetryContinuity data={telemetry} /> : null}
                 <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
               </div>
@@ -2236,8 +2236,8 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           <>
             <section id="admin-panel-cameras" className="bento-card config-editor settings-panel settings-panel-wide admin-workspace-cameras">
               <div className="section-head camera-config-head">
-                <div><h2>{selectedCamera ? selectedCamera.name : "Cameras"}</h2><p>{selectedCamera ? "Changes save to config.json; only structural motion or camera changes interrupt the affected camera" : "Add cameras or choose one to configure"}</p></div>
                 <CameraScopePicker
+                  className="section-title-picker"
                   cameras={cameras}
                   runtimeStatus={runtimeStatus}
                   value={selectedCamera?.id || ""}
