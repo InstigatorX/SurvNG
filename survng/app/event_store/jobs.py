@@ -630,7 +630,10 @@ class EventStoreJobsMixin:
                 "select * from detection_jobs where camera_id = ? and "
                 "((state = 'queued' and available_at <= ?) or "
                 "(state = 'running' and (lease_expires_at <= ? or lease_owner = ?))) "
-                "order by created_at, id limit 1",
+                # Refinement is time-sensitive evidence, not a FIFO batch.
+                # After restart, processing an old backlog before a current
+                # incident makes the current event unrecoverably stale.
+                "order by created_at desc, id desc limit 1",
                 (camera_id, now, now, lease_owner),
             ).fetchone()
             if row is None:

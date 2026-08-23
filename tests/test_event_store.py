@@ -51,6 +51,33 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(status["completed"], 1)
             self.assertEqual(status["oldest_age_ms"], 0.0)
 
+    def test_detection_jobs_prioritize_newest_incident_over_restart_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            for job_id in ("older", "newer"):
+                self.assertEqual(
+                    store.enqueue_detection_job(
+                        job_id=job_id,
+                        camera_id="gate",
+                        dedupe_key=f"episode:{job_id}",
+                        payload={"event_at": "2026-08-22T20:00:00+00:00"},
+                    ),
+                    "queued",
+                )
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set created_at = ? where id = 'older'",
+                    ("2026-08-22T19:00:00+00:00",),
+                )
+                connection.execute(
+                    "update detection_jobs set created_at = ? where id = 'newer'",
+                    ("2026-08-22T20:00:00+00:00",),
+                )
+
+            claimed = store.claim_detection_job("gate")
+
+            self.assertEqual(claimed["id"], "newer")
+
     def test_security_work_ledger_is_separate_from_general_event_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
