@@ -48,10 +48,9 @@ TRACKING_CATCHUP_RETRY_SECONDS = 0.25
 # Small open-segment handoff gaps are expected; escalate only when large
 # or repeated, or when catch-up itself fails (exception path below).
 COVERAGE_GAP_WARNING_SECONDS = 10.0
-# A live-history bridge is intentionally short.  When an incident has waited
-# longer than this without finalized recording coverage, attempting to replay
-# it pins a tracker on stale media and prevents newer handoffs from starting.
-TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS = 20.0
+# Keep aligned with tracking_frames.TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS.
+# Anything older cannot be reconstructed from retained live history.
+TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS = 12.0
 
 
 def _adaptive_tracking_fps(
@@ -349,10 +348,16 @@ class ObjectTrackingSession:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            pending_event_id = (
+                int(self._pending_start[0]) if self._pending_start is not None else None
+            )
             return {
                 **self._status,
                 "accepting": self._accepting,
                 "worker_running": bool(self._thread is not None and self._thread.is_alive()),
+                # Distinct from active event_id: handoff returned True but the
+                # successor has not started until the prior worker finishes.
+                "pending_event_id": pending_event_id,
             }
 
     def _consider_cover_candidate(

@@ -467,17 +467,27 @@ class _InferenceWorker:
             if not isinstance(item, dict):
                 continue
             box = item.get("box")
-            if not isinstance(box, dict):
-                continue
-            for key, factor in (
-                ("x1", scale_x),
-                ("x2", scale_x),
-                ("y1", scale_y),
-                ("y2", scale_y),
-            ):
+            if isinstance(box, dict):
+                for key, factor in (
+                    ("x1", scale_x),
+                    ("x2", scale_x),
+                    ("y1", scale_y),
+                    ("y2", scale_y),
+                ):
+                    try:
+                        box[key] = float(box[key]) * factor
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            elif isinstance(box, (list, tuple)) and len(box) >= 4:
                 try:
-                    box[key] = float(box[key]) * factor
-                except (KeyError, TypeError, ValueError):
+                    item["box"] = [
+                        float(box[0]) * scale_x,
+                        float(box[1]) * scale_y,
+                        float(box[2]) * scale_x,
+                        float(box[3]) * scale_y,
+                        *[value for value in box[4:]],
+                    ]
+                except (TypeError, ValueError):
                     continue
         return result
 

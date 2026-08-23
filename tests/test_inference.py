@@ -1017,6 +1017,12 @@ class InferenceSupervisorTest(unittest.TestCase):
             {"x1": 300.0, "y1": 150.0, "x2": 1500.0, "y2": 900.0},
         )
 
+        list_result = worker._restore_object_boxes(
+            [{"box": [100, 50, 500, 300]}],
+            scale,
+        )
+        self.assertEqual(list_result[0]["box"], [300.0, 150.0, 1500.0, 900.0])
+
     def test_object_worker_keeps_frame_when_model_shape_is_unknown(self) -> None:
         worker = _InferenceWorker(
             DetectorConfig(enabled=False),

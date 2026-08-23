@@ -1134,12 +1134,14 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         ))
         # First worker exits capacity wait without acquiring; queued successor
         # must start once the shared slot is released.
+        self.assertEqual(session.status().get("pending_event_id"), 43)
         limiter.release()
         self.assertTrue(second_active.wait(2.0))
         session.stop()
 
         self.assertTrue(any(event_id == 43 for event_id, _ in updates))
         self.assertEqual(session._pending_start, None)
+        self.assertIsNone(session.status().get("pending_event_id"))
 
     def test_capacity_wait_admits_session_and_preserves_tracking_window(self) -> None:
         active = threading.Event()
@@ -1755,7 +1757,9 @@ class ObjectTrackingSessionTest(unittest.TestCase):
     def test_large_unresolved_catchup_gap_logs_warning(self) -> None:
         frame_processed = threading.Event()
         updates: list[dict] = []
-        event_at = datetime.fromtimestamp(time.time() - 12.0, timezone.utc)
+        # Stay inside the recoverable open-segment window so live bridging still
+        # runs, but large enough to escalate the coverage-gap log to WARNING.
+        event_at = datetime.fromtimestamp(time.time() - 11.0, timezone.utc)
 
         class Detector:
             config = SimpleNamespace(
