@@ -70,6 +70,58 @@ def _is_safe_app_href(value: str) -> bool:
     ))
 
 
+def _is_safe_confirm_post_path(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text.startswith("/api/") or text.startswith("//") or ".." in text or "\\" in text:
+        return False
+    if text == "/api/motion-ai-reviews":
+        return True
+    if re.fullmatch(r"/api/motion-ai-reviews/\d+/apply", text):
+        return True
+    if re.fullmatch(r"/api/camera-intelligence/evaluations/\d+/follow-up", text):
+        return True
+    return False
+
+
+def _sanitize_assistant_action(value: Any, *, _depth: int = 0) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    label = str(value.get("label") or "").strip()[:120]
+    kind = str(value.get("kind") or "href").strip() or "href"
+    if kind == "confirm_post":
+        path = str(value.get("path") or "").strip()
+        if not label or not _is_safe_confirm_post_path(path):
+            return None
+        body = value.get("body") if isinstance(value.get("body"), Mapping) else {}
+        safe_body: dict[str, Any] = {}
+        for raw_key, item in list(body.items())[:16]:
+            key = str(raw_key)[:64]
+            lowered = key.lower()
+            if any(part in lowered for part in _SENSITIVE_KEY_PARTS) or _is_path_key(lowered):
+                continue
+            if isinstance(item, (bool, int)):
+                safe_body[key] = item
+            elif isinstance(item, float):
+                if math.isfinite(item):
+                    safe_body[key] = item
+            elif isinstance(item, str):
+                text = item.strip()[:256]
+                if text.startswith(("/", "file://", "rtsp://", "rtsps://", "http://", "https://")):
+                    continue
+                safe_body[key] = text
+        return {
+            "kind": "confirm_post",
+            "label": label,
+            "path": path[:512],
+            "body": safe_body,
+            "confirm": str(value.get("confirm") or "")[:500],
+        }
+    href = str(value.get("href") or "").strip()
+    if not label or not _is_safe_app_href(href):
+        return None
+    return {"label": label, "href": href[:512]}
+
+
 def sanitize_assistant_data(value: Any, *, _depth: int = 0) -> Any:
     """Return bounded, JSON-safe evidence without secrets, URLs, or filesystem paths."""
     if _depth >= MAX_ASSISTANT_VALUE_DEPTH:
@@ -92,6 +144,14 @@ def sanitize_assistant_data(value: Any, *, _depth: int = 0) -> Any:
             key = str(raw_key)[:128]
             lowered_key = key.lower()
             if any(part in lowered_key for part in _SENSITIVE_KEY_PARTS):
+                continue
+            if lowered_key == "next_actions" and isinstance(item, (list, tuple)):
+                actions = []
+                for action in list(item)[:MAX_ASSISTANT_LIST_ITEMS]:
+                    sanitized = _sanitize_assistant_action(action, _depth=_depth + 1)
+                    if sanitized is not None:
+                        actions.append(sanitized)
+                result[key] = actions
                 continue
             if _is_path_key(lowered_key):
                 continue

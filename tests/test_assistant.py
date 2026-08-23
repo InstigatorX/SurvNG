@@ -124,11 +124,31 @@ class AssistantModelsTest(unittest.TestCase):
         self.assertEqual(sanitized["temporal_center_path_ratio"], 0.42)
         self.assertIsNone(sanitized["score"])
         preserved = sanitize_assistant_data({
-            "next_actions": [{"label": "Open Telemetry", "href": "/admin?section=telemetry"}],
+            "next_actions": [
+                {"label": "Open Telemetry", "href": "/admin?section=telemetry"},
+                {
+                    "kind": "confirm_post",
+                    "label": "Start multi-sample review for Gate",
+                    "path": "/api/motion-ai-reviews",
+                    "body": {"camera_id": "gate", "hours": 24, "image_limit": 12, "api_key": "nope"},
+                    "confirm": "Start a review?",
+                },
+                {
+                    "kind": "confirm_post",
+                    "label": "Bad path",
+                    "path": "/api/config",
+                    "body": {"camera_id": "gate"},
+                },
+            ],
             "camera_advisor_href": "/admin?section=general&subsection=motion-review&camera=gate",
             "absolute_path_value": "/mnt/secret.mp4",
         })
         self.assertEqual(preserved["next_actions"][0]["href"], "/admin?section=telemetry")
+        self.assertEqual(preserved["next_actions"][1]["kind"], "confirm_post")
+        self.assertEqual(preserved["next_actions"][1]["path"], "/api/motion-ai-reviews")
+        self.assertEqual(preserved["next_actions"][1]["body"]["camera_id"], "gate")
+        self.assertNotIn("api_key", preserved["next_actions"][1]["body"])
+        self.assertEqual(len(preserved["next_actions"]), 2)
         self.assertEqual(preserved["camera_advisor_href"], "/admin?section=general&subsection=motion-review&camera=gate")
         self.assertEqual(preserved["absolute_path_value"], "[filesystem path omitted]")
 
@@ -499,7 +519,16 @@ class AssistantApiTest(unittest.TestCase):
                 "camera_id": "gate",
                 "camera_name": "Gate",
                 "proposals": [{"setting": "sensitivity"}],
-                "next_actions": [{"label": "Open Camera Advisor for Gate", "href": "/admin?section=general&subsection=motion-review&camera=gate"}],
+                "next_actions": [
+                    {
+                        "kind": "confirm_post",
+                        "label": "Start multi-sample review for Gate",
+                        "path": "/api/motion-ai-reviews",
+                        "body": {"camera_id": "gate", "hours": 24, "record_limit": 100, "image_limit": 12},
+                        "confirm": "Start a review?",
+                    },
+                    {"label": "Open Camera Advisor for Gate", "href": "/admin?section=general&subsection=motion-review&camera=gate"},
+                ],
             },
         )
 
@@ -511,10 +540,11 @@ class AssistantApiTest(unittest.TestCase):
             service._assistant_closed_loop_suggestions([visual], ["Ignore me"]),
             ["Is Gate healthy?", "Summarize recent activity for Gate", "Trace this incident across cameras", "Ignore me"],
         )
-        self.assertEqual(
-            service._assistant_closed_loop_actions([system, visual])[0]["href"],
-            "/admin?section=telemetry",
-        )
+        closed_actions = service._assistant_closed_loop_actions([system, visual])
+        self.assertEqual(closed_actions[0]["href"], "/admin?section=telemetry")
+        confirm_post = next(action for action in closed_actions if action.get("kind") == "confirm_post")
+        self.assertEqual(confirm_post["path"], "/api/motion-ai-reviews")
+        self.assertEqual(confirm_post["body"]["camera_id"], "gate")
         self.assertEqual(
             service._assistant_camera_advisor_href("gate"),
             "/admin?section=general&subsection=motion-review&camera=gate",
@@ -548,6 +578,7 @@ class AssistantApiTest(unittest.TestCase):
             audit_ai=AuditAiConfig(
                 enabled=True,
                 allow_apply_recommendations=True,
+                api_key="test-key",
             ),
             cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")],
         )
@@ -605,7 +636,10 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(len(details["configuration_fingerprint"]), 64)
         self.assertTrue(details["recommendation_proof"].startswith("v1."))
         self.assertNotIn("recommendation_proof", evidence.prompt_payload()["data"])
-        self.assertEqual(details["next_actions"][0]["href"], "/admin?section=general&subsection=motion-review&camera=gate")
+        self.assertEqual(details["next_actions"][0]["kind"], "confirm_post")
+        self.assertEqual(details["next_actions"][0]["path"], "/api/motion-ai-reviews")
+        self.assertEqual(details["next_actions"][0]["body"]["camera_id"], "gate")
+        self.assertEqual(details["next_actions"][1]["href"], "/admin?section=general&subsection=motion-review&camera=gate")
         self.assertEqual(
             evidence.client_payload()["image_url"],
             "/api/events/42/thumbnail.jpg?width=960&quality=82",
@@ -764,8 +798,11 @@ class AssistantApiTest(unittest.TestCase):
         self.assertTrue(response["ok"])
         apply_update.assert_called_once()
         self.assertIn("Camera Advisor", response["follow_up"]["message"])
+        self.assertEqual(response["follow_up"]["actions"][0]["kind"], "confirm_post")
+        self.assertEqual(response["follow_up"]["actions"][0]["path"], "/api/motion-ai-reviews")
+        self.assertEqual(response["follow_up"]["actions"][0]["body"]["camera_id"], "gate")
         self.assertEqual(
-            response["follow_up"]["actions"][0]["href"],
+            response["follow_up"]["actions"][1]["href"],
             "/admin?section=general&subsection=motion-review&camera=gate",
         )
         self.assertIn("Is Gate healthy?", response["follow_up"]["suggestions"])

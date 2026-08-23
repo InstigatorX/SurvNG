@@ -12665,7 +12665,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   gap: 6px;
 }
 
-.assistant-next-actions a {
+.assistant-next-actions a,
+.assistant-next-actions button {
   display: inline-flex;
   align-items: center;
   min-height: 36px;
@@ -12677,6 +12678,12 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   font-weight: 700;
   padding: 0 9px;
   text-decoration: none;
+  cursor: pointer;
+}
+
+.assistant-next-actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .assistant-evidence-card .assistant-next-actions {

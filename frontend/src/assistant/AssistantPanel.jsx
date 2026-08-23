@@ -20,6 +20,15 @@ import {
   stripAssistantCitationMarkers,
 } from "../assistantMessage.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "../assistantNavigation.mjs";
+import {
+  assistantActionKey,
+  assistantConfirmPostKind,
+  buildApplyCameraReviewAction,
+  buildEvaluationFollowupAction,
+  isAssistantConfirmPostAllowed,
+  summarizeEffectivenessEvaluation,
+  summarizeMotionAiReview,
+} from "./assistantTuneLoop.mjs";
 import { assistantActiveExportIds, fetchAssistantExportJobs, mergeAssistantExportJobs } from "../exportPolling.mjs";
 import { appUrl, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
@@ -70,6 +79,12 @@ function AssistantMessageText({ content }) {
   return <div className="assistant-message-text">{stripAssistantCitationMarkers(content)}</div>;
 }
 
+function apiErrorDetail(payload, fallback) {
+  const detail = payload?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  return fallback;
+}
+
 export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAskRequestHandled = null }) {
   const [openValue, setOpenValue] = useStoredState("survng.assistantOpen.v1", "false");
   const open = openValue === "true";
@@ -79,20 +94,27 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
   const [busy, setBusy] = useState(false);
   const [thinkingStage, setThinkingStage] = useState(0);
   const [applyingEvidenceId, setApplyingEvidenceId] = useState("");
+  const [postingActionKey, setPostingActionKey] = useState("");
   const [error, setError] = useState(null);
   const [applyReview, setApplyReview] = useState(null);
+  const [confirmPost, setConfirmPost] = useState(null);
   const [showCoach, setShowCoach] = useState(() => !assistantCoachSeen(browserStorage(window)));
   const bodyRef = useRef(null);
   const drawerRef = useRef(null);
   const applyDialogRef = useRef(null);
+  const confirmDialogRef = useRef(null);
   const applyReturnFocusRef = useRef(null);
   const applyEvidenceRef = useRef(null);
+  const confirmReturnFocusRef = useRef(null);
   const launcherRef = useRef(null);
   const composerRef = useRef(null);
   const followTranscriptRef = useRef(true);
   const returnFocusRef = useRef(null);
   const abortRef = useRef(null);
   const handledAskRef = useRef(null);
+  const reviewPollRef = useRef({});
+  const evaluationPollRef = useRef({});
+  const modalOpen = Boolean(applyReview || confirmPost);
   const compactAssistant = useViewportQuery("(max-width: 1279px)");
   const currentContext = useMemo(() => snapshotAssistantContext(pageContext, timeZone), [pageContext, timeZone]);
   const currentContextLabel = assistantContextLabel(currentContext, (epoch) => formatDateTime(epoch, timeZone));
@@ -149,11 +171,12 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
     if (!open) return undefined;
     function handleAssistantKeyboard(event) {
       if (event.key === "Escape") {
-        if (applyReview) closeApplyReview(false);
+        if (confirmPost) closeConfirmPost(false);
+        else if (applyReview) closeApplyReview(false);
         else setOpenValue("false");
         return;
       }
-      if (!compactAssistant || event.key !== "Tab" || applyReview) return;
+      if (!compactAssistant || event.key !== "Tab" || modalOpen) return;
       const controls = [...(drawerRef.current?.querySelectorAll('button:not([disabled]), a[href], textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
       if (!controls.length) return;
       const first = controls[0];
@@ -163,23 +186,23 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
     }
     window.addEventListener("keydown", handleAssistantKeyboard);
     return () => window.removeEventListener("keydown", handleAssistantKeyboard);
-  }, [applyReview, compactAssistant, open, setOpenValue]);
+  }, [applyReview, compactAssistant, confirmPost, modalOpen, open, setOpenValue]);
 
   useEffect(() => {
-    if (!applyReview) return undefined;
-    const dialog = applyDialogRef.current;
+    if (!applyReview && !confirmPost) return undefined;
+    const dialog = (confirmPost ? confirmDialogRef.current : applyDialogRef.current);
     const controls = [...(dialog?.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])') || [])];
     controls[0]?.focus();
-    function trapApplyFocus(event) {
+    function trapModalFocus(event) {
       if (event.key !== "Tab" || !controls.length) return;
       const first = controls[0];
       const last = controls.at(-1);
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }
-    dialog?.addEventListener("keydown", trapApplyFocus);
-    return () => dialog?.removeEventListener("keydown", trapApplyFocus);
-  }, [applyReview]);
+    dialog?.addEventListener("keydown", trapModalFocus);
+    return () => dialog?.removeEventListener("keydown", trapModalFocus);
+  }, [applyReview, confirmPost]);
 
   useEffect(() => {
     if (!busy) {
@@ -209,7 +232,13 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
     void sendMessage(prompt);
   }, [askRequest, open, busy]);
 
-  useEffect(() => () => { abortRef.current?.abort(); }, []);
+  useEffect(() => () => {
+    abortRef.current?.abort();
+    Object.values(reviewPollRef.current).forEach((timer) => window.clearInterval(timer));
+    Object.values(evaluationPollRef.current).forEach((timer) => window.clearInterval(timer));
+    reviewPollRef.current = {};
+    evaluationPollRef.current = {};
+  }, []);
 
   function dismissCoach() {
     markAssistantCoachSeen(browserStorage(window));
@@ -223,8 +252,44 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
   function clearConversation() {
     if (messages.length && !window.confirm("Start a new assistant conversation? The current conversation will be cleared.")) return;
     abortRef.current?.abort();
+    Object.values(reviewPollRef.current).forEach((timer) => window.clearInterval(timer));
+    Object.values(evaluationPollRef.current).forEach((timer) => window.clearInterval(timer));
+    reviewPollRef.current = {};
+    evaluationPollRef.current = {};
     setMessages([]);
     setError(null);
+  }
+
+  function appendAssistantMessage(partial) {
+    setMessages((current) => [...current, {
+      id: `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      role: "assistant",
+      content: "",
+      evidence: [],
+      suggestions: [],
+      actions: [],
+      reasoningTier: "fast",
+      model: "",
+      ...partial,
+    }].slice(-30));
+  }
+
+  function markActionsSpent(messageId, action) {
+    const key = assistantActionKey(action);
+    setMessages((current) => current.map((message) => {
+      if (message.id !== messageId) return message;
+      return {
+        ...message,
+        actions: (message.actions || []).map((item) => assistantActionKey(item) === key ? { ...item, spent: true } : item),
+        evidence: (message.evidence || []).map((item) => ({
+          ...item,
+          details: item.details?.next_actions ? {
+            ...item.details,
+            next_actions: item.details.next_actions.map((next) => assistantActionKey(next) === key ? { ...next, spent: true } : next),
+          } : item.details,
+        })),
+      };
+    }));
   }
 
   function openApplyReview(messageId, evidence, trigger) {
@@ -241,6 +306,233 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
       else composerRef.current?.focus();
     });
   }
+
+  function openConfirmPost(action, messageId, trigger) {
+    if (!isAssistantConfirmPostAllowed(action) || action.spent || postingActionKey) return;
+    confirmReturnFocusRef.current = trigger || null;
+    setConfirmPost({ action, messageId });
+  }
+
+  function closeConfirmPost(confirmed = false) {
+    const target = confirmed ? null : confirmReturnFocusRef.current;
+    setConfirmPost(null);
+    window.requestAnimationFrame(() => {
+      if (target instanceof HTMLElement && target.isConnected) target.focus();
+      else composerRef.current?.focus();
+    });
+  }
+
+  function stopReviewPoll(reviewId) {
+    const key = String(reviewId);
+    if (reviewPollRef.current[key]) {
+      window.clearInterval(reviewPollRef.current[key]);
+      delete reviewPollRef.current[key];
+    }
+  }
+
+  function stopEvaluationPoll(evaluationId) {
+    const key = String(evaluationId);
+    if (evaluationPollRef.current[key]) {
+      window.clearInterval(evaluationPollRef.current[key]);
+      delete evaluationPollRef.current[key];
+    }
+  }
+
+  async function pollMotionAiReview(reviewId) {
+    const response = await fetch(`/api/motion-ai-reviews/${reviewId}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorDetail(payload, "Unable to load the camera review"));
+    return payload;
+  }
+
+  function startReviewPolling(reviewId) {
+    const key = String(reviewId);
+    if (reviewPollRef.current[key]) return;
+    const tick = async () => {
+      try {
+        const review = await pollMotionAiReview(reviewId);
+        if (["queued", "running"].includes(String(review.status || ""))) return;
+        stopReviewPoll(reviewId);
+        setMessages((current) => current.map((message) => (
+          message.tuneLoop?.reviewId === Number(reviewId) && message.tuneLoop?.phase === "reviewing"
+            ? { ...message, tuneLoop: { ...message.tuneLoop, phase: review.status === "completed" ? "awaiting_apply" : "failed" } }
+            : message
+        )));
+        const applyAction = buildApplyCameraReviewAction(review);
+        const advisorHref = review.camera_id
+          ? `/admin?section=general&subsection=motion-review&camera=${encodeURIComponent(review.camera_id)}`
+          : "/admin?section=general&subsection=motion-review";
+        appendAssistantMessage({
+          content: summarizeMotionAiReview(review),
+          actions: [
+            ...(applyAction ? [applyAction] : []),
+            { label: "Open Camera Advisor", href: advisorHref },
+          ],
+          tuneLoop: { reviewId: Number(review.id || reviewId), cameraId: review.camera_id || "", phase: review.status === "completed" ? "awaiting_apply" : "failed" },
+        });
+      } catch (pollError) {
+        stopReviewPoll(reviewId);
+        setError({ message: pollError.message || "Unable to track the camera review", kind: "tune" });
+      }
+    };
+    void tick();
+    reviewPollRef.current[key] = window.setInterval(() => { void tick(); }, 4_000);
+  }
+
+  function startEvaluationPolling(evaluationId, cameraId) {
+    const key = String(evaluationId);
+    if (evaluationPollRef.current[key]) return;
+    const tick = async () => {
+      try {
+        const response = await fetch(`/api/camera-intelligence/evaluations/latest?camera_id=${encodeURIComponent(cameraId)}`);
+        const evaluation = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(apiErrorDetail(evaluation, "Unable to load the effectiveness check"));
+        if (Number(evaluation.id || 0) !== Number(evaluationId)) return;
+        if (evaluation.status === "collecting") return;
+        if (evaluation.status === "ready") {
+          stopEvaluationPoll(evaluationId);
+          setMessages((current) => current.map((message) => (
+            message.tuneLoop?.evaluationId === Number(evaluationId) && message.tuneLoop?.phase === "collecting"
+              ? { ...message, tuneLoop: { ...message.tuneLoop, phase: "ready" } }
+              : message
+          )));
+          const followup = buildEvaluationFollowupAction(evaluation);
+          appendAssistantMessage({
+            content: `Enough time has passed to check whether the change helped on ${cameraId || "this camera"}.`,
+            actions: followup ? [followup] : [],
+            tuneLoop: { evaluationId: Number(evaluationId), cameraId, phase: "ready" },
+          });
+          return;
+        }
+        if (evaluation.status === "completed") {
+          stopEvaluationPoll(evaluationId);
+          setMessages((current) => current.map((message) => (
+            message.tuneLoop?.evaluationId === Number(evaluationId) && ["collecting", "followup_running", "ready"].includes(message.tuneLoop?.phase)
+              ? { ...message, tuneLoop: { ...message.tuneLoop, phase: "done" } }
+              : message
+          )));
+          appendAssistantMessage({
+            content: summarizeEffectivenessEvaluation(evaluation),
+            tuneLoop: { evaluationId: Number(evaluationId), cameraId, phase: "done" },
+          });
+          return;
+        }
+        if (evaluation.status === "reviewing") {
+          setMessages((current) => current.map((message) => (
+            message.tuneLoop?.evaluationId === Number(evaluationId) && message.tuneLoop?.phase !== "followup_running"
+              ? { ...message, tuneLoop: { ...message.tuneLoop, phase: "followup_running" } }
+              : message
+          )));
+        }
+      } catch (pollError) {
+        stopEvaluationPoll(evaluationId);
+        setError({ message: pollError.message || "Unable to track the effectiveness check", kind: "tune" });
+      }
+    };
+    void tick();
+    evaluationPollRef.current[key] = window.setInterval(() => { void tick(); }, 8_000);
+  }
+
+  async function executeConfirmPost(action, messageId) {
+    if (!isAssistantConfirmPostAllowed(action) || postingActionKey) return;
+    const key = assistantActionKey(action);
+    const kind = assistantConfirmPostKind(action.path);
+    setPostingActionKey(key);
+    setError(null);
+    markActionsSpent(messageId, action);
+    try {
+      const response = await fetch(action.path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action.body || {}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(apiErrorDetail(payload, "Unable to run that Camera Advisor step"));
+      if (kind === "start_review") {
+        const reviewId = Number(payload.id || 0);
+        const cameraId = String(payload.camera_id || action.body?.camera_id || "");
+        appendAssistantMessage({
+          content: `Started a multi-sample Camera Advisor review${cameraId ? ` for ${cameraId}` : ""}. I’ll update this chat when it finishes.`,
+          tuneLoop: { reviewId, cameraId, phase: "reviewing" },
+        });
+        if (reviewId) startReviewPolling(reviewId);
+        return;
+      }
+      if (kind === "apply_review") {
+        const followUp = payload.follow_up;
+        const evaluation = payload.effectiveness_evaluation || {};
+        const evaluationId = Number(evaluation.id || 0);
+        const cameraId = String(payload.camera_id || evaluation.camera_id || "");
+        appendAssistantMessage({
+          content: followUp?.message || `Applied Camera Advisor recommendations${cameraId ? ` on ${cameraId}` : ""}.`,
+          suggestions: followUp?.suggestions || [],
+          actions: followUp?.actions || [],
+          tuneLoop: evaluationId ? { evaluationId, cameraId, phase: "collecting" } : undefined,
+        });
+        if (evaluationId && cameraId) startEvaluationPolling(evaluationId, cameraId);
+        return;
+      }
+      if (kind === "evaluation_followup") {
+        const evaluationId = Number(payload.id || action.path.match(/evaluations\/(\d+)/)?.[1] || 0);
+        const cameraId = String(payload.camera_id || "");
+        appendAssistantMessage({
+          content: `Started the effectiveness follow-up${cameraId ? ` for ${cameraId}` : ""}. I’ll share the comparison when it finishes.`,
+          tuneLoop: { evaluationId, cameraId, phase: "followup_running" },
+        });
+        if (evaluationId && cameraId) startEvaluationPolling(evaluationId, cameraId);
+      }
+    } catch (postError) {
+      setError({ message: postError.message || "Unable to run that Camera Advisor step", kind: "tune" });
+    } finally {
+      setPostingActionKey("");
+    }
+  }
+
+  function renderAssistantActions(actions, messageId) {
+    if (!actions?.length) return null;
+    return (
+      <div className="assistant-next-actions">
+        {actions.map((action) => {
+          const key = assistantActionKey(action);
+          if (String(action.kind || "href") === "confirm_post") {
+            if (!isAssistantConfirmPostAllowed(action)) return null;
+            return (
+              <button
+                type="button"
+                key={key}
+                disabled={Boolean(action.spent) || Boolean(postingActionKey) || busy}
+                onClick={(event) => openConfirmPost(action, messageId, event.currentTarget)}
+              >
+                {postingActionKey === key ? "Working…" : action.label}
+              </button>
+            );
+          }
+          if (!action.href) return null;
+          return <a key={key} href={appUrl(action.href)}>{action.label}</a>;
+        })}
+      </div>
+    );
+  }
+
+  useEffect(() => {
+    if (!open) {
+      Object.values(reviewPollRef.current).forEach((timer) => window.clearInterval(timer));
+      Object.values(evaluationPollRef.current).forEach((timer) => window.clearInterval(timer));
+      reviewPollRef.current = {};
+      evaluationPollRef.current = {};
+      return undefined;
+    }
+    for (const message of messages) {
+      const loop = message.tuneLoop || {};
+      if (loop.phase === "reviewing" && Number(loop.reviewId) > 0 && !reviewPollRef.current[String(loop.reviewId)]) {
+        startReviewPolling(Number(loop.reviewId));
+      }
+      if (["collecting", "followup_running"].includes(loop.phase) && Number(loop.evaluationId) > 0 && loop.cameraId && !evaluationPollRef.current[String(loop.evaluationId)]) {
+        startEvaluationPolling(Number(loop.evaluationId), loop.cameraId);
+      }
+    }
+    return undefined;
+  }, [open, messages]);
 
   async function sendMessage(messageText = draft, contextOverride = null, { appendUser = true } = {}) {
     const content = String(messageText || "").trim();
@@ -359,7 +651,7 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
         </div> : null}
       </div>
       {open && compactAssistant ? <div className="assistant-backdrop" aria-hidden="true" onClick={() => setOpenValue("false")} /> : null}
-      {open ? <aside id="survng-assistant" ref={drawerRef} className="assistant-drawer" role={applyReview ? undefined : compactAssistant ? "dialog" : "complementary"} aria-modal={!applyReview && compactAssistant || undefined} aria-hidden={applyReview || undefined} inert={applyReview || undefined} aria-labelledby="assistant-heading">
+      {open ? <aside id="survng-assistant" ref={drawerRef} className="assistant-drawer" role={modalOpen ? undefined : compactAssistant ? "dialog" : "complementary"} aria-modal={!modalOpen && compactAssistant || undefined} aria-hidden={modalOpen || undefined} inert={modalOpen || undefined} aria-labelledby="assistant-heading">
         <header className="assistant-head">
           <div><strong id="assistant-heading"><Sparkles size={17} /> SurvNG Assistant</strong><small>{status?.configured === false ? "AI provider needs setup" : "Answers from your cameras & incidents"}</small></div>
           <div>
@@ -420,14 +712,10 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
                   {item.details.can_apply && !item.details.applied?.length ? <button type="button" className="assistant-apply" disabled={Boolean(applyingEvidenceId)} onClick={(event) => openApplyReview(message.id, item, event.currentTarget)}>{applyingEvidenceId === item.id ? "Applying…" : "Apply proposed changes"}</button> : null}
                   {item.details.proposals?.length && !item.details.can_apply && !item.details.applied?.length ? <small>Enable “Allow confirmed changes” in Admin to apply these proposals.</small> : null}
                 </div> : null}
-                {item.details?.next_actions?.length ? <div className="assistant-next-actions">
-                  {item.details.next_actions.map((action) => <a key={`${action.href}-${action.label}`} href={appUrl(action.href)}>{action.label}</a>)}
-                </div> : null}
+                {item.details?.next_actions?.length ? renderAssistantActions(item.details.next_actions, message.id) : null}
               </div>)}
             </div> : null}
-            {message.actions?.length ? <div className="assistant-next-actions">
-              {message.actions.map((action) => <a key={`${action.href}-${action.label}`} href={appUrl(action.href)}>{action.label}</a>)}
-            </div> : null}
+            {message.actions?.length ? renderAssistantActions(message.actions, message.id) : null}
             {message.suggestions?.length ? <div className="assistant-suggestions">
               {message.suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
             </div> : null}
@@ -450,6 +738,21 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
           <p>{applyReview.evidence.details?.camera_id || "This camera"} will restart after these settings are applied.</p>
           <ul>{(applyReview.evidence.details?.proposals || []).map((change) => <li key={change.setting}><strong>{assistantSettingLabels[change.setting] || change.setting}</strong><span>{String(change.current)} → {String(change.proposed)}</span></li>)}</ul>
           <footer><button type="button" onClick={() => closeApplyReview(false)}>Cancel</button><button type="button" onClick={() => { const review = applyReview; closeApplyReview(true); void applyVisualProposals(review.messageId, review.evidence); }}>Confirm and apply</button></footer>
+        </div>
+      </div> : null}
+      {confirmPost ? <div ref={confirmDialogRef} className="assistant-apply-dialog" role="dialog" aria-modal="true" aria-labelledby="assistant-confirm-post-title">
+        <div>
+          <h2 id="assistant-confirm-post-title">{assistantConfirmPostKind(confirmPost.action.path) === "apply_review" ? "Apply Camera Advisor recommendations?" : "Confirm Camera Advisor step?"}</h2>
+          <p>{confirmPost.action.confirm || confirmPost.action.label}</p>
+          {confirmPost.action.proposals?.length ? <ul>{confirmPost.action.proposals.map((change) => <li key={change.setting}><strong>{assistantSettingLabels[change.setting] || change.setting}</strong><span>{String(change.current)} → {String(change.proposed)}</span></li>)}</ul> : null}
+          <footer>
+            <button type="button" onClick={() => closeConfirmPost(false)}>Cancel</button>
+            <button type="button" onClick={() => {
+              const pending = confirmPost;
+              closeConfirmPost(true);
+              void executeConfirmPost(pending.action, pending.messageId);
+            }}>Confirm</button>
+          </footer>
         </div>
       </div> : null}
     </>
