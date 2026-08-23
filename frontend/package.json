@@ -25,6 +25,7 @@
     "test:admin-workspace": "node tests/admin-workspace.mjs",
     "test:assistant-export": "node tests/assistant-export.mjs",
     "test:assistant-apply-modal": "node tests/assistant-apply-modal.mjs",
+    "test:assistant-tune-loop": "node tests/assistant-tune-loop.mjs",
     "test:export-center": "node tests/export-center.mjs",
     "test:recordings-soak": "node tests/recordings-soak.mjs",
     "test:recording-playback": "node tests/recording-playback.mjs",

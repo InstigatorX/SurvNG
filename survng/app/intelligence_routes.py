@@ -653,7 +653,18 @@ class IntelligenceService:
             active_events = self.deps.get_manager().events
             _effective_config, apply_result = self.deps.apply_config_update(next_config)
             evaluation = active_events.create_camera_intelligence_evaluation(camera_id=camera.id, baseline_review_id=review_id, evaluation_hours=request.evaluation_hours, applied_changes=previews, baseline_result=result)
-        return {'ok': True, 'review_id': review_id, 'camera_id': camera.id, 'applied': previews, 'workers_restarted': bool(apply_result['camera_workers_restarted']), 'apply_mode': apply_result['apply_mode'], 'effectiveness_evaluation': evaluation}
+        advisor_href = self._assistant_camera_advisor_href(camera.id)
+        applied_count = len(previews)
+        hours_label = int(request.evaluation_hours) if float(request.evaluation_hours).is_integer() else request.evaluation_hours
+        follow_up = {
+            'message': (
+                f'Applied {applied_count} Camera Advisor recommendation{"s" if applied_count != 1 else ""} on {camera.name}. '
+                f'That camera was restarted. SurvNG is collecting about {hours_label} hours of evidence—then you can check from this chat whether the change helped.'
+            ),
+            'suggestions': [f'Is {camera.name} healthy?', f'Summarize recent activity for {camera.name}'],
+            'actions': [{'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href}],
+        }
+        return {'ok': True, 'review_id': review_id, 'camera_id': camera.id, 'applied': previews, 'workers_restarted': bool(apply_result['camera_workers_restarted']), 'apply_mode': apply_result['apply_mode'], 'effectiveness_evaluation': evaluation, 'follow_up': follow_up}
 
     def latest_camera_intelligence_evaluation(self, camera_id: str) -> dict:
         with self.deps.manager_lock:
@@ -1150,6 +1161,62 @@ class IntelligenceService:
             href = f'{href}&camera={quote(cleaned, safe="")}'
         return href
 
+    def _assistant_start_camera_review_action(self, camera_id: str, camera_name: str = '', *, hours: float = 24.0, image_limit: int = 12) -> dict[str, Any]:
+        cleaned_id = str(camera_id or '').strip()
+        name = str(camera_name or cleaned_id or 'this camera').strip() or 'this camera'
+        limit = max(4, min(int(image_limit), 24))
+        window = max(1.0, min(float(hours), 168.0))
+        return {
+            'kind': 'confirm_post',
+            'label': f'Start multi-sample review for {name}'[:120],
+            'path': '/api/motion-ai-reviews',
+            'body': {
+                'camera_id': cleaned_id,
+                'hours': window,
+                'record_limit': 100,
+                'image_limit': limit,
+            },
+            'confirm': (
+                f'Start a Camera Advisor multi-sample review for {name}? '
+                f'This inspects up to {limit} recent images and may take a few minutes. '
+                'Nothing is applied automatically.'
+            )[:500],
+        }
+
+    def _assistant_sanitize_closed_loop_action(self, action: dict[str, Any]) -> dict[str, Any] | None:
+        label = str(action.get('label') or '').strip()
+        kind = str(action.get('kind') or 'href').strip() or 'href'
+        if kind == 'confirm_post':
+            path = str(action.get('path') or '').strip()
+            body = action.get('body') if isinstance(action.get('body'), dict) else {}
+            if not label or path != '/api/motion-ai-reviews':
+                return None
+            camera_id = str(body.get('camera_id') or '').strip()
+            if not camera_id:
+                return None
+            try:
+                hours = max(1.0, min(float(body.get('hours') or 24.0), 168.0))
+                image_limit = max(4, min(int(body.get('image_limit') or 12), 24))
+                record_limit = max(20, min(int(body.get('record_limit') or 100), 100))
+            except (TypeError, ValueError):
+                return None
+            return {
+                'kind': 'confirm_post',
+                'label': label[:120],
+                'path': path,
+                'body': {
+                    'camera_id': camera_id[:128],
+                    'hours': hours,
+                    'record_limit': record_limit,
+                    'image_limit': image_limit,
+                },
+                'confirm': str(action.get('confirm') or '')[:500],
+            }
+        href = str(action.get('href') or '').strip()
+        if not label or not href:
+            return None
+        return {'label': label[:120], 'href': href[:512]}
+
     def _assistant_system_evidence(self, active_manager: AppManager) -> AssistantEvidence:
         status = self.deps.system_telemetry.system_status(active_manager)
         cameras = active_manager.statuses()
@@ -1376,7 +1443,9 @@ class IntelligenceService:
         advice_payload['changes'] = [change.model_dump(mode='json') for change in changes]
         configuration_fingerprint = self._assistant_motion_config_fingerprint(active_config, camera)
         advisor_href = self._assistant_camera_advisor_href(camera.id)
-        next_actions = [{'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href}]
+        next_actions: list[dict[str, Any]] = [{'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href}]
+        if active_config.audit_ai.enabled and ai_provider_configured(active_config.audit_ai):
+            next_actions.insert(0, self._assistant_start_camera_review_action(camera.id, camera.name))
         details = {'event_id': event_id, 'source_event_id': source_event_id, 'camera_id': camera.id, 'camera_name': camera.name, 'advice': advice_payload, 'proposals': previews, 'can_apply': bool(previews and active_config.audit_ai.allow_apply_recommendations), 'apply_requires_confirmation': True, 'configuration_fingerprint': configuration_fingerprint, 'recommendation_proof': self._issue_ai_recommendation_token(kind='incident_visual', record_id=event_id, camera_id=camera.id, configuration_fingerprint=configuration_fingerprint, changes=changes), 'next_actions': next_actions, 'camera_advisor_href': advisor_href}
         incident_evidence = self._assistant_incident_evidence(incident, event_id)
         return AssistantEvidence(evidence_id=f'E-visual-{event_id}', kind='incident_visual_review', title=f'Visual review · {camera.name}', summary=f'{advice.verdict.replace('_', ' ')} ({round(advice.confidence * 100)}% confidence); {len(previews)} bounded setting proposal(s).', data={**{key: value for key, value in details.items() if key != 'recommendation_proof'}, 'incident_evidence': incident_evidence.data}, href=incident_evidence.href, image_url=f'/api/events/{source_event_id}/thumbnail.jpg?width=960&quality=82', client_data=details)
@@ -1596,19 +1665,24 @@ class IntelligenceService:
             followups.append(f'Trace this incident across cameras')
         return followups[:3]
 
-    def _assistant_closed_loop_actions(self, evidence: list[AssistantEvidence]) -> list[dict[str, str]]:
-        actions: list[dict[str, str]] = []
+    def _assistant_closed_loop_actions(self, evidence: list[AssistantEvidence]) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in evidence:
             for action in list((item.client_data or {}).get('next_actions') or []) + list((item.data or {}).get('next_actions') or []):
                 if not isinstance(action, dict):
                     continue
-                label = str(action.get('label') or '').strip()
-                href = str(action.get('href') or '').strip()
-                if not label or not href or href in seen:
+                sanitized = self._assistant_sanitize_closed_loop_action(action)
+                if sanitized is None:
                     continue
-                seen.add(href)
-                actions.append({'label': label[:120], 'href': href[:512]})
+                if sanitized.get('kind') == 'confirm_post':
+                    key = f"confirm_post:{sanitized.get('path')}:{(sanitized.get('body') or {}).get('camera_id')}"
+                else:
+                    key = f"href:{sanitized.get('href')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                actions.append(sanitized)
                 if len(actions) >= 4:
                     return actions
         return actions
@@ -1864,11 +1938,14 @@ class IntelligenceService:
         follow_up = {
             'message': (
                 f'Applied {applied_count} motion setting change{"s" if applied_count != 1 else ""} on {camera.name}. '
-                f'That camera was restarted. This was one incident image—open Camera Advisor to run a multi-sample review '
-                f'and check whether the change helped after 24 hours.'
+                f'That camera was restarted. This was one incident image—start a multi-sample Camera Advisor review '
+                f'from here to gather more evidence, then check whether the change helped after about 24 hours.'
             ),
             'suggestions': [f'Is {camera.name} healthy?', f'Summarize recent activity for {camera.name}'],
-            'actions': [{'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href}],
+            'actions': [
+                self._assistant_start_camera_review_action(camera.id, camera.name),
+                {'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href},
+            ],
         }
         return {'ok': True, 'event_id': event_id, 'camera_id': camera.id, 'applied': previews, 'workers_restarted': bool(apply_result['camera_workers_restarted']), 'apply_mode': apply_result['apply_mode'], 'follow_up': follow_up}
 
@@ -1911,6 +1988,8 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
         '_assistant_catalog': service._assistant_catalog,
         '_assistant_closed_loop_actions': service._assistant_closed_loop_actions,
         '_assistant_closed_loop_suggestions': service._assistant_closed_loop_suggestions,
+        '_assistant_sanitize_closed_loop_action': service._assistant_sanitize_closed_loop_action,
+        '_assistant_start_camera_review_action': service._assistant_start_camera_review_action,
         '_assistant_configuration_evidence': service._assistant_configuration_evidence,
         '_assistant_event_objects': service._assistant_event_objects,
         '_assistant_execute_tool': service._assistant_execute_tool,

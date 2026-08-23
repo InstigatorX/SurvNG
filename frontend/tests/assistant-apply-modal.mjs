@@ -25,7 +25,48 @@ try {
       },
     }],
   }) }));
-  await page.route("**/api/incidents/42/ai-apply", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ applied: [{ setting: "sensitivity" }] }) }));
+  await page.route("**/api/incidents/42/ai-apply", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      applied: [{ setting: "sensitivity" }],
+      follow_up: {
+        message: "Applied 1 motion setting change on Front Door. Start a multi-sample review from here.",
+        suggestions: ["Is Front Door healthy?"],
+        actions: [{
+          kind: "confirm_post",
+          label: "Start multi-sample review for Front Door",
+          path: "/api/motion-ai-reviews",
+          body: { camera_id: "front-door", hours: 24, record_limit: 100, image_limit: 12 },
+          confirm: "Start a Camera Advisor multi-sample review for Front Door?",
+        }],
+      },
+    }),
+  }));
+  let startedReview = false;
+  await page.route("**/api/motion-ai-reviews", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    startedReview = true;
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ id: 77, camera_id: "front-door", status: "queued" }),
+    });
+  });
+  await page.route("**/api/motion-ai-reviews/77", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      id: 77,
+      camera_id: "front-door",
+      status: "completed",
+      analyzed: 6,
+      failed: 0,
+      result: {
+        summary: "Repeated evidence supports a sensitivity increase.",
+        can_apply: true,
+        configuration_fingerprint: "fp",
+        recommendations: [{ setting: "sensitivity", current: "balanced", proposed: "high", reasons: ["misses"] }],
+      },
+    }),
+  }));
 
   await page.goto("http://127.0.0.1:8088/survng/", { waitUntil: "domcontentloaded", timeout: 30_000 });
   await page.getByText("Loading workspace…").waitFor({ state: "hidden", timeout: 30_000 });
@@ -45,6 +86,15 @@ try {
   await page.getByRole("button", { name: "Confirm and apply" }).click();
   await page.getByText("Applied after confirmation").waitFor({ state: "visible" });
   assert.equal(await page.locator(".assistant-evidence-card").evaluate((card) => document.activeElement === card), true);
+  await page.getByText("Start a multi-sample review from here").waitFor({ state: "visible" });
+  const startReview = page.getByRole("button", { name: "Start multi-sample review for Front Door" });
+  await startReview.click();
+  assert.equal(await page.getByRole("dialog").getAttribute("aria-labelledby"), "assistant-confirm-post-title");
+  await page.getByRole("button", { name: "Confirm" }).click();
+  await page.getByText("Started a multi-sample Camera Advisor review").waitFor({ state: "visible" });
+  assert.equal(startedReview, true);
+  await page.getByText("Multi-sample review for front-door finished").waitFor({ state: "visible", timeout: 10_000 });
+  await page.getByRole("button", { name: "Apply 1 Camera Advisor recommendation" }).waitFor({ state: "visible" });
 } finally {
   await browser.close();
 }
