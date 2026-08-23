@@ -10,7 +10,12 @@ import numpy as np
 import pytest
 
 from survng.app.events import EventStore
-from survng.app.motion_incidents import MotionIncidentService
+from survng.app.event_store.jobs import DETECTION_JOB_MAXIMUM_AGE_SECONDS
+from survng.app.motion_incidents import (
+    REFINEMENT_MAX_QUEUE_AGE_SECONDS,
+    MotionIncidentService,
+    _MemoryDetectionJobStore,
+)
 from survng.app.motion_pipeline.decision_handler import MotionDecisionOutcome
 
 
@@ -862,3 +867,40 @@ def test_durable_completion_failure_retries_until_handler_succeeds() -> None:
     stop.set()
     service.request_stop()
     assert service.wait_stopped(1.0)
+
+
+def test_refinement_age_constant_matches_detection_job_store() -> None:
+    assert REFINEMENT_MAX_QUEUE_AGE_SECONDS == DETECTION_JOB_MAXIMUM_AGE_SECONDS
+
+
+def test_memory_claim_expires_stale_expired_lease_before_fresh_job() -> None:
+    store = _MemoryDetectionJobStore()
+    store.enqueue_detection_job(
+        job_id="zombie",
+        camera_id="gate",
+        dedupe_key="episode:zombie",
+        payload={"event_at": "2026-08-22T19:00:00+00:00"},
+    )
+    store.enqueue_detection_job(
+        job_id="fresh",
+        camera_id="gate",
+        dedupe_key="episode:fresh",
+        payload={"event_at": "2026-08-22T20:00:00+00:00"},
+    )
+    with store._lock:
+        zombie = store._jobs["zombie"]
+        zombie["state"] = "running"
+        zombie["lease_owner"] = "dead-worker"
+        zombie["lease_expires_at"] = 0.0
+        zombie["created_at_monotonic"] = zombie["created_at_monotonic"] - 30.0
+
+    claimed = store.claim_detection_job(
+        "gate",
+        lease_owner="refiner-a",
+        maximum_age_seconds=1.0,
+    )
+
+    assert claimed is not None
+    assert claimed["id"] == "fresh"
+    assert store._jobs["zombie"]["state"] == "failed"
+    assert store._jobs["zombie"]["last_error"] == "stale_refinement"
