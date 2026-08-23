@@ -93,6 +93,44 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         older.join(timeout=1.0)
         self.assertEqual(order, [10.0, 30.0])
 
+    def test_memory_waiter_does_not_block_free_process_slot(self) -> None:
+        budget = RecordedDecodeBudget(
+            max_processes=1,
+            memory_budget_bytes=8 << 20,
+            estimated_frame_bytes=8 << 20,
+        )
+        memory_holder = budget.reserve_workflow(maximum_frames=1, incident_epoch=1.0)
+        self.assertIsNotNone(memory_holder)
+        memory_waiting = threading.Event()
+
+        def wait_for_memory() -> None:
+            memory_waiting.set()
+            lease = budget.reserve_workflow(
+                maximum_frames=1,
+                incident_epoch=2.0,
+                deadline=time.monotonic() + 1.0,
+            )
+            if lease is not None:
+                lease.release()
+
+        waiter = threading.Thread(target=wait_for_memory)
+        waiter.start()
+        self.assertTrue(memory_waiting.wait(1.0))
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and budget.status()["waiting"] < 1:
+            time.sleep(0.01)
+
+        process = budget.acquire_process(
+            incident_epoch=3.0,
+            deadline=time.monotonic() + 0.2,
+        )
+
+        self.assertIsNotNone(process)
+        assert process is not None and memory_holder is not None
+        process.release()
+        memory_holder.release()
+        waiter.join(1.0)
+
     def test_cancellation_exits_without_admission(self) -> None:
         budget = RecordedDecodeBudget(max_processes=1, memory_budget_bytes=64 << 20)
         holder = budget.acquire_process(incident_epoch=1.0)

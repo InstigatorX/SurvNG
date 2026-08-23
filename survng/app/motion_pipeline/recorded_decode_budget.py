@@ -56,7 +56,10 @@ class RecordedDecodeBudget:
         self._active_processes = 0
         self._reserved_bytes = 0
         self._sequence = 0
-        self._waiters: list[_Waiter] = []
+        # Process slots and workflow-memory reservations are independent
+        # resources.  Keep independent ordered queues so an unfittable memory
+        # request cannot idle an available FFmpeg process slot (or vice versa).
+        self._waiters: dict[str, list[_Waiter]] = {"process": [], "memory": []}
         self._admitted_processes = 0
         self._admitted_workflows = 0
         self._process_wait_ms = 0.0
@@ -125,7 +128,7 @@ class RecordedDecodeBudget:
                 "memory_budget_bytes": self._memory_budget_bytes,
                 "reserved_bytes": self._reserved_bytes,
                 "estimated_frame_bytes": self._estimated_frame_bytes,
-                "waiting": len(self._waiters),
+                "waiting": sum(len(waiters) for waiters in self._waiters.values()),
                 "admitted_processes": self._admitted_processes,
                 "admitted_workflows": self._admitted_workflows,
                 "process_wait_ms": round(self._process_wait_ms, 3),
@@ -203,16 +206,17 @@ class RecordedDecodeBudget:
                 kind=kind,
                 amount=int(amount),
             )
-            self._waiters.append(waiter)
-            self._waiters.sort()
+            waiters = self._waiters[kind]
+            waiters.append(waiter)
+            waiters.sort()
             try:
                 while True:
                     if cancelled is not None and cancelled():
                         self._cancellations += 1
                         return None
-                    if self._waiters[0] is waiter and self._fits(waiter):
+                    if waiters[0] is waiter and self._fits(waiter):
                         self._account(waiter)
-                        self._waiters.remove(waiter)
+                        waiters.remove(waiter)
                         wait_ms = max(0.0, (time.monotonic() - started) * 1000.0)
                         if kind == "process":
                             self._process_wait_ms += wait_ms
@@ -237,8 +241,8 @@ class RecordedDecodeBudget:
                         timeout=0.1 if remaining is None else min(0.1, remaining)
                     )
             finally:
-                if waiter in self._waiters:
-                    self._waiters.remove(waiter)
+                if waiter in waiters:
+                    waiters.remove(waiter)
                     self._condition.notify_all()
 
     def _fits(self, waiter: _Waiter) -> bool:

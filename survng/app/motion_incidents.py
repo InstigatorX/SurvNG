@@ -72,6 +72,9 @@ class DetectionJobStore(Protocol):
         maximum_attempts: int = 5,
         lease_owner: str = "",
     ) -> bool: ...
+    def expire_stale_detection_jobs(
+        self, camera_id: str, *, maximum_age_seconds: float,
+    ) -> int: ...
     def detection_job_status(self, camera_id: str) -> dict[str, int | float]: ...
 
     def refine(
@@ -97,6 +100,8 @@ TrackingStarter = Callable[
 ]
 RefinementCallback = Callable[[MotionDecisionOutcome], None]
 RefinementCompletionHandler = Callable[[MotionDecisionOutcome, dict[str, Any]], None]
+REFINEMENT_MAX_QUEUE_AGE_SECONDS = 20.0
+REFINEMENT_STALE_EXPIRY_INTERVAL_SECONDS = 5.0
 
 
 def _compact_refinement_qualification(
@@ -254,6 +259,21 @@ class _MemoryDetectionJobStore:
                     job["attempts"] += 1
                     return copy.deepcopy(job)
         return None
+
+    def expire_stale_detection_jobs(self, camera_id, *, maximum_age_seconds):
+        cutoff = time.monotonic() - max(0.0, float(maximum_age_seconds))
+        expired = 0
+        with self._lock:
+            for job in self._jobs.values():
+                if (
+                    job["camera_id"] == camera_id
+                    and job["state"] == "queued"
+                    and job["created_at_monotonic"] <= cutoff
+                ):
+                    job["state"] = "failed"
+                    job["last_error"] = "stale_refinement"
+                    expired += 1
+        return expired
 
     def complete_detection_job(self, job_id, event_id, *, lease_owner=""):
         del lease_owner
@@ -648,6 +668,7 @@ class MotionIncidentService:
 
     def _run_refinements(self) -> None:
         last_prune = 0.0
+        last_stale_expiry = 0.0
         while True:
             stop = self._refinement_stop
             if stop is None or stop.is_set():
@@ -663,6 +684,30 @@ class MotionIncidentService:
                         "terminal detection-job pruning failed for %s",
                         self.camera_id,
                     )
+            if now - last_stale_expiry >= REFINEMENT_STALE_EXPIRY_INTERVAL_SECONDS:
+                last_stale_expiry = now
+                expire_stale = getattr(
+                    self.refinement_store,
+                    "expire_stale_detection_jobs",
+                    None,
+                )
+                if callable(expire_stale):
+                    try:
+                        expired = int(expire_stale(
+                            self.camera_id,
+                            maximum_age_seconds=REFINEMENT_MAX_QUEUE_AGE_SECONDS,
+                        ))
+                        if expired:
+                            LOGGER.info(
+                                "expired %d stale motion refinement job(s) for %s",
+                                expired,
+                                self.camera_id,
+                            )
+                    except Exception:
+                        LOGGER.exception(
+                            "stale motion refinement expiration failed for %s",
+                            self.camera_id,
+                        )
             claimed = self.refinement_store.claim_detection_job(
                 self.camera_id,
                 lease_owner=self._lease_owner,
