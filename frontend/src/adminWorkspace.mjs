@@ -17,15 +17,14 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
       { id: "detection", label: "Detection", workspace: "general", subsection: "detection" },
       { id: "storage", label: "Storage", workspace: "general", subsection: "storage" },
       { id: "integrations", label: "Integrations", workspace: "general", subsection: "mqtt" },
-      { id: "preferences", label: "Preferences", workspace: "general", subsection: "general", secondary: true },
+      { id: "server", label: "Server", workspace: "general", subsection: "general", secondary: true },
     ],
   },
   {
     id: "observe",
     label: "Observe",
     items: [
-      { id: "overview", label: "Overview", workspace: "telemetry", subsection: "overview" },
-      { id: "health", label: "Health", workspace: "telemetry", subsection: "cameras" },
+      { id: "health", label: "Health", workspace: "telemetry" },
       { id: "audit", label: "Audit", workspace: "audit" },
       { id: "logs", label: "Logs", workspace: "logs" },
     ],
@@ -42,22 +41,27 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
   },
 ]);
 
-export function adminDestination(workspace, { generalSection = "general", telemetrySection = "overview" } = {}) {
+export function normalizeTelemetrySection(value = "") {
+  const candidate = String(value || "");
+  return candidate === "diagnostics" ? "diagnostics" : "health";
+}
+
+export function adminDestination(workspace, { generalSection = "general", telemetrySection = "health" } = {}) {
   return ADMIN_RESPONSIBILITY_GROUPS
     .flatMap((group) => group.items)
     .find((item) => item.workspace === workspace && (
       workspace === "general"
         ? (item.subsection || "general") === generalSection
         : workspace === "telemetry"
-          ? (item.subsection || "overview") === telemetrySection
+          ? normalizeTelemetrySection(item.subsection || "health") === normalizeTelemetrySection(telemetrySection)
           : true
     )) || ADMIN_RESPONSIBILITY_GROUPS[0].items[0];
 }
 
 export const GENERAL_SECTION_LABELS = Object.freeze({
-  general: "General",
+  general: "Server",
   storage: "Storage & Retention",
-  mqtt: "API & MQTT",
+  mqtt: "Integrations",
   detection: "Object Detection",
   "motion-review": "Camera Advisor",
 });
