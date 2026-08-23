@@ -74,11 +74,14 @@ class EventStoreTest(unittest.TestCase):
                     ("2026-08-22T20:00:00+00:00",),
                 )
 
-            claimed = store.claim_detection_job("gate")
+            claimed = store.claim_detection_job(
+                "gate",
+                maximum_age_seconds=86400.0,
+            )
 
             self.assertEqual(claimed["id"], "newer")
 
-    def test_detection_job_claim_reclaims_expired_lease_before_newer_queued(self) -> None:
+    def test_detection_job_claim_reclaims_fresh_expired_lease_before_newer_queued(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
             for job_id in ("zombie", "fresh"):
@@ -94,13 +97,8 @@ class EventStoreTest(unittest.TestCase):
             with store._connect_jobs() as connection:
                 connection.execute(
                     "update detection_jobs set state = 'running', "
-                    "lease_expires_at = 0, lease_owner = 'dead-worker', "
-                    "created_at = ? where id = 'zombie'",
-                    ("2026-08-22T19:00:00+00:00",),
-                )
-                connection.execute(
-                    "update detection_jobs set created_at = ? where id = 'fresh'",
-                    ("2026-08-22T20:00:00+00:00",),
+                    "lease_expires_at = 0, lease_owner = 'dead-worker' "
+                    "where id = 'zombie'",
                 )
 
             claimed = store.claim_detection_job("gate", lease_owner="refiner-a")
@@ -151,13 +149,18 @@ class EventStoreTest(unittest.TestCase):
                     ("2026-08-22T19:00:00+00:00",),
                 )
 
-            self.assertEqual(
-                store.expire_stale_detection_jobs("gate", maximum_age_seconds=1.0),
-                1,
+            claimed = store.claim_detection_job(
+                "gate",
+                lease_owner="refiner-a",
+                maximum_age_seconds=1.0,
             )
-            claimed = store.claim_detection_job("gate", lease_owner="refiner-a")
 
             self.assertEqual(claimed["id"], "fresh")
+            with store._connect_jobs() as connection:
+                row = connection.execute(
+                    "select state, last_error from detection_jobs where id = 'zombie'"
+                ).fetchone()
+            self.assertEqual((row["state"], row["last_error"]), ("failed", "stale_refinement"))
 
     def test_security_work_ledger_is_separate_from_general_event_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

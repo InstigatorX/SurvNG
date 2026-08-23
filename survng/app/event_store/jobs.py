@@ -8,6 +8,8 @@ from typing import Any
 
 from ..durable_payload import durable_json_dumps
 
+DETECTION_JOB_MAXIMUM_AGE_SECONDS = 20.0
+
 
 def _detection_job_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
     qualification = payload.get("qualification")
@@ -606,6 +608,7 @@ class EventStoreJobsMixin:
         *,
         lease_seconds: float = 60.0,
         lease_owner: str = "",
+        maximum_age_seconds: float = DETECTION_JOB_MAXIMUM_AGE_SECONDS,
     ) -> dict[str, Any] | None:
         """Claim one due job, reclaiming an expired worker lease atomically."""
         now = time.time()
@@ -626,6 +629,16 @@ class EventStoreJobsMixin:
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute("begin immediate")
+            # Admission must expire stale work in this transaction.  The
+            # periodic maintenance pass is intentionally rate-limited, so it
+            # cannot protect a fresh job arriving between maintenance ticks.
+            self._expire_stale_detection_jobs_locked(
+                conn,
+                camera_id,
+                maximum_age_seconds=maximum_age_seconds,
+                now=now,
+                now_iso=now_iso,
+            )
             # Reclaim expired/owned running leases before LIFO queued work.
             # Otherwise continuous fresh enqueue can starve zombie running rows
             # forever (expire_stale only fails queued jobs).
@@ -670,20 +683,37 @@ class EventStoreJobsMixin:
     ) -> int:
         """Terminally mark stale queued or reclaimable evidence jobs."""
         now = time.time()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._jobs_lock, self._connect_jobs() as conn:
+            return self._expire_stale_detection_jobs_locked(
+                conn,
+                camera_id,
+                maximum_age_seconds=maximum_age_seconds,
+                now=now,
+                now_iso=now_iso,
+            )
+
+    @staticmethod
+    def _expire_stale_detection_jobs_locked(
+        conn: sqlite3.Connection,
+        camera_id: str,
+        *,
+        maximum_age_seconds: float,
+        now: float,
+        now_iso: str,
+    ) -> int:
         cutoff = datetime.fromtimestamp(
             now - max(0.0, float(maximum_age_seconds)),
             timezone.utc,
         ).isoformat()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        with self._jobs_lock, self._connect_jobs() as conn:
-            cursor = conn.execute(
-                "update detection_jobs set state = 'failed', lease_expires_at = null, "
-                "lease_owner = '', last_error = 'stale_refinement', updated_at = ? "
-                "where camera_id = ? and created_at <= ? and (state = 'queued' "
-                "or (state = 'running' and lease_expires_at <= ?))",
-                (now_iso, camera_id, cutoff, now),
-            )
-            return max(0, int(cursor.rowcount))
+        cursor = conn.execute(
+            "update detection_jobs set state = 'failed', lease_expires_at = null, "
+            "lease_owner = '', last_error = 'stale_refinement', updated_at = ? "
+            "where camera_id = ? and created_at <= ? and (state = 'queued' "
+            "or (state = 'running' and lease_expires_at <= ?))",
+            (now_iso, camera_id, cutoff, now),
+        )
+        return max(0, int(cursor.rowcount))
 
     def complete_detection_job(
         self,

@@ -65,6 +65,7 @@ class DetectionJobStore(Protocol):
     ) -> str: ...
     def claim_detection_job(
         self, camera_id: str, *, lease_seconds: float = 60.0, lease_owner: str = "",
+        maximum_age_seconds: float = 20.0,
     ) -> dict[str, Any] | None: ...
     def complete_detection_job(self, job_id: str, event_id: int | None, *, lease_owner: str = "") -> None: ...
     def retry_detection_job(
@@ -246,8 +247,15 @@ class _MemoryDetectionJobStore:
             }
             return "queued"
 
-    def claim_detection_job(self, camera_id, *, lease_seconds=60.0, lease_owner=""):
-        del lease_seconds, lease_owner
+    def claim_detection_job(
+        self,
+        camera_id,
+        *,
+        lease_seconds=60.0,
+        lease_owner="",
+        maximum_age_seconds=20.0,
+    ):
+        del lease_seconds, lease_owner, maximum_age_seconds
         with self._lock:
             for job in self._jobs.values():
                 if (
@@ -711,6 +719,7 @@ class MotionIncidentService:
             claimed = self.refinement_store.claim_detection_job(
                 self.camera_id,
                 lease_owner=self._lease_owner,
+                maximum_age_seconds=REFINEMENT_MAX_QUEUE_AGE_SECONDS,
             )
             if claimed is None:
                 try:
