@@ -16,6 +16,7 @@ from typing import Any, Callable, Protocol
 import numpy as np
 
 from .durable_payload import durable_json_copy
+from .event_store.jobs import DETECTION_JOB_MAXIMUM_AGE_SECONDS
 from .motion_pipeline.decision_handler import MotionDecisionOutcome
 from .perf_samples import RollingLatencySamples
 from .security import redact_secret_text
@@ -65,7 +66,7 @@ class DetectionJobStore(Protocol):
     ) -> str: ...
     def claim_detection_job(
         self, camera_id: str, *, lease_seconds: float = 60.0, lease_owner: str = "",
-        maximum_age_seconds: float = 20.0,
+        maximum_age_seconds: float = DETECTION_JOB_MAXIMUM_AGE_SECONDS,
     ) -> dict[str, Any] | None: ...
     def complete_detection_job(self, job_id: str, event_id: int | None, *, lease_owner: str = "") -> None: ...
     def retry_detection_job(
@@ -101,7 +102,7 @@ TrackingStarter = Callable[
 ]
 RefinementCallback = Callable[[MotionDecisionOutcome], None]
 RefinementCompletionHandler = Callable[[MotionDecisionOutcome, dict[str, Any]], None]
-REFINEMENT_MAX_QUEUE_AGE_SECONDS = 20.0
+REFINEMENT_MAX_QUEUE_AGE_SECONDS = DETECTION_JOB_MAXIMUM_AGE_SECONDS
 REFINEMENT_STALE_EXPIRY_INTERVAL_SECONDS = 5.0
 
 
@@ -244,6 +245,8 @@ class _MemoryDetectionJobStore:
                 "payload": copy.deepcopy(payload), "state": "queued", "attempts": 0,
                 "available_at": time.monotonic(),
                 "created_at_monotonic": time.monotonic(),
+                "lease_owner": "",
+                "lease_expires_at": None,
             }
             return "queued"
 
@@ -253,52 +256,114 @@ class _MemoryDetectionJobStore:
         *,
         lease_seconds=60.0,
         lease_owner="",
-        maximum_age_seconds=20.0,
+        maximum_age_seconds=DETECTION_JOB_MAXIMUM_AGE_SECONDS,
     ):
-        del lease_seconds, lease_owner, maximum_age_seconds
+        now = time.monotonic()
         with self._lock:
-            for job in self._jobs.values():
+            self._expire_stale_detection_jobs_locked(
+                camera_id,
+                maximum_age_seconds=maximum_age_seconds,
+                now=now,
+            )
+            reclaimable = [
+                job
+                for job in self._jobs.values()
                 if (
                     job["camera_id"] == camera_id
-                    and job["state"] == "queued"
-                    and job["available_at"] <= time.monotonic()
-                ):
-                    job["state"] = "running"
-                    job["attempts"] += 1
-                    return copy.deepcopy(job)
-        return None
+                    and job["state"] == "running"
+                    and (
+                        (
+                            job.get("lease_expires_at") is not None
+                            and float(job["lease_expires_at"]) <= now
+                        )
+                        or str(job.get("lease_owner") or "") == str(lease_owner)
+                    )
+                )
+            ]
+            if reclaimable:
+                job = min(
+                    reclaimable,
+                    key=lambda item: (
+                        float(item["created_at_monotonic"]),
+                        str(item["id"]),
+                    ),
+                )
+            else:
+                job = None
+                for candidate in self._jobs.values():
+                    if (
+                        candidate["camera_id"] == camera_id
+                        and candidate["state"] == "queued"
+                        and candidate["available_at"] <= now
+                    ):
+                        job = candidate
+                        break
+                if job is None:
+                    return None
+            job["state"] = "running"
+            job["attempts"] += 1
+            job["lease_owner"] = str(lease_owner or "")
+            job["lease_expires_at"] = now + max(1.0, float(lease_seconds))
+            return copy.deepcopy(job)
 
     def expire_stale_detection_jobs(self, camera_id, *, maximum_age_seconds):
-        cutoff = time.monotonic() - max(0.0, float(maximum_age_seconds))
-        expired = 0
         with self._lock:
-            for job in self._jobs.values():
-                if (
-                    job["camera_id"] == camera_id
-                    and job["state"] == "queued"
-                    and job["created_at_monotonic"] <= cutoff
-                ):
-                    job["state"] = "failed"
-                    job["last_error"] = "stale_refinement"
-                    expired += 1
+            return self._expire_stale_detection_jobs_locked(
+                camera_id,
+                maximum_age_seconds=maximum_age_seconds,
+                now=time.monotonic(),
+            )
+
+    def _expire_stale_detection_jobs_locked(
+        self,
+        camera_id,
+        *,
+        maximum_age_seconds,
+        now,
+    ):
+        cutoff = now - max(0.0, float(maximum_age_seconds))
+        expired = 0
+        for job in self._jobs.values():
+            if job["camera_id"] != camera_id or job["created_at_monotonic"] > cutoff:
+                continue
+            lease_expires_at = job.get("lease_expires_at")
+            reclaimable_running = (
+                job["state"] == "running"
+                and lease_expires_at is not None
+                and float(lease_expires_at) <= now
+            )
+            if job["state"] == "queued" or reclaimable_running:
+                job["state"] = "failed"
+                job["last_error"] = "stale_refinement"
+                job["lease_owner"] = ""
+                job["lease_expires_at"] = None
+                expired += 1
         return expired
 
     def complete_detection_job(self, job_id, event_id, *, lease_owner=""):
-        del lease_owner
         with self._lock:
-            self._jobs[job_id]["state"] = "completed"
-            self._jobs[job_id]["event_id"] = event_id
+            job = self._jobs[job_id]
+            if lease_owner and str(job.get("lease_owner") or "") not in {"", lease_owner}:
+                return
+            job["state"] = "completed"
+            job["event_id"] = event_id
+            job["lease_owner"] = ""
+            job["lease_expires_at"] = None
 
     def retry_detection_job(
         self, job_id, error, *, retry_delay_seconds=2.0, maximum_attempts=5,
         lease_owner="",
     ):
-        del error, lease_owner
+        del error
         with self._lock:
             job = self._jobs[job_id]
+            if lease_owner and str(job.get("lease_owner") or "") not in {"", lease_owner}:
+                return False
             retry = job["attempts"] < maximum_attempts
             job["state"] = "queued" if retry else "failed"
             job["available_at"] = time.monotonic() + retry_delay_seconds
+            job["lease_owner"] = ""
+            job["lease_expires_at"] = None
             return retry
 
     def detection_job_status(self, camera_id):
