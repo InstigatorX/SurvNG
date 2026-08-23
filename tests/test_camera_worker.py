@@ -35,6 +35,7 @@ from survng.app.motion_decisions import (
     should_verify_suppression,
 )
 from survng.app.object_tracking import ObjectTrackingSessionFactory
+from survng.app.tracking_frames import CameraFrameTimeline
 from survng.app.motion_pipeline import (
     EVIDENCE_REPOSITORY_SERVICE,
     MotionDecisionHandlerFactory,
@@ -378,7 +379,10 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertIs(worker.tracking_lifecycle.current(), replacement)
             previous.stop.assert_called_once_with()
             replacement.set_accepting.assert_called_once_with(True)
-            self.assertEqual(worker.tracking_frames.frames.maxlen, 32)
+            self.assertEqual(
+                worker.tracking_frames.frames.maxlen,
+                CameraFrameTimeline.buffer_size(3.0),
+            )
             self.assertEqual(len(worker.tracking_frames.frames), 2)
             self.assertFalse(worker._stop.is_set())
 

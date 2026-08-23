@@ -44,8 +44,8 @@ class RecorderTest(unittest.TestCase):
             first.mkdir()
             second.mkdir()
             registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
-                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
-                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"], reserve_percent=0),
+                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"], reserve_percent=0),
             ]))
             recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
             paths = []
@@ -69,8 +69,8 @@ class RecorderTest(unittest.TestCase):
             first.mkdir()
             second.mkdir()
             registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
-                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
-                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"], reserve_percent=0),
+                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"], reserve_percent=0),
             ]))
             recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
             for index in range(5):
