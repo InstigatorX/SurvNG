@@ -784,3 +784,57 @@ a.button {
   }
 }
 
+.camera-scope-picker {
+  min-width: 0;
+}
+
+.motion-audit-filter-fields .camera-scope-picker,
+.telemetry-diagnostic-controls .camera-scope-picker,
+.motion-ai-review-controls .camera-scope-picker {
+  width: 100%;
+}
+
+.telemetry-panel-head .camera-scope-picker {
+  flex: 0 1 auto;
+  min-width: min(240px, 100%);
+}
+
+.tree-list button i.camera-status-dot {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.tree-list button i.camera-status-dot.online {
+  background: var(--good);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 18%, transparent);
+}
+
+.tree-list button .camera-dirty-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 16%, var(--control));
+  color: var(--warn);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: .04em;
+  line-height: 1;
+  padding: 3px 6px;
+  text-transform: uppercase;
+}
+
+.tree-list button:has(.camera-dirty-badge) i.camera-status-dot {
+  margin-left: 0;
+}
+
+@media (max-width: 760px) {
+  .camera-scope-picker {
+    display: none !important;
+  }
+}
+

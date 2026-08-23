@@ -129,6 +129,26 @@ export function cameraConfigDirtyState(cameras = [], baselineCameras = []) {
   return { settings, zones };
 }
 
+export function perCameraDirtyState(cameras = [], baselineCameras = []) {
+  const baseline = new Map((baselineCameras || []).map((camera) => [camera.id, camera]));
+  const dirty = {};
+  for (const camera of cameras || []) {
+    const baselineCamera = baseline.get(camera.id);
+    dirty[camera.id] = {
+      settings: !configValuesEqual(
+        comparableCameraSettings(camera),
+        comparableCameraSettings(baselineCamera),
+      ),
+      zones: !configValuesEqual(camera.zones || [], baselineCamera?.zones || []),
+    };
+  }
+  return dirty;
+}
+
+export function dirtyCameraCount(perCameraDirty = {}) {
+  return Object.values(perCameraDirty).filter((item) => item?.settings || item?.zones).length;
+}
+
 export function preferredStoredValue(initialValue, storedValue, preferInitial = false) {
   return preferInitial ? initialValue : storedValue;
 }
