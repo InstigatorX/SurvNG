@@ -722,7 +722,7 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
           </article>)}
           {busy ? <div className="assistant-thinking" aria-live="polite"><span /><span /><span /> {thinkingStages[thinkingStage] || thinkingStages[0]}{busy ? <button type="button" className="assistant-stop" onClick={cancelInFlight}>Stop</button> : null}</div> : null}
           {error ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>{error.message}</span>{error.kind === "request" ? <button type="button" onClick={() => sendMessage(error.content, error.context, { appendUser: false })}>Retry</button> : error.kind === "status" ? <button type="button" onClick={() => void loadAssistantStatus()}>Retry</button> : null}</div> : null}
-          {status && !status.configured ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>Configure and enable the AI provider to use the assistant.</span><a href={appUrl("/admin?section=general&subsection=detection&detail=ai-provider")}>Open AI Provider settings</a></div> : null}
+          {status && !status.configured ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>Configure and enable the AI provider to use the assistant.</span><a href={appUrl("/admin?section=general&subsection=mqtt&detail=ai-provider#ai-provider-settings")}>Open AI Provider settings</a></div> : null}
         </div>
         {messages.length ? <div className="assistant-quick-actions" role="group" aria-label={`Suggestions for ${currentContextLabel}`}>
           {quickPrompts.map((suggestion) => <button type="button" key={suggestion} disabled={busy} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}

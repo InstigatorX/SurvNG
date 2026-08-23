@@ -838,3 +838,29 @@ a.button {
   }
 }
 
+.admin-workspace-surface.admin-workspace-cameras {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.admin-workspace-cameras {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.admin-workspace-cameras>.settings-panel {
+  grid-column: 1;
+}
+
+.camera-config-head {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.camera-config-head .camera-scope-picker {
+  flex: 0 1 auto;
+  min-width: min(240px, 100%);
+}
+
+.camera-order-panel {
+  margin: 0 18px 12px;
+}
+

@@ -52,7 +52,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { insertZonePointWithIndex } from "../zoneGeometry.mjs";
-import { ADMIN_RESPONSIBILITY_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, perCameraDirtyState, readAdminSubsection, readAdminWorkspace } from "../adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, readAdminWorkspace } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -61,6 +61,7 @@ import { formatDateTime, formatTimeOnly, formatBytes, formatMilliseconds, format
 import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hooks.js";
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
 import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
+import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
   cameras: Camera,
@@ -68,6 +69,7 @@ export const ADMIN_DESTINATION_ICONS = {
   storage: HardDrive,
   integrations: Radio,
   preferences: Cog,
+  server: Cog,
   overview: Gauge,
   health: ShieldCheck,
   audit: Activity,
@@ -1095,11 +1097,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [telemetry, setTelemetry] = useState(null);
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryError, setTelemetryError] = useState("");
-  const [telemetrySection, setTelemetrySection] = useStoredState("survng.telemetrySection.v1", readAdminSubsection(
+  const [telemetrySection, setTelemetrySection] = useStoredState("survng.telemetrySection.v1", normalizeTelemetrySection(readAdminSubsection(
     initialAdminSearch,
-    TELEMETRY_ADMIN_SECTIONS,
-    initialAdminParams.get("camera") ? "cameras" : "overview",
-  ), { preferInitial: initialAdminWorkspace === "telemetry" && (initialAdminParams.has("subsection") || initialAdminParams.has("camera")) });
+    ["diagnostics", "overview", "cameras", "health"],
+    "health",
+  )), { preferInitial: initialAdminWorkspace === "telemetry" && (initialAdminParams.has("subsection") || initialAdminParams.has("camera")) });
   const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", initialAdminParams.get("camera") || "", { preferInitial: initialAdminWorkspace === "telemetry" && initialAdminParams.has("camera") });
   const [diagnosticScope, setDiagnosticScope] = useState("system");
   const [diagnosticDuration, setDiagnosticDuration] = useState("3600");
@@ -1122,7 +1124,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       camera: generalSection === "motion-review" ? selectedId : "",
     };
     if (section === "cameras") return { subsection: cameraSection === "settings" ? "" : cameraSection, camera: selectedId };
-    if (section === "telemetry") return { subsection: telemetrySection === "overview" ? "" : telemetrySection, camera: telemetrySection === "cameras" ? telemetryCamera : "" };
+    if (section === "telemetry") {
+      if (telemetrySection === "diagnostics") return { subsection: "diagnostics" };
+      return { camera: telemetryCamera };
+    }
     if (section === "audit") return { camera: auditCamera };
     return {};
   }
@@ -1171,7 +1176,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         setSelectedId(new URLSearchParams(window.location.search).get("camera") || selectedId);
       }
       if (nextSection === "telemetry") {
-        setTelemetrySection(readAdminSubsection(window.location.search, TELEMETRY_ADMIN_SECTIONS, telemetrySection));
+        setTelemetrySection(normalizeTelemetrySection(readAdminSubsection(window.location.search, ["diagnostics", "overview", "cameras", "health"], telemetrySection)));
         setTelemetryCamera(new URLSearchParams(window.location.search).get("camera") || telemetryCamera);
       }
       if (nextSection === "audit") {
@@ -1190,7 +1195,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       nextWorkspace === "general"
         ? (nextSubsection || "general") === generalSection
         : nextWorkspace === "telemetry"
-          ? (nextSubsection || "overview") === telemetrySection
+          ? normalizeTelemetrySection(nextSubsection || "health") === telemetrySection
           : true
     );
     if (alreadySelected) {
@@ -1203,11 +1208,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     }
     if (!confirmDiscardAdminChanges("Switch sections and discard unsaved changes?")) return;
     if (nextWorkspace === "general") setGeneralSection(nextSubsection || "general");
-    if (nextWorkspace === "telemetry") setTelemetrySection(nextSubsection || "overview");
+    if (nextWorkspace === "telemetry") setTelemetrySection(normalizeTelemetrySection(nextSubsection || "health"));
     const options = nextWorkspace === "general"
       ? { subsection: nextSubsection === "general" ? "" : nextSubsection }
       : nextWorkspace === "telemetry"
-        ? { subsection: nextSubsection === "overview" ? "" : nextSubsection, camera: nextSubsection === "cameras" ? telemetryCamera : "" }
+        ? nextSubsection === "diagnostics"
+          ? { subsection: "diagnostics" }
+          : { camera: telemetryCamera }
         : adminLocationOptions(nextWorkspace);
     const search = adminWorkspaceSearch(nextWorkspace, window.location.search, options);
     const location = appUrl(`/admin${search}`);
@@ -1223,7 +1230,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       ? { subsection: nextSubsection === "general" ? "" : nextSubsection }
       : section === "cameras"
         ? { subsection: nextSubsection === "settings" ? "" : nextSubsection, camera: cameraOverride || selectedId }
-        : { subsection: nextSubsection === "overview" ? "" : nextSubsection, camera: nextSubsection === "cameras" ? cameraOverride || telemetryCamera : "" };
+        : nextSubsection === "diagnostics"
+          ? { subsection: "diagnostics" }
+          : { camera: cameraOverride || telemetryCamera };
     const search = adminWorkspaceSearch(section, window.location.search, options);
     const location = appUrl(`/admin${search}`);
     window.history.pushState({ ...(window.history.state || {}), survngAdminSubsection: nextSubsection }, "", location);
@@ -1439,7 +1448,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     try {
       const params = new URLSearchParams({ hours: "24" });
       const cameraId = telemetryCamera || config?.cameras?.[0]?.id || "";
-      if (telemetrySection === "cameras" && cameraId) params.set("camera_id", cameraId);
+      if (telemetrySection !== "diagnostics" && cameraId) params.set("camera_id", cameraId);
       const response = await fetch(`/api/telemetry?${params.toString()}`);
       if (!response.ok) throw new Error(`Telemetry failed to load (${response.status})`);
       setTelemetry(await response.json());
@@ -1660,10 +1669,14 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     browserStorage(window)?.setItem("survng.motionAuditCamera.v1", nextCameraId);
   }
 
-  function selectTelemetryScopeCamera(nextCameraId) {
+  function selectTelemetryCamera(nextCameraId) {
     setTelemetryCamera(nextCameraId);
-    if (telemetrySection !== "cameras") setTelemetrySection("cameras");
-    selectAdminSubsection("cameras", setTelemetrySection, "telemetry", nextCameraId);
+    if (telemetrySection === "diagnostics") setTelemetrySection("health");
+    const search = adminWorkspaceSearch("telemetry", window.location.search, { camera: nextCameraId });
+    const location = appUrl(`/admin${search}`);
+    window.history.pushState({ ...(window.history.state || {}), survngTelemetryCamera: nextCameraId }, "", location);
+    acceptedAdminLocationRef.current = location;
+    adminHistoryWriteRef.current = false;
   }
 
   function updateConfig(path, value) {
@@ -2055,7 +2068,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
               <div className="section-head compact"><div><h2>Settings</h2><p>Choose a configuration area</p></div></div>
               <div className="tree-list">
                 <span className="tree-group-label">System</span>
-                <button type="button" aria-current={generalSection === "general" ? "page" : undefined} className={generalSection === "general" ? "active" : ""} onClick={() => selectAdminSubsection("general", setGeneralSection, "general")}><Cog size={16} /><span>General</span></button>
+                <button type="button" aria-current={generalSection === "general" ? "page" : undefined} className={generalSection === "general" ? "active" : ""} onClick={() => selectAdminSubsection("general", setGeneralSection, "general")}><Cog size={16} /><span>Server</span></button>
                 <button type="button" aria-current={generalSection === "storage" ? "page" : undefined} className={generalSection === "storage" ? "active" : ""} onClick={() => selectAdminSubsection("storage", setGeneralSection, "general")}><HardDrive size={16} /><span>Storage &amp; Retention</span></button>
                 <button type="button" aria-current={generalSection === "mqtt" ? "page" : undefined} className={generalSection === "mqtt" ? "active" : ""} onClick={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}><Radio size={16} /><span>API &amp; MQTT</span></button>
                 <span className="tree-group-label">Intelligence</span>
@@ -2066,7 +2079,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             </section>
             <section id="admin-panel-general" className="bento-card config-editor settings-panel" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
               <div className="section-head">
-                <div><h2>{GENERAL_SECTION_LABELS[generalSection] || "General"}</h2><p>{generalSection === "general" ? "Application preferences" : generalSection === "storage" ? "Media placement and retention" : generalSection === "mqtt" ? "API access and MQTT integration" : generalSection === "detection" ? "Models, inference, and object policy" : "Search, faces, tracking, and AI analysis"}</p></div>
+                <div><h2>{GENERAL_SECTION_LABELS[generalSection] || "Server"}</h2><p>{generalSection === "general" ? "Server preferences, updates, and restart" : generalSection === "storage" ? "Media placement and retention" : generalSection === "mqtt" ? "API access, MQTT integration, and AI provider" : generalSection === "detection" ? "Models, inference, and object policy" : "Camera intelligence review and recommendations"}</p></div>
                 {generalSection === "motion-review" ? <span className="admin-action-kind">Advisor actions apply immediately</span> : null}
               </div>
               <GeneralSettings
@@ -2088,6 +2101,8 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 detectorStatus={detectorStatus}
                 motionCatalog={motionCatalog}
                 runtimeStatus={runtimeStatus}
+                advisorCameraId={selectedId}
+                onAdvisorCameraIdChange={setSelectedId}
                 section={generalSection}
               />
             </section>
@@ -2147,26 +2162,23 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           <>
             <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
               <div className="section-head telemetry-panel-head">
-                <div><h2>Telemetry</h2><p>System, detection, event, and camera health</p></div>
-                {telemetrySection === "cameras" ? (
+                <div><h2>{telemetrySection === "diagnostics" ? "Diagnostics" : "Health"}</h2><p>{telemetrySection === "diagnostics" ? "Models, hardware, and temporary capture sessions" : "System and camera health with optional camera scope"}</p></div>
+                {telemetrySection !== "diagnostics" ? (
                   <CameraScopePicker
                     cameras={cameras}
                     runtimeStatus={runtimeStatus}
-                    value={selectedTelemetryCamera}
-                    onChange={selectTelemetryScopeCamera}
-                    ariaLabel="Telemetry camera"
+                    value={telemetryCamera}
+                    onChange={selectTelemetryCamera}
+                    allOption={{ value: "", label: "All cameras" }}
+                    ariaLabel="Health camera scope"
                   />
                 ) : null}
-                {telemetrySection === "overview" ? <TelemetryContinuity data={telemetry} /> : null}
+                {telemetrySection !== "diagnostics" ? <TelemetryContinuity data={telemetry} /> : null}
                 <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
               </div>
               {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
-              <div id="telemetry-section-tabs" className="camera-section-tabs telemetry-section-tabs" role="tablist" aria-label="Telemetry sections" onKeyDown={(event) => moveTabFocus(event, TELEMETRY_ADMIN_SECTIONS, telemetrySection, (next) => selectAdminSubsection(next, setTelemetrySection, "telemetry"))}>
-                <button id="telemetry-tab-overview" data-tab-id="overview" tabIndex={telemetrySection === "overview" ? 0 : -1} aria-controls="telemetry-view-panel" type="button" className={telemetrySection === "overview" ? "active" : ""} onClick={() => selectAdminSubsection("overview", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "overview"}><Gauge size={15} />Overview</button>
-                <button id="telemetry-tab-cameras" data-tab-id="cameras" tabIndex={telemetrySection === "cameras" ? 0 : -1} aria-controls="telemetry-view-panel" type="button" className={telemetrySection === "cameras" ? "active" : ""} onClick={() => selectAdminSubsection("cameras", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "cameras"}><Camera size={15} />Per-camera</button>
-                <button id="telemetry-tab-diagnostics" data-tab-id="diagnostics" tabIndex={telemetrySection === "diagnostics" ? 0 : -1} aria-controls="telemetry-view-panel" type="button" className={telemetrySection === "diagnostics" ? "active" : ""} onClick={() => selectAdminSubsection("diagnostics", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "diagnostics"}><Wrench size={15} />Diagnostics</button>
-              </div>
-              <div id="telemetry-view-panel" className="telemetry-tab-panel" role="tabpanel" aria-labelledby={`telemetry-tab-${telemetrySection}`}>{telemetrySection === "diagnostics" ? <div className="telemetry-diagnostics">
+              <div id="telemetry-view-panel" className="telemetry-tab-panel" role="tabpanel">{telemetrySection === "diagnostics" ? <div className="telemetry-diagnostics">
+                <ModelsAndHardwarePanel config={config} updateConfig={updateConfig} detectorModels={detectorModels} accelerator={accelerator} />
                 <section className="telemetry-section">
                   <div className="telemetry-section-head"><div><h3>Temporary diagnostics</h3><p>Capture detailed troubleshooting data for a limited time. Sessions stop automatically and never include images, video, or credentials.</p></div></div>
                   <div className="telemetry-diagnostic-controls">
@@ -2190,7 +2202,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 </section>
                 {(telemetry?.diagnostics?.recent || []).some((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()) ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent diagnostic reports</summary><div className="telemetry-diagnostic-list">{telemetry.diagnostics.recent.filter((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()).map((session) => <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? cameras.find((camera) => camera.id === session.camera_id)?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>{formatDateTime(session.started_at, timeZone)}</span></div><a className="button" href={appUrl(`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`)} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a></article>)}</div></details></section> : null}
                 {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
-              </div> : <TelemetryViewer data={telemetry} cameraId={telemetrySection === "cameras" ? selectedTelemetryCamera : ""} timeZone={timeZone} config={config} />}</div>
+              </div> : <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} config={config} />}</div>
             </section>
           </>
         ) : settingsTab === "maintenance" ? (
@@ -2222,94 +2234,95 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           </section>
         ) : (
           <>
-            <section className="bento-card camera-tree config-tree">
-              <div className="section-head compact">
-                <div><h2>Cameras</h2><p>Add, clone, or select</p></div>
-                <div className="camera-tree-actions">
-                  {cameraOrderEditing ? (
-                    <>
-                      <button type="button" onClick={() => moveSelectedCameraBy(-1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) <= 0}>Up</button>
-                      <button type="button" onClick={() => moveSelectedCameraBy(1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) >= cameras.length - 1}>Down</button>
-                      <button type="button" onClick={cancelCameraOrderEdit} disabled={cameraOrderSaving}>Cancel</button>
-                    </>
-                  ) : (
-                    <>
-                      <button type="button" onClick={startCameraOrderEdit}><GripVertical size={14} /> Edit Order</button>
-                      <button type="button" onClick={() => addCamera()}><Plus size={14} /> Add</button>
-                    </>
-                  )}
-                </div>
-              </div>
-              <div className="tree-list">
-                {cameras.map((camera) => (
-                  <button
-                    type="button"
-                    aria-current={camera.id === selectedCamera?.id ? "page" : undefined}
-                    key={camera.id}
-                    draggable={cameraOrderEditing}
-                    className={`${camera.id === selectedCamera?.id ? "active" : ""} ${cameraOrderEditing ? "ordering" : ""} ${dragConfigCameraTarget === camera.id ? (dragConfigCameraAfter ? "drag-after" : "drag-before") : ""}`}
-                    onClick={() => { if (cameraOrderEditing) setSelectedId(camera.id); else selectConfigCamera(camera.id); }}
-                    onKeyDown={(event) => {
-                      if (!cameraOrderEditing || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
-                      event.preventDefault();
-                      setSelectedId(camera.id);
-                      const offset = event.key === "ArrowUp" ? -1 : 1;
-                      const currentIndex = cameras.findIndex((item) => item.id === camera.id);
-                      const targetIndex = currentIndex + offset;
-                      if (targetIndex >= 0 && targetIndex < cameras.length) {
-                        moveConfigCamera(camera.id, cameras[targetIndex].id, offset > 0);
-                        setSaveNotice({ state: "pending", text: `${camera.name || camera.id} moved to position ${targetIndex + 1}. Save order to apply.` });
-                      }
-                    }}
-                    onDragStart={(event) => {
-                      if (!cameraOrderEditing) return;
-                      setDragConfigCameraId(camera.id);
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("text/plain", camera.id);
-                    }}
-                    onDragOver={(event) => {
-                      if (!dragConfigCameraId || dragConfigCameraId === camera.id) return;
-                      event.preventDefault();
-                      const bounds = event.currentTarget.getBoundingClientRect();
-                      setDragConfigCameraTarget(camera.id);
-                      setDragConfigCameraAfter(event.clientY > bounds.top + bounds.height / 2);
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      const sourceId = event.dataTransfer.getData("text/plain") || dragConfigCameraId;
-                      const bounds = event.currentTarget.getBoundingClientRect();
-                      moveConfigCamera(sourceId, camera.id, event.clientY > bounds.top + bounds.height / 2);
-                      setDragConfigCameraId("");
-                      setDragConfigCameraTarget("");
-                    }}
-                    onDragEnd={() => {
-                      setDragConfigCameraId("");
-                      setDragConfigCameraTarget("");
-                    }}
-                  >
-                    {cameraOrderEditing ? <GripVertical size={16} /> : <Camera size={16} />}
-                    <span>{camera.name || camera.id}</span>
-                    {perCameraDirty[camera.id]?.settings || perCameraDirty[camera.id]?.zones
-                      ? <em className="camera-dirty-badge" aria-label="Unsaved changes">Edited</em>
-                      : null}
-                    <i className={`camera-status-dot${runtimeStatusById.get(camera.id)?.running ? " online" : ""}`} aria-hidden="true" />
-                  </button>
-                ))}
-              </div>
-            </section>
-            <section id="admin-panel-cameras" className="bento-card config-editor" aria-labelledby="admin-destination-cameras">
-              <div className="section-head">
-                <div><h2>{selectedCamera ? selectedCamera.name : "Camera Config"}</h2><p>Changes save to config.json; only structural motion or camera changes interrupt the affected camera</p></div>
-                {selectedCamera ? (
-                  <div className="camera-command-area">
-                    <div className="camera-command-bar">
+            <section id="admin-panel-cameras" className="bento-card config-editor settings-panel settings-panel-wide admin-workspace-cameras">
+              <div className="section-head camera-config-head">
+                <div><h2>{selectedCamera ? selectedCamera.name : "Cameras"}</h2><p>{selectedCamera ? "Changes save to config.json; only structural motion or camera changes interrupt the affected camera" : "Add cameras or choose one to configure"}</p></div>
+                <CameraScopePicker
+                  cameras={cameras}
+                  runtimeStatus={runtimeStatus}
+                  value={selectedCamera?.id || ""}
+                  onChange={selectConfigCamera}
+                  ariaLabel="Configure camera"
+                />
+                <div className="camera-command-area">
+                  <div className="camera-command-bar">
+                    {cameraOrderEditing ? (
+                      <>
+                        <button type="button" onClick={() => moveSelectedCameraBy(-1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) <= 0}>Up</button>
+                        <button type="button" onClick={() => moveSelectedCameraBy(1)} disabled={cameraOrderSaving || cameras.findIndex((camera) => camera.id === selectedCamera?.id) >= cameras.length - 1}>Down</button>
+                        <button type="button" onClick={cancelCameraOrderEdit} disabled={cameraOrderSaving}>Done</button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" onClick={startCameraOrderEdit}><GripVertical size={16} /> Edit Order</button>
+                        <button type="button" onClick={() => addCamera()}><Plus size={16} /> Add</button>
+                      </>
+                    )}
+                    {selectedCamera ? <>
                       <button type="button" onClick={() => cloneCamera(selectedCamera)} disabled={cameraSaving}><Copy size={16} /> Clone</button>
                       <button type="button" onClick={() => probeCamera(selectedCamera)} disabled={cameraSaving}><Radar size={16} /> Auto-detect</button>
                       <button type="button" className="danger" onClick={() => deleteCamera(selectedCamera)} disabled={cameraSaving}><Trash2 size={16} /> Remove</button>
-                    </div>
+                    </> : null}
                   </div>
-                ) : null}
+                </div>
               </div>
+
+              {cameraOrderEditing ? <section className="sub-panel camera-order-panel" aria-label="Camera order">
+                <div className="tree-list">
+                  {cameras.map((camera) => (
+                    <button
+                      type="button"
+                      aria-current={camera.id === selectedCamera?.id ? "page" : undefined}
+                      key={camera.id}
+                      draggable
+                      className={`ordering ${camera.id === selectedCamera?.id ? "active" : ""} ${dragConfigCameraTarget === camera.id ? (dragConfigCameraAfter ? "drag-after" : "drag-before") : ""}`}
+                      onClick={() => setSelectedId(camera.id)}
+                      onKeyDown={(event) => {
+                        if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+                        event.preventDefault();
+                        setSelectedId(camera.id);
+                        const offset = event.key === "ArrowUp" ? -1 : 1;
+                        const currentIndex = cameras.findIndex((item) => item.id === camera.id);
+                        const targetIndex = currentIndex + offset;
+                        if (targetIndex >= 0 && targetIndex < cameras.length) {
+                          moveConfigCamera(camera.id, cameras[targetIndex].id, offset > 0);
+                          setSaveNotice({ state: "pending", text: `${camera.name || camera.id} moved to position ${targetIndex + 1}. Save order to apply.` });
+                        }
+                      }}
+                      onDragStart={(event) => {
+                        setDragConfigCameraId(camera.id);
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", camera.id);
+                      }}
+                      onDragOver={(event) => {
+                        if (!dragConfigCameraId || dragConfigCameraId === camera.id) return;
+                        event.preventDefault();
+                        const bounds = event.currentTarget.getBoundingClientRect();
+                        setDragConfigCameraTarget(camera.id);
+                        setDragConfigCameraAfter(event.clientY > bounds.top + bounds.height / 2);
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const sourceId = event.dataTransfer.getData("text/plain") || dragConfigCameraId;
+                        const bounds = event.currentTarget.getBoundingClientRect();
+                        moveConfigCamera(sourceId, camera.id, event.clientY > bounds.top + bounds.height / 2);
+                        setDragConfigCameraId("");
+                        setDragConfigCameraTarget("");
+                      }}
+                      onDragEnd={() => {
+                        setDragConfigCameraId("");
+                        setDragConfigCameraTarget("");
+                      }}
+                    >
+                      <GripVertical size={16} />
+                      <span>{camera.name || camera.id}</span>
+                      {perCameraDirty[camera.id]?.settings || perCameraDirty[camera.id]?.zones
+                        ? <em className="camera-dirty-badge" aria-label="Unsaved changes">Edited</em>
+                        : null}
+                    </button>
+                  ))}
+                </div>
+              </section> : null}
 
               {selectedCamera ? <div id="camera-section-tabs" className="camera-section-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`} onKeyDown={(event) => moveTabFocus(event, CAMERA_ADMIN_SECTIONS, cameraSection, (next) => selectAdminSubsection(next, setCameraSection, "cameras"))}>
                 <button id="camera-tab-settings" data-tab-id="settings" tabIndex={cameraSection === "settings" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => selectAdminSubsection("settings", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
@@ -3566,7 +3579,7 @@ export function RetentionSummary({ status }) {
   );
 }
 
-export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], section }) {
+export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
   const [productUpdate, setProductUpdate] = useState(null);
@@ -3577,18 +3590,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
   const [apiTokenError, setApiTokenError] = useState("");
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
-  const validEvaluationModels = detectorModels.filter((model) => model.valid).sort((left, right) => String(left.path).localeCompare(String(right.path)));
-  const defaultBaselinePath = validEvaluationModels.filter((model) => String(model.path) < activeModelPath).at(-1)?.path
-    || validEvaluationModels.filter((model) => model.path !== activeModelPath).at(-1)?.path
-    || "";
-  const [modelEvaluationDraft, setModelEvaluationDraft] = useState({ baseline_path: "", candidate_path: "", sample_count: 200, confidence: 0.25 });
-  const [modelEvaluation, setModelEvaluation] = useState({ status: "idle" });
-  const [modelEvaluationError, setModelEvaluationError] = useState("");
-  const [modelEvaluationPreview, setModelEvaluationPreview] = useState(null);
-  const assistantRequestedAiProvider = new URLSearchParams(window.location.search).get("detail") === "ai-provider";
-  const [detectionSection, setDetectionSection] = useStoredState("survng.adminDetectionSection.v1", assistantRequestedAiProvider ? "ai" : "object", { preferInitial: assistantRequestedAiProvider });
-  const modelEvaluationDialogRef = useRef(null);
-  const modelEvaluationTriggerRef = useRef(null);
+  const [detectionSection, setDetectionSection] = useStoredState("survng.adminDetectionSection.v1", "object");
   const mediaLocations = config.media_storage?.locations || [];
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
@@ -3665,39 +3667,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   ].map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
 
-  function closeModelEvaluationPreview() {
-    setModelEvaluationPreview(null);
-    window.requestAnimationFrame(() => modelEvaluationTriggerRef.current?.isConnected && modelEvaluationTriggerRef.current.focus());
-  }
-
-  useEffect(() => {
-    if (!modelEvaluationPreview) return undefined;
-    const dialog = modelEvaluationDialogRef.current;
-    const focusable = () => [...(dialog?.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
-    window.requestAnimationFrame(() => focusable()[0]?.focus());
-    function handleKeyDown(event) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeModelEvaluationPreview();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const items = focusable();
-      if (!items.length) return;
-      const first = items[0];
-      const last = items.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [modelEvaluationPreview]);
-
   function selectOpenvinoModel(path) {
     updateConfig(["detector", "model_path"], path);
     updateConfig(["detector", "model_xml"], "");
@@ -3748,57 +3717,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       priority: 100,
       require_mount: true,
     }]);
-  }
-
-  useEffect(() => {
-    setModelEvaluationDraft((current) => ({
-      ...current,
-      candidate_path: current.candidate_path || activeModelPath,
-      baseline_path: current.baseline_path || defaultBaselinePath,
-    }));
-  }, [activeModelPath, defaultBaselinePath]);
-
-  useEffect(() => {
-    if (section !== "detection") return undefined;
-    let cancelled = false;
-    let timer;
-    const load = async () => {
-      try {
-        const response = await fetch("/api/detector/model-evaluation", { cache: "no-store" });
-        if (!response.ok) return;
-        const payload = await response.json();
-        if (cancelled) return;
-        setModelEvaluation(payload);
-        if (["queued", "running", "cancelling"].includes(payload.status)) timer = window.setTimeout(load, 1_000);
-      } catch {
-        // An evaluation result is optional configuration telemetry.
-      }
-    };
-    void load();
-    return () => { cancelled = true; if (timer) window.clearTimeout(timer); };
-  }, [section, modelEvaluation.status]);
-
-  async function startModelEvaluation() {
-    setModelEvaluationError("");
-    try {
-      const response = await fetch("/api/detector/model-evaluation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(modelEvaluationDraft),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Unable to start model evaluation.");
-      setModelEvaluation(payload);
-    } catch (error) {
-      setModelEvaluationError(error.message || "Unable to start model evaluation.");
-    }
-  }
-
-  async function cancelModelEvaluation() {
-    const response = await fetch("/api/detector/model-evaluation", { method: "DELETE" });
-    const payload = await response.json().catch(() => ({}));
-    if (response.ok) setModelEvaluation(payload);
-    else setModelEvaluationError(payload.detail || "Unable to cancel model evaluation.");
   }
 
   async function restartServer() {
@@ -4196,13 +4114,34 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
             {mqttStatus ? <div className={`probe-result ${mqttStatus.connected ? "ok" : ""}`}><strong>Connection details</strong><span>{mqttStatus.host || "No broker"}:{mqttStatus.port || 1883}</span><span>{mqttStatus.messages_published || 0} published · {mqttStatus.publish_failures || 0} publish failures</span><span>Commands: {mqttStatus.command_subscriptions_active ? "ready" : mqttStatus.connected ? "not subscribed" : "offline"} · {mqttStatus.commands_received || 0} accepted · {mqttStatus.commands_rejected || 0} rejected · {mqttStatus.command_errors || 0} failed · {mqttStatus.command_queue_depth || 0} queued</span>{mqttStatus.server_status_enabled ? <span>Server: {mqttStatus.server_lifecycle || "starting"} · {mqttStatus.server_state?.health || "pending"} · {mqttStatus.server_state?.activity || "idle"} · every {mqttStatus.server_metrics_interval_seconds || 30}s · {mqttStatus.server_state_topic}</span> : null}{mqttStatus.incident_events_enabled ? <span>Incidents: {mqttStatus.incident_topic} ({mqttStatus.pending_incidents || 0} pending)</span> : null}{mqttStatus.server_status_error ? <span>Server metrics: {mqttStatus.server_status_error}</span> : null}{mqttStatus.last_error ? <span>{mqttStatus.last_error}</span> : null}</div> : null}
           </section>
+          <section className="api-access-settings ai-provider-settings" id="ai-provider-settings">
+            <div className="detection-settings-subhead">
+              <div><strong>AI Provider</strong><small>Shared provider for the assistant, Motion Audit reviews, and Camera Advisor.</small></div>
+              <span className="admin-action-kind">Save settings to apply</span>
+            </div>
+            <div className="detection-field-grid">
+              <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /><span>AI features enabled</span></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.assistant_enabled ?? true} onChange={(event) => updateConfig(["audit_ai", "assistant_enabled"], event.target.checked)} disabled={!config.audit_ai?.enabled} /><span>SurvNG Assistant enabled</span></label>
+              <label>Provider<select value={config.audit_ai?.provider || "openai"} onChange={(event) => updateConfig(["audit_ai", "provider"], event.target.value)}>
+                <option value="openai">OpenAI</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="openai_compatible">OpenAI compatible</option>
+              </select></label>
+              <label>Everyday AI model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /><small>Used for Motion Audit reviews, finding incidents, status questions, and straightforward answers.</small></label>
+              <label>Detailed analysis model<input value={config.audit_ai?.assistant_reasoning_model || ""} onChange={(event) => updateConfig(["audit_ai", "assistant_reasoning_model"], event.target.value)} placeholder="Leave blank to use the everyday model" /><small>Optional second model for visual incident reviews, difficult diagnoses, comparisons, and tuning advice.</small></label>
+              <label>API Key<input type="password" value={secretInputValue(config.audit_ai?.api_key)} placeholder={secretInputHint(config.audit_ai?.api_key)} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
+              <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
+              <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /><span>Allow confirmed changes</span></label>
+            </div>
+          </section>
         </div>
       ) : null}
 
       {section === "detection" ? (
         <div className="detection-settings">
           <nav className="detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection"], ["models", "Models & Hardware"], ["tracking", "Tracking & ReID"], ["search", "Smart Search"], ["motion", "Motion Validation"], ["faces", "Face Recognition"], ["ai", "AI Provider"]].map(([value, label]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}>{label}</button>)}
+            {[["object", "Object Detection"], ["tracking", "Tracking & ReID"], ["search", "Smart Search"], ["motion", "Motion Validation"], ["faces", "Face Recognition"]].map(([value, label]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}>{label}</button>)}
           </nav>
           {detectionSection === "object" ? <section className="detection-settings-card primary">
             <header className="detection-settings-card-head">
@@ -4262,61 +4201,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </details>
           </section> : null}
 
-          {detectionSection === "models" ? <section className="detection-settings-card wide-card model-evaluation-card">
-            <header className="detection-settings-card-head">
-              <div className="detection-settings-card-icon"><Gauge size={18} /></div>
-              <div><h3>Model Evaluation</h3><p>Compare two models on the same recent clean incident images without changing production detection.</p></div>
-            </header>
-            <div className="detection-field-grid">
-              <label>Baseline model<select value={modelEvaluationDraft.baseline_path} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, baseline_path: event.target.value }))}>
-                <option value="">Select model</option>
-                {detectorModels.filter((model) => model.valid).map((model) => <option key={model.path} value={model.path}>{String(model.path).split("/").slice(-2, -1)[0] || model.name}</option>)}
-              </select></label>
-              <label>Candidate model<select value={modelEvaluationDraft.candidate_path} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, candidate_path: event.target.value }))}>
-                <option value="">Select model</option>
-                {detectorModels.filter((model) => model.valid).map((model) => <option key={model.path} value={model.path}>{String(model.path).split("/").slice(-2, -1)[0] || model.name}{model.path === activeModelPath ? " (active)" : ""}</option>)}
-              </select></label>
-              <label>Recent images<input type="number" min="10" max="500" step="10" value={modelEvaluationDraft.sample_count} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, sample_count: Number(event.target.value) }))} /><small>Round-robin sampled across cameras; 200 is a useful first pass.</small></label>
-              <label>Candidate threshold<input type="number" min="0.01" max="0.99" step="0.01" value={modelEvaluationDraft.confidence} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, confidence: Number(event.target.value) }))} /><small>Use the same low evidence threshold for both models.</small></label>
-            </div>
-            <div className="model-evaluation-actions">
-              <span className="admin-action-kind">Background task · does not change production</span>
-              <button type="button" className="primary" onClick={startModelEvaluation} disabled={!modelEvaluationDraft.baseline_path || !modelEvaluationDraft.candidate_path || ["queued", "running", "cancelling"].includes(modelEvaluation.status)}><Activity size={15} />Run comparison</button>
-              {["queued", "running", "cancelling"].includes(modelEvaluation.status) ? <button type="button" onClick={cancelModelEvaluation} disabled={modelEvaluation.status === "cancelling"}><X size={15} />Cancel</button> : null}
-              <span className={`model-evaluation-state ${modelEvaluation.status}`}>{String(modelEvaluation.status || "idle").replaceAll("_", " ")}{modelEvaluation.progress?.total ? ` · ${modelEvaluation.progress.completed}/${modelEvaluation.progress.total}` : ""}</span>
-            </div>
-            <p className="settings-help">Runs sequentially at low priority from the user’s perspective, but shares the configured accelerator with production detection. Start with 200 images and run during a quiet period.</p>
-            {modelEvaluationError || modelEvaluation.error ? <div className="error-banner">{modelEvaluationError || modelEvaluation.error}</div> : null}
-            {modelEvaluation.result ? <div className="model-evaluation-results">
-              <div className="model-evaluation-summary">
-                <span><strong>{modelEvaluation.result.sample_count}</strong> images</span>
-                <span><strong>{modelEvaluation.result.camera_count}</strong> cameras</span>
-                <span><strong>{modelEvaluation.result.source_counts?.incident || 0}</strong> incidents</span>
-                <span><strong>{modelEvaluation.result.source_counts?.motion_audit || 0}</strong> negatives</span>
-                <span><strong>{modelEvaluation.result.disagreement_frames}</strong> disagreements</span>
-                <span><strong>{modelEvaluation.result.candidate.average_ms} ms</strong> candidate average</span>
-                <span><strong>{modelEvaluation.result.candidate.p95_ms} ms</strong> candidate p95</span>
-              </div>
-              <div className="model-evaluation-models">
-                {[['Baseline', modelEvaluation.result.baseline], ['Candidate', modelEvaluation.result.candidate]].map(([label, result]) => <div key={label}><strong>{label}</strong><span>{String(result.path).split("/").slice(-2, -1)[0]}</span><span>{result.frames_with_objects} frames with objects</span><span>{result.average_ms} ms average · {result.p95_ms} ms p95</span><span>{Object.entries(result.label_counts || {}).map(([name, count]) => `${name} ${count}`).join(" · ") || "No detections"}</span></div>)}
-              </div>
-              <p className="settings-help">Stored-evidence recall is diagnostic, not verified accuracy: baseline {modelEvaluation.result.stored_evidence_recall?.baseline ?? "—"}, candidate {modelEvaluation.result.stored_evidence_recall?.candidate ?? "—"}. Review disagreements before promoting a model.</p>
-              {modelEvaluation.result.disagreements?.length ? <div className="model-evaluation-disagreements">
-                {modelEvaluation.result.disagreements.map((item) => <article key={`${item.source_kind}-${item.source_id}`}>
-                  <button type="button" className="model-evaluation-image-button" onClick={(event) => { modelEvaluationTriggerRef.current = event.currentTarget; setModelEvaluationPreview(item); }} aria-label={`Enlarge ${item.camera_id} comparison image`}><img src={appUrl(item.image_url)} alt="" loading="lazy" /></button>
-                  <span><strong>{item.camera_id}</strong><small>{item.source_kind === "motion_audit" ? "Motion audit negative" : "Incident"} · {item.created_at}</small><small>Old: {item.baseline_labels.join(", ") || "none"}</small><small>New: {item.candidate_labels.join(", ") || "none"}</small><a href={appUrl(item.source_kind === "motion_audit" ? `/admin?section=audit&audit_id=${item.source_id}` : `/incidents?event_ids=${item.event_id}`)}>Open {item.source_kind === "motion_audit" ? "audit" : "incident"}</a></span>
-                </article>)}
-              </div> : <div className="probe-result ok"><strong>No label disagreements</strong><span>Both models returned the same label sets on this corpus.</span></div>}
-            </div> : null}
-            {modelEvaluationPreview ? <div className="model-evaluation-preview" role="presentation">
-              <button type="button" className="live-overlay-backdrop" onClick={closeModelEvaluationPreview} aria-label="Close comparison image" />
-              <section ref={modelEvaluationDialogRef} role="dialog" aria-modal="true" aria-labelledby="model-evaluation-preview-title">
-                <header><div><strong id="model-evaluation-preview-title">{modelEvaluationPreview.camera_id}</strong><small>{modelEvaluationPreview.created_at}</small></div><button type="button" className="icon-only" onClick={closeModelEvaluationPreview} aria-label="Close comparison image"><X size={19} /></button></header>
-                <img src={appUrl(modelEvaluationPreview.image_url)} alt={`${modelEvaluationPreview.camera_id} model comparison source`} />
-                <footer><span><strong>Old</strong> {modelEvaluationPreview.baseline_labels.join(", ") || "none"}</span><span><strong>New</strong> {modelEvaluationPreview.candidate_labels.join(", ") || "none"}</span><a className="primary" href={appUrl(modelEvaluationPreview.source_kind === "motion_audit" ? `/admin?section=audit&audit_id=${modelEvaluationPreview.source_id}` : `/incidents?event_ids=${modelEvaluationPreview.event_id}`)}>Open {modelEvaluationPreview.source_kind === "motion_audit" ? "audit" : "incident"}</a></footer>
-              </section>
-            </div> : null}
-          </section> : null}
 
           {detectionSection === "object" ? <section className="detection-settings-card detection-feature-card wide-card">
             <header className="detection-settings-card-head">
@@ -4495,25 +4379,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
           </details> : null}
 
-          {detectionSection === "ai" ? <details className="detection-settings-card detection-feature-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><Sparkles size={18} /></span><span><strong>AI analysis &amp; assistant</strong><small>One provider and API key, with your existing analysis model plus an optional deep-reasoning model.</small></span></summary>
-            <div className="detection-feature-body detection-field-grid">
-              <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /><span>AI features enabled</span></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.assistant_enabled ?? true} onChange={(event) => updateConfig(["audit_ai", "assistant_enabled"], event.target.checked)} disabled={!config.audit_ai?.enabled} /><span>SurvNG Assistant enabled</span></label>
-              <label>Provider<select value={config.audit_ai?.provider || "openai"} onChange={(event) => updateConfig(["audit_ai", "provider"], event.target.value)}>
-                <option value="openai">OpenAI</option>
-                <option value="gemini">Google Gemini</option>
-                <option value="openai_compatible">OpenAI compatible</option>
-              </select></label>
-              <label>Everyday AI model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /><small>Used for Motion Audit reviews, finding incidents, status questions, and straightforward answers.</small></label>
-              <label>Detailed analysis model<input value={config.audit_ai?.assistant_reasoning_model || ""} onChange={(event) => updateConfig(["audit_ai", "assistant_reasoning_model"], event.target.value)} placeholder="Leave blank to use the everyday model" /><small>Optional second model for visual incident reviews, difficult diagnoses, comparisons, and tuning advice.</small></label>
-              <label>API Key<input type="password" value={secretInputValue(config.audit_ai?.api_key)} placeholder={secretInputHint(config.audit_ai?.api_key)} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
-              <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
-              <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /><span>Allow confirmed changes</span></label>
-            </div>
-          </details> : null}
-
           {detectionSection === "faces" ? <details className="detection-settings-card detection-feature-card wide-card" open>
             <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Face recognition</strong><small>Identify detected faces using a separate embedding model.</small></span></summary>
             <div className="detection-feature-body detection-field-grid">
@@ -4534,52 +4399,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label>Minimum Lead Over Next Person<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_margin ?? 0.12} onChange={(event) => updateConfig(["detector", "face_auto_identify_margin"], Number(event.target.value))} /></label>
             </div>
           </details> : null}
-
-          {detectionSection === "models" ? <details className="detection-settings-card detection-feature-card diagnostics-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><Cpu size={18} /></span><span><strong>Model &amp; accelerator diagnostics</strong><small>Loaded model metadata and available processing hardware.</small></span></summary>
-            <div className="detection-feature-body diagnostics-grid">
-              {activeModel ? (
-                <div className={`probe-result ${activeModel.valid ? "ok" : "bad"}`}>
-                  <strong>{activeModel.valid ? "OpenVINO IR ready" : "OpenVINO IR incomplete"}</strong>
-                  <span>XML: {activeModel.path}</span>
-                  <span>Weights: {activeModel.bin_present ? activeModel.bin_path : "matching .bin file not found"}</span>
-                  <span>Input: {activeModel.input_shape.join(" x ") || "unknown"}</span>
-                  <span>Output: {activeModel.output_shapes.map((shape) => shape.join(" x ")).join(", ") || "unknown"}</span>
-                  <span>Task: {activeModel.task || "detect"}</span>
-                  <span>Classes: {activeModel.classes.join(", ") || "none found"}</span>
-                  {activeModel.error ? <span>{activeModel.error}</span> : null}
-                </div>
-              ) : null}
-              {detectorBackend === "coreml" ? (
-                <div className="detection-field-grid">
-                  <label>Core ML Model Path<input value={config.detector?.coreml_model_path || ""} onChange={(event) => updateConfig(["detector", "coreml_model_path"], event.target.value)} placeholder="model.mlpackage or model.mlmodel" /></label>
-                </div>
-              ) : null}
-              <div className="probe-result">
-                <strong>Accelerator</strong>
-                <span>System: {accelerator ? `${accelerator.system} ${accelerator.machine}` : "checking..."}</span>
-                <span>Detector recommendation: {accelerator?.recommended_detector_backend === "coreml" ? "Core ML" : "OpenVINO / ONNX"}</span>
-                <span>{coremlLabel}</span>
-                <span>OpenVINO devices: {openvinoDevices.length ? openvinoDevices.join(", ") : "none reported"}</span>
-                <span>{gpuLabel}</span>
-                <span>FFmpeg acceleration: {ffmpegAcceleration.configured || config.hardware_acceleration || "auto"}</span>
-                <span>FFmpeg: {ffmpegAcceleration.ffmpeg_path || accelerator?.ffmpeg_path || config.ffmpeg_path || "ffmpeg"}</span>
-                <span>FFprobe: {ffmpegAcceleration.ffprobe_path || accelerator?.ffprobe_path || "ffprobe"}</span>
-                <span>FFplay: {ffmpegAcceleration.ffplay_path || accelerator?.ffplay_path || "ffplay"}</span>
-                <span>{vaapiLabel}</span>
-                {vaapi.render_devices?.length ? <span>VAAPI render devices: {vaapi.render_devices.join(", ")}</span> : null}
-                {vaapi.filters?.length ? <span>VAAPI filters: {vaapi.filters.join(", ")}</span> : null}
-                {vaapi.runtime_error ? <span>VAAPI runtime: {vaapi.runtime_error}</span> : null}
-                <span>{qsvLabel}</span>
-                {qsv.render_devices?.length ? <span>QSV render devices: {qsv.render_devices.join(", ")}</span> : null}
-                {qsv.decoders?.length ? <span>QSV decoders: {qsv.decoders.join(", ")}</span> : null}
-                {qsv.runtime_error ? <span>QSV runtime: {qsv.runtime_error}</span> : null}
-                {accelerator?.recommended_openvino_device ? <span>Recommended OpenVINO device: {accelerator.recommended_openvino_device}</span> : null}
-                {accelerator?.coreml_error ? <span>{accelerator.coreml_error}</span> : null}
-                {accelerator?.openvino_error ? <span>{accelerator.openvino_error}</span> : null}
-              </div>
-            </div>
-          </details> : null}
         </div>
       ) : null}
 
@@ -4588,8 +4407,8 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           cameras={config.cameras || []}
           runtimeStatus={runtimeStatus}
           advisorEnabled={config.audit_ai?.enabled ?? false}
-          cameraId={selectedId}
-          onCameraIdChange={setSelectedId}
+          cameraId={advisorCameraId}
+          onCameraIdChange={onAdvisorCameraIdChange}
         />
       ) : null}
     </div>
