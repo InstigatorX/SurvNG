@@ -78,6 +78,19 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("git pull --ff-only", text)
         self.assertIn("docker compose", text)
 
+    def test_github_runner_cleanup_script_is_executable(self) -> None:
+        script = ROOT / "scripts" / "github-runner-cleanup.sh"
+        self.assertTrue(script.is_file())
+        self.assertTrue(os.access(script, os.X_OK))
+        result = subprocess.run(
+            [str(script), "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("--aggressive", result.stdout)
+        self.assertTrue((ROOT / ".github/workflows/runner-maintenance.yml").is_file())
+
     def test_lxc_override_is_explicit_and_not_part_of_default_compose(self) -> None:
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
         lxc_override = (ROOT / "compose.lxc.yaml").read_text(encoding="utf-8")

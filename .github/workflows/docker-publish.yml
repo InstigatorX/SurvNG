@@ -46,14 +46,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free runner disk space
-        run: |
-          set -euo pipefail
-          df -h /
-          docker system df || true
-          docker builder prune -af || true
-          docker image prune -af --filter "until=24h" || true
-          docker container prune -f || true
-          df -h /
+        run: scripts/github-runner-cleanup.sh --standard
 
       # Self-hosted runners may lack docker-buildx. Keep the default (legacy)
       # builder; the Dockerfile avoids BuildKit-only features like COPY --chmod.
@@ -94,4 +87,4 @@ jobs:
             echo "Pushed ${tag}"
           done
           docker rmi "${primary}" $(printf ' %s' "${tags[@]:1}") 2>/dev/null || true
-          docker builder prune -af || true
+          scripts/github-runner-cleanup.sh --standard
