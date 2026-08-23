@@ -1,12 +1,13 @@
 /* Unified Admin workspace */
 .settings-grid {
   --admin-navigation-width: 224px;
+  --admin-command-height: 52px;
   position: relative;
   display: grid;
   height: calc(100dvh - var(--topbar-height, 58px));
   min-height: 0;
   grid-template-columns: var(--admin-navigation-width) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: var(--admin-command-height) minmax(0, 1fr);
   align-items: stretch;
   gap: 0;
   overflow: hidden;
@@ -17,7 +18,7 @@
 .admin-navigation {
   z-index: 6;
   grid-column: 1;
-  grid-row: 1;
+  grid-row: 1 / -1;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -130,9 +131,104 @@
   display: none;
 }
 
-.admin-workspace-surface {
+.admin-command-bar {
+  z-index: 5;
   grid-column: 2;
   grid-row: 1;
+  display: flex;
+  min-width: 0;
+  min-height: var(--admin-command-height);
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--topbar);
+  padding: 6px 12px;
+}
+
+.admin-command-scope,
+.admin-command-meta,
+.admin-command-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-command-scope {
+  flex: 0 1 auto;
+}
+
+.admin-command-meta {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.admin-command-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.admin-command-label {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  padding: 0 2px;
+}
+
+.admin-command-label strong {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -.015em;
+}
+
+.admin-command-bar .section-title-picker .timeline-camera-picker-toggle {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: var(--workspace-control-radius);
+  background: var(--control);
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.admin-command-bar .telemetry-header-continuity {
+  max-width: min(720px, 100%);
+  margin-left: 0;
+}
+
+.admin-command-bar .camera-command-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.admin-command-bar .camera-command-bar button {
+  min-height: 38px;
+}
+
+.admin-command-bar .log-command-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-command-bar .maintenance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.admin-workspace-surface {
+  grid-column: 2;
+  grid-row: 2;
   display: grid;
   min-width: 0;
   min-height: 0;
@@ -227,7 +323,7 @@
 .admin-save-bar {
   z-index: 12;
   grid-column: 2;
-  grid-row: 1;
+  grid-row: 2;
   align-self: end;
   display: flex;
   min-width: 0;
@@ -335,6 +431,25 @@
     background: color-mix(in srgb, var(--topbar) 96%, transparent);
     padding: 6px 9px;
     backdrop-filter: blur(14px);
+  }
+
+  .admin-command-bar {
+    position: sticky;
+    z-index: 7;
+    top: 56px;
+    flex-wrap: wrap;
+    min-height: 52px;
+    padding: 8px 9px;
+  }
+
+  .admin-command-meta {
+    flex: 1 1 100%;
+    order: 3;
+    justify-content: flex-start;
+  }
+
+  .admin-command-actions {
+    margin-left: auto;
   }
 
   .admin-mobile-toolbar>button {
