@@ -20,7 +20,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     SURVNG_CONFIG_PATH=/config/config.json
 
-RUN apt-get update \
+COPY docker/add-apt-ppa-retry.sh /usr/local/bin/add-apt-ppa-retry
+
+RUN chmod 755 /usr/local/bin/add-apt-ppa-retry \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -34,7 +37,7 @@ RUN apt-get update \
         python3-venv \
         software-properties-common \
         tini \
-    && add-apt-repository -y ppa:ubuntuhandbook1/ffmpeg8 \
+    && /usr/local/bin/add-apt-ppa-retry ppa:ubuntuhandbook1/ffmpeg8 \
     && apt-get update \
     && apt-get install -y --no-install-recommends "ffmpeg=${FFMPEG_VERSION}" \
     && apt-mark hold ffmpeg \
@@ -93,7 +96,7 @@ ARG INTEL_VPL_VERSION=1:2.16.0-1~24.04~ppa1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         software-properties-common \
-    && add-apt-repository -y ppa:kobuk-team/intel-graphics \
+    && /usr/local/bin/add-apt-ppa-retry ppa:kobuk-team/intel-graphics \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         "intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}" \
