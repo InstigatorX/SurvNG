@@ -52,9 +52,10 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { insertZonePointWithIndex } from "../zoneGeometry.mjs";
-import { ADMIN_RESPONSIBILITY_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, nextTabId, readAdminSubsection, readAdminWorkspace } from "../adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, perCameraDirtyState, readAdminSubsection, readAdminWorkspace } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
+import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
 import { secretInputValue, secretInputHint } from "../shared/secrets.js";
 import { formatDateTime, formatTimeOnly, formatBytes, formatMilliseconds, formatAge, formatDuration, formatCompactDuration } from "../shared/format.js";
 import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hooks.js";
@@ -1080,7 +1081,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [auditItems, setAuditItems] = useState([]);
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(0);
-  const [auditCamera, setAuditCamera] = useStoredState("survng.motionAuditCamera.v1", "");
+  const [auditCamera, setAuditCamera] = useState(() => {
+    const fromUrl = initialAdminParams.get("camera") || "";
+    if (fromUrl) return fromUrl;
+    return readStoredValue(browserStorage(window), "survng.motionAuditCamera.v1", "");
+  });
   const [auditCategory, setAuditCategory] = useStoredState("survng.motionAuditCategory.v1", "all");
   const [auditOutcome, setAuditOutcome] = useStoredState("survng.motionAuditOutcome.v1", "all");
   const [auditLoading, setAuditLoading] = useState(false);
@@ -1090,7 +1095,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [telemetry, setTelemetry] = useState(null);
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryError, setTelemetryError] = useState("");
-  const [telemetrySection, setTelemetrySection] = useStoredState("survng.telemetrySection.v1", readAdminSubsection(initialAdminSearch, TELEMETRY_ADMIN_SECTIONS, "overview"), { preferInitial: initialAdminWorkspace === "telemetry" && initialAdminParams.has("subsection") });
+  const [telemetrySection, setTelemetrySection] = useStoredState("survng.telemetrySection.v1", readAdminSubsection(
+    initialAdminSearch,
+    TELEMETRY_ADMIN_SECTIONS,
+    initialAdminParams.get("camera") ? "cameras" : "overview",
+  ), { preferInitial: initialAdminWorkspace === "telemetry" && (initialAdminParams.has("subsection") || initialAdminParams.has("camera")) });
   const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", initialAdminParams.get("camera") || "", { preferInitial: initialAdminWorkspace === "telemetry" && initialAdminParams.has("camera") });
   const [diagnosticScope, setDiagnosticScope] = useState("system");
   const [diagnosticDuration, setDiagnosticDuration] = useState("3600");
@@ -1114,6 +1123,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     };
     if (section === "cameras") return { subsection: cameraSection === "settings" ? "" : cameraSection, camera: selectedId };
     if (section === "telemetry") return { subsection: telemetrySection === "overview" ? "" : telemetrySection, camera: telemetrySection === "cameras" ? telemetryCamera : "" };
+    if (section === "audit") return { camera: auditCamera };
     return {};
   }
 
@@ -1134,7 +1144,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     const location = appUrl(`/admin${search}`);
     window.history.replaceState(window.history.state, "", location);
     acceptedAdminLocationRef.current = location;
-  }, [cameraSection, generalSection, selectedId, settingsTab, telemetryCamera, telemetrySection]);
+  }, [auditCamera, cameraSection, generalSection, selectedId, settingsTab, telemetryCamera, telemetrySection]);
 
   useEffect(() => {
     function restoreAdminWorkspace() {
@@ -1163,6 +1173,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       if (nextSection === "telemetry") {
         setTelemetrySection(readAdminSubsection(window.location.search, TELEMETRY_ADMIN_SECTIONS, telemetrySection));
         setTelemetryCamera(new URLSearchParams(window.location.search).get("camera") || telemetryCamera);
+      }
+      if (nextSection === "audit") {
+        setAuditCamera(new URLSearchParams(window.location.search).get("camera") || "");
       }
       acceptedAdminLocationRef.current = requestedLocation;
     }
@@ -1533,6 +1546,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const selectedCameraSettingsDirty = Boolean(selectedCamera) && !configValuesEqual(comparableCameraSettings(selectedCamera), comparableCameraSettings(baselineCamera));
   const selectedZonesDirty = Boolean(selectedCamera) && !configValuesEqual(selectedCamera.zones || [], baselineCamera?.zones || []);
   const cameraDirtyState = cameraConfigDirtyState(config?.cameras || [], baselineConfig?.cameras || []);
+  const perCameraDirty = perCameraDirtyState(config?.cameras || [], baselineConfig?.cameras || []);
+  const dirtyCamerasCount = dirtyCameraCount(perCameraDirty);
+  const runtimeStatusById = useMemo(
+    () => new Map(runtimeStatus.map((item) => [item.id, item])),
+    [runtimeStatus],
+  );
   const cameraSettingsDirty = Boolean(config && baselineConfig) && cameraDirtyState.settings;
   const zonesDirty = Boolean(config && baselineConfig) && cameraDirtyState.zones;
   const cameraOrderDirty = Boolean(config && baselineConfig) && !configValuesEqual(
@@ -1544,18 +1563,29 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const currentAdminDirty = settingsTab === "general"
     ? generalDirty
     : settingsTab === "cameras"
-      ? selectedCameraSettingsDirty || selectedZonesDirty || cameraOrderDirty
+      ? cameraSettingsDirty || zonesDirty || cameraOrderDirty
       : false;
   const currentAdminSaving = generalSaving || cameraSaving || zonesSaving || cameraOrderSaving;
+  const adminSaveStatusTitle = currentAdminSaving
+    ? "Saving changes"
+    : currentAdminDirty
+      ? settingsTab === "cameras" && dirtyCamerasCount > 1
+        ? `${dirtyCamerasCount} cameras with unsaved changes`
+        : "Unsaved changes"
+      : saveNotice?.state === "error"
+        ? "Save failed"
+        : "Changes saved";
   const adminSaveAvailable = settingsTab === "general" || settingsTab === "cameras";
   const adminSaveImpact = settingsTab === "cameras"
-    ? selectedCameraSettingsDirty
-      ? "Camera settings save independently; only structural changes reload the affected camera worker."
-      : selectedZonesDirty
-        ? "Zone changes apply without restarting camera workers."
-        : cameraOrderDirty
-          ? "Camera order changes the interface only and does not restart camera workers."
-          : "Camera changes use scoped saves and avoid unnecessary worker restarts."
+    ? dirtyCamerasCount > 1
+      ? "Saving will apply changes to each edited camera independently."
+      : selectedCameraSettingsDirty
+        ? "Camera settings save independently; only structural changes reload the affected camera worker."
+        : selectedZonesDirty
+          ? "Zone changes apply without restarting camera workers."
+          : cameraOrderDirty
+            ? "Camera order changes the interface only and does not restart camera workers."
+            : "Camera changes use scoped saves and avoid unnecessary worker restarts."
     : "Settings apply selectively; the confirmation will identify any subsystem or camera worker that reloaded.";
   adminDirtyRef.current = adminDirty;
   apiTokenSecretVisibleRef.current = apiTokenSecretVisible;
@@ -1615,21 +1645,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
   function selectConfigCamera(cameraId) {
     if (cameraId === selectedCamera?.id) return;
-    if ((selectedCameraSettingsDirty || selectedZonesDirty) && !window.confirm("Switch cameras and discard unsaved changes for this camera?")) return;
-    if (selectedCameraSettingsDirty || selectedZonesDirty) {
-      const restoredCamera = baselineConfigRef.current?.cameras?.find((camera) => camera.id === selectedCamera?.id);
-      if (restoredCamera) {
-        setConfig((current) => ({
-          ...current,
-          cameras: (current.cameras || []).map((camera) => camera.id === selectedCamera.id ? structuredClone(restoredCamera) : camera),
-        }));
-      } else {
-        setConfig((current) => ({
-          ...current,
-          cameras: (current.cameras || []).filter((camera) => camera.id !== selectedCamera?.id),
-        }));
-      }
-    }
     setSelectedId(cameraId);
     setProbe(null);
     const search = adminWorkspaceSearch("cameras", window.location.search, { subsection: cameraSection === "settings" ? "" : cameraSection, camera: cameraId });
@@ -1637,6 +1652,18 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     window.history.pushState({ ...(window.history.state || {}), survngAdminCamera: cameraId }, "", location);
     acceptedAdminLocationRef.current = location;
     adminHistoryWriteRef.current = false;
+  }
+
+  function selectAuditCamera(nextCameraId) {
+    setAuditCamera(nextCameraId);
+    setAuditPage(0);
+    browserStorage(window)?.setItem("survng.motionAuditCamera.v1", nextCameraId);
+  }
+
+  function selectTelemetryScopeCamera(nextCameraId) {
+    setTelemetryCamera(nextCameraId);
+    if (telemetrySection !== "cameras") setTelemetrySection("cameras");
+    selectAdminSubsection("cameras", setTelemetrySection, "telemetry", nextCameraId);
   }
 
   function updateConfig(path, value) {
@@ -1922,9 +1949,14 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       if (generalDirty) await save();
       return;
     }
-    if (settingsTab !== "cameras" || !selectedCamera) return;
-    if (selectedCameraSettingsDirty && !await saveCamera(selectedCamera)) return;
-    if (selectedZonesDirty && !await saveZones(selectedCamera)) return;
+    if (settingsTab !== "cameras") return;
+    const dirtyMap = perCameraDirtyState(config?.cameras || [], baselineConfigRef.current?.cameras || []);
+    for (const camera of config?.cameras || []) {
+      const dirty = dirtyMap[camera.id];
+      if (!dirty) continue;
+      if (dirty.settings && !await saveCamera(camera)) return;
+      if (dirty.zones && !await saveZones(camera)) return;
+    }
     if (cameraOrderDirty) await saveCameraOrder();
   }
 
@@ -2055,6 +2087,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 mqttStatus={mqttStatus}
                 detectorStatus={detectorStatus}
                 motionCatalog={motionCatalog}
+                runtimeStatus={runtimeStatus}
                 section={generalSection}
               />
             </section>
@@ -2064,10 +2097,14 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             <section className="bento-card camera-tree config-tree settings-section-tree motion-audit-filters">
               <div className="section-head compact"><div><h2>Motion Audit</h2><p>{auditTotal.toLocaleString()} matching decisions</p></div></div>
               <div className="motion-audit-filter-fields">
-                <label>Camera<select value={auditCamera} onChange={(event) => { setAuditCamera(event.target.value); setAuditPage(0); }}>
-                  <option value="">All cameras</option>
-                  {cameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}
-                </select></label>
+                <CameraScopePicker
+                  cameras={cameras}
+                  runtimeStatus={runtimeStatus}
+                  value={auditCamera}
+                  onChange={selectAuditCamera}
+                  allOption={{ value: "", label: "All cameras" }}
+                  ariaLabel="Motion Audit camera"
+                />
                 <label>Category<select value={auditCategory} onChange={(event) => { setAuditCategory(event.target.value); setAuditPage(0); }}>
                   <option value="all">All categories</option>
                   <option value="visual_backup">Visual backup</option>
@@ -2108,15 +2145,18 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           <CalibrationLab cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} />
         ) : settingsTab === "telemetry" ? (
           <>
-            {telemetrySection === "cameras" ? <section className="bento-card camera-tree config-tree settings-section-tree telemetry-camera-filter">
-              <div className="section-head compact"><div><h2>Cameras</h2><p>Select for camera statistics</p></div></div>
-              <div className="tree-list">
-                {cameras.map((camera) => <button type="button" className={telemetrySection === "cameras" && selectedTelemetryCamera === camera.id ? "active" : ""} aria-pressed={telemetrySection === "cameras" && selectedTelemetryCamera === camera.id} key={camera.id} onClick={() => { setTelemetryCamera(camera.id); selectAdminSubsection("cameras", setTelemetrySection, "telemetry", camera.id); }}><Camera size={16} /><span>{camera.name || camera.id}</span></button>)}
-              </div>
-            </section> : null}
-            <section id="admin-panel-telemetry" className={`bento-card config-editor settings-panel telemetry-panel${telemetrySection === "cameras" ? "" : " settings-panel-wide"}`} aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
+            <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
               <div className="section-head telemetry-panel-head">
                 <div><h2>Telemetry</h2><p>System, detection, event, and camera health</p></div>
+                {telemetrySection === "cameras" ? (
+                  <CameraScopePicker
+                    cameras={cameras}
+                    runtimeStatus={runtimeStatus}
+                    value={selectedTelemetryCamera}
+                    onChange={selectTelemetryScopeCamera}
+                    ariaLabel="Telemetry camera"
+                  />
+                ) : null}
                 {telemetrySection === "overview" ? <TelemetryContinuity data={telemetry} /> : null}
                 <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
               </div>
@@ -2131,7 +2171,15 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                   <div className="telemetry-section-head"><div><h3>Temporary diagnostics</h3><p>Capture detailed troubleshooting data for a limited time. Sessions stop automatically and never include images, video, or credentials.</p></div></div>
                   <div className="telemetry-diagnostic-controls">
                     <label><span>Scope</span><select value={diagnosticScope} onChange={(event) => setDiagnosticScope(event.target.value)}><option value="system">Entire system</option><option value="detector">Object detector</option><option value="storage">Storage</option><option value="camera">One camera</option></select></label>
-                    {diagnosticScope === "camera" ? <label><span>Camera</span><select value={selectedTelemetryCamera} onChange={(event) => setTelemetryCamera(event.target.value)}>{cameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}</select></label> : null}
+                    {diagnosticScope === "camera" ? (
+                      <CameraScopePicker
+                        cameras={cameras}
+                        runtimeStatus={runtimeStatus}
+                        value={selectedTelemetryCamera}
+                        onChange={setTelemetryCamera}
+                        ariaLabel="Diagnostics camera"
+                      />
+                    ) : null}
                     <label><span>Duration</span><select value={diagnosticDuration} onChange={(event) => setDiagnosticDuration(event.target.value)}><option value="900">15 minutes</option><option value="3600">1 hour</option><option value="21600">6 hours</option><option value="86400">24 hours</option></select></label>
                     <button type="button" className="primary" onClick={() => void startTelemetryDiagnostics()} disabled={diagnosticScope === "camera" && !selectedTelemetryCamera}>Start diagnostics</button>
                   </div>
@@ -2241,6 +2289,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                   >
                     {cameraOrderEditing ? <GripVertical size={16} /> : <Camera size={16} />}
                     <span>{camera.name || camera.id}</span>
+                    {perCameraDirty[camera.id]?.settings || perCameraDirty[camera.id]?.zones
+                      ? <em className="camera-dirty-badge" aria-label="Unsaved changes">Edited</em>
+                      : null}
+                    <i className={`camera-status-dot${runtimeStatusById.get(camera.id)?.running ? " online" : ""}`} aria-hidden="true" />
                   </button>
                 ))}
               </div>
@@ -2438,7 +2490,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       {adminSaveAvailable ? <div className={`admin-save-bar${currentAdminDirty ? " dirty" : ""}`} role="region" aria-label="Save Admin changes">
         <div className="admin-save-state" role="status" aria-live="polite">
           {saveNotice?.state === "error" ? <CircleAlert size={17} /> : currentAdminSaving ? <RefreshCcw className="spin" size={17} /> : <CircleDot size={17} />}
-          <span><strong>{currentAdminSaving ? "Saving changes" : currentAdminDirty ? "Unsaved changes" : saveNotice?.state === "error" ? "Save failed" : "Changes saved"}</strong><small>{saveNotice?.state === "error" ? saveNotice.text : currentAdminDirty ? adminSaveImpact : saveNotice?.text || adminSaveImpact}</small></span>
+          <span><strong>{adminSaveStatusTitle}</strong><small>{saveNotice?.state === "error" ? saveNotice.text : currentAdminDirty ? adminSaveImpact : saveNotice?.text || adminSaveImpact}</small></span>
         </div>
         <div className="admin-save-actions">
           <button type="button" onClick={discardAdminChanges} disabled={!currentAdminDirty || currentAdminSaving}>Discard</button>
@@ -3187,7 +3239,7 @@ export function ProbeResult({ probe }) {
   );
 }
 
-export function MotionAiReviewPanel({ cameras, advisorEnabled, cameraId: controlledCameraId = "", onCameraIdChange = null }) {
+export function MotionAiReviewPanel({ cameras, runtimeStatus = [], advisorEnabled, cameraId: controlledCameraId = "", onCameraIdChange = null }) {
   const [cameraId, setCameraId] = useState(controlledCameraId || cameras[0]?.id || "");
   const [hours, setHours] = useState(24);
   const [imageLimit, setImageLimit] = useState(12);
@@ -3372,9 +3424,14 @@ export function MotionAiReviewPanel({ cameras, advisorEnabled, cameraId: control
       <h3>Camera Intelligence</h3>
       <p className="settings-help">Review how one camera has performed across recent incidents and motion decisions. SurvNG deliberately samples successes, possible misses, visual rescues, and filtered motion, then recommends a change only when multiple images support it. Nothing is applied automatically.</p>
       <div className="field-row motion-ai-review-controls">
-        <label>Camera<select value={cameraId} onChange={(event) => selectCamera(event.target.value)} disabled={running}>
-          {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>)}
-        </select></label>
+        <CameraScopePicker
+          cameras={cameras}
+          runtimeStatus={runtimeStatus}
+          value={cameraId}
+          onChange={selectCamera}
+          ariaLabel="Camera Advisor camera"
+          disabled={running}
+        />
         <label>Review period<select value={hours} onChange={(event) => setHours(Number(event.target.value))} disabled={running}>
           <option value={24}>Last 24 hours</option>
           <option value={72}>Last 3 days</option>
@@ -3509,7 +3566,7 @@ export function RetentionSummary({ status }) {
   );
 }
 
-export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, section }) {
+export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
   const [productUpdate, setProductUpdate] = useState(null);
@@ -4529,6 +4586,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       {section === "motion-review" ? (
         <MotionAiReviewPanel
           cameras={config.cameras || []}
+          runtimeStatus={runtimeStatus}
           advisorEnabled={config.audit_ai?.enabled ?? false}
           cameraId={selectedId}
           onCameraIdChange={setSelectedId}
