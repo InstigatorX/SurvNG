@@ -626,16 +626,25 @@ class EventStoreJobsMixin:
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute("begin immediate")
+            # Reclaim expired/owned running leases before LIFO queued work.
+            # Otherwise continuous fresh enqueue can starve zombie running rows
+            # forever (expire_stale only fails queued jobs).
             row = conn.execute(
                 "select * from detection_jobs where camera_id = ? and "
-                "((state = 'queued' and available_at <= ?) or "
-                "(state = 'running' and (lease_expires_at <= ? or lease_owner = ?))) "
-                # Refinement is time-sensitive evidence, not a FIFO batch.
-                # After restart, processing an old backlog before a current
-                # incident makes the current event unrecoverably stale.
-                "order by created_at desc, id desc limit 1",
-                (camera_id, now, now, lease_owner),
+                "state = 'running' and (lease_expires_at <= ? or lease_owner = ?) "
+                "order by created_at asc, id asc limit 1",
+                (camera_id, now, lease_owner),
             ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "select * from detection_jobs where camera_id = ? and "
+                    "state = 'queued' and available_at <= ? "
+                    # Refinement is time-sensitive evidence, not a FIFO batch.
+                    # After restart, processing an old backlog before a current
+                    # incident makes the current event unrecoverably stale.
+                    "order by created_at desc, id desc limit 1",
+                    (camera_id, now),
+                ).fetchone()
             if row is None:
                 return None
             conn.execute(

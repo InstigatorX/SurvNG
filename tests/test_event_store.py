@@ -78,6 +78,36 @@ class EventStoreTest(unittest.TestCase):
 
             self.assertEqual(claimed["id"], "newer")
 
+    def test_detection_job_claim_reclaims_expired_lease_before_newer_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            for job_id in ("zombie", "fresh"):
+                self.assertEqual(
+                    store.enqueue_detection_job(
+                        job_id=job_id,
+                        camera_id="gate",
+                        dedupe_key=f"episode:{job_id}",
+                        payload={"event_at": "2026-08-22T20:00:00+00:00"},
+                    ),
+                    "queued",
+                )
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set state = 'running', "
+                    "lease_expires_at = 0, lease_owner = 'dead-worker', "
+                    "created_at = ? where id = 'zombie'",
+                    ("2026-08-22T19:00:00+00:00",),
+                )
+                connection.execute(
+                    "update detection_jobs set created_at = ? where id = 'fresh'",
+                    ("2026-08-22T20:00:00+00:00",),
+                )
+
+            claimed = store.claim_detection_job("gate", lease_owner="refiner-a")
+
+            self.assertEqual(claimed["id"], "zombie")
+            self.assertEqual(claimed["attempts"], 1)
+
     def test_stale_queued_detection_jobs_become_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
