@@ -735,10 +735,9 @@ class ObjectTrackingSession:
                 "capacity_wait_seconds_last": round(capacity_wait_seconds, 3),
             }
         if stop.is_set() and not acquired:
-            with self._lock:
-                if self._thread is threading.current_thread():
-                    self._thread = None
-                    self._event_id = None
+            # Still drain a queued replacement; capacity-wait exits never reach
+            # the acquired-path finally that normally starts _pending_start.
+            self._finish_worker_and_start_pending(release_limiter=False)
             return
         if not acquired:
             skipped = {
@@ -771,10 +770,7 @@ class ObjectTrackingSession:
                 event_id,
                 capacity_wait_seconds,
             )
-            with self._lock:
-                if self._thread is threading.current_thread():
-                    self._thread = None
-                    self._event_id = None
+            self._finish_worker_and_start_pending(release_limiter=False)
             return
         tracker: ObjectTrackerBackend | None = None
         frames_processed = 0
@@ -1278,18 +1274,28 @@ class ObjectTrackingSession:
             )
             LOGGER.exception("object tracking failed for %s event %d", self.camera.id, event_id)
         finally:
+            self._finish_worker_and_start_pending(release_limiter=True)
+
+    def _finish_worker_and_start_pending(self, *, release_limiter: bool) -> None:
+        """Release this worker's slot ownership and start any queued successor.
+
+        Capacity-wait exits never acquire the limiter, so they must still clear
+        ``_thread`` and drain ``_pending_start`` or a replacement queued while
+        waiting for capacity is orphaned until a later unrelated start.
+        """
+        if release_limiter:
             self.limiter.release()
-            with self._transition_lock:
-                pending_start = None
-                with self._lock:
-                    if self._thread is threading.current_thread():
-                        self._thread = None
-                        self._event_id = None
-                        if self._accepting:
-                            pending_start = self._pending_start
-                        self._pending_start = None
-                if pending_start is not None:
-                    self._start_session(*pending_start)
+        with self._transition_lock:
+            pending_start = None
+            with self._lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+                    self._event_id = None
+                    if self._accepting:
+                        pending_start = self._pending_start
+                    self._pending_start = None
+            if pending_start is not None:
+                self._start_session(*pending_start)
 
     def _persist(
         self,

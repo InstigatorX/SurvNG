@@ -1071,6 +1071,76 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(session.status()["capacity_timeouts"], 1)
         self.assertFalse(session.running())
 
+    def test_replacement_during_capacity_wait_starts_queued_successor(self) -> None:
+        """A handoff queued while waiting for capacity must not be orphaned."""
+        first_waiting = threading.Event()
+        second_active = threading.Event()
+        updates: list[tuple[int, dict]] = []
+        limiter = threading.BoundedSemaphore(1)
+        self.assertTrue(limiter.acquire(blocking=False))
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detection("person", 0.9, (10, 10, 40, 80))]
+
+        original_acquire = limiter.acquire
+
+        def acquire_and_signal(*args, **kwargs):
+            first_waiting.set()
+            return original_acquire(*args, **kwargs)
+
+        limiter.acquire = acquire_and_signal  # type: ignore[method-assign]
+
+        def update_event(event_id, tracking, _tracked_objects):
+            updates.append((event_id, tracking))
+            if event_id == 43 and tracking.get("state") == "active":
+                second_active.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(
+                sample_fps=5.0,
+                max_session_seconds=3.0,
+                capacity_wait_seconds=0.4,
+            ),
+            detector=Detector(),
+            frame_provider=lambda: (
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            ),
+            update_event=update_event,
+            publisher=None,
+            limiter=limiter,
+        )
+        session.set_accepting(True)
+
+        self.assertTrue(session.start(
+            42,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        ))
+        self.assertTrue(first_waiting.wait(1.0))
+        self.assertTrue(session.start(
+            43,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        ))
+        # First worker exits capacity wait without acquiring; queued successor
+        # must start once the shared slot is released.
+        limiter.release()
+        self.assertTrue(second_active.wait(2.0))
+        session.stop()
+
+        self.assertTrue(any(event_id == 43 for event_id, _ in updates))
+        self.assertEqual(session._pending_start, None)
+
     def test_capacity_wait_admits_session_and_preserves_tracking_window(self) -> None:
         active = threading.Event()
         updates: list[dict] = []
