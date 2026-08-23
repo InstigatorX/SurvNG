@@ -1070,7 +1070,6 @@ class ObjectTrackingSession:
                 return advanced
 
             catchup_until = time.time()
-            initial_catchup_advanced = False
             if (
                 self.catchup_frame_provider is not None
                 and initial_frame is not None
@@ -1079,23 +1078,24 @@ class ObjectTrackingSession:
                 # Start immediately after the actual selected sample. The
                 # provider and loop still reject non-increasing timestamps.
                 try:
-                    initial_catchup_advanced = process_catchup_until(catchup_until)
+                    process_catchup_until(catchup_until)
                 except Exception:
                     LOGGER.exception(
                         "recorded tracking catch-up failed for %s event %d; continuing live",
                         self.camera.id,
                         event_id,
                     )
+                catchup_until = time.time()
             if (
                 self.catchup_frame_provider is not None
                 and initial_frame is not None
                 and catchup_until - captured_at
                 > TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS
-                and not initial_catchup_advanced
             ):
                 # Do not turn minutes of queue delay into a fabricated
-                # open-segment warning.  There is neither finalized coverage
-                # nor enough retained live history to reconstruct this event.
+                # open-segment warning. Partial catch-up that still leaves the
+                # cursor beyond recoverable live/open-segment history is the
+                # same unrecoverable case as advancing nothing.
                 self._completion_reason = "stale_handoff_without_recorded_coverage"
                 final_epoch = time.time()
                 self._persist(
@@ -1210,14 +1210,21 @@ class ObjectTrackingSession:
                             )
                             else LOGGER.info
                         )
+                        if coverage_gap <= TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS:
+                            gap_detail = "open recording segment not bridged"
+                            reason = "missing_media_while_object_active"
+                        else:
+                            gap_detail = "tracking fell behind live"
+                            reason = "tracking_fell_behind_live"
                         log(
                             "object tracking coverage gap for %s event %d: %.3fs "
-                            "(open recording segment not bridged)",
+                            "(%s)",
                             self.camera.id,
                             event_id,
                             coverage_gap,
+                            gap_detail,
                         )
-                        self._completion_reason = "missing_media_while_object_active"
+                        self._completion_reason = reason
                     elif not tracker.has_live_tracks(captured_at):
                         self._completion_reason = "object_exited_during_catchup"
                         break

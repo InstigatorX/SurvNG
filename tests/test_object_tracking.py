@@ -1491,6 +1491,50 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         )
         self.assertFalse(updates[-1]["coverage_incomplete"])
 
+    def test_partial_catchup_still_stale_when_remaining_gap_unrecoverable(self) -> None:
+        """One catch-up frame must not disable stale abort for a huge remaining gap."""
+        updates: list[dict] = []
+        event_epoch = time.time() - 40.0
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detection("person", 0.9, (10, 10, 40, 80))]
+
+        def catchup_provider(start_epoch, end_epoch, _sample_fps, _frame_width):
+            yield min(start_epoch + 0.5, end_epoch), np.zeros((100, 100, 3), dtype=np.uint8)
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=3.0),
+            detector=Detector(),
+            frame_provider=lambda: None,
+            catchup_frame_provider=catchup_provider,
+            update_event=lambda _event_id, tracking, _tracked: updates.append(tracking) or {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        self.assertTrue(session.start(
+            47,
+            datetime.fromtimestamp(event_epoch, timezone.utc),
+            [detection("person", 0.95, (10, 10, 40, 80))],
+            np.zeros((100, 100, 3), dtype=np.uint8),
+        ))
+        self.assertTrue(session.wait_stopped(2.0))
+
+        self.assertEqual(
+            updates[-1]["completion_reason"],
+            "stale_handoff_without_recorded_coverage",
+        )
+        self.assertFalse(updates[-1]["coverage_incomplete"])
+        self.assertGreaterEqual(updates[-1]["catchup_frames_processed"], 1)
+
     def test_recorded_catchup_preserves_identity_across_processing_delay(self) -> None:
         catchup_ready = threading.Event()
         updates: list[dict] = []
