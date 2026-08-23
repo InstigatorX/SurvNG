@@ -84,6 +84,40 @@ Pin a specific build with the `sha-…` tag. Use a `v*` tag when you want a
 stable release number. Pull requires a GitHub account with read access to the
 package (or a public package).
 
+## Self-hosted runner disk maintenance
+
+Docker image builds run on the repository's self-hosted GitHub Actions runner.
+Each publish builds three large targets sequentially, but CI and prior builds
+still accumulate Docker layer cache, old images, and tool caches under the runner
+account.
+
+SurvNG automates cleanup in three layers:
+
+1. **Per job** — `scripts/github-runner-cleanup.sh` runs before Docker publish
+   and lightly before/after CI tests.
+2. **Nightly** — `.github/workflows/runner-maintenance.yml` runs at 05:00 UTC
+   with `--standard` cleanup (build cache, images older than 24h, npm/pip cache).
+3. **Auto-escalation** — when root filesystem free space drops below 15%, the
+   script escalates to a stronger mode automatically.
+
+Manual cleanup on the runner host (or via **Actions → Runner maintenance → Run
+workflow**):
+
+```bash
+scripts/github-runner-cleanup.sh --standard   # normal maintenance
+scripts/github-runner-cleanup.sh --aggressive # when disk is tight
+```
+
+Optional host-level safety net (outside GitHub Actions), e.g. daily cron as the
+runner user:
+
+```cron
+0 4 * * * /path/to/SurvNG/scripts/github-runner-cleanup.sh --standard >>/var/log/survng-runner-cleanup.log 2>&1
+```
+
+Do not prune Docker volumes from CI unless the runner host has no other services;
+SurvNG production containers on the same machine would be affected.
+
 Point Compose at the published image instead of building locally by setting
 `image:` under `survng` (and omit `build:` when you want a registry-only pull).
 For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mounts.

@@ -1,0 +1,31 @@
+name: Runner maintenance
+
+on:
+  schedule:
+    # Nightly cleanup before typical US/EU morning pushes.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Cleanup mode
+        type: choice
+        options:
+          - light
+          - standard
+          - aggressive
+        default: standard
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean runner disk
+        run: |
+          MODE="${{ github.event.inputs.mode || 'standard' }}"
+          scripts/github-runner-cleanup.sh "--${MODE}"

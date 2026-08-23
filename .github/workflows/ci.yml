@@ -25,6 +25,8 @@ jobs:
           pwd
           python --version
           node --version
+      - name: Free runner disk space
+        run: scripts/github-runner-cleanup.sh --light
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
       - name: Build frontend static assets
@@ -51,3 +53,6 @@ jobs:
             tests/test_config_reload.py
       - name: Run frontend unit tests
         run: node frontend/tests/run-tests.mjs unit
+      - name: Post-job cleanup
+        if: always()
+        run: scripts/github-runner-cleanup.sh --light
