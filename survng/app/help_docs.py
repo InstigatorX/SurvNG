@@ -16,8 +16,8 @@ REFERENCE_DIR = Path("docs")
 
 GUIDE_PAGES = (
     ("index", "Welcome"),
-    ("concepts", "Basic ideas"),
-    ("getting-started", "First-time setup"),
+    ("concepts", "Concepts"),
+    ("getting-started", "Getting started"),
     ("live", "Live view"),
     ("incidents", "Incidents"),
     ("timeline", "Timeline & exports"),
@@ -38,11 +38,21 @@ _FENCE_RE = re.compile(r"```([a-zA-Z0-9_-]*)\n(.*?)```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
 _HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$")
 _UL_RE = re.compile(r"^[-*]\s+(.+)$")
 _OL_RE = re.compile(r"^(\d+)\.\s+(.+)$")
 _TABLE_ROW_RE = re.compile(r"^\|.+\|$")
 _HR_RE = re.compile(r"^---+\s*$")
+_ASSET_MEDIA_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,14 +70,11 @@ def create_help_router(deps: HelpRouteDependencies) -> APIRouter:
 
     @router.get("/help/assets/help.css", include_in_schema=False)
     def help_stylesheet() -> Response:
-        path = GUIDE_DIR / "help.css"
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail="Help stylesheet not found")
-        return Response(
-            path.read_text(encoding="utf-8"),
-            media_type="text/css; charset=utf-8",
-            headers={"Cache-Control": "public, max-age=3600"},
-        )
+        return _help_asset_response("help.css")
+
+    @router.get("/help/assets/{asset_path:path}", include_in_schema=False)
+    def help_asset(asset_path: str) -> Response:
+        return _help_asset_response(asset_path)
 
     @router.get("/help/reference/{page}", include_in_schema=False)
     def help_reference_page(page: str) -> HTMLResponse:
@@ -100,6 +107,30 @@ def create_help_router(deps: HelpRouteDependencies) -> APIRouter:
         return _render_guide(slug, deps.base_path())
 
     return router
+
+
+def _help_asset_response(asset_path: str) -> Response:
+    normalized = str(asset_path or "").replace("\\", "/").lstrip("/")
+    if (
+        not normalized
+        or normalized.startswith("../")
+        or "/../" in f"/{normalized}/"
+        or normalized.startswith("/")
+    ):
+        raise HTTPException(status_code=404, detail="Help asset not found")
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", normalized):
+        raise HTTPException(status_code=404, detail="Help asset not found")
+    path = (GUIDE_DIR / normalized).resolve()
+    if not path.is_file() or not _is_under(path, GUIDE_DIR):
+        raise HTTPException(status_code=404, detail="Help asset not found")
+    media_type = _ASSET_MEDIA_TYPES.get(path.suffix.lower())
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="Help asset not found")
+    return Response(
+        path.read_bytes(),
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 def _safe_slug(value: str) -> str:
@@ -218,6 +249,18 @@ def _markdown_to_html(source: str, base_path: str) -> str:
             flush_table()
             blocks.append("<hr />")
             continue
+        image = _IMAGE_RE.match(line.strip())
+        if image:
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            alt = html.escape(image.group(1))
+            src = html.escape(_rewrite_href(image.group(2).strip(), base_path), quote=True)
+            caption = f"<figcaption>{alt}</figcaption>" if image.group(1).strip() else ""
+            blocks.append(
+                f'<figure class="help-figure"><img src="{src}" alt="{alt}" loading="lazy" />{caption}</figure>'
+            )
+            continue
         heading = _HEADING_RE.match(line)
         if heading:
             flush_paragraph()
@@ -289,6 +332,10 @@ def _rewrite_href(target: str, base_path: str) -> str:
     prefix = base_path.rstrip("/")
     help_root = f"{prefix}/help" if prefix else "/help"
 
+    # Guide images: images/live-command-center.png
+    if re.fullmatch(r"images/[A-Za-z0-9_-]+\.(?:png|jpe?g|webp|gif|svg)", target):
+        return f"{help_root}/assets/{target}"
+
     # Guide or same-folder markdown: concepts.md, ./getting-started.md, storage.md
     if re.fullmatch(r"\.?/?(?:[A-Za-z0-9_-]+\.md)", target):
         name = Path(target).stem
@@ -341,7 +388,7 @@ def _page_shell(
         nav_items.append(f'<a href="{html.escape(href)}"{css}{current}>{html.escape(label)}</a>')
     nav_html = "\n".join(nav_items)
     banner = (
-        '<p class="help-reference-banner">Technical reference — denser detail for operators who want the internals.</p>'
+        '<p class="help-reference-banner">Additional detail for this topic.</p>'
         if is_reference
         else ""
     )
@@ -360,7 +407,7 @@ def _page_shell(
     <aside class="help-sidebar" aria-label="Help topics">
       <a class="help-brand" href="{html.escape(help_home)}">
         <strong>SurvNG Help</strong>
-        <span>Operator guide</span>
+        <span>Documentation</span>
       </a>
       <nav class="help-nav">{nav_html}</nav>
       <a class="help-back" href="{html.escape(app_home)}">← Back to SurvNG</a>

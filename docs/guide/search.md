@@ -4,7 +4,9 @@
 
 SurvNG supports ordinary incident filters and, when enabled, **Smart Search** — find incidents from a short visual description.
 
-## Everyday filters
+![Search results for a visual description](images/search-workspace.png)
+
+## Filters
 
 Even without Smart Search you can narrow incidents by camera, object label, zone, and time. That is often enough for “show me cars at the gate yesterday.”
 
@@ -12,14 +14,14 @@ Even without Smart Search you can narrow incidents by camera, object label, zone
 
 Smart Search compares your text to pictures SurvNG already stored. Images and search indexes stay on your SurvNG host. They are not uploaded to the AI assistant provider.
 
-### Examples of useful queries
+### Example queries
 
 - `person in a red jacket`
 - `white delivery truck`
 - `dog near the fence`
 - `package on the porch`
 
-Start with simple, visual phrases. Abstract ideas (“suspicious,” “threat”) work poorly because the search matches appearance, not intent.
+Concrete visual phrases work best. Abstract ideas (“suspicious,” “threat”) match poorly because the search compares appearance, not intent.
 
 ### Setup summary
 

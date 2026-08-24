@@ -2,8 +2,8 @@
 
 Local-first surveillance app for RTSP/RTMP/ONVIF cameras with recording, camera motion-event ingestion, OpenVINO object detection, and a browser GUI.
 
-**New to SurvNG?** Start with the [operator guide](docs/guide/index.md).
-When the app is running, the same guide is available online at
+See the [SurvNG guide](docs/guide/index.md).
+When the app is running, the same guide is available at
 `/help` (for example `http://127.0.0.1:8088/survng/help`), also linked from
 **Help** in the navigation.
 

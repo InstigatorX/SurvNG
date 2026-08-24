@@ -203,6 +203,27 @@ html, body {
 
 .help-article strong { color: #f2f7fb; font-weight: 650; }
 
+.help-figure {
+  margin: 1.25rem 0 1.5rem;
+  padding: 0;
+  border: 1px solid var(--help-border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: #0b1015;
+}
+.help-figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.help-figure figcaption {
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  border-top: 1px solid var(--help-border);
+  color: var(--help-muted);
+  font-size: 0.86rem;
+}
+
 @media (max-width: 860px) {
   .help-shell { grid-template-columns: 1fr; }
   .help-sidebar {

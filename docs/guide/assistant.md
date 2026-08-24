@@ -4,7 +4,7 @@ The sparkle control opens SurvNG’s assistant. It is a read-only helper for sta
 
 ## What it can do
 
-- Explain health and configuration in everyday language
+- Explain health and configuration
 - Search incidents with structured tools
 - Attach the actual incident picture when one exists
 - Visually review a selected incident

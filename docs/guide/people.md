@@ -4,6 +4,8 @@
 
 When face recognition is enabled, SurvNG stores face sightings separately from ordinary object detections. You review suggestions, name people, and later search their history.
 
+![People workspace with face review](images/people-workspace.png)
+
 ## First-time face setup
 
 1. Install the face model package on the server (see the project README face section).
@@ -11,7 +13,7 @@ When face recognition is enabled, SurvNG stores face sightings separately from o
 3. Confirm the embedding, landmark, and face-detector model paths.
 4. Wait for new incidents that include clear faces.
 
-Face recognition needs reasonably clear, front-ish faces. Distant blobs and heavy motion blur will not identify well.
+Face recognition needs reasonably clear, front-facing faces. Distant blobs and heavy motion blur will not identify well.
 
 ## Review queue
 

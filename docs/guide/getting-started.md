@@ -1,4 +1,4 @@
-# First-time setup
+# Getting started
 
 This walkthrough assumes SurvNG is already installed and reachable in a browser. If you still need to install it, use the project [README](https://github.com/InstigatorX/SurvNG/blob/v1.0/README.md) or the [Docker installation](../docker.md) notes, then return here.
 
@@ -14,6 +14,8 @@ On another device on the same network, use the server’s LAN address instead of
 
 You should land on **Live**. The left side lists the main workspaces: Live, Incidents, Timeline, Exports, Search, People, and Admin.
 
+![Live camera grid](images/live-command-center.png)
+
 ## 2. Check that the server looks healthy
 
 Glance at the top status strip. Healthy usually means SurvNG is running and can see its storage. If cameras are not configured yet, that is normal.
@@ -28,6 +30,8 @@ Open **Admin → Health** if you want a fuller picture later.
 4. If the camera has a lighter **sub** stream, paste that into the live stream field.
 5. If the camera supports ONVIF motion notices, fill in the ONVIF host, port, username, and password.
 6. Save.
+
+![Camera settings in Admin](images/admin-cameras.png)
 
 **Example Reolink-style RTSP links:**
 
@@ -52,9 +56,11 @@ Return to **Live**. You should see a tile for the new camera. If the picture is 
 
 Leave the camera enabled for a few minutes, then open **Timeline**, select the camera, and scrub near “now.” You should see continuous video segments filling in.
 
+![Timeline workspace](images/timeline-workspace.png)
+
 If Timeline is empty, confirm recording is enabled for that camera under **Admin → Cameras**.
 
-## 6. Decide how motion should work
+## 6. Choose a motion behavior
 
 Under **Admin → Cameras → Motion/Object**, pick a motion behavior. The recommended default is **Camera + EMA backup**:
 
@@ -63,7 +69,7 @@ Under **Admin → Cameras → Motion/Object**, pick a motion behavior. The recom
 
 If your camera never sends reliable motion notices, choose **EMA only**.
 
-Plain-language overview: [Motion & detection](motion-detection.md).
+Overview: [Motion & detection](motion-detection.md).
 
 ## 7. Optional: turn on object detection
 
@@ -76,9 +82,9 @@ Object detection is optional but useful. Under **Admin → Detection**:
 
 Without a model, SurvNG still records and can store motion-related notes; it just will not label people or vehicles.
 
-## 8. Draw a zone (recommended)
+## 8. Draw a zone
 
-Open the camera’s **Zones** tab and draw a polygon over the area you care about — a doorway, driveway apron, or gate — not the whole yard if trees and headlights create noise.
+Open the camera’s **Zones** tab and draw a polygon over the area you care about — a doorway, driveway apron, or gate — rather than an entire busy street if that creates noise.
 
 See [Zones](zones.md).
 
@@ -87,12 +93,12 @@ See [Zones](zones.md).
 | Goal | Where to go |
 | --- | --- |
 | Watch right now | [Live](live.md) |
-| Review important activity | [Incidents](incidents.md) |
+| Review kept activity | [Incidents](incidents.md) |
 | Scrub recorded video | [Timeline](timeline.md) |
 | Save a clip | [Timeline & exports](timeline.md) |
 | Find “person in a red jacket” | [Search](search.md) |
 | Name a recurring face | [People](people.md) |
-| Ask a question about an incident | [AI assistant](assistant.md) |
+| Ask about an incident | [AI assistant](assistant.md) |
 
 ## Security reminder
 

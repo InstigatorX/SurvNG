@@ -33,7 +33,7 @@ Many Reolink cameras expose RTSP and ONVIF after you enable them in the camera�
 
 If ONVIF notices are missing or flaky, set that camera’s motion behavior to **EMA only**.
 
-## Stream strategy in plain language
+## Main vs live streams
 
 - Record the **main** stream for history.
 - Watch the **sub** stream live when it looks good enough.
@@ -47,7 +47,7 @@ You can start/stop a camera’s capture or recording from Admin controls and, wh
 
 ## Related
 
-- [First-time setup](getting-started.md)
+- [Getting started](getting-started.md)
 - [Motion & detection](motion-detection.md)
 - [Zones](zones.md)
 - [Integrations](integrations.md)
