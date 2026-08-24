@@ -4,7 +4,9 @@ import { isMobileViewport } from "./hooks.js";
 
 export function mediaStorageConfigurationError(mediaStorage) {
   const locations = mediaStorage?.locations || [];
-  if (!locations.length) return "";
+  if (!locations.length) {
+    return "Configure at least one media location for recordings and related media.";
+  }
   const enabledRoles = new Set(
     locations
       .filter((location) => location.enabled !== false)

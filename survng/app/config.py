@@ -327,6 +327,17 @@ class ImageStorageConfig(BaseModel):
 
 MediaStorageRole = Literal["recordings", "snapshots", "motion_audits", "clips", "exports"]
 
+ALL_MEDIA_STORAGE_ROLES: list[MediaStorageRole] = [
+    "recordings",
+    "snapshots",
+    "motion_audits",
+    "clips",
+    "exports",
+]
+
+DEFAULT_MEDIA_LOCATION_ID = "primary"
+DEFAULT_MEDIA_LOCATION_NAME = "Primary media"
+
 
 class MediaStorageLocationConfig(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -334,7 +345,7 @@ class MediaStorageLocationConfig(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
     enabled: bool = True
     roles: list[MediaStorageRole] = Field(
-        default_factory=lambda: ["recordings", "snapshots", "motion_audits", "clips", "exports"]
+        default_factory=lambda: list(ALL_MEDIA_STORAGE_ROLES)
     )
     reserve_percent: float = Field(default=15.0, ge=0.0, le=95.0)
     priority: int = Field(default=100, ge=1, le=1000)
@@ -349,12 +360,32 @@ class MediaStorageLocationConfig(BaseModel):
         return roles
 
 
+def primary_media_location(
+    path: str,
+    *,
+    location_id: str = DEFAULT_MEDIA_LOCATION_ID,
+    name: str = DEFAULT_MEDIA_LOCATION_NAME,
+) -> MediaStorageLocationConfig:
+    """Build the default single-disk media location for a storage root."""
+    return MediaStorageLocationConfig(
+        id=location_id,
+        name=name,
+        path=path,
+        roles=list(ALL_MEDIA_STORAGE_ROLES),
+    )
+
+
 class MediaStorageConfig(BaseModel):
     placement: Literal["balanced", "priority"] = "balanced"
-    locations: list[MediaStorageLocationConfig] = Field(default_factory=list)
+    locations: list[MediaStorageLocationConfig] = Field(
+        default_factory=lambda: [primary_media_location("survng/storage")],
+        min_length=1,
+    )
 
     @model_validator(mode="after")
     def validate_locations(self) -> "MediaStorageConfig":
+        if not self.locations:
+            raise ValueError("media_storage.locations requires at least one location")
         ids = [location.id for location in self.locations]
         if len(ids) != len(set(ids)):
             raise ValueError("media storage location ids must be unique")
@@ -362,6 +393,11 @@ class MediaStorageConfig(BaseModel):
         if len(paths) != len(set(paths)):
             raise ValueError("media storage location paths must be unique")
         return self
+
+
+def primary_media_storage(path: str) -> MediaStorageConfig:
+    """Build a media pool with one primary location at *path*."""
+    return MediaStorageConfig(locations=[primary_media_location(path)])
 
 
 class CameraViewFrameConfig(BaseModel):
@@ -690,6 +726,22 @@ class AppConfig(BaseModel):
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def seed_media_storage_from_storage_dir(cls, value: object) -> object:
+        """When media_storage is omitted, seed one primary location at storage_dir.
+
+        Explicit empty ``locations`` remain invalid; operators must configure at
+        least one media filesystem for new installs and migrated configs.
+        """
+        if not isinstance(value, dict):
+            return value
+        if "media_storage" in value:
+            return value
+        storage_dir = str(value.get("storage_dir") or "survng/storage").strip() or "survng/storage"
+        value["media_storage"] = primary_media_storage(storage_dir).model_dump(mode="json")
+        return value
 
     @field_validator("base_path", mode="before")
     @classmethod

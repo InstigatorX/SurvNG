@@ -1,6 +1,27 @@
 {
   "base_path": "/survng",
   "storage_dir": "survng/storage",
+  "media_storage": {
+    "placement": "balanced",
+    "locations": [
+      {
+        "id": "primary",
+        "name": "Primary media",
+        "path": "survng/storage",
+        "enabled": true,
+        "roles": [
+          "recordings",
+          "snapshots",
+          "motion_audits",
+          "clips",
+          "exports"
+        ],
+        "reserve_percent": 15,
+        "priority": 100,
+        "require_mount": false
+      }
+    ]
+  },
   "ffmpeg_path": "ffmpeg",
   "recording_segment_seconds": 10.0,
   "retention": {
