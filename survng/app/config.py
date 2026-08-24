@@ -594,10 +594,83 @@ class DetectorConfig(BaseModel):
     event_confirmation_frames: int = Field(default=2, ge=1, le=5)
     event_class_confirmation_frames: dict[str, int] = Field(default_factory=dict)
     event_class_confidence_thresholds: dict[str, float] = Field(default_factory=dict)
+    # Recorded refinement occupancy budgets. Defaults match the historical
+    # hard-coded stages so existing deployments keep the same evidence window
+    # unless an operator deliberately tightens them.
+    event_refinement_stages: list[list[float]] = Field(
+        default_factory=lambda: [
+            [-1.0, -0.5, 0.0, 0.5, 1.0],
+            [4.0, 4.5],
+            [8.0, 8.5],
+            [12.0, 12.5],
+        ]
+    )
+    event_refinement_retry_seconds: float = Field(default=24.0, ge=0.0, le=120.0)
+    event_refinement_settle_seconds: float = Field(default=0.75, ge=0.0, le=5.0)
+    event_refinement_retry_interval_seconds: float = Field(
+        default=1.0,
+        ge=0.05,
+        le=5.0,
+    )
+    event_representative_refinement_timeout_seconds: float = Field(
+        default=6.0,
+        ge=0.0,
+        le=60.0,
+    )
     object_activity_attribution: Literal["off", "shadow", "enforce"] = "enforce"
     require_incident_zone: bool = True
     labels: list[str] = Field(default_factory=list)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
+
+    @field_validator("event_refinement_stages", mode="before")
+    @classmethod
+    def normalize_event_refinement_stages(cls, value: object) -> list[list[float]]:
+        if value in (None, ""):
+            return [
+                [-1.0, -0.5, 0.0, 0.5, 1.0],
+                [4.0, 4.5],
+                [8.0, 8.5],
+                [12.0, 12.5],
+            ]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("event refinement stages must be a list of offset lists")
+        if not value:
+            raise ValueError("event refinement stages cannot be empty")
+        if len(value) > 8:
+            raise ValueError("event refinement stages cannot exceed 8 stages")
+        normalized: list[list[float]] = []
+        total_offsets = 0
+        for stage_index, raw_stage in enumerate(value):
+            if not isinstance(raw_stage, (list, tuple)) or not raw_stage:
+                raise ValueError(
+                    f"event refinement stage {stage_index} must be a non-empty list"
+                )
+            if len(raw_stage) > 16:
+                raise ValueError(
+                    f"event refinement stage {stage_index} cannot exceed 16 offsets"
+                )
+            stage: list[float] = []
+            for raw_offset in raw_stage:
+                try:
+                    offset = float(raw_offset)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "event refinement offsets must be numbers"
+                    ) from exc
+                if isinstance(raw_offset, bool) or not math.isfinite(offset):
+                    raise ValueError(
+                        "event refinement offsets must be finite numbers"
+                    )
+                if offset < -30.0 or offset > 60.0:
+                    raise ValueError(
+                        "event refinement offsets must be between -30 and 60 seconds"
+                    )
+                stage.append(offset)
+            total_offsets += len(stage)
+            if total_offsets > 32:
+                raise ValueError("event refinement stages cannot exceed 32 offsets")
+            normalized.append(stage)
+        return normalized
 
     @field_validator("event_class_confirmation_frames", mode="before")
     @classmethod

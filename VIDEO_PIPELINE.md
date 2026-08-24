@@ -385,12 +385,15 @@ control and restrict its filesystem permissions.
 ## 6. High-Resolution Object Detection
 
 An accepted motion burst uses finalized main recording fragments rather than
-the low-resolution qualification frames. SurvNG samples five target times
-around the ONVIF event:
+the low-resolution qualification frames. By default SurvNG samples five target
+times around the ONVIF event:
 
 ```text
 -1.0s, -0.5s, event time, +0.5s, +1.0s
 ```
+
+`detector.event_refinement_stages` can narrow or extend that window. Within each
+stage, inference stops early once temporal confirmation is already satisfied.
 
 For each available target:
 

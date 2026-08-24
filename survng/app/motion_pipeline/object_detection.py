@@ -50,6 +50,73 @@ REPRESENTATIVE_MIN_QUALITY_SCORE = 0.25
 SEMANTIC_RESCUE_THRESHOLD_FRACTION = 0.5
 
 
+def _flatten_refinement_stages(
+    stages: tuple[tuple[float, ...], ...],
+) -> tuple[float, ...]:
+    return tuple(offset for stage in stages for offset in stage)
+
+
+def _coerce_refinement_stages(raw: object) -> tuple[tuple[float, ...], ...] | None:
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, (list, tuple)) or not raw:
+        return None
+    stages: list[tuple[float, ...]] = []
+    for stage in raw:
+        if not isinstance(stage, (list, tuple)) or not stage:
+            return None
+        try:
+            stages.append(tuple(float(offset) for offset in stage))
+        except (TypeError, ValueError):
+            return None
+    return tuple(stages)
+
+
+def _refinement_budget(config: Any, name: str, default: float) -> float:
+    """Prefer detector config when present; else module defaults (patchable in tests)."""
+    if config is None or not hasattr(config, name):
+        return float(default)
+    value = getattr(config, name)
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def resolve_recorded_refinement_plan(
+    config: Any = None,
+) -> tuple[tuple[tuple[float, ...], ...], float, float, float, float]:
+    """Resolve recorded refinement stages and occupancy budgets."""
+    stages = _coerce_refinement_stages(
+        getattr(config, "event_refinement_stages", None)
+    ) or RECORDED_EVENT_FRAME_STAGES
+    return (
+        stages,
+        _refinement_budget(
+            config,
+            "event_refinement_retry_seconds",
+            RECORDED_EVENT_RETRY_SECONDS,
+        ),
+        _refinement_budget(
+            config,
+            "event_refinement_settle_seconds",
+            RECORDED_EVENT_SETTLE_SECONDS,
+        ),
+        _refinement_budget(
+            config,
+            "event_refinement_retry_interval_seconds",
+            RECORDED_EVENT_RETRY_INTERVAL_SECONDS,
+        ),
+        _refinement_budget(
+            config,
+            "event_representative_refinement_timeout_seconds",
+            RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class _RecordedDetectionSample:
     offset: float
@@ -376,14 +443,11 @@ def _representative_needs_refinement(objects: list[dict[str, Any]]) -> bool:
     )
 
 
-def _temporal_consensus(
+def _collect_temporal_evidence(
     samples: list[_RecordedDetectionSample],
-    minimum_confirmations: int,
-    class_confirmations: dict[str, int] | None = None,
-) -> tuple[_RecordedDetectionSample, list[dict[str, Any]]]:
-    """Select one recorded frame and retain only repeatable object evidence."""
+) -> list[_TemporalDetectionEvidence]:
+    """Associate candidate detections across samples into temporal tracks."""
     evidence: list[_TemporalDetectionEvidence] = []
-    assignments: dict[tuple[int, int], _TemporalDetectionEvidence] = {}
     for sample_index, sample in enumerate(samples):
         available = set(range(len(evidence)))
         candidates = [item for item in sample.objects if _candidate_detection(item)]
@@ -414,7 +478,112 @@ def _temporal_consensus(
             else:
                 track = evidence[evidence_index]
             track.add(sample_index, detected)
-            assignments[(sample_index, id(detected))] = track
+    return evidence
+
+
+def _refinement_stage_complete(
+    samples: list[_RecordedDetectionSample],
+    minimum_confirmations: int,
+    class_confirmations: dict[str, int] | None = None,
+) -> bool:
+    """Whether every associated track is closed and at least one is confirmed.
+
+    Uses full-sample track association, not the selected-frame annotation list,
+    so a newly appeared subject on a later offset remains visible to early-exit.
+    """
+    evidence = _collect_temporal_evidence(samples)
+    if not evidence:
+        return False
+    default_required = max(1, min(5, int(minimum_confirmations)))
+    normalized_class_confirmations = {
+        str(label).strip().lower(): max(1, min(5, int(confirmations)))
+        for label, confirmations in (class_confirmations or {}).items()
+    }
+    required_by_track = {
+        id(track): normalized_class_confirmations.get(
+            track.winning_label.lower(),
+            default_required,
+        )
+        for track in evidence
+    }
+    normally_confirmed_ids = {
+        id(track)
+        for track in evidence
+        if len(track.winning_observations) >= required_by_track[id(track)]
+        and any(_eligible_detection(item) for item in track.winning_observations)
+    }
+    if not normally_confirmed_ids:
+        return False
+    rescue_candidate_ids = {
+        id(track)
+        for track in evidence
+        if id(track) not in normally_confirmed_ids
+        and len(track.winning_observations) >= max(3, required_by_track[id(track)])
+        and track.aggregate_confidence
+        >= min(
+            0.99,
+            max(_semantic_rescue_threshold(item) for item in track.winning_observations),
+        )
+        and any(
+            item.get("spatial_zone_eligible") is True
+            for item in track.winning_observations
+        )
+    }
+    confirmed_ids = normally_confirmed_ids | rescue_candidate_ids
+    return all(id(track) in confirmed_ids for track in evidence)
+
+
+def _refinement_early_exit_ready(
+    *,
+    stage_index: int,
+    stage_offsets: tuple[float, ...],
+    samples_by_offset: dict[float, _RecordedDetectionSample],
+    samples: list[_RecordedDetectionSample],
+    minimum_confirmations: int,
+    class_confirmations: dict[str, int] | None = None,
+) -> bool:
+    """Allow skipping remaining stage offsets only after the core window is seen.
+
+    Stage 0 must still observe the near-event neighborhood (|offset| <= 0.5)
+    before early-exit, so a pre-trigger confirmation cannot hide a subject that
+    enters at event time. Delayed discovery stages may stop as soon as every
+    observed track is confirmed.
+    """
+    if not _refinement_stage_complete(
+        samples,
+        minimum_confirmations,
+        class_confirmations,
+    ):
+        return False
+    if stage_index > 0:
+        return True
+    core_offsets = tuple(
+        offset for offset in stage_offsets if abs(float(offset)) <= 0.5
+    )
+    if not core_offsets:
+        return True
+    return all(offset in samples_by_offset for offset in core_offsets)
+
+
+def _temporal_consensus(
+    samples: list[_RecordedDetectionSample],
+    minimum_confirmations: int,
+    class_confirmations: dict[str, int] | None = None,
+) -> tuple[_RecordedDetectionSample, list[dict[str, Any]]]:
+    """Select one recorded frame and retain only repeatable object evidence."""
+    evidence = _collect_temporal_evidence(samples)
+    assignments: dict[tuple[int, int], _TemporalDetectionEvidence] = {}
+    for sample_index, sample in enumerate(samples):
+        for detected in sample.objects:
+            if not _candidate_detection(detected):
+                continue
+            for track in evidence:
+                if (
+                    sample_index in track.observations
+                    and track.observations[sample_index] is detected
+                ):
+                    assignments[(sample_index, id(detected))] = track
+                    break
 
     default_required = max(1, min(5, int(minimum_confirmations)))
     normalized_class_confirmations = {
@@ -908,10 +1077,20 @@ class RecordedMotionObjectDetector:
         self.stop_requested = stop_requested
 
     def detect(self, event_at: datetime) -> RecordedDetectionResult:
+        (
+            stages,
+            retry_seconds,
+            settle_seconds,
+            retry_interval_seconds,
+            representative_timeout_seconds,
+        ) = resolve_recorded_refinement_plan(getattr(self.detector, "config", None))
         return self._detect(
             event_at,
-            stages=RECORDED_EVENT_FRAME_STAGES,
-            retry_seconds=RECORDED_EVENT_RETRY_SECONDS,
+            stages=stages,
+            retry_seconds=retry_seconds,
+            settle_seconds=settle_seconds,
+            retry_interval_seconds=retry_interval_seconds,
+            representative_timeout_seconds=representative_timeout_seconds,
             allow_representative_refinement=True,
             refinement_pending=False,
         )
@@ -1080,6 +1259,9 @@ class RecordedMotionObjectDetector:
         *,
         stages: tuple[tuple[float, ...], ...],
         retry_seconds: float,
+        settle_seconds: float = RECORDED_EVENT_SETTLE_SECONDS,
+        retry_interval_seconds: float = RECORDED_EVENT_RETRY_INTERVAL_SECONDS,
+        representative_timeout_seconds: float = RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
         allow_representative_refinement: bool,
         refinement_pending: bool,
     ) -> RecordedDetectionResult:
@@ -1094,10 +1276,12 @@ class RecordedMotionObjectDetector:
             "recording_fallback_samples": 0.0,
             "recording_samples_requested": 0.0,
             "recording_samples_decoded": 0.0,
+            "refinement_early_exit_skipped": 0.0,
         }
         event_epoch = event_at.timestamp()
+        planned_offsets = _flatten_refinement_stages(stages)
         initial_offsets = stages[0]
-        newest_needed = event_epoch + max(initial_offsets) + RECORDED_EVENT_SETTLE_SECONDS
+        newest_needed = event_epoch + max(initial_offsets) + settle_seconds
         wait_seconds = max(0.0, newest_needed - time.time())
         if wait_seconds > 0:
             slept = min(wait_seconds, 3.0)
@@ -1107,17 +1291,18 @@ class RecordedMotionObjectDetector:
         deadline = time.monotonic() + max(0.0, retry_seconds)
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
+        samples: list[_RecordedDetectionSample] = []
         default_required = max(
             1,
             min(
-                len(RECORDED_EVENT_FRAME_OFFSETS),
+                len(planned_offsets),
                 int(getattr(self.detector.config, "event_confirmation_frames", 2)),
             ),
         )
         class_confirmations = {
             str(label).strip().lower(): max(
                 1,
-                min(len(RECORDED_EVENT_FRAME_OFFSETS), int(confirmations)),
+                min(len(planned_offsets), int(confirmations)),
             )
             for label, confirmations in dict(
                 getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}
@@ -1130,8 +1315,8 @@ class RecordedMotionObjectDetector:
             try:
                 prefetched_rows = list(rows_between(
                     self.camera.id,
-                    event_epoch + min(offset for stage in stages for offset in stage) - 1.0,
-                    event_epoch + max(offset for stage in stages for offset in stage) + 1.0,
+                    event_epoch + min(planned_offsets) - 1.0,
+                    event_epoch + max(planned_offsets) + 1.0,
                     "main",
                     discover_missing=False,
                 ))
@@ -1171,6 +1356,7 @@ class RecordedMotionObjectDetector:
                 )
                 recording_missing = False
                 future_sample = False
+                stage_consensus = False
                 pending_by_path: dict[Path, list[tuple[float, float, dict[str, Any]]]] = {}
                 for sample_offset in stage_offsets:
                     if sample_offset in samples_by_offset:
@@ -1178,7 +1364,7 @@ class RecordedMotionObjectDetector:
                     if time.monotonic() >= stage_deadline:
                         break
                     target_epoch = event_epoch + sample_offset
-                    if target_epoch + RECORDED_EVENT_SETTLE_SECONDS > time.time():
+                    if target_epoch + settle_seconds > time.time():
                         future_sample = True
                         continue
                     lookup_started = time.monotonic()
@@ -1197,7 +1383,10 @@ class RecordedMotionObjectDetector:
                         (sample_offset, frame_offset, row)
                     )
 
-                for path, pending in pending_by_path.items():
+                for path, pending in list(pending_by_path.items()):
+                    if stage_consensus:
+                        timing["refinement_early_exit_skipped"] += float(len(pending))
+                        continue
                     decode_started = time.monotonic()
                     frames, batch_processes, fallback_count = sampler.frames_at(
                         path,
@@ -1211,7 +1400,14 @@ class RecordedMotionObjectDetector:
                     timing["recording_fallback_samples"] += fallback_count
                     timing["recording_samples_requested"] += len(pending)
                     timing["recording_samples_decoded"] += len(frames)
-                    for sample_offset, frame_offset, row in pending:
+                    for sample_index, (sample_offset, frame_offset, row) in enumerate(
+                        pending
+                    ):
+                        if stage_consensus:
+                            timing["refinement_early_exit_skipped"] += float(
+                                len(pending) - sample_index
+                            )
+                            break
                         decoded = frames.get(frame_offset)
                         if decoded is None:
                             continue
@@ -1232,10 +1428,30 @@ class RecordedMotionObjectDetector:
                             objects=objects,
                             recording_path=str(row["path"]),
                         )
+                        samples = [
+                            samples_by_offset[offset]
+                            for offset in planned_offsets
+                            if offset in samples_by_offset
+                        ]
+                        if _refinement_early_exit_ready(
+                            stage_index=stage_index,
+                            stage_offsets=stage_offsets,
+                            samples_by_offset=samples_by_offset,
+                            samples=samples,
+                            minimum_confirmations=default_required,
+                            class_confirmations=class_confirmations,
+                        ):
+                            # Stop spending GPU on remaining offsets once every
+                            # observed track is confirmed and the core window
+                            # has already been sampled.
+                            stage_consensus = True
+                            timing["refinement_early_exit_skipped"] += float(
+                                len(pending) - sample_index - 1
+                            )
 
                 samples = [
                     samples_by_offset[offset]
-                    for offset in RECORDED_EVENT_FRAME_OFFSETS
+                    for offset in planned_offsets
                     if offset in samples_by_offset
                 ]
                 if samples:
@@ -1258,7 +1474,7 @@ class RecordedMotionObjectDetector:
                             refinement_deadline = min(
                                 deadline,
                                 time.monotonic()
-                                + RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
+                                + representative_timeout_seconds,
                             )
                             LOGGER.info(
                                 "recorded object representative refinement requested for %s",
@@ -1285,7 +1501,9 @@ class RecordedMotionObjectDetector:
                             frame_source="recorded_main",
                             frame_timestamp_exact=selected.exact_timestamp,
                         )
-                if all(offset in samples_by_offset for offset in stage_offsets):
+                if stage_consensus or all(
+                    offset in samples_by_offset for offset in stage_offsets
+                ):
                     break
                 remaining = deadline - time.monotonic()
                 if refinement_deadline is not None:
@@ -1295,7 +1513,7 @@ class RecordedMotionObjectDetector:
                     )
                 if remaining <= 0:
                     break
-                slept = min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining)
+                slept = min(retry_interval_seconds, remaining)
                 time.sleep(slept)
                 wait_key = (
                     "recording_wait_ms"
