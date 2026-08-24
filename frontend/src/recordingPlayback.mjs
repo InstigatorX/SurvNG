@@ -22,13 +22,37 @@ export function scrubPreviewBucketSeconds(options = {}) {
   return prefersJpegScrubPreview(options) ? 10 : 5;
 }
 
-export function seekVideoToTime(video, mediaTime) {
+export function shouldUseFastSeek(options = {}) {
+  if (options.allowFastSeek === false) return false;
+  return !prefersJpegScrubPreview(options);
+}
+
+export function recordingSeekToleranceSeconds(options = {}) {
+  return prefersJpegScrubPreview(options) ? 0.35 : 0.08;
+}
+
+export function videoReachedSeekTarget(video, mediaTime, tolerance = 0.08) {
+  if (!video || !Number.isFinite(mediaTime)) return false;
+  const currentTime = Number(video.currentTime);
+  if (!Number.isFinite(currentTime)) return false;
+  return Math.abs(currentTime - mediaTime) <= tolerance;
+}
+
+export function seekVideoToTime(video, mediaTime, options = {}) {
   if (!video || !Number.isFinite(mediaTime)) return;
-  if (typeof video.fastSeek === "function") {
+  if (shouldUseFastSeek(options) && typeof video.fastSeek === "function") {
     video.fastSeek(mediaTime);
     return;
   }
   video.currentTime = mediaTime;
+}
+
+export function seekWatchdogDelayMs(options = {}) {
+  return prefersJpegScrubPreview(options) ? 3000 : 1500;
+}
+
+export function ignorePauseAfterSeekMs(options = {}) {
+  return prefersJpegScrubPreview(options) ? 900 : 400;
 }
 
 export function playbackRowsCoverEpoch(rows, epoch) {
