@@ -3762,6 +3762,13 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
     ...trackingExcludedLabels,
   ].map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
+  const refinementStagePresets = {
+    full: [[-1, -0.5, 0, 0.5, 1], [4, 4.5], [8, 8.5], [12, 12.5]],
+    compact: [[-0.5, 0, 0.5], [4, 4.5], [8, 8.5]],
+    tight: [[-0.5, 0, 0.5]],
+  };
+  const refinementStagesKey = JSON.stringify(config.detector?.event_refinement_stages || refinementStagePresets.full);
+  const refinementStagePreset = Object.entries(refinementStagePresets).find(([, stages]) => JSON.stringify(stages) === refinementStagesKey)?.[0] || "custom";
 
   function selectOpenvinoModel(path) {
     updateConfig(["detector", "model_path"], path);
@@ -4261,7 +4268,17 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               </select><small>Independent OpenVINO workers can process simultaneous camera events. More workers use more accelerator and memory capacity.</small></label>
               <label>Incident confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /><small>A single detection must meet this confidence. Repeated candidates can still qualify through confirmation.</small></label>
               <label>Candidate confidence<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.event_candidate_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "event_candidate_confidence_threshold"], Number(event.target.value))} /><small>Retains weaker detections only as temporal evidence; they require at least three consistent frames.</small></label>
-              <label>Object confirmation<select value={String(config.detector?.event_confirmation_frames ?? 2)} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))}><option value="1">Immediate (1 frame)</option><option value="2">Confirmed (2 frames)</option><option value="3">Strong (3 frames)</option><option value="4">Very strict (4 frames)</option><option value="5">Maximum (5 frames)</option></select><small>Requires the same label in this many of five event-time frames. Confirmed is recommended and suppresses one-frame false identifications.</small></label>
+              <label>Object confirmation<select value={String(config.detector?.event_confirmation_frames ?? 2)} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))}><option value="1">Immediate (1 frame)</option><option value="2">Confirmed (2 frames)</option><option value="3">Strong (3 frames)</option><option value="4">Very strict (4 frames)</option><option value="5">Maximum (5 frames)</option></select><small>Requires the same label across this many recorded samples. Refinement stops early once confirmation is met, so lower counts also spend less detector time.</small></label>
+              <label>Refinement window<select value={refinementStagePreset} onChange={(event) => {
+                const preset = refinementStagePresets[event.target.value];
+                if (preset) updateConfig(["detector", "event_refinement_stages"], preset);
+              }}>
+                <option value="full">Full (−1…+1s, then +4/+8/+12s)</option>
+                <option value="compact">Compact (−0.5…+0.5s, then +4/+8s)</option>
+                <option value="tight">Tight (−0.5…+0.5s only)</option>
+                {refinementStagePreset === "custom" ? <option value="custom">Custom stages</option> : null}
+              </select><small>Smaller windows free the detector sooner after each event. Full remains the default evidence profile.</small></label>
+              <label>Refinement retry budget<input type="number" min="0" max="120" step="1" value={config.detector?.event_refinement_retry_seconds ?? 24} onChange={(event) => updateConfig(["detector", "event_refinement_retry_seconds"], Number(event.target.value))} /><small>Seconds spent waiting for finalized recordings and delayed discovery stages.</small></label>
               <label>Incident eligibility<select value={String(config.detector?.require_incident_zone ?? true)} onChange={(event) => updateConfig(["detector", "require_incident_zone"], event.target.value === "true")}>
                 <option value="true">Zones</option>
                 <option value="false">Zones + Full Frame</option>

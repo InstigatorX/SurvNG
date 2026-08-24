@@ -71,7 +71,7 @@ can therefore be useful immediately without claiming exact recording time.
 ## Main-recording refinement
 
 The refinement worker analyzes finalized main-stream recordings around the
-event. Its sampling stages are currently:
+event. Its default sampling stages are:
 
 | Stage | Requested offsets from the event |
 | --- | --- |
@@ -80,9 +80,16 @@ event. Its sampling stages are currently:
 | Delayed discovery 2 | +8.0, +8.5 seconds |
 | Delayed discovery 3 | +12.0, +12.5 seconds |
 
-Later stages are used only as needed. They allow an object that was distant,
-occluded, or not yet in view at the trigger instant to be discovered without
-holding the initial response open.
+Operators can tighten `detector.event_refinement_stages` and
+`detector.event_refinement_retry_seconds` when detector occupancy matters more
+than the widest delayed-discovery window. Later stages are used only as needed.
+They allow an object that was distant, occluded, or not yet in view at the
+trigger instant to be discovered without holding the initial response open.
+
+Within a stage, SurvNG stops requesting additional detector inferences once the
+configured confirmation count is already met. That early exit keeps the live →
+recorded paradigm while reducing how long refinement holds the shared
+accelerator.
 
 SurvNG associates detections across distinct timestamps, votes on labels, uses
 median confidence rather than the highest outlier, and applies the configured
