@@ -61,23 +61,29 @@ with an ad-hoc Dockerfile or `docker commit`.
 
 ## GitHub Container Registry
 
-Pushing to the `v1.0` branch or a version tag such as `v1.0.1` runs
-`.github/workflows/docker-publish.yml` on the self-hosted runner and publishes
-both Dockerfile targets to GHCR:
+Pushing to a release branch (`v1.0`, `v1.1`, …) or a version tag such as
+`v1.1.0` runs `.github/workflows/docker-publish.yml` on the self-hosted runner
+and publishes all Dockerfile targets to GHCR:
 
 | Image | When | Target |
 | --- | --- | --- |
-| `ghcr.io/instigatorx/survng:v1.0` | Every push to `v1.0` | `runtime` (CPU tip) |
-| `ghcr.io/instigatorx/survng:v1.0-intel` | Every push to `v1.0` | `runtime-intel` tip |
-| `ghcr.io/instigatorx/survng:sha-<7chars>` | Every push to `v1.0` | Immutable CPU commit |
-| `ghcr.io/instigatorx/survng:sha-<7chars>-intel` | Every push to `v1.0` | Immutable Intel commit |
-| `ghcr.io/instigatorx/survng:v1.0.1` | Git tag `v1.0.1` | `runtime` release |
-| `ghcr.io/instigatorx/survng:v1.0.1-intel` | Git tag `v1.0.1` | `runtime-intel` release |
+| `ghcr.io/instigatorx/survng:v1.1` | Every push to `v1.1` | `runtime` (CPU tip) |
+| `ghcr.io/instigatorx/survng:v1.1-intel` | Every push to `v1.1` | `runtime-intel` tip |
+| `ghcr.io/instigatorx/survng:v1.1-model-installer` | Every push to `v1.1` | `model-installer` tip |
+| `ghcr.io/instigatorx/survng:sha-<7chars>` | Every push to a release branch | Immutable CPU commit |
+| `ghcr.io/instigatorx/survng:sha-<7chars>-intel` | Every push to a release branch | Immutable Intel commit |
+| `ghcr.io/instigatorx/survng:sha-<7chars>-model-installer` | Every push to a release branch | Immutable model-installer commit |
+| `ghcr.io/instigatorx/survng:v1.1.0` | Git tag `v1.1.0` | `runtime` release |
+| `ghcr.io/instigatorx/survng:v1.1.0-intel` | Git tag `v1.1.0` | `runtime-intel` release |
+| `ghcr.io/instigatorx/survng:v1.1.0-model-installer` | Git tag `v1.1.0` | `model-installer` release |
+
+The same pattern applies to other release branches (for example `v1.0` publishes
+`v1.0`, `v1.0-intel`, and `v1.0-model-installer`).
 
 Day-to-day deploys can track the branch tip without cutting a release tag:
 
 ```bash
-docker pull ghcr.io/instigatorx/survng:v1.0
+docker pull ghcr.io/instigatorx/survng:v1.1
 ```
 
 Pin a specific build with the `sha-…` tag. Use a `v*` tag when you want a
