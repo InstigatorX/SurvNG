@@ -3812,14 +3812,14 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   function addMediaLocation() {
     const index = mediaLocations.length + 1;
     updateConfig(["media_storage", "locations"], [...mediaLocations, {
-      id: `media-${index}`,
-      name: `Media ${index}`,
-      path: "",
+      id: index === 1 ? "primary" : `media-${index}`,
+      name: index === 1 ? "Primary media" : `Media ${index}`,
+      path: index === 1 ? (config.storage_dir || "") : "",
       enabled: true,
       roles: ["recordings", "snapshots", "motion_audits", "clips", "exports"],
       reserve_percent: 15,
       priority: 100,
-      require_mount: true,
+      require_mount: false,
     }]);
   }
 
@@ -4075,13 +4075,13 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           </div>
           <section className="media-storage-settings">
             <div className="retention-heading">
-              <div><h4>Media locations</h4><p>Spread recordings and related media across independently managed filesystems.</p></div>
+              <div><h4>Media locations</h4><p>Place recordings and related media on one or more independently managed filesystems. At least one location is required.</p></div>
               <button type="button" onClick={addMediaLocation}><Plus size={15} /> Add location</button>
             </div>
             <div className="admin-field-grid">
               <label>Placement<select value={config.media_storage?.placement || "balanced"} onChange={(event) => updateConfig(["media_storage", "placement"], event.target.value)}><option value="balanced">Balanced free space</option><option value="priority">Location priority</option></select></label>
             </div>
-            {!mediaLocations.length ? <div className="probe-result ok"><strong>Single media location</strong><span>All media continues to use Storage Directory. Add locations only when the additional filesystems are mounted and writable.</span></div> : null}
+            {!mediaLocations.length ? <div className="probe-result"><strong>Media location required</strong><span>Add a primary filesystem path for recordings, snapshots, clips, and exports. Storage Directory remains the portable-path anchor for metadata under that root.</span></div> : null}
             <div className="media-location-list">
               {mediaLocations.map((location, index) => {
                 const candidateStatus = retentionStatus?.plan?.storage?.locations?.find((item) => item.id === location.id);
@@ -4090,7 +4090,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                   ? candidateStatus
                   : null;
                 return <article className="media-location-card" key={index}>
-                  <header><strong>{location.name || location.id || `Location ${index + 1}`}</strong><span className={`retention-state ${status?.state === "online" ? "running" : status?.state || "idle"}`}>{status?.state || "save to inspect"}</span><button type="button" className="danger compact" aria-label={`Remove ${location.name || location.id}`} onClick={() => updateConfig(["media_storage", "locations"], mediaLocations.filter((_item, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button></header>
+                  <header><strong>{location.name || location.id || `Location ${index + 1}`}</strong><span className={`retention-state ${status?.state === "online" ? "running" : status?.state || "idle"}`}>{status?.state || "save to inspect"}</span><button type="button" className="danger compact" aria-label={`Remove ${location.name || location.id}`} disabled={mediaLocations.length <= 1} onClick={() => updateConfig(["media_storage", "locations"], mediaLocations.filter((_item, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button></header>
                   <div className="admin-field-grid">
                     <label>ID<input value={location.id || ""} onChange={(event) => updateMediaLocation(index, "id", event.target.value)} /></label>
                     <label>Name<input value={location.name || ""} onChange={(event) => updateMediaLocation(index, "name", event.target.value)} /></label>
