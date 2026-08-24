@@ -1312,6 +1312,121 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(health["missing_index_files"], [])
 
+    def test_full_health_revalidates_before_treating_undiscovered_rows_as_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            hour = Path(tmpdir) / "recordings" / "gate" / "main" / "2026-01-01" / "00"
+            hour.mkdir(parents=True)
+            present = hour / "20260101-000000.mp4"
+            present.write_bytes(b"segment")
+            self._age_file(present, 120)
+            recorder._store_recording_rows(
+                "gate",
+                "main",
+                recorder._recording_rows_for_files("gate", "main", [present]),
+            )
+
+            with patch.object(recorder, "_recording_files_by_source", return_value={}):
+                health = recorder.storage_index_health(full=True)
+                repairs = recorder.reconcile_storage_index(full=True, health=health)
+
+            with recorder._index_connection() as connection:
+                remaining = {
+                    str(row[0]) for row in connection.execute("SELECT path FROM recordings")
+                }
+
+        self.assertEqual(health["missing_index_files"], [])
+        self.assertEqual(health["index_rows_retained_present"], 1)
+        self.assertEqual(repairs["stale_index_rows_removed"], 0)
+        self.assertEqual(remaining, {str(present)})
+
+    def test_quick_health_does_not_mark_discovered_paths_stale_on_probe_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            now = datetime.now()
+            hour = (
+                Path(tmpdir)
+                / "recordings"
+                / "gate"
+                / "main"
+                / now.strftime("%Y-%m-%d")
+                / now.strftime("%H")
+            )
+            hour.mkdir(parents=True)
+            clip = hour / f"{now.strftime('%Y%m%d-%H%M%S')}.mp4"
+            clip.write_bytes(b"segment")
+            self._age_file(clip, 120)
+            recorder._store_recording_rows(
+                "gate",
+                "main",
+                recorder._recording_rows_for_files("gate", "main", [clip]),
+            )
+
+            def fail_presence(path):
+                if Path(path) == clip:
+                    return "unknown"
+                from survng.app.media_storage import path_presence as real_presence
+                return real_presence(path)
+
+            with patch("survng.app.recording_process.index.path_presence", side_effect=fail_presence):
+                health = recorder.storage_index_health(full=False)
+                repairs = recorder.reconcile_storage_index(full=False, health=health)
+
+            with recorder._index_connection() as connection:
+                remaining = {
+                    str(row[0]) for row in connection.execute("SELECT path FROM recordings")
+                }
+
+        self.assertEqual(health["missing_index_files"], [])
+        self.assertEqual(repairs["stale_index_rows_removed"], 0)
+        self.assertEqual(remaining, {str(clip)})
+
+    def test_reconcile_never_deletes_paths_from_same_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            hour = Path(tmpdir) / "recordings" / "gate" / "main" / "2026-01-01" / "00"
+            hour.mkdir(parents=True)
+            clip = hour / "20260101-000000.mp4"
+            clip.write_bytes(b"segment")
+            self._age_file(clip, 120)
+            rows = recorder._recording_rows_for_files("gate", "main", [clip])
+            recorder._store_recording_rows("gate", "main", rows)
+            health = {
+                "files_by_source": {("gate", "main"): [clip]},
+                "unindexed_files": [],
+                "missing_index_files": [str(clip)],
+                "indexed_recordings": 1,
+            }
+
+            repairs = recorder.reconcile_storage_index(full=True, health=health)
+
+            with recorder._index_connection() as connection:
+                remaining = {
+                    str(row[0]) for row in connection.execute("SELECT path FROM recordings")
+                }
+
+        self.assertEqual(repairs["stale_index_rows_removed"], 0)
+        self.assertEqual(remaining, {str(clip)})
+
+    def test_prune_ignores_transient_stat_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "retained.mp4"
+            clip.write_bytes(b"recording")
+            recorder._store_recording_rows("front-door", "main", [self._row(clip)])
+
+            with patch(
+                "survng.app.recording_process.index.path_presence",
+                return_value="unknown",
+            ):
+                removed = recorder._prune_missing_index_rows()
+
+            with recorder._index_connection() as connection:
+                remaining = connection.execute("SELECT count(*) FROM recordings").fetchone()[0]
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(remaining, 1)
+
     def test_index_can_be_stored_outside_recording_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as index:
             recorder = Recorder(
