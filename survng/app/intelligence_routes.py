@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from .assistant import AssistantAnswer, AssistantChatRequest, AssistantEvidence, AssistantProvider, AssistantToolCall, IncidentVisualReviewer, strip_assistant_citation_markers
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, ai_provider_configured, motion_audit_interpretation, motion_paradigm_context, validate_tuning_value
-from .cross_camera_trace import build_cross_camera_trace
+from .cross_camera_trace import build_cross_camera_trace, prioritize_trace_candidates
 from .calibration import apply_calibration_changes, build_calibration_report, calibration_configuration_fingerprint, calibration_setting_value
 from .camera_intelligence import aggregate_camera_intelligence, compare_camera_intelligence_results, select_balanced_samples
 from .config import AppConfig, CameraConfig, camera_by_id
@@ -1951,7 +1951,7 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
         '_assistant_motion_change_previews': service._assistant_motion_change_previews,
         '_assistant_motion_config_fingerprint': service._assistant_motion_config_fingerprint,
         '_assistant_parse_datetime': service._assistant_parse_datetime,
-        '_assistant_prioritize_trace_candidates': service._assistant_prioritize_trace_candidates,
+        'prioritize_trace_candidates': prioritize_trace_candidates,
         '_assistant_recent_activity_summary': service._assistant_recent_activity_summary,
         '_assistant_search_incidents': service._assistant_search_incidents,
         '_assistant_semantic_search': service._assistant_semantic_search,
