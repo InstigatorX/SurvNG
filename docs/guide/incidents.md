@@ -2,7 +2,9 @@
 
 **Incidents** answers: what important activity did SurvNG keep?
 
-An incident is more than a motion blink. It is a reviewed stretch of activity with evidence you can inspect — usually a picture, object labels when detection is on, and links into recorded video.
+An incident is more than a motion blink. It is a stretch of activity with evidence you can inspect — usually a picture, object labels when detection is on, and links into recorded video.
+
+![Incidents workspace with evidence viewer](images/incidents-workspace.png)
 
 ## Browse incidents
 

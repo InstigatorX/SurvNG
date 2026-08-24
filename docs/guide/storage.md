@@ -13,7 +13,7 @@ SurvNG can keep continuous video, incident pictures, short clips, and exports. S
 | Event clips | Short generated clips around incidents |
 | Exports | Files you explicitly saved for download |
 
-## Retention in plain language
+## How retention works
 
 Under **Admin → Storage** you set limits such as:
 

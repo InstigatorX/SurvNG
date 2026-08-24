@@ -2,6 +2,8 @@
 
 **Admin** answers: how is SurvNG configured and performing?
 
+![Camera settings in Admin](images/admin-cameras.png)
+
 Admin is grouped into practical jobs.
 
 ## Configure

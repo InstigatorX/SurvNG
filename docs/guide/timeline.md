@@ -2,6 +2,8 @@
 
 **Timeline** answers: what happened around this time on this camera?
 
+![Timeline workspace with scrubber and related events](images/timeline-workspace.png)
+
 ## Scrub recorded video
 
 1. Open **Timeline**.
@@ -28,7 +30,7 @@ Typical flow:
 
 1. Select a time range on Timeline.
 2. Start an export.
-3. Watch progress in the background-task status (you do not need to keep the dialog open).
+3. Watch progress in the background-task status (you can leave the page while it runs).
 4. Open **Exports** to download, protect, or delete finished jobs.
 
 Protected exports are kept even when ordinary retention cleanup runs.
@@ -46,4 +48,4 @@ You want a 45-second clip of a package drop:
 
 - [Recordings & storage](storage.md)
 - [Incidents](incidents.md)
-- [Recording frame API](../recording-frame-api.md) (technical)
+- [Recording frame API](../recording-frame-api.md)

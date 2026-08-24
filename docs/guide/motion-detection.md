@@ -11,7 +11,7 @@ You can run recording without detection. Detection without sensible motion setti
 
 Under **Admin → Cameras → Motion/Object** you pick one complete behavior:
 
-| Choice | Plain meaning | Good when |
+| Choice | Meaning | Good when |
 | --- | --- | --- |
 | **Camera only** | Trust every ordinary camera motion notice | Camera notices are excellent and you want minimum extra CPU |
 | **Camera + EMA validation** | Camera notices still start work; SurvNG double-checks the picture | Notices are frequent but sometimes noisy |

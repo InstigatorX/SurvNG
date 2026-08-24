@@ -2,13 +2,17 @@
 
 **Live** answers one question: what is happening on my cameras right now?
 
+![Live command center with camera grid](images/live-command-center.png)
+
 ## What you see
 
 - A grid of camera tiles with live or near-live video
 - Borders or cues when a camera has recent motion
 - A feed of recent incidents so you can jump from “now” to “what just happened”
 
-On a phone, SurvNG keeps the same ideas but uses a more compact layout.
+On a phone, SurvNG keeps the same ideas in a more compact layout.
+
+![Mobile Live and Timeline](images/mobile-live-timeline.png)
 
 ## Command Center and Overview
 
@@ -27,7 +31,7 @@ Both stay inside Live; they are not separate destinations in the main navigation
 
 Live presentation settings (cropping/framing) only change how the browser shows the picture. They do **not** crop recordings, detection, or exports.
 
-## Tips for newcomers
+## Tips
 
 1. Start with one or two important cameras before filling the grid.
 2. Prefer the sub stream for live watching when the picture is still clear enough — it is lighter on the network.
