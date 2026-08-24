@@ -233,6 +233,16 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.detector.event_confirmation_frames, 2)
         self.assertEqual(config.detector.event_class_confirmation_frames, {})
         self.assertEqual(config.detector.event_class_confidence_thresholds, {})
+        self.assertEqual(
+            config.detector.event_refinement_stages,
+            [
+                [-1.0, -0.5, 0.0, 0.5, 1.0],
+                [4.0, 4.5],
+                [8.0, 8.5],
+                [12.0, 12.5],
+            ],
+        )
+        self.assertEqual(config.detector.event_refinement_retry_seconds, 24.0)
         self.assertIsNone(config.cameras[0].require_incident_zone)
         self.assertEqual(config.motion_qualification.pipeline.qualification, [])
         self.assertIsNone(
@@ -304,6 +314,36 @@ class AppConfigTest(unittest.TestCase):
                         "event_class_confidence_thresholds": {"person": invalid},
                     },
                 })
+
+    def test_detector_normalizes_event_refinement_stages_and_budgets(self) -> None:
+        config = AppConfig.model_validate({
+            "detector": {
+                "event_refinement_stages": [[-0.5, 0, 0.5], [4, 4.5]],
+                "event_refinement_retry_seconds": 12,
+                "event_refinement_settle_seconds": 0.5,
+                "event_representative_refinement_timeout_seconds": 3,
+            },
+        })
+
+        self.assertEqual(
+            config.detector.event_refinement_stages,
+            [[-0.5, 0.0, 0.5], [4.0, 4.5]],
+        )
+        self.assertEqual(config.detector.event_refinement_retry_seconds, 12.0)
+        self.assertEqual(config.detector.event_refinement_settle_seconds, 0.5)
+        self.assertEqual(
+            config.detector.event_representative_refinement_timeout_seconds,
+            3.0,
+        )
+
+        with self.assertRaises(ValidationError):
+            AppConfig.model_validate({
+                "detector": {"event_refinement_stages": []},
+            })
+        with self.assertRaises(ValidationError):
+            AppConfig.model_validate({
+                "detector": {"event_refinement_stages": [[100.0]]},
+            })
 
     def test_camera_identity_and_stream_urls_are_safe_for_runtime_paths(self) -> None:
         with self.assertRaises(ValidationError):
