@@ -1,11 +1,14 @@
 import { PREFER_NATIVE_HLS } from "./shared/constants.js";
 
 export function prefersJpegScrubPreview(options = {}) {
-  if (typeof options.preferNativeHls === "boolean") return options.preferNativeHls;
-  if (typeof options.coarsePointer === "boolean") return options.coarsePointer;
-  const coarsePointer = typeof window !== "undefined"
-    && Boolean(window.matchMedia?.("(pointer: coarse)").matches);
-  return PREFER_NATIVE_HLS || coarsePointer;
+  const preferNativeHls = typeof options.preferNativeHls === "boolean"
+    ? options.preferNativeHls
+    : PREFER_NATIVE_HLS;
+  const coarsePointer = typeof options.coarsePointer === "boolean"
+    ? options.coarsePointer
+    : (typeof window !== "undefined"
+      && Boolean(window.matchMedia?.("(pointer: coarse)").matches));
+  return preferNativeHls || coarsePointer;
 }
 
 export function scrubPreviewDelayMs(options = {}) {
