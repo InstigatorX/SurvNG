@@ -10605,6 +10605,14 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   pointer-events: none;
 }
 
+.recording-hero-controls {
+  bottom: 8px;
+}
+
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) .recording-hero-controls {
+  bottom: calc(86px + 8px);
+}
+
 .recording-grid-controls button,
 .recording-grid-controls time {
   pointer-events: auto;
@@ -11475,6 +11483,16 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .recording-grid-controls time {
     display: none;
+  }
+
+  .recording-hero-controls button,
+  .recording-grid-controls button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) .recording-hero-controls {
+    bottom: calc(86px + 8px);
   }
 
   .recordings-v2-controls {
