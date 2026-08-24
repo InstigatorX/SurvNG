@@ -26,9 +26,7 @@ from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_epoch
 from .media_exports import MediaExportManager
 from .manager_access import ManagerAccessCoordinator, guard_manager_generation
 from .recording_media import (
-    hls_map_transition,
     playback_segment_duration,
-    resolve_stream_fingerprints,
 )
 
 RECORDING_LOOKUP_LIMIT = 20_000
@@ -818,21 +816,19 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "#EXT-X-MEDIA-SEQUENCE:0",
             "#EXT-X-PLAYLIST-TYPE:VOD",
         ]
-        media_offset = 0.0
-        previous_fingerprint: str | None = None
-        fingerprints = resolve_stream_fingerprints(
-            [row.get("stream_fingerprint") for row in rows]
-        )
-        for row, stream_fingerprint in zip(rows, fingerprints):
+        for index, row in enumerate(rows):
             row_start = float(row["start_epoch"])
             segment_name = quote(str(row["name"]), safe="")
-            segment_query = f"{query}&media_offset={media_offset:.3f}"
-            map_lines, previous_fingerprint = hls_map_transition(
-                previous_fingerprint,
-                stream_fingerprint,
-                f"day/segment/{segment_name}/init.mp4?{segment_query}",
+            segment_query = query
+            # Each recording is remuxed independently.  Its media timestamps
+            # therefore restart at zero, even when codec metadata matches the
+            # preceding recording.  Make that boundary explicit for native HLS
+            # clients instead of synthesizing a continuous decode timeline.
+            if index:
+                lines.append("#EXT-X-DISCONTINUITY")
+            lines.append(
+                f'#EXT-X-MAP:URI="day/segment/{segment_name}/init.mp4?{segment_query}"'
             )
-            lines.extend(map_lines)
             lines.extend(
                 [
                     "#EXT-X-PROGRAM-DATE-TIME:"
@@ -841,7 +837,6 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                     f"day/segment/{segment_name}/media.m4s?{segment_query}",
                 ]
             )
-            media_offset += float(row["duration_seconds"])
         lines.append("#EXT-X-ENDLIST")
         return Response(
             "\n".join(lines) + "\n",
@@ -859,7 +854,6 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         start_epoch: float,
         end_epoch: float,
         source: str = "main",
-        media_offset: float = 0.0,
         trim_end: bool = False,
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
@@ -870,7 +864,6 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             start_epoch,
             end_epoch,
             source,
-            media_offset,
             trim_end,
         )
         return deps.recording_file_response(init_path, "video/mp4")
@@ -885,7 +878,6 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         start_epoch: float,
         end_epoch: float,
         source: str = "main",
-        media_offset: float = 0.0,
         trim_end: bool = False,
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
@@ -896,7 +888,6 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             start_epoch,
             end_epoch,
             source,
-            media_offset,
             trim_end,
         )
         return deps.recording_file_response(media_path, "video/iso.segment")
@@ -992,32 +983,18 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "#EXT-X-PLAYLIST-TYPE:VOD",
             f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
         ]
-        media_offset = 0.0
-        previous_fingerprint: str | None = None
-        fingerprints = resolve_stream_fingerprints(
-            [row.get("stream_fingerprint") for row in rows]
-        )
-        for row, stream_fingerprint, clip_duration in zip(
-            rows,
-            fingerprints,
-            clip_durations,
-        ):
+        for index, (row, clip_duration) in enumerate(zip(rows, clip_durations)):
             row_start = float(row["start_epoch"])
             segment_name = quote(str(row["name"]), safe="")
-            segment_query = (
-                f"{query}&media_offset={media_offset:.3f}&trim_end=true"
-            )
+            segment_query = f"{query}&trim_end=true"
             encoded_camera = quote(camera_id, safe="")
             map_uri = deps.public_url(
                 f"/api/cameras/{encoded_camera}/recordings/day/segment/"
                 f"{segment_name}/init.mp4?{segment_query}"
             )
-            map_lines, previous_fingerprint = hls_map_transition(
-                previous_fingerprint,
-                stream_fingerprint,
-                map_uri,
-            )
-            lines.extend(map_lines)
+            if index:
+                lines.append("#EXT-X-DISCONTINUITY")
+            lines.append(f'#EXT-X-MAP:URI="{map_uri}"')
             lines.extend(
                 [
                     "#EXT-X-PROGRAM-DATE-TIME:"
@@ -1029,7 +1006,6 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                     ),
                 ]
             )
-            media_offset += clip_duration
         lines.append("#EXT-X-ENDLIST")
         return Response(
             "\n".join(lines) + "\n",
