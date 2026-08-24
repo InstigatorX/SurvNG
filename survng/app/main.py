@@ -49,6 +49,7 @@ from .face_routes import (
     create_face_router,
 )
 from .frontend_routes import FrontendRouteDependencies, create_frontend_router
+from .help_docs import HelpRouteDependencies, create_help_router
 from .onvif_inspector_routes import create_onvif_inspector_router
 from .manager import AppManager, validate_manager_configuration
 from .manager_access import ManagerAccessCoordinator
@@ -1053,6 +1054,11 @@ _frontend_route_bundle = create_frontend_router(
     )
 )
 app.include_router(_frontend_route_bundle.router)
+app.include_router(
+    create_help_router(
+        HelpRouteDependencies(base_path=lambda: config.base_path)
+    )
+)
 app.include_router(create_onvif_inspector_router())
 health = _frontend_route_bundle.handlers["health"]
 favicon = _frontend_route_bundle.handlers["favicon"]
