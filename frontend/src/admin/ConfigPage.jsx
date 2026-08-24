@@ -23,6 +23,7 @@ import {
   HardDrive,
   Search,
   ListTree,
+  MapPin,
   Monitor,
   Moon,
   Pause,
@@ -62,6 +63,7 @@ import { formatDateTime, formatTimeOnly, formatBytes, formatMilliseconds, format
 import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hooks.js";
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
 import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
+import { SiteMapEditor, CameraMapPlacementEditor } from "./SiteMapEditor.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 
@@ -2238,6 +2240,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 <span className="tree-group-label">System</span>
                 <button type="button" aria-current={generalSection === "general" ? "page" : undefined} className={generalSection === "general" ? "active" : ""} onClick={() => selectAdminSubsection("general", setGeneralSection, "general")}><Cog size={16} /><span>Server</span></button>
                 <button type="button" aria-current={generalSection === "storage" ? "page" : undefined} className={generalSection === "storage" ? "active" : ""} onClick={() => selectAdminSubsection("storage", setGeneralSection, "general")}><HardDrive size={16} /><span>Storage &amp; Retention</span></button>
+                <button type="button" aria-current={generalSection === "property-map" ? "page" : undefined} className={generalSection === "property-map" ? "active" : ""} onClick={() => selectAdminSubsection("property-map", setGeneralSection, "general")}><MapPin size={16} /><span>Property Map</span></button>
                 <button type="button" aria-current={generalSection === "mqtt" ? "page" : undefined} className={generalSection === "mqtt" ? "active" : ""} onClick={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}><Radio size={16} /><span>API &amp; MQTT</span></button>
                 <span className="tree-group-label">Intelligence</span>
                 <button type="button" aria-current={generalSection === "detection" ? "page" : undefined} className={generalSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setGeneralSection, "general")}><Cpu size={16} /><span>Object Detection</span></button>
@@ -2268,6 +2271,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 advisorCameraId={selectedId}
                 onAdvisorCameraIdChange={setSelectedId}
                 section={generalSection}
+                cameras={cameras}
+                onUpdateCameraPlacement={(cameraId, placement) => updateCamera(cameraId, ["map_placement"], placement)}
+                onSiteMapChanged={(payload) => setConfig((current) => ({ ...current, site_map: { image_path: payload.image_path || "" } }))}
               />
             </section>
           </>
@@ -2423,6 +2429,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 <button id="camera-tab-settings" data-tab-id="settings" tabIndex={cameraSection === "settings" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => selectAdminSubsection("settings", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
                 <button id="camera-tab-motion" data-tab-id="motion" tabIndex={cameraSection === "motion" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "motion" ? "active" : ""} onClick={() => selectAdminSubsection("motion", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "motion"}><Activity size={15} />Motion/Object</button>
                 <button id="camera-tab-zones" data-tab-id="zones" tabIndex={cameraSection === "zones" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "zones" ? "active" : ""} onClick={() => selectAdminSubsection("zones", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "zones"}><Crop size={15} />Zones</button>
+                <button id="camera-tab-map" data-tab-id="map" tabIndex={cameraSection === "map" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "map" ? "active" : ""} onClick={() => selectAdminSubsection("map", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "map"}><MapPin size={15} />Map</button>
                 <button id="camera-tab-info" data-tab-id="info" tabIndex={cameraSection === "info" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "info" ? "active" : ""} onClick={() => selectAdminSubsection("info", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "info"}><Gauge size={15} />Info</button>
               </div> : null}
 
@@ -2579,6 +2586,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                       camera={selectedCamera}
                       classOptions={zoneClassOptions}
                       onChange={(zones) => updateCamera(selectedCamera.id, ["zones"], zones)}
+                    /> : null}
+
+                    {cameraSection === "map" ? <CameraMapPlacementEditor
+                      camera={selectedCamera}
+                      cameras={cameras}
+                      config={config}
+                      onUpdatePlacement={(cameraId, placement) => updateCamera(cameraId, ["map_placement"], placement)}
                     /> : null}
 
                     {cameraSection === "info" ? <>
@@ -3676,7 +3690,7 @@ export function RetentionSummary({ status }) {
   );
 }
 
-export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section }) {
+export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section, cameras = [], onUpdateCameraPlacement = null, onSiteMapChanged = null }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
   const [productUpdate, setProductUpdate] = useState(null);
@@ -4163,6 +4177,18 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
             <p className="retention-protection"><ShieldCheck size={15} /> Incident snapshots expire only after their configured history; face-reference images, incident clips, metadata databases, and the newest five minutes of recording remain protected.</p>
           </div>
+        </div>
+      ) : null}
+
+      {section === "property-map" ? (
+        <div className="sub-panel">
+          <h3>Property Map</h3>
+          <SiteMapEditor
+            config={config}
+            cameras={cameras}
+            onUpdatePlacement={onUpdateCameraPlacement}
+            onSiteMapChanged={onSiteMapChanged}
+          />
         </div>
       ) : null}
 

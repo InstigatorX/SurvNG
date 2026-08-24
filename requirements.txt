@@ -1,5 +1,6 @@
 fastapi>=0.141,<1
 uvicorn[standard]>=0.52,<1
+python-multipart>=0.0.20,<1
 websockets>=16,<17
 opencv-python==4.10.0.84
 openvino==2026.3.0

@@ -416,6 +416,23 @@ class CameraLiveViewConfig(BaseModel):
     live: CameraViewFrameConfig = Field(default_factory=CameraViewFrameConfig)
 
 
+class CameraMapPlacement(BaseModel):
+    """Normalized placement for one camera on the admin site map."""
+
+    enabled: bool = False
+    x: float = Field(default=0.5, ge=0.0, le=1.0)
+    y: float = Field(default=0.5, ge=0.0, le=1.0)
+    heading: float = Field(default=0.0, ge=0.0, lt=360.0)
+    fov: float = Field(default=90.0, ge=10.0, le=180.0)
+    range: float = Field(default=0.18, ge=0.03, le=0.5)
+
+
+class SiteMapConfig(BaseModel):
+    """User-uploaded property map shown on the incident workspace."""
+
+    image_path: str = ""
+
+
 class CameraConfig(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
@@ -431,6 +448,7 @@ class CameraConfig(BaseModel):
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
+    map_placement: CameraMapPlacement = Field(default_factory=CameraMapPlacement)
 
     @model_validator(mode="after")
     def derive_connection_from_url(self) -> "CameraConfig":
@@ -798,6 +816,7 @@ class AppConfig(BaseModel):
     semantic_search: SemanticSearchConfig = Field(default_factory=SemanticSearchConfig)
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
+    site_map: SiteMapConfig = Field(default_factory=SiteMapConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 
     @model_validator(mode="before")
