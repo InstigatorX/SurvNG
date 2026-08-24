@@ -25,12 +25,19 @@ export const ShakaVideo = forwardRef(function ShakaVideo({
 }, forwardedRef) {
   const videoRef = useRef(null);
   const [runtime, setRuntime] = useState(null);
-  const [nativeControlsVisible, setNativeControlsVisible] = useState(false);
+  const [nativeControlsVisible, setNativeControlsVisible] = useState(() => (
+    PREFER_NATIVE_HLS
+    || (typeof window !== "undefined" && Boolean(window.matchMedia?.("(pointer: coarse)").matches))
+  ));
   const callbacksRef = useRef({ onReady, onError });
   useImperativeHandle(forwardedRef, () => videoRef.current);
 
   useEffect(() => {
-    setNativeControlsVisible(false);
+    // Touch / iOS need controls immediately; deferred reveal leaves a paused frame with no play affordance.
+    setNativeControlsVisible(
+      PREFER_NATIVE_HLS
+      || Boolean(window.matchMedia?.("(pointer: coarse)").matches),
+    );
   }, [controls, src]);
 
   useEffect(() => {

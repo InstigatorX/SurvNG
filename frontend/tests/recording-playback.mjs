@@ -7,6 +7,7 @@ import {
   mergeRecordingAvailability,
   playbackMediaTimeForEpoch,
   playbackRowsCoverEpoch,
+  shouldResumePlaybackAfterSeek,
 } from "../src/recordingPlayback.mjs";
 
 const exportRange = { start: 100, end: 200 };
@@ -45,6 +46,12 @@ assert.equal(gridPlaybackNeedsSeek({ currentTime: 4, targetTime: 5.2, playing: t
 assert.equal(gridPlaybackNeedsSeek({ currentTime: 1, targetTime: 5.2, playing: true, epochDelta: 0.5 }), false);
 assert.equal(gridPlaybackNeedsSeek({ currentTime: 4, targetTime: 5.2, playing: true, epochDelta: 10 }), true);
 assert.equal(gridPlaybackNeedsSeek({ currentTime: 5, targetTime: 5.2, playing: false, epochDelta: 0 }), true);
+
+assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: "local", autoplay: true }), true);
+assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: "window-ready", autoplay: true }), true);
+assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: "local", autoplay: false }), false);
+assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: "window", autoplay: true }), false);
+assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: null, autoplay: true }), false);
 
 const mergedAvailability = mergeRecordingAvailability(
   [
