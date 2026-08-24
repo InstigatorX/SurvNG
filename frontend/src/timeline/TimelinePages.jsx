@@ -35,7 +35,7 @@ import {
 import { browserStorage } from "../storage.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "../recordingPlayback.mjs";
+import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, shouldResumePlaybackAfterSeek } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
@@ -718,6 +718,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [playbackErrorStage, setPlaybackErrorStage] = useState("");
   const [playbackNotice, setPlaybackNotice] = useState("");
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
+  const [heroPlaying, setHeroPlaying] = useState(false);
   const [playbackWindow, setPlaybackWindow] = useState(null);
   const [playbackWindowRevision, setPlaybackWindowRevision] = useState(0);
   const [manifestRetryToken, setManifestRetryToken] = useState(0);
@@ -1009,8 +1010,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!video) return;
     video.play().then(() => {
       setPlaybackBlocked(false);
+      setHeroPlaying(true);
     }).catch((error) => {
       if (showBlocked && error?.name === "NotAllowedError") {
+        setHeroPlaying(false);
         setPlaybackBlocked(true);
         setPlaybackNotice("Tap to play recording");
       }
@@ -1132,6 +1135,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setPlaybackError("");
     setPlaybackErrorStage("");
     setPlaybackBlocked(false);
+    setHeroPlaying(false);
     setRecordings([]);
     playbackRequestRef.current += 1;
     setPlaybackDetail(null);
@@ -1387,7 +1391,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function handleRecordingSeeked(event) {
-    if (pendingSeekModeRef.current === "local" || pendingSeekModeRef.current === "window-ready") {
+    const pendingMode = pendingSeekModeRef.current;
+    const resumePlayback = shouldResumePlaybackAfterSeek({
+      pendingSeekMode: pendingMode,
+      autoplay: autoplayRef.current,
+    });
+    if (pendingMode === "local" || pendingMode === "window-ready") {
       const epoch = mediaTimeToEpoch(event.currentTarget.currentTime);
       if (Number.isFinite(epoch)) {
         desiredEpochRef.current = epoch;
@@ -1396,7 +1405,22 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       pendingSeekEpochRef.current = null;
       pendingSeekModeRef.current = null;
       setPlaybackNotice("");
+      // Seek often pauses on mobile Safari; restore intentional playback after seek settles.
+      if (resumePlayback) requestRecordingPlay(event.currentTarget);
     }
+  }
+
+  function toggleHeroPlayback() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (!video.paused) {
+      autoplayRef.current = false;
+      setHeroPlaying(false);
+      video.pause();
+      return;
+    }
+    autoplayRef.current = true;
+    requestRecordingPlay(video);
   }
 
   function handleRecordingError(error) {
@@ -1605,12 +1629,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               onEnded={continueRecordingPlayback}
               onPlay={() => {
                 autoplayRef.current = true;
+                setHeroPlaying(true);
                 setPlaybackBlocked(false);
                 if (!Number.isFinite(pendingSeekEpochRef.current)) setPlaybackNotice("");
               }}
               onPause={(event) => {
                 if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
                   autoplayRef.current = false;
+                  setHeroPlaying(false);
                 }
               }}
             />
@@ -1625,6 +1651,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               <Play size={22} fill="currentColor" />
               Play recording
             </button>
+          ) : null}
+          {!isAllCameras && Number.isFinite(playhead) && manifestUrl && !playbackError ? (
+            <div className="recording-grid-controls recording-hero-controls">
+              <button type="button" onClick={() => playAt(playhead - 10, autoplayRef.current || heroPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
+              <button type="button" className="primary" onClick={toggleHeroPlayback}>
+                {heroPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}
+                {heroPlaying ? "Pause" : "Play"}
+              </button>
+              <button type="button" onClick={() => playAt(playhead + 10, autoplayRef.current || heroPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
+              <time>{formatDateTime(playhead, timeZone)}</time>
+            </div>
           ) : null}
           {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls">
             <button type="button" onClick={() => playAt(playhead - 10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>

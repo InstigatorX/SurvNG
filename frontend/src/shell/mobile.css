@@ -531,6 +531,15 @@
     position: relative !important;
     z-index: 1 !important;
   }
+
+  .recording-hero-controls,
+  .recordings-v2-play {
+    z-index: 8 !important;
+  }
+
+  .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) .recording-hero-controls {
+    bottom: calc(86px + 8px) !important;
+  }
 }
 
 @media (max-width: 760px) {
