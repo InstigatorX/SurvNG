@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import {
   Activity,
   Camera,
+  CircleHelp,
   Clock3,
   Cog,
   Cpu,
@@ -49,6 +50,7 @@ export function MobileMoreSheet({ links, page, onClose }) {
         {links.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} href={href} key={id}><Icon size={20} /><span>{label}</span></a>)}
         <a href={appUrl("/admin?section=telemetry")}><Gauge size={20} /><span>System status</span></a>
         <a href={appUrl("/admin?section=general")}><Sun size={20} /><span>Appearance</span></a>
+        <a href={appUrl("/help")}><CircleHelp size={20} /><span>Help</span></a>
       </div>
     </div>
   ), document.body);
@@ -133,6 +135,7 @@ export function Shell({ page, theme, recordingContext, children }) {
         <nav className="workspace-navigation" aria-label="Primary">
           {workspaceLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} title={label} href={href} key={id}><Icon size={19} /><span>{label}</span></a>)}
         </nav>
+        <a className="workspace-help-link" href={appUrl("/help")} aria-label="Help" title="Help"><CircleHelp size={19} /><span>Help</span></a>
         <button type="button" className="workspace-rail-toggle" onClick={() => setRailCollapsedValue(railCollapsed ? "false" : "true")} aria-label={railCollapsed ? "Expand navigation" : "Collapse navigation"} title={railCollapsed ? "Expand navigation" : "Collapse navigation"}>
           {railCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}<span>{railCollapsed ? "Expand" : "Collapse"}</span>
         </button>
