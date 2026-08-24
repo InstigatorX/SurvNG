@@ -54,24 +54,28 @@ class EventStoreTest(unittest.TestCase):
     def test_detection_jobs_prioritize_newest_incident_over_restart_backlog(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
+            now = datetime.now(timezone.utc)
+            older_created_at = (now - timedelta(hours=2)).isoformat()
+            newer_created_at = (now - timedelta(hours=1)).isoformat()
+            event_at = now.isoformat()
             for job_id in ("older", "newer"):
                 self.assertEqual(
                     store.enqueue_detection_job(
                         job_id=job_id,
                         camera_id="gate",
                         dedupe_key=f"episode:{job_id}",
-                        payload={"event_at": "2026-08-22T20:00:00+00:00"},
+                        payload={"event_at": event_at},
                     ),
                     "queued",
                 )
             with store._connect_jobs() as connection:
                 connection.execute(
                     "update detection_jobs set created_at = ? where id = 'older'",
-                    ("2026-08-22T19:00:00+00:00",),
+                    (older_created_at,),
                 )
                 connection.execute(
                     "update detection_jobs set created_at = ? where id = 'newer'",
-                    ("2026-08-22T20:00:00+00:00",),
+                    (newer_created_at,),
                 )
 
             claimed = store.claim_detection_job(
