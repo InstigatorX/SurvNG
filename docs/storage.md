@@ -56,8 +56,10 @@ Example with a location rooted at `/mnt/survng-a`:
     └── manifests/
 ```
 
-If no media locations are configured, SurvNG preserves the historical layout
-under `storage_dir`. No migration is required to retain single-disk behavior.
+If only one media location is configured, SurvNG still uses the same placement
+and health checks as a multi-disk pool. Point that location at your media
+filesystem (often the same path as `storage_dir` for portable relative paths).
+Empty `media_storage.locations` is invalid.
 
 ## Configuration
 
@@ -281,7 +283,7 @@ The recording index stores absolute paths and a location ID for each segment.
 Playback, timeline discovery, export generation, event clips, maintenance, and
 retention search every configured recording root.
 
-Snapshots outside the legacy `storage_dir` retain verified absolute paths.
+Snapshots outside `storage_dir` retain verified absolute paths.
 Incident viewing, face recognition, appearance indexing, semantic search,
 model evaluation, AI analysis, and training-image APIs validate those paths
 against the configured media-location registry before reading them.

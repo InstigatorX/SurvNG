@@ -3,6 +3,27 @@
   "storage_dir": "/media",
   "database_dir": "/data/database",
   "recording_index_dir": "/data/recording-index",
+  "media_storage": {
+    "placement": "balanced",
+    "locations": [
+      {
+        "id": "primary",
+        "name": "Primary media",
+        "path": "/media",
+        "enabled": true,
+        "roles": [
+          "recordings",
+          "snapshots",
+          "motion_audits",
+          "clips",
+          "exports"
+        ],
+        "reserve_percent": 15,
+        "priority": 100,
+        "require_mount": false
+      }
+    ]
+  },
   "ffmpeg_path": "/usr/bin/ffmpeg",
   "hardware_acceleration": "auto",
   "recording_segment_seconds": 10.0,

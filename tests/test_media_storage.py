@@ -3,16 +3,37 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
-from survng.app.config import MediaStorageConfig, MediaStorageLocationConfig
+from survng.app.config import (
+    AppConfig,
+    MediaStorageConfig,
+    MediaStorageLocationConfig,
+    primary_media_storage,
+)
 from survng.app.media_storage import MediaStorageRegistry
 
 
-def test_empty_config_preserves_legacy_storage_root(tmp_path: Path) -> None:
-    registry = MediaStorageRegistry(tmp_path, MediaStorageConfig())
+def test_primary_location_uses_configured_media_root(tmp_path: Path) -> None:
+    media_root = tmp_path / "media"
+    media_root.mkdir()
+    registry = MediaStorageRegistry(tmp_path, primary_media_storage(str(media_root)))
 
-    assert registry.location_ids == ("default",)
-    assert registry.directory("snapshots", "gate", "gate") == tmp_path / "snapshots" / "gate"
+    assert registry.location_ids == ("primary",)
+    assert registry.directory("snapshots", "gate", "gate") == media_root / "snapshots" / "gate"
+
+
+def test_empty_locations_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="at least 1 item"):
+        MediaStorageConfig(locations=[])
+
+
+def test_app_config_seeds_primary_location_from_storage_dir(tmp_path: Path) -> None:
+    config = AppConfig(storage_dir=str(tmp_path))
+
+    assert len(config.media_storage.locations) == 1
+    assert config.media_storage.locations[0].id == "primary"
+    assert config.media_storage.locations[0].path == str(tmp_path)
 
 
 def test_role_selection_uses_only_eligible_locations(tmp_path: Path) -> None:

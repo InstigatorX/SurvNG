@@ -1,11 +1,11 @@
 # Storage retention
 
 SurvNG separates continuous recordings from protected incident media and
-regenerable playback data. By default all media remains beneath `storage_dir`,
-preserving the historical single-filesystem layout. Admin can additionally
-configure two or more role-aware media locations for recordings, snapshots,
-motion-audit evidence, event clips, and exports. Databases, indexes, model
-packages, and transient playback work remain on local application storage.
+regenerable playback data. Configure at least one media location under
+`media_storage.locations` (often the same path as `storage_dir`). Admin can
+add additional role-aware locations for recordings, snapshots, motion-audit
+evidence, event clips, and exports. Databases, indexes, model packages, and
+transient playback work remain on local application storage.
 
 Each location has an immutable ID, filesystem path, accepted media roles,
 reserve percentage, priority, enabled state, and optional mount requirement.

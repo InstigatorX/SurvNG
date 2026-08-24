@@ -4,7 +4,24 @@
   "recording_index_dir": "",
   "media_storage": {
     "placement": "balanced",
-    "locations": []
+    "locations": [
+      {
+        "id": "primary",
+        "name": "Primary media",
+        "path": "survng/storage",
+        "enabled": true,
+        "roles": [
+          "recordings",
+          "snapshots",
+          "motion_audits",
+          "clips",
+          "exports"
+        ],
+        "reserve_percent": 15,
+        "priority": 100,
+        "require_mount": false
+      }
+    ]
   },
   "ffmpeg_path": "ffmpeg",
   "event_clip_before_seconds": 5.0,
