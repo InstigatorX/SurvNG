@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException
 
 from .audit_ai import motion_audit_interpretation
+from .cross_camera_trace import build_cross_camera_trace
 from .incident_presenter import (
     _event_row,
     _incident_list_payload,
@@ -578,6 +579,37 @@ class IncidentQueryService:
                 return hydrated[0] if hydrated else summary
         return None
 
+    def cross_camera_trace(
+        self,
+        manager: AppManager,
+        event_id: int,
+        *,
+        start_at: str = "",
+        end_at: str = "",
+        object_label: str = "",
+        face_name: str = "",
+        time_zone: str = "America/New_York",
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        try:
+            return build_cross_camera_trace(
+                manager,
+                resolve_event=self.resolve_event,
+                hydrate=self.hydrate,
+                with_faces=self.with_faces,
+                event_id=event_id,
+                object_label=object_label,
+                face_name=face_name,
+                start_at=start_at,
+                end_at=end_at,
+                time_zone=time_zone,
+                limit=limit,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="incident was not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
 
 @dataclass(frozen=True, slots=True)
 class IncidentQueryDependencies:
@@ -687,6 +719,29 @@ def create_incident_query_router(
             raise HTTPException(status_code=404, detail="incident was not found")
         return incident
 
+    @router.get("/api/incidents/by-event/{event_id}/cross-camera-trace")
+    def cross_camera_trace(
+        event_id: int,
+        start_at: str = "",
+        end_at: str = "",
+        object_label: str = "",
+        face_name: str = "",
+        time_zone: str = "America/New_York",
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        return with_manager(
+            lambda active: service.cross_camera_trace(
+                active,
+                event_id,
+                start_at=start_at,
+                end_at=end_at,
+                object_label=object_label,
+                face_name=face_name,
+                time_zone=time_zone,
+                limit=limit,
+            )
+        )
+
     return IncidentQueryRouteBundle(
         router=router,
         handlers={
@@ -696,5 +751,6 @@ def create_incident_query_router(
             "incident_detail": incident_detail,
             "incident_search": incident_search,
             "incident_for_event": incident_for_event,
+            "cross_camera_trace": cross_camera_trace,
         },
     )

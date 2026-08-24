@@ -13,6 +13,7 @@ assert.match(incidentCard, /export function IncidentCard\(/);
 assert.match(incidentCard, /export function IncidentInspector\(/);
 assert.match(incidentCard, /export function IncidentClipLayer\(/);
 assert.match(incidentCard, /export function RelatedAppearanceIncidents\(/);
+assert.match(incidentCard, /export function CrossCameraTracePanel\(/);
 assert.doesNotMatch(incidentCard, /export function IncidentListItem\(/);
 
 assert.match(evidence, /export function IncidentListItem\(/);

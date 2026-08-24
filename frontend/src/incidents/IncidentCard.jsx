@@ -12,6 +12,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
 import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
@@ -592,6 +593,98 @@ export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loa
   );
 }
 
+export function CrossCameraTracePanel({
+  anchorEventId,
+  cameraNameById,
+  timeZone,
+  onSelect,
+  loadingEventId,
+}) {
+  const [trace, setTrace] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setTrace(null);
+      setError("");
+      setLoading(false);
+      return undefined;
+    }
+    if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
+      setTrace(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    fetch(appUrl(crossCameraTracePath(anchorEventId, { time_zone: timeZone })), {
+      signal: controller.signal,
+    })
+      .then((response) => response.ok ? response.json() : response.json().then((payload) => Promise.reject(new Error(payload.detail || "Cross-camera trace unavailable"))))
+      .then((payload) => {
+        if (!cancelled) setTrace(payload);
+      })
+      .catch((requestError) => {
+        if (!cancelled && requestError?.name !== "AbortError") {
+          setTrace(null);
+          setError(requestError.message || "Cross-camera trace unavailable");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [anchorEventId, open, timeZone]);
+
+  if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) return null;
+
+  return (
+    <section className="incident-cross-camera-trace">
+      <div className="incident-related-head">
+        <div>
+          <h3>Cross-camera trace</h3>
+          <small>Chronological matches across cameras without using the assistant.</small>
+        </div>
+        <button type="button" onClick={() => setOpen((current) => !current)}>
+          {open ? "Hide trace" : "Trace across cameras"}
+        </button>
+      </div>
+      {open && loading ? <p>Finding cross-camera matches…</p> : null}
+      {open && error ? <p className="incident-cross-camera-trace-error">{error}</p> : null}
+      {open && trace ? <>
+        <p className="incident-cross-camera-trace-summary">{trace.summary}</p>
+        <div className="assistant-timeline incident-cross-camera-timeline">
+          {trace.matches?.length ? trace.matches.map((match) => {
+            const eventId = Number(match.event_id);
+            const pending = eventId === Number(loadingEventId);
+            return (
+              <button
+                type="button"
+                className="assistant-timeline-link"
+                key={eventId}
+                disabled={pending}
+                onClick={() => onSelect?.(match)}
+                title={`Open incident from ${crossCameraMatchCameraLabel(match, cameraNameById)}`}
+              >
+                <span>{formatDateTime(match.start_at, timeZone)}</span>
+                <strong>{crossCameraMatchCameraLabel(match, cameraNameById)}</strong>
+                <small>{pending ? "Loading…" : crossCameraMatchLabel(match)}</small>
+              </button>
+            );
+          }) : <small>No related incidents were found in this time window.</small>}
+        </div>
+        {trace.limitations?.[3] ? <p className="incident-cross-camera-trace-limitations">{trace.limitations[3]}</p> : null}
+      </> : null}
+    </section>
+  );
+}
+
 export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
@@ -667,6 +760,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
         )) : <p>No recognized faces.</p>}
       </section>
       <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
+      <CrossCameraTracePanel anchorEventId={anchorEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} loadingEventId={relatedLoadingEventId} />
       <details className="incident-technical-details">
         <summary>Technical details</summary>
         <div className="incident-technical-body">

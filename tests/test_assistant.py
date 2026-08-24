@@ -942,7 +942,7 @@ class AssistantApiTest(unittest.TestCase):
         with (
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
             patch(
-                "survng.app.intelligence_routes._incident_rows", return_value=[match]
+                "survng.app.cross_camera_trace._incident_rows", return_value=[match]
             ),
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
@@ -1005,7 +1005,7 @@ class AssistantApiTest(unittest.TestCase):
         with (
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
             patch(
-                "survng.app.intelligence_routes._incident_rows", return_value=[match]
+                "survng.app.cross_camera_trace._incident_rows", return_value=[match]
             ),
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),

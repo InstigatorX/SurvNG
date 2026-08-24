@@ -1334,6 +1334,43 @@ p {
   white-space: nowrap;
 }
 
+.incident-cross-camera-trace {
+  display: grid;
+  gap: 10px;
+}
+
+.incident-cross-camera-trace-summary,
+.incident-cross-camera-trace-limitations,
+.incident-cross-camera-trace-error {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.incident-cross-camera-trace-error {
+  color: var(--danger);
+}
+
+.incident-cross-camera-timeline {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .02);
+}
+
+.incident-cross-camera-timeline .assistant-timeline-link {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.incident-cross-camera-timeline .assistant-timeline-link:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+
 .incident-replay-analysis {
   gap: 8px !important;
 }
