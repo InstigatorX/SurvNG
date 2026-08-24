@@ -1,3 +1,33 @@
+import { PREFER_NATIVE_HLS } from "./shared/constants.js";
+
+export function prefersJpegScrubPreview(options = {}) {
+  if (typeof options.preferNativeHls === "boolean") return options.preferNativeHls;
+  if (typeof options.coarsePointer === "boolean") return options.coarsePointer;
+  const coarsePointer = typeof window !== "undefined"
+    && Boolean(window.matchMedia?.("(pointer: coarse)").matches);
+  return PREFER_NATIVE_HLS || coarsePointer;
+}
+
+export function scrubPreviewDelayMs(options = {}) {
+  const coarsePointer = typeof options.coarsePointer === "boolean"
+    ? options.coarsePointer
+    : prefersJpegScrubPreview(options);
+  return coarsePointer ? 450 : 250;
+}
+
+export function scrubPreviewBucketSeconds(options = {}) {
+  return prefersJpegScrubPreview(options) ? 10 : 5;
+}
+
+export function seekVideoToTime(video, mediaTime) {
+  if (!video || !Number.isFinite(mediaTime)) return;
+  if (typeof video.fastSeek === "function") {
+    video.fastSeek(mediaTime);
+    return;
+  }
+  video.currentTime = mediaTime;
+}
+
 export function playbackRowsCoverEpoch(rows, epoch) {
   if (!Number.isFinite(epoch) || !Array.isArray(rows)) return false;
   return rows.some((row) => {
