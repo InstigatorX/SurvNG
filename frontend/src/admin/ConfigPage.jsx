@@ -47,6 +47,7 @@ import { buildMotionDecisionFusion, MOTION_BEHAVIOR_OPTIONS, motionBehaviorOptio
 import { availableQualificationPresets, motionAnalysisPresetSelectionUseful, presetQualificationGraph, readMotionAnalysisPreset } from "../motionAnalysisConfig.mjs";
 import { TUNEUP_PERIODS, TUNEUP_SETTING_NAMES, tuneupHistoryTitle, tuneupOutcome, tuneupRecommendationGroup, tuneupValue } from "../detectionTuneup.mjs";
 import { formatServerUptime } from "../duration.mjs";
+import { cameraCaptureConnectivity, cameraConnectivityClass, cameraConnectivityLabel } from "../cameraConnectivity.mjs";
 import { browserStorage, readStoredValue } from "../storage.mjs";
 import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
@@ -555,7 +556,7 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
           <article><span>Events · 1h</span><strong>{Number(lastHour.events || 0).toLocaleString()}</strong><small>{Number(lastDay.events || 0).toLocaleString()} in the shown 24-hour window</small></article>
           <article><span>Object incidents · 24h</span><strong>{Number(lastDay.object_incidents || 0).toLocaleString()}</strong><small>{Number(lastDay.objects || 0).toLocaleString()} eligible object detections</small></article>
           {selected ? <>
-            <article><span>Live video</span><strong>{selected.connected ? "Available" : "Unavailable"}</strong><small>Last frame {formatAge(selected.last_frame_age_seconds)}</small></article>
+            <article><span>Live video</span><strong>{cameraConnectivityLabel(cameraCaptureConnectivity(selected))}</strong><small>Last frame {formatAge(selected.last_frame_age_seconds)}{Number(selected.capture_reconnects || 0) ? ` · ${Number(selected.capture_reconnects).toLocaleString()} reconnects since restart` : ""}{selected.last_error ? ` · ${selected.last_error}` : ""}</small></article>
             <article><span>Stream interruptions · since restart</span><strong>{(selectedReadFailures + selectedOpenFailures).toLocaleString()}</strong><small>{selectedReadFailures.toLocaleString()} interrupted reads · {selectedOpenFailures.toLocaleString()} failed connections</small></article>
             <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
             <article><span>EMA coverage · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{runtimeTotals.eventLoss ? `${runtimeTotals.eventLoss} events lost` : "No events lost"}</small></article>
@@ -696,7 +697,7 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
               const objectActivity = camera.object_tracking?.object_activity_attribution || {};
               const onvifIssues = Number(camera.onvif?.poll_errors || 0) + Number(camera.onvif?.poll_timeouts || 0) + Number(camera.onvif?.renewal_errors || 0);
               const expected = camera.expected_enabled ?? (camera.lifecycle?.enabled !== false);
-              const fresh = camera.connected && (camera.frame_fresh ?? Number(camera.last_frame_age_seconds || 0) <= 5);
+              const connectivity = cameraCaptureConnectivity(camera);
               const cameraEventStatus = !camera.onvif?.enabled
                 ? "Disabled"
                 : !camera.onvif?.connected
@@ -704,8 +705,8 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
                   : onvifIssues
                     ? `Connected · ${onvifIssues.toLocaleString()} recovered issues`
                     : "Healthy";
-              const statusClass = !expected ? "disabled" : fresh ? "healthy" : camera.connected ? "attention" : "offline";
-              const statusLabel = !expected ? "Paused" : fresh ? "Healthy" : camera.connected ? "Stale video" : "Offline";
+              const statusClass = !expected ? "disabled" : cameraConnectivityClass(connectivity);
+              const statusLabel = !expected ? "Paused" : cameraConnectivityLabel(connectivity);
               return <article className="telemetry-camera-card" key={camera.id}>
                 <header><div><strong>{camera.name}</strong><small>{camera.id}</small></div><span className={statusClass}>{statusLabel}</span></header>
                 <dl>

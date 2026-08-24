@@ -48,8 +48,26 @@ class MotionRuntimeStatusProvider(Protocol):
     def runtime_status(self) -> dict[str, Any]: ...
 
 
+CaptureConnectivity = str  # healthy | reconnecting | offline | paused
+
+
 class CameraStatusService:
     """Build the stable API status payload from injected runtime providers."""
+
+    @staticmethod
+    def capture_connectivity(
+        *,
+        running: bool,
+        connected: bool,
+        capture_running: bool,
+    ) -> CaptureConnectivity:
+        if not running:
+            return "paused"
+        if connected:
+            return "healthy"
+        if capture_running:
+            return "reconnecting"
+        return "offline"
 
     def __init__(
         self,
@@ -163,12 +181,21 @@ class CameraStatusService:
             "fusion_pipeline": self.fusion_pipeline.status(),
             "debug": self.debug_store.status(),
         }
+        capture_running = bool(capture["live_running"])
+        connectivity = self.capture_connectivity(
+            running=enabled,
+            connected=connected,
+            capture_running=capture_running,
+        )
+        live_stats = dict((capture.get("capture_stats") or {}).get("live") or {})
         return {
             "id": self.camera.id,
             "name": self.camera.name,
             "running": enabled,
             "connected": connected,
-            "capture_running": bool(capture["live_running"]),
+            "capture_running": capture_running,
+            "capture_connectivity": connectivity,
+            "capture_reconnects": int(live_stats.get("reconnects") or 0),
             "frame_fresh": connected,
             "last_frame_age_seconds": self._rounded(live_age),
             "main_running": bool(capture["main_running"]),

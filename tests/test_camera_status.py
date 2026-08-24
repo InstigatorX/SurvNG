@@ -167,3 +167,18 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
 def test_disabled_or_stale_camera_is_not_reported_connected() -> None:
     assert _service(enabled=False).snapshot()["connected"] is False
     assert _service(live_clock=0.0).snapshot()["connected"] is False
+
+
+def test_capture_connectivity_reports_reconnecting_when_thread_is_alive_without_fresh_frames() -> None:
+    status = _service(live_clock=0.0).snapshot()
+
+    assert status["capture_connectivity"] == "reconnecting"
+    assert status["connected"] is False
+    assert status["capture_running"] is True
+
+
+def test_capture_connectivity_reports_paused_when_camera_is_disabled() -> None:
+    status = _service(enabled=False).snapshot()
+
+    assert status["capture_connectivity"] == "paused"
+    assert status["capture_running"] is True
