@@ -92,29 +92,30 @@ class MotionReconfigurationIncompleteError(RuntimeError):
 
 
 def validate_media_storage_configuration(config: AppConfig) -> None:
-    if config.media_storage.locations:
-        required_roles = {
-            "recordings": "recordings",
-            "snapshots": "snapshots",
-            "motion_audits": "motion audits",
-            "clips": "clips",
-            "exports": "exports",
-        }
-        enabled_roles = {
-            role
-            for location in config.media_storage.locations
-            if location.enabled
-            for role in location.roles
-        }
-        missing_roles = [
-            label for role, label in required_roles.items()
-            if role not in enabled_roles
-        ]
-        if missing_roles:
-            raise ValueError(
-                "at least one enabled media location must accept: "
-                + ", ".join(missing_roles)
-            )
+    if not config.media_storage.locations:
+        raise ValueError("media_storage.locations requires at least one location")
+    required_roles = {
+        "recordings": "recordings",
+        "snapshots": "snapshots",
+        "motion_audits": "motion audits",
+        "clips": "clips",
+        "exports": "exports",
+    }
+    enabled_roles = {
+        role
+        for location in config.media_storage.locations
+        if location.enabled
+        for role in location.roles
+    }
+    missing_roles = [
+        label for role, label in required_roles.items()
+        if role not in enabled_roles
+    ]
+    if missing_roles:
+        raise ValueError(
+            "at least one enabled media location must accept: "
+            + ", ".join(missing_roles)
+        )
 
 
 def validate_motion_pipeline_configuration(config: AppConfig) -> None:

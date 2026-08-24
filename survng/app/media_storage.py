@@ -73,12 +73,10 @@ class MediaStorageSnapshot:
 class MediaStorageRegistry:
     """Resolve media locations and make stable, bounded placement decisions.
 
-    An empty location list intentionally means the historical single
-    ``storage_dir``. This makes the abstraction safe to deploy before an
-    operator configures a second filesystem.
+    At least one configured location is required. Single-disk and multi-disk
+    installs share the same placement and health path.
     """
 
-    LEGACY_LOCATION_ID = "default"
     ROLE_DIRECTORIES: dict[MediaStorageRole, str] = {
         "recordings": "recordings",
         "snapshots": "snapshots",
@@ -90,17 +88,11 @@ class MediaStorageRegistry:
     def __init__(self, storage_dir: Path, config: MediaStorageConfig) -> None:
         self.storage_dir = storage_dir.expanduser().resolve(strict=False)
         self.config = config
-        self._implicit_legacy = not config.locations
         self._lock = threading.RLock()
         self._assignments: dict[tuple[str, str], str] = {}
         configured = list(config.locations)
         if not configured:
-            configured = [MediaStorageLocationConfig(
-                id=self.LEGACY_LOCATION_ID,
-                name="Primary media",
-                path=str(self.storage_dir),
-                reserve_percent=0,
-            )]
+            raise ValueError("media_storage.locations requires at least one location")
         self._locations = {item.id: item for item in configured}
         self._roots = {
             item.id: Path(item.path).expanduser().resolve(strict=False)
@@ -278,11 +270,8 @@ class MediaStorageRegistry:
         *relative: str,
         create: bool = True,
     ) -> Path:
-        if self._implicit_legacy:
-            directory = self.storage_dir / self.ROLE_DIRECTORIES[role]
-        else:
-            selected = self.choose(role, assignment_key)
-            directory = selected.path / self.ROLE_DIRECTORIES[role]
+        selected = self.choose(role, assignment_key)
+        directory = selected.path / self.ROLE_DIRECTORIES[role]
         if relative:
             directory = directory.joinpath(*relative)
         if create:
