@@ -14,7 +14,7 @@ import { incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
 import { formatDateTime } from "../shared/format.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
-import { useStoredState, isMobileViewport } from "../shared/hooks.js";
+import { useStoredState, useViewportQuery } from "../shared/hooks.js";
 import { clearLegacyIncidentFilterStorage } from "../shared/cameras.js";
 import { useAppEvents } from "../shared/events.js";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
@@ -78,7 +78,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const [tabletInspectorOpen, setTabletInspectorOpen] = useState(false);
   const tabletInspectorToggleRef = useRef(null);
   const relatedPreviewRequestRef = useRef(0);
-  const mobileView = isMobileViewport();
+  const mobileView = useViewportQuery("(max-width: 760px)");
   const incidentRailReady = mobileView || (incidentRailSize.width > 0 && incidentRailSize.height > 0);
   const incidentsPerPage = mobileView
     ? 12

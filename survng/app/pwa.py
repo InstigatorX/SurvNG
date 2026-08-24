@@ -52,7 +52,7 @@ def web_app_manifest(base_path: str) -> dict[str, Any]:
     }
 
 
-def service_worker_script(base_path: str, cache_version: str = "v1") -> str:
+def service_worker_script(base_path: str, cache_version: str = "v2") -> str:
     """Return a network-first service worker that only caches hashed static assets."""
     prefix = str(base_path or "").rstrip("/")
     cache_name = f"survng-static-{cache_version}"

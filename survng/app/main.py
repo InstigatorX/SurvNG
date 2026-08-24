@@ -520,6 +520,27 @@ def public_url(path: str) -> str:
     return f"{config.base_path}{normalized}"
 
 
+def _warn_if_frontend_build_stale() -> None:
+    static_dir = Path("survng/static")
+    index_path = static_dir / "index.html"
+    assets_dir = static_dir / "assets"
+    logger = logging.getLogger("uvicorn.error")
+    if not index_path.is_file():
+        logger.warning(
+            "Frontend build missing at survng/static/index.html; run scripts/build-frontend.sh"
+        )
+        return
+    if not assets_dir.is_dir():
+        logger.warning(
+            "Frontend assets missing at survng/static/assets; run scripts/build-frontend.sh"
+        )
+        return
+    if not any(path.name.startswith("PropertyMapPanel-") for path in assets_dir.glob("*.js")):
+        logger.warning(
+            "Frontend build appears stale (property map UI missing); run scripts/build-frontend.sh and hard-refresh the browser"
+        )
+
+
 def frontend_response(filename: str) -> HTMLResponse:
     html = Path("survng/static", filename).read_text(encoding="utf-8")
     html = html.replace('="/static/', f'="{config.base_path}/static/')
@@ -830,6 +851,7 @@ async def lifespan(app: FastAPI):
             "early ONVIF shutdown signal is unavailable on this platform"
         )
     _record_process_lifecycle("startup_started")
+    _warn_if_frontend_build_stale()
     get_manager().start_all()
     try:
         media_exports = _recording_media_runtime._media_export_manager()

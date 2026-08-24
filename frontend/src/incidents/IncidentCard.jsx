@@ -624,9 +624,23 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
   }, [incident?.id]);
   if (!incident) {
     const emptyClass = embedded ? "incident-inspector embedded" : `incident-inspector${open ? " open" : ""}`;
-    return embedded
-      ? <div id="incident-inspector" className={emptyClass}><div className="empty-state">Select an incident.</div></div>
-      : <aside id="incident-inspector" className={emptyClass}><div className="empty-state">Select an incident.</div></aside>;
+    const EmptyWrapper = embedded ? "div" : "aside";
+    return (
+      <EmptyWrapper id="incident-inspector" className={emptyClass}>
+        <div className="incident-inspector-head">
+          <div><strong id="incident-inspector-title">Incident details</strong><time>Select an incident from the list</time></div>
+          {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
+        </div>
+        <div className="incident-inspector-tabs" role="tablist" aria-label="Incident details">
+          <button type="button" role="tab" className="active" aria-selected="true" disabled>Details</button>
+          <button type="button" role="tab" disabled>AI</button>
+          <button type="button" role="tab" disabled>Related</button>
+        </div>
+        <div className="incident-inspector-body">
+          <div className="empty-state">Select an incident to inspect details, AI detections, and related appearances.</div>
+        </div>
+      </EmptyWrapper>
+    );
   }
   const inspectedEvent = faceEvent || incident;
   const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
