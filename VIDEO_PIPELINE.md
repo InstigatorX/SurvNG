@@ -5,7 +5,7 @@ describes the implementation currently in the repository, not an aspirational
 design. Update it whenever ingest, recording, motion qualification, inference,
 incident generation, media storage, or browser playback behavior changes.
 
-Last reviewed: 2026-08-06
+Last reviewed: 2026-08-24
 
 ## Motion Pipeline Migration
 
@@ -196,6 +196,14 @@ time remains event metadata. A backward camera-clock discontinuity resets the
 affected temporal runtime instead of suspending motion analysis. Main-source
 OpenCV capture is demand-driven and stops after an idle
 period; continuous main recording is handled by its own FFmpeg process.
+
+Live capture reconnects with exponential backoff when a stream read or open
+fails. After the first failure on a live source, the open deadline escalates to
+a longer reconnect timeout before resetting once frames resume. Camera status
+reports `capture_connectivity` as `healthy`, `reconnecting`, `offline`, or
+`paused` so Live and Admin can distinguish a recovering stream from a powered-off
+camera. `capture_reconnects` counts successful live recoveries since the current
+capture generation started.
 
 Browser live-view modes currently include:
 
