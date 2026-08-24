@@ -35,7 +35,7 @@ import {
 import { browserStorage } from "../storage.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, shouldResumePlaybackAfterSeek } from "../recordingPlayback.mjs";
+import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, shouldResumePlaybackAfterSeek } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
@@ -1055,17 +1055,15 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       && target < loadedPlaybackWindow.end;
     const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
-    if (autoplay && video) requestRecordingPlay(video, false);
     const mediaTime = epochToPlaybackMediaTime(target);
     if (inCurrentWindow && coveredByCurrentManifest && video && Number.isFinite(mediaTime)) {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "local";
       playbackRequestRef.current += 1;
       setPlaybackWindow(null);
-      setPlaybackNotice("Seeking...");
-      video.currentTime = mediaTime;
-      if (autoplay) requestRecordingPlay(video);
-      else setPlaybackNotice("");
+      setPlaybackNotice(autoplay ? "Seeking..." : "");
+      seekVideoToTime(video, mediaTime);
+      if (!autoplay) setPlaybackNotice("");
     } else {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "window";
@@ -1366,7 +1364,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "window-ready";
       setPlaybackNotice("Seeking...");
-      video.currentTime = mediaTime;
+      seekVideoToTime(video, mediaTime);
     }
     if (Number.isFinite(target)) {
       desiredEpochRef.current = target;
@@ -2367,6 +2365,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   }
 
   function requestLocalPreview(request) {
+    if (prefersJpegScrubPreview()) return false;
     const video = localPreviewRef.current;
     const mediaTime = playbackMediaTimeForEpoch(previewTimeline, request.epoch);
     if (!localPreviewReady || previewInFlightRef.current || !video || !Number.isFinite(mediaTime)) {
@@ -2387,7 +2386,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     if (Math.abs(video.currentTime - mediaTime) <= 0.04 && video.readyState >= 2) {
       publishLocalPreviewFrame(video, target);
     } else {
-      video.currentTime = mediaTime;
+      seekVideoToTime(video, mediaTime);
     }
     return true;
   }
@@ -2396,7 +2395,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     video.pause();
     setLocalPreviewReady(true);
     const target = localPreviewTargetRef.current;
-    if (target && Number.isFinite(target.mediaTime)) video.currentTime = target.mediaTime;
+    if (target && Number.isFinite(target.mediaTime)) seekVideoToTime(video, target.mediaTime);
   }
 
   function handleLocalPreviewSeeked(event) {
@@ -2457,19 +2456,21 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   function schedulePreview(value, immediate = false) {
     if (!cameraId) return;
     const requestedEpoch = startEpoch + Math.max(0, Math.min(duration, Number(value) || 0));
-    const localMediaTime = localPreviewReady && !previewInFlightRef.current
+    const useLocalPreview = !prefersJpegScrubPreview() && localPreviewReady && !previewInFlightRef.current;
+    const localMediaTime = useLocalPreview
       ? playbackMediaTimeForEpoch(previewTimeline, requestedEpoch)
       : null;
+    const bucketSeconds = scrubPreviewBucketSeconds();
     const previewBucket = Number.isFinite(localMediaTime)
       ? `local:${Math.floor(requestedEpoch * 2)}`
-      : `jpeg:${Math.floor((requestedEpoch - startEpoch) / 5)}`;
+      : `jpeg:${Math.floor((requestedEpoch - startEpoch) / bucketSeconds)}`;
     if (previewLastRequestRef.current.epoch === previewBucket) {
       previewPendingRef.current = null;
       return;
     }
     if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
     const elapsed = performance.now() - previewLastRequestRef.current.at;
-    const delay = immediate ? 0 : Math.max(0, 250 - elapsed);
+    const delay = immediate ? 0 : Math.max(0, scrubPreviewDelayMs() - elapsed);
     previewTimerRef.current = window.setTimeout(() => {
       previewTimerRef.current = null;
       const request = { epoch: requestedEpoch, bucket: previewBucket };
@@ -2516,7 +2517,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     };
     dragRef.current = drag;
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
-    if (previewManifestUrl) setLocalPreviewEnabled(true);
+    if (previewManifestUrl && !prefersJpegScrubPreview()) setLocalPreviewEnabled(true);
     if (drag.precise) setScrubbing(true);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
@@ -2566,7 +2567,6 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       hidePreviewAfterDelay();
       return;
     }
-    schedulePreview(pointerValue(event, drag), true);
     hidePreviewAfterDelay();
     commit(pointerValue(event, drag));
   }
@@ -2679,7 +2679,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
             ><span>{formatExportHandleTime(exportRange.end, timeZone)}</span></button>
           </>
         ) : null}
-        {localPreviewEnabled && previewManifestUrl ? (
+        {localPreviewEnabled && previewManifestUrl && !prefersJpegScrubPreview() ? (
           <ShakaVideo
             ref={localPreviewRef}
             src={previewManifestUrl}
