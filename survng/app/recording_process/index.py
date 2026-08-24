@@ -11,9 +11,10 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
+from ..media_storage import path_presence
 from ..recording_media import mp4_stream_fingerprint
 
 
@@ -914,6 +915,61 @@ class RecordingIndexMixin:
         self._store_recording_rows(camera_id, source, rows)
         self._prune_recording_index(camera_id, source, files)
 
+    def _unavailable_recording_roots(self) -> list[Path]:
+        unavailable: list[Path] = []
+        for root in self.recording_roots:
+            try:
+                if not root.is_dir():
+                    unavailable.append(root)
+            except OSError:
+                unavailable.append(root)
+        return unavailable
+
+    @staticmethod
+    def _path_under_roots(path_value: str, roots: list[Path]) -> bool:
+        path = Path(path_value)
+        for root in roots:
+            try:
+                path.relative_to(root)
+                return True
+            except ValueError:
+                try:
+                    path.resolve(strict=False).relative_to(root.resolve(strict=False))
+                    return True
+                except ValueError:
+                    continue
+        return False
+
+    def _confirm_missing_index_paths(
+        self,
+        candidates: set[str],
+        *,
+        discovered_paths: set[str],
+        unavailable_roots: list[Path],
+        cancel_event: threading.Event | None = None,
+        progress: Callable[[str, int, int | None], None] | None = None,
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Split undiscovered index paths into missing, present, and unknown."""
+        stale: list[str] = []
+        retained_present: list[str] = []
+        unknown: list[str] = []
+        ordered = sorted(candidates - discovered_paths)
+        for index, path in enumerate(ordered, start=1):
+            self._raise_if_cancelled(cancel_event)
+            if self._path_under_roots(path, unavailable_roots):
+                unknown.append(path)
+            else:
+                presence = path_presence(path)
+                if presence == "missing":
+                    stale.append(path)
+                elif presence == "present":
+                    retained_present.append(path)
+                else:
+                    unknown.append(path)
+            if progress and index % 100 == 0:
+                progress("Confirming indexed recordings", index, len(ordered))
+        return stale, retained_present, unknown
+
     def storage_index_health(
         self,
         *,
@@ -924,6 +980,7 @@ class RecordingIndexMixin:
         quick_hours: int = 6,
     ) -> dict[str, object]:
         """Compare recording files with the index using bounded or exhaustive discovery."""
+        unavailable_roots = self._unavailable_recording_roots()
         if full:
             # Freeze the index side before walking remote storage. A full NFS walk
             # can take hours while the live index keeps receiving new segments.
@@ -959,18 +1016,19 @@ class RecordingIndexMixin:
             if not self._recording_file_may_be_active(path)
         }
         indexed_sample = {str(row["path"]) for row in indexed_rows}
+        # Never treat a path discovered in this same snapshot as stale, even when a
+        # later independent is_file()/stat probe fails on flaky network storage.
+        stale, retained_present, unknown = self._confirm_missing_index_paths(
+            indexed_sample,
+            discovered_paths=all_disk_paths,
+            unavailable_roots=unavailable_roots,
+            cancel_event=cancel_event,
+            progress=progress,
+        )
         if full:
-            stale = sorted(indexed_sample - all_disk_paths)
             discovery_candidates = stable_disk_paths - indexed_sample
             indexed_for_discovery = indexed_sample | self.indexed_path_subset(discovery_candidates)
         else:
-            stale = []
-            for index, path in enumerate(indexed_sample, start=1):
-                self._raise_if_cancelled(cancel_event)
-                if not Path(path).is_file():
-                    stale.append(path)
-                if progress and index % 100 == 0:
-                    progress("Checking indexed recordings", index, len(indexed_sample))
             indexed_for_discovery = self.indexed_path_subset(stable_disk_paths)
         unindexed = sorted(stable_disk_paths - indexed_for_discovery)
         return {
@@ -979,9 +1037,12 @@ class RecordingIndexMixin:
             "indexed_recordings": indexed_total,
             "index_rows_scanned": len(indexed_sample),
             "recording_hours_scanned": None if full else max(1, quick_hours),
-            "scan_complete": full,
+            "scan_complete": full and not unavailable_roots and not unknown,
             "missing_index_files": stale,
             "unindexed_files": unindexed,
+            "index_rows_retained_present": len(retained_present),
+            "index_rows_presence_unknown": len(unknown),
+            "unavailable_recording_roots": [str(root) for root in unavailable_roots],
             "files_by_source": files_by_source,
         }
 
@@ -1003,6 +1064,11 @@ class RecordingIndexMixin:
         files_by_source = health.get("files_by_source", {})
         if not isinstance(files_by_source, dict):
             raise ValueError("recording health is missing its file snapshot")
+        snapshot_paths = {
+            str(path)
+            for files in files_by_source.values()
+            for path in files
+        }
         added = 0
         unindexed = set(health.get("unindexed_files", []))
         for (camera_id, source), files in files_by_source.items():
@@ -1010,9 +1076,20 @@ class RecordingIndexMixin:
             if rows:
                 self._store_recording_rows(camera_id, source, rows)
                 added += sum(1 for row in rows if str(row["path"]) in unindexed)
-        stale = list(health.get("missing_index_files", []))
-        self._delete_index_paths(stale)
-        return {"recordings_reindexed": added, "stale_index_rows_removed": len(stale)}
+        stale_candidates = [
+            str(path)
+            for path in health.get("missing_index_files", [])
+            if str(path) not in snapshot_paths
+        ]
+        confirmed_missing = [
+            path for path in stale_candidates if path_presence(path) == "missing"
+        ]
+        self._delete_index_paths(confirmed_missing)
+        return {
+            "recordings_reindexed": added,
+            "stale_index_rows_removed": len(confirmed_missing),
+            "stale_index_rows_skipped": len(stale_candidates) - len(confirmed_missing),
+        }
 
     def _recording_files_by_source(
         self,
@@ -1253,7 +1330,11 @@ class RecordingIndexMixin:
         if not rows:
             return 0
         self._prune_cursor = int(rows[-1]["rowid"])
-        stale_paths = [str(row["path"]) for row in rows if not Path(str(row["path"])).is_file()]
+        stale_paths = [
+            str(row["path"])
+            for row in rows
+            if path_presence(str(row["path"])) == "missing"
+        ]
         self._delete_index_paths(stale_paths)
         return len(stale_paths)
 
