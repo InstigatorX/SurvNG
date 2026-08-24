@@ -6,6 +6,7 @@ import hashlib
 import math
 import os
 import shutil
+import stat
 import threading
 import time
 from dataclasses import dataclass
@@ -15,6 +16,23 @@ from typing import Literal
 from .config import MediaStorageConfig, MediaStorageLocationConfig, MediaStorageRole
 
 LocationState = Literal["online", "unavailable", "not_mounted", "read_only", "full"]
+PathPresence = Literal["present", "missing", "unknown"]
+
+
+def path_presence(path: Path | str) -> PathPresence:
+    """Classify whether a media path is a regular file, confirmed missing, or unknown.
+
+    ``Path.is_file()`` collapses transient filesystem errors (ESTALE, EIO,
+    permission failures) into False. Storage repair must not treat those as
+    confirmed deletions.
+    """
+    try:
+        mode = os.stat(path).st_mode
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unknown"
+    return "present" if stat.S_ISREG(mode) else "missing"
 
 
 @dataclass(frozen=True, slots=True)

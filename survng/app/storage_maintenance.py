@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import MediaStorageRole
-from .media_storage import MediaStorageRegistry
+from .media_storage import MediaStorageRegistry, path_presence
 from .recorder import Recorder
 
 
@@ -18,6 +18,7 @@ LOGGER = logging.getLogger(__name__)
 MEDIA_SAMPLE_LIMIT = 20
 RECENT_MEDIA_SECONDS = 60.0
 QUICK_MEDIA_REFERENCE_LIMIT = 500
+HEALTHY_MEDIA_LOCATION_STATES = frozenset({"online", "full", "read_only"})
 
 
 def _utc_now() -> str:
@@ -47,12 +48,14 @@ class StorageReconciler:
     def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
         repairs = {
             "stale_index_rows_removed": 0,
+            "stale_index_rows_skipped": 0,
             "recordings_reindexed": 0,
             "recordings_validated": 0,
             "recording_fingerprints_added": 0,
             "event_media_references_cleared": 0,
             "motion_sample_references_cleared": 0,
             "face_media_references_cleared": 0,
+            "media_references_skipped": 0,
         }
         repaired_recording_health: dict[str, object] | None = None
         if apply:
@@ -77,10 +80,15 @@ class StorageReconciler:
             remaining_unindexed = sorted(
                 unindexed_paths - self.recorder.indexed_path_subset(unindexed_paths)
             )
+            original_stale = {
+                str(path) for path in recording_health.get("missing_index_files", [])
+            }
+            remaining_stale = sorted(self.recorder.indexed_path_subset(original_stale))
             repaired_recording_health = self._repaired_recording_health(
                 recording_health,
                 repairs,
                 remaining_unindexed=remaining_unindexed,
+                remaining_stale=remaining_stale,
             )
             repairs.update(self._clear_missing_references(full=full))
         summary = self._scan(full=full, recording_health=repaired_recording_health)
@@ -91,8 +99,9 @@ class StorageReconciler:
             "summary": summary,
             "repairs": repairs,
             "note": (
-                "Repairs completed from one recording-library snapshot. Recordings created or removed "
-                "after that snapshot are reconciled continuously. Incident, motion-audit, and face "
+                "Repairs completed from one recording-library snapshot. Only confirmed-missing "
+                "index rows and media links were cleared. Recordings created or removed after "
+                "that snapshot are reconciled continuously. Incident, motion-audit, and face "
                 "history was preserved."
                 if apply
                 else "No changes were made. Run Repair to reconcile the local databases."
@@ -105,15 +114,16 @@ class StorageReconciler:
         repairs: dict[str, int],
         *,
         remaining_unindexed: list[str],
+        remaining_stale: list[str],
     ) -> dict[str, object]:
         """Describe the reconciled state of the exact storage snapshot used by repair."""
-        stale_count = len(health.get("missing_index_files", []))
+        stale_removed = int(repairs.get("stale_index_rows_removed", 0) or 0)
         indexed_count = int(health.get("indexed_recordings", 0) or 0)
         added_count = int(repairs.get("recordings_reindexed", 0) or 0)
         return {
             **health,
-            "indexed_recordings": max(0, indexed_count - stale_count + added_count),
-            "missing_index_files": [],
+            "indexed_recordings": max(0, indexed_count - stale_removed + added_count),
+            "missing_index_files": remaining_stale,
             "unindexed_files": remaining_unindexed,
             "recording_snapshot_reused": True,
         }
@@ -140,7 +150,18 @@ class StorageReconciler:
 
     def _missing(self, path_value: object) -> bool:
         raw_path = str(path_value or "").strip()
-        return bool(raw_path) and not self._media_path(raw_path).is_file()
+        return bool(raw_path) and path_presence(self._media_path(raw_path)) == "missing"
+
+    def _media_location_blocks_clear(self, path_value: object) -> bool:
+        """Refuse to clear references when their configured location is offline."""
+        if self.media_storage is None:
+            return False
+        path = self._media_path(path_value)
+        location_id = self.media_storage.location_id_for(path)
+        if location_id is None:
+            return False
+        status = self.media_storage.status(location_id)
+        return status.state not in HEALTHY_MEDIA_LOCATION_STATES
 
     def _display_path(self, path_value: object) -> str:
         path = self._media_path(path_value)
@@ -253,12 +274,25 @@ class StorageReconciler:
                     if index % 500 == 0:
                         self._report("Scanning all incident media", index, None)
             media_paths = {self._path_key(path) for path in media_files}
-            references = [
+            candidate_references = [
                 reference for reference in all_references
                 if self._path_key(reference["path"]) not in (
                     recording_paths if reference["kind"] == "event_recording" else media_paths
                 )
             ]
+            # Walk membership only nominates candidates. Confirm absence so an
+            # incomplete NFS walk cannot report or clear valid media links.
+            references = []
+            for index, reference in enumerate(candidate_references, start=1):
+                self._raise_if_cancelled()
+                if self._missing(reference["path"]):
+                    references.append(reference)
+                if index % 100 == 0:
+                    self._report(
+                        "Confirming missing media references",
+                        index,
+                        len(candidate_references),
+                    )
         else:
             references = []
             for index, reference in enumerate(all_references, start=1):
@@ -313,7 +347,7 @@ class StorageReconciler:
             else []
         )
         return {
-            "scan_complete": full,
+            "scan_complete": bool(recording_health.get("scan_complete", full)),
             "reference_rows_scanned": len(all_references),
             "storage_total_bytes": usage.total,
             "storage_used_bytes": usage.used,
@@ -353,10 +387,17 @@ class StorageReconciler:
     def _clear_missing_references(self, *, full: bool) -> dict[str, int]:
         references, _ = self._media_references(limit=None if full else QUICK_MEDIA_REFERENCE_LIMIT)
         missing: list[dict[str, object]] = []
+        skipped = 0
         for index, reference in enumerate(references, start=1):
             self._raise_if_cancelled()
-            if self._missing(reference["path"]):
-                missing.append(reference)
+            presence = path_presence(self._media_path(reference["path"]))
+            if presence == "missing":
+                if self._media_location_blocks_clear(reference["path"]):
+                    skipped += 1
+                else:
+                    missing.append(reference)
+            elif presence == "unknown":
+                skipped += 1
             if index % 100 == 0:
                 self._report("Checking repair candidates", index, len(references))
         counts = {"events": 0, "motion_audits": 0, "face_observations": 0}
@@ -376,6 +417,7 @@ class StorageReconciler:
             "event_media_references_cleared": counts["events"],
             "motion_sample_references_cleared": counts["motion_audits"],
             "face_media_references_cleared": counts["face_observations"],
+            "media_references_skipped": skipped,
         }
 
     @staticmethod

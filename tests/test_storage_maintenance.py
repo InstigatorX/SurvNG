@@ -254,6 +254,126 @@ class StorageReconcilerTest(unittest.TestCase):
         self.assertEqual(repaired["repairs"]["recordings_reindexed"], 0)
         self.assertEqual(repaired["summary"]["unindexed_recording_files"], 1)
 
+    def test_repair_then_fresh_scan_stays_clean_after_confirmed_fixes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            database = root / "database"
+            index = root / "recording-index"
+            storage.mkdir()
+            events = EventStore(storage, database_dir=database)
+            recorder = Recorder("ffmpeg", storage, segment_seconds=10, index_dir=index)
+
+            missing_snapshot = storage / "snapshots" / "gate" / "deleted.jpg"
+            event_id = events.add_event(
+                "gate", "object", snapshot_path=str(missing_snapshot),
+            )["id"]
+            hour = storage / "recordings" / "gate" / "main" / "2026-01-01" / "00"
+            hour.mkdir(parents=True)
+            unindexed = hour / "20260101-000000.mp4"
+            unindexed.write_bytes(b"segment")
+            stale = hour / "20260101-000010.mp4"
+            stale.write_bytes(b"gone")
+            recorder._store_recording_rows(
+                "gate", "main", recorder._recording_rows_for_files("gate", "main", [stale])
+            )
+            stale.unlink()
+
+            reconciler = StorageReconciler(storage, events.db_path, recorder)
+            repaired = reconciler.run(apply=True, full=True)
+            fresh = reconciler.run(full=True)
+
+            self.assertEqual(repaired["summary"]["missing_index_rows"], 0)
+            self.assertEqual(repaired["summary"]["unindexed_recording_files"], 0)
+            self.assertEqual(fresh["summary"]["missing_index_rows"], 0)
+            self.assertEqual(fresh["summary"]["unindexed_recording_files"], 0)
+            self.assertEqual(fresh["summary"]["missing_event_snapshots"], 0)
+            with sqlite3.connect(events.db_path) as connection:
+                row = connection.execute(
+                    "SELECT snapshot_path FROM events WHERE id = ?", (event_id,)
+                ).fetchone()
+                self.assertEqual(row[0], "")
+
+    def test_full_scan_does_not_report_present_media_omitted_from_walk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            database = root / "database"
+            storage.mkdir()
+            events = EventStore(storage, database_dir=database)
+            recorder = Recorder("ffmpeg", storage, segment_seconds=10, index_dir=root / "index")
+            present = storage / "snapshots" / "gate" / "present.jpg"
+            present.parent.mkdir(parents=True)
+            present.write_bytes(b"image")
+            events.add_event("gate", "object", snapshot_path=str(present))
+
+            reconciler = StorageReconciler(storage, events.db_path, recorder)
+            real_rglob = Path.rglob
+
+            def hide_present(self, pattern):
+                for path in real_rglob(self, pattern):
+                    if path == present:
+                        continue
+                    yield path
+
+            with patch.object(Path, "rglob", hide_present):
+                summary = reconciler.run(full=True)["summary"]
+                repaired = reconciler.run(apply=True, full=True)
+
+            self.assertEqual(summary["missing_event_snapshots"], 0)
+            self.assertEqual(repaired["repairs"]["event_media_references_cleared"], 0)
+            with sqlite3.connect(events.db_path) as connection:
+                row = connection.execute("SELECT snapshot_path FROM events").fetchone()
+                self.assertTrue(row[0])
+                self.assertTrue(str(row[0]).endswith("snapshots/gate/present.jpg"))
+
+    def test_repair_skips_clearing_when_media_location_is_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            external = root / "external"
+            storage.mkdir()
+            external.mkdir()
+            registry = MediaStorageRegistry(
+                storage,
+                MediaStorageConfig(locations=[MediaStorageLocationConfig(
+                    id="archive",
+                    path=str(external),
+                    roles=["snapshots"],
+                )]),
+            )
+            events = EventStore(storage, database_dir=root / "database", media_storage=registry)
+            recorder = Recorder(
+                "ffmpeg",
+                storage,
+                segment_seconds=10,
+                index_dir=root / "index",
+            )
+            missing = external / "snapshots" / "gate" / "gone.jpg"
+            events.add_event("gate", "object", snapshot_path=str(missing))
+            offline = registry.status("archive")
+            offline_status = type(offline)(
+                **{
+                    **{field: getattr(offline, field) for field in offline.__dataclass_fields__},
+                    "state": "not_mounted",
+                    "error": "required mount is absent",
+                }
+            )
+
+            with patch.object(registry, "status", return_value=offline_status):
+                repaired = StorageReconciler(
+                    storage,
+                    events.db_path,
+                    recorder,
+                    media_storage=registry,
+                ).run(apply=True, full=True)
+
+            self.assertEqual(repaired["repairs"]["event_media_references_cleared"], 0)
+            self.assertGreaterEqual(repaired["repairs"]["media_references_skipped"], 1)
+            with sqlite3.connect(events.db_path) as connection:
+                row = connection.execute("SELECT snapshot_path FROM events").fetchone()
+                self.assertEqual(row[0], str(missing))
+
 
 if __name__ == "__main__":
     unittest.main()
