@@ -1631,10 +1631,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
 
 
-  if (!config) {
-    return <main className="bento-grid config-grid"><section className="bento-card config-editor"><div className="empty-state">{configLoadError || "Loading config..."}{configLoadError ? <button type="button" onClick={() => void load()}><RefreshCcw size={15} /> Retry</button> : null}</div></section></main>;
-  }
-
   function discardAdminChanges() {
     if (!baselineConfigRef.current) return;
     setConfig(structuredClone(baselineConfigRef.current));
@@ -2201,6 +2197,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     telemetryLoading,
     telemetrySection,
   ]);
+
+  if (!config) {
+    return <main className="bento-grid config-grid"><section className="bento-card config-editor"><div className="empty-state">{configLoadError || "Loading config..."}{configLoadError ? <button type="button" onClick={() => void load()}><RefreshCcw size={15} /> Retry</button> : null}</div></section></main>;
+  }
 
   return (
     <main className="bento-grid config-grid settings-grid">
