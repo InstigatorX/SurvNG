@@ -67,6 +67,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY survng/ ./survng/
+COPY docs/ ./docs/
 COPY config.example.json /usr/share/survng/config.example.json
 COPY docker/config.example.json /usr/share/survng/config.docker.example.json
 COPY docker/go2rtc.example.yaml /usr/share/survng/go2rtc.example.yaml

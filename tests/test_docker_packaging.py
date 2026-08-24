@@ -74,6 +74,14 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("IncidentsPage-*.js", dockerfile)
         self.assertIn("/build/.survng-frontend-build-id", dockerfile)
 
+    def test_runtime_image_includes_help_documentation_and_assets(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+        self.assertIn("COPY docs/ ./docs/", dockerfile)
+        self.assertNotIn("docs/**/*.png", dockerignore)
+        self.assertNotIn("docs/**/*.jpg", dockerignore)
+
     def test_add_apt_ppa_retry_script_is_executable(self) -> None:
         script = ROOT / "docker" / "add-apt-ppa-retry.sh"
         self.assertTrue(script.is_file())
