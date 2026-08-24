@@ -26,6 +26,7 @@ import { liveMediaShouldRun, liveSnapshotRefreshMs } from "../pollingPolicy.mjs"
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "../liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "../liveWorkspace.mjs";
+import { cameraCaptureConnectivity, cameraTileLiveState } from "../cameraConnectivity.mjs";
 import { liveFramingStyle } from "../liveFraming.mjs";
 import { createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident } from "../incidentNavigation.mjs";
 import { appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
@@ -97,7 +98,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   const shouldUseLiveMedia = liveMediaShouldRun({ running: camera.running, streamReady: hoverPreview || streamReady, mediaActive, transport: displayedTransport });
   const shouldUseWebRtc = shouldUseLiveMedia && displayedTransport === "webrtc";
   const shouldUseMjpegStream = shouldUseLiveMedia && activeTransport === "mjpeg";
-  const cameraConnected = camera.connected ?? camera.running;
+  const cameraConnectivity = cameraCaptureConnectivity(camera);
 
   useEffect(() => {
     onAspectChange?.(camera.id, mediaAspectRatio(aspect));
@@ -480,10 +481,10 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
         style={{ "--media-aspect": aspect }}
       >
         <div className="camera-tile-chrome">
-          <span className="camera-tile-name"><i className={cameraConnected ? "online" : "offline"} aria-hidden="true" /><strong>{camera.name}</strong></span>
+          <span className="camera-tile-name"><i className={`${cameraConnectivity === "healthy" ? "online" : cameraConnectivity === "reconnecting" ? "reconnecting" : "offline"}`} aria-hidden="true" /><strong>{camera.name}</strong></span>
           <time className="camera-tile-time">{formatTimeOnly(Date.now() / 1000, timeZone)}</time>
           <span className="camera-tile-actions">
-            <span className="camera-tile-live-state">{cameraConnected ? "LIVE" : camera.running ? "WAIT" : "OFF"}</span>
+            <span className={`camera-tile-live-state ${cameraConnectivity === "reconnecting" ? "attention" : ""}`}>{cameraTileLiveState(camera)}</span>
             <button
               type="button"
               ref={controlMenuButtonRef}
@@ -1474,7 +1475,8 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
       <section className="bento-card camera-zone live-camera-zone">
         <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
           {orderedCameras.map((camera) => {
-            const online = Boolean(camera.connected ?? camera.running);
+            const connectivity = cameraCaptureConnectivity(camera);
+            const online = connectivity === "healthy";
             const active = camera.id === mobileFocusedCameraId;
             return (
               <button
@@ -1486,7 +1488,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
               >
                 <Camera size={16} aria-hidden="true" />
                 <span>{camera.name || camera.id}</span>
-                <i className={online ? "online" : ""} aria-hidden="true" />
+                <i className={online ? "online" : connectivity === "reconnecting" ? "reconnecting" : ""} aria-hidden="true" />
               </button>
             );
           })}

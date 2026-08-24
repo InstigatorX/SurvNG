@@ -446,7 +446,8 @@ class ApplicationRuntimeMonitor:
     @staticmethod
     def camera_state_fingerprint(status: dict[str, Any]) -> tuple[Any, ...]:
         keys = (
-            "running", "connected", "capture_running", "frame_fresh", "main_running",
+            "running", "connected", "capture_running", "capture_connectivity",
+            "frame_fresh", "main_running",
             "main_frame_fresh", "last_error", "main_last_error", "onvif_connected",
             "onvif_last_event_at", "onvif_last_motion_event_at", "onvif_last_error",
             "onvif_last_poll_success_at", "onvif_last_poll_error_at",

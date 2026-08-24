@@ -2363,6 +2363,16 @@ p {
   background: #46c82f;
 }
 
+.camera-tile-name i.reconnecting,
+.mobile-camera-picker i.reconnecting {
+  background: #f0ad4e;
+}
+
+.camera-tile-live-state.attention {
+  background: rgba(240, 173, 78, .24);
+  color: #ffdca8;
+}
+
 .camera-tile-name strong {
   overflow: hidden;
   font-size: 11px;
