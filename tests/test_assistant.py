@@ -872,7 +872,7 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(trace.call_args.args[1].context.incident_event_id, 42)
 
     def test_trace_candidate_cap_preserves_strong_appearance_matches(self) -> None:
-        from survng.app import main
+        from survng.app.cross_camera_trace import prioritize_trace_candidates
 
         candidates = [
             {
@@ -888,7 +888,7 @@ class AssistantApiTest(unittest.TestCase):
             "visually_similar": True,
         }]
 
-        selected = main._intelligence_route_bundle.service._assistant_prioritize_trace_candidates(
+        selected = prioritize_trace_candidates(
             candidates,
             appearance,
             {601},
