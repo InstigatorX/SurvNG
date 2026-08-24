@@ -2150,7 +2150,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         scope: <AdminCommandLabel icon={Wrench}>Storage Reconciliation</AdminCommandLabel>,
         actions: (
           <div className="maintenance-actions">
-            {["running", "cancelling"].includes(maintenance?.status) ? <button type="button" onClick={() => void cancelMaintenance()} disabled={maintenance?.status === "cancelling"}><X size={16} /> {maintenance?.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : <><button type="button" onClick={() => void startMaintenance(false, false)}><RefreshCcw size={16} /> Quick Check</button><button type="button" onClick={() => void startMaintenance(false, true)}><Search size={16} /> Full Scan</button><button type="button" className="primary" onClick={() => void startMaintenance(true, maintenance?.result?.full === true)}><Wrench size={16} /> Repair Database</button></>}
+            {["running", "cancelling"].includes(maintenance?.status) ? <button type="button" onClick={() => void cancelMaintenance()} disabled={maintenance?.status === "cancelling"}><X size={16} /> {maintenance?.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : <><button type="button" onClick={() => void startMaintenance(false, false)}><RefreshCcw size={16} /> Quick Check</button><button type="button" onClick={() => void startMaintenance(false, true)}><Search size={16} /> Full Scan</button><button type="button" className="primary" onClick={() => void startMaintenance(true, maintenance?.result?.full === true)}><Wrench size={16} /> {maintenance?.result?.full === true ? "Repair Full Findings" : "Repair Recent Findings"}</button></>}
           </div>
         ),
       };
@@ -2343,7 +2343,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           </>
         ) : settingsTab === "maintenance" ? (
           <section id="admin-panel-maintenance" className="bento-card config-editor settings-panel settings-panel-wide maintenance-panel" aria-labelledby="admin-destination-maintenance">
-            <details className="maintenance-explanation"><summary>What these checks do</summary><div><p>Quick Check is bounded to recent media and the newest index rows, so it will not saturate network storage.</p><p>Full Scan checks the entire library, reports progress, and can be cancelled. Repair Database also checks a small bounded batch of older recording metadata. Repairs never delete media or incident history.</p></div></details>
+            <details className="maintenance-explanation"><summary>What these checks do</summary><div><p>Quick Check is bounded to recent media and the newest index rows, so it will not saturate network storage. Repeated quick repairs can still leave older index batches for a later check.</p><p>Full Scan checks the entire library, reports progress, and can be cancelled. Repair only clears confirmed-missing index rows and media links; flaky or offline storage never deletes valid records. Repair also checks a small bounded batch of older recording metadata. Repairs never delete media or incident history.</p></div></details>
             {maintenanceError ? <div className="error-banner">{maintenanceError}</div> : null}
             <MaintenanceViewer state={maintenance} />
           </section>
