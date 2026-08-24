@@ -56,6 +56,11 @@ export function gridPlaybackNeedsSeek({ currentTime, targetTime, playing, epochD
   return continuousClock ? false : drift > 0.2;
 }
 
+/** Mobile Safari often pauses while seeking; resume only for intentional autoplay seeks. */
+export function shouldResumePlaybackAfterSeek({ pendingSeekMode, autoplay }) {
+  return Boolean(autoplay) && (pendingSeekMode === "local" || pendingSeekMode === "window-ready");
+}
+
 export function mergeRecordingAvailability(current, updates) {
   const groups = new Map();
   for (const item of [...(current || []), ...(updates || [])]) {
