@@ -33,6 +33,7 @@ from .recording_media import (
 
 RECORDING_LOOKUP_LIMIT = 20_000
 RECORDING_PLAYBACK_WINDOW_SECONDS = 15 * 60
+MOBILE_PLAYBACK_WINDOW_SECONDS = 120
 
 
 class MediaExportRequest(BaseModel):
@@ -673,6 +674,22 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             headers={"Cache-Control": "private, max-age=3600"},
         )
 
+    @router.get("/api/cameras/{camera_id}/recordings/mobile-window.mp4")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_mobile_window(camera_id: str, epoch: float, source: str = "main") -> FileResponse:
+        active_manager = _require_recording_camera(deps, camera_id)
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail="invalid recording window time")
+        window_start = math.floor(epoch / MOBILE_PLAYBACK_WINDOW_SECONDS) * MOBILE_PLAYBACK_WINDOW_SECONDS
+        clip_path = deps.ensure_event_clip(
+            active_manager,
+            {"id": int(window_start), "camera_id": camera_id,
+             "created_at": datetime.fromtimestamp(window_start, timezone.utc).isoformat()},
+            before=0.0, after=float(MOBILE_PLAYBACK_WINDOW_SECONDS),
+            source=recording_source(source),
+        )
+        return FileResponse(clip_path, media_type="video/mp4", headers={"Cache-Control": "private, max-age=3600"})
+
 
     @router.get("/api/cameras/{camera_id}/recordings/preview.jpg")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
@@ -1087,6 +1104,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 update_media_export_metadata,
                 delete_media_export,
                 recording_segment,
+                recording_mobile_window,
                 recording_window,
                 recording_preview,
                 recording_updates,
