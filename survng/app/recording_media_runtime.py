@@ -5,10 +5,12 @@ import hashlib
 import json
 import logging
 import math
+import mmap
 import os
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import tempfile
 import threading
@@ -355,6 +357,93 @@ class RecordingMediaRuntime:
         except Exception:
             return ''
 
+    def _mp4_boxes(self, data: bytes | bytearray, start: int=0, end: int | None=None):
+        limit = len(data) if end is None else min(end, len(data))
+        cursor = start
+        while cursor + 8 <= limit:
+            size = struct.unpack_from('>I', data, cursor)[0]
+            box_type = bytes(data[cursor + 4:cursor + 8])
+            header = 8
+            if size == 1 and cursor + 16 <= limit:
+                size = struct.unpack_from('>Q', data, cursor + 8)[0]
+                header = 16
+            elif size == 0:
+                size = limit - cursor
+            if size < header or cursor + size > limit:
+                break
+            yield (box_type, cursor, cursor + header, cursor + size)
+            cursor += size
+
+    def _mp4_track_timescales(self, init_data: bytes) -> dict[int, int]:
+        timescales: dict[int, int] = {}
+        for box_type, _, payload, box_end in self._mp4_boxes(init_data):
+            if box_type != b'moov':
+                continue
+            for child_type, _, child_payload, child_end in self._mp4_boxes(init_data, payload, box_end):
+                if child_type != b'trak':
+                    continue
+                track_id = None
+                timescale = None
+                for trak_type, _, trak_payload, trak_end in self._mp4_boxes(init_data, child_payload, child_end):
+                    if trak_type == b'tkhd':
+                        version = init_data[trak_payload]
+                        offset = trak_payload + (20 if version == 1 else 12)
+                        if offset + 4 <= trak_end:
+                            track_id = struct.unpack_from('>I', init_data, offset)[0]
+                    elif trak_type == b'mdia':
+                        for mdia_type, _, mdia_payload, mdia_end in self._mp4_boxes(init_data, trak_payload, trak_end):
+                            if mdia_type != b'mdhd':
+                                continue
+                            version = init_data[mdia_payload]
+                            offset = mdia_payload + (20 if version == 1 else 12)
+                            if offset + 4 <= mdia_end:
+                                timescale = struct.unpack_from('>I', init_data, offset)[0]
+                if track_id and timescale:
+                    timescales[track_id] = timescale
+        return timescales
+
+    def _offset_fmp4_timestamps(self, init_path: Path, media_path: Path, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        timescales = self._mp4_track_timescales(init_path.read_bytes())
+        if not timescales:
+            raise RuntimeError('fragment init has no track timescales')
+        adjusted = 0
+        with media_path.open('r+b') as media_file, mmap.mmap(media_file.fileno(), 0) as data:
+            for box_type, _, payload, box_end in self._mp4_boxes(data):
+                if box_type != b'moof':
+                    continue
+                for child_type, _, child_payload, child_end in self._mp4_boxes(data, payload, box_end):
+                    if child_type != b'traf':
+                        continue
+                    track_id = None
+                    tfdt = None
+                    for traf_type, _, traf_payload, traf_end in self._mp4_boxes(data, child_payload, child_end):
+                        if traf_type == b'tfhd' and traf_payload + 8 <= traf_end:
+                            track_id = struct.unpack_from('>I', data, traf_payload + 4)[0]
+                        elif traf_type == b'tfdt':
+                            tfdt = (traf_payload, traf_end)
+                    if not track_id or not tfdt or track_id not in timescales:
+                        continue
+                    tfdt_payload, tfdt_end = tfdt
+                    version = data[tfdt_payload]
+                    value_offset = tfdt_payload + 4
+                    increment = round(seconds * timescales[track_id])
+                    if version == 1 and value_offset + 8 <= tfdt_end:
+                        current = struct.unpack_from('>Q', data, value_offset)[0]
+                        struct.pack_into('>Q', data, value_offset, current + increment)
+                        adjusted += 1
+                    elif version == 0 and value_offset + 4 <= tfdt_end:
+                        current = struct.unpack_from('>I', data, value_offset)[0]
+                        next_value = current + increment
+                        if next_value > 4294967295:
+                            raise RuntimeError('fragment timestamp exceeds version 0 tfdt')
+                        struct.pack_into('>I', data, value_offset, next_value)
+                        adjusted += 1
+            data.flush()
+        if not adjusted:
+            raise RuntimeError('fragment has no adjustable tfdt boxes')
+
     def _event_clip_cache_suffix(self, source_codec: str, backend: str) -> str:
         codec = source_codec or 'unknown'
         return f'a3-{backend}-{codec}'
@@ -474,9 +563,9 @@ class RecordingMediaRuntime:
                 if self.recording_prewarm_process is process:
                     self.recording_prewarm_process = None
 
-    def _recording_fmp4_files(self, path: Path, duration: float, origin: str='playback') -> tuple[Path, Path]:
+    def _recording_fmp4_files(self, path: Path, duration: float, media_offset: float, origin: str='playback') -> tuple[Path, Path]:
         stat = path.stat()
-        fingerprint = f'v4:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}'
+        fingerprint = f'v3:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}'
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:24]
         cache_dir = self.manager.storage_dir / 'playback-cache' / 'fmp4' / cache_key
         init_path = cache_dir / 'init.mp4'
@@ -495,7 +584,7 @@ class RecordingMediaRuntime:
             cache_dir.mkdir(parents=True, exist_ok=True)
             temp_dir = Path(tempfile.mkdtemp(prefix='fmp4-', dir=cache_dir))
             codec = self._probe_video_codec(path)
-            command = [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy']
+            command = [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-output_ts_offset', f'{media_offset:.3f}']
             if codec in {'hevc', 'h265'}:
                 command.extend(['-tag:v', 'hvc1'])
             command.extend(['-f', 'hls', '-hls_time', '300', '-hls_list_size', '0', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'), str(temp_dir / 'index.m3u8')])
@@ -523,6 +612,12 @@ class RecordingMediaRuntime:
                 with self.recording_day_cache_lock:
                     self.recording_day_cache.clear()
                 raise HTTPException(status_code=500, detail=f'recording fragment failed: {error[-300:]}')
+            try:
+                self._offset_fmp4_timestamps(generated_init, generated_media, media_offset)
+            except Exception as exc:
+                self._recording_cache_metric(origin, 'failures')
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise HTTPException(status_code=500, detail=f'recording fragment timestamp repair failed: {exc}') from exc
             try:
                 os.replace(generated_init, init_path)
                 os.replace(generated_media, media_path)
@@ -838,18 +933,24 @@ class RecordingMediaRuntime:
                             target_path = str(target['path'])
                             if target_path in warmed:
                                 continue
+                            index = next((i for i, item in enumerate(rows) if item['path'] == target_path), None)
+                            if index is None:
+                                continue
                             warmed.add(target_path)
-                            self._recording_fmp4_files(Path(target_path), float(target['duration_seconds']), origin='prewarm')
+                            media_offset = sum((float(item['duration_seconds']) for item in rows[:index]))
+                            self._recording_fmp4_files(Path(target_path), float(target['duration_seconds']), media_offset, origin='prewarm')
                     except RecordingPrewarmCancelled:
                         return
                     except Exception:
                         logging.getLogger(__name__).exception('Recording prewarm failed for %s/%s', camera.id, source)
 
-    def _recording_day_fmp4_paths(self, camera_id: str, segment_name: str, start_epoch: float, end_epoch: float, source: str='main', trim_end: bool=False, *, active_manager: AppManager | None=None) -> tuple[Path, Path]:
+    def _recording_day_fmp4_paths(self, camera_id: str, segment_name: str, start_epoch: float, end_epoch: float, source: str='main', media_offset: float=0.0, trim_end: bool=False, *, active_manager: AppManager | None=None) -> tuple[Path, Path]:
         selected_manager = active_manager or self.manager
         if selected_manager.camera(camera_id) is None:
             raise HTTPException(status_code=404, detail='camera not found')
         self.deps.validate_recording_range(start_epoch, end_epoch, 90000, 'invalid recording day range')
+        if not math.isfinite(media_offset) or media_offset < 0:
+            raise HTTPException(status_code=400, detail='invalid recording media offset')
         rows = self._recording_day_rows(camera_id, start_epoch, end_epoch, source, active_manager=selected_manager)
         if not segment_name or Path(segment_name).name != segment_name:
             raise HTTPException(status_code=404, detail='recording segment not found')
@@ -859,7 +960,10 @@ class RecordingMediaRuntime:
         row = rows[segment_index]
         path = self._recording_storage_path(row.get('path'), active_manager=selected_manager)
         segment_duration = playback_segment_duration(float(row['start_epoch']), float(row['duration_seconds']), end_epoch, trim_end)
-        return self._recording_fmp4_files(path, segment_duration)
+        expected_offset = sum((float(row['duration_seconds']) for row in rows[:segment_index]))
+        if abs(media_offset - expected_offset) > 0.1:
+            media_offset = expected_offset
+        return self._recording_fmp4_files(path, segment_duration, media_offset)
 
     def _recording_rows(self, camera_id: str, limit: int, source: str='main', *, active_manager: AppManager | None=None) -> list[dict]:
         selected_manager = active_manager or self.manager

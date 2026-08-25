@@ -67,41 +67,6 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
-    def test_day_hls_declares_each_independent_recording_a_discontinuity(self) -> None:
-        rows = [
-            {
-                "name": "first.mp4",
-                "start_epoch": 100.0,
-                "duration_seconds": 10.0,
-                "stream_fingerprint": "same-stream",
-            },
-            {
-                "name": "second.mp4",
-                "start_epoch": 110.0,
-                "duration_seconds": 10.0,
-                "stream_fingerprint": "same-stream",
-            },
-        ]
-        bundle = create_recording_router(
-            replace(
-                _dependencies(lambda: _Manager("current")),
-                recording_day_rows=lambda *_args, **_kwargs: rows,
-            )
-        )
-
-        response = bundle.handlers["recording_day_hls_playlist"](
-            "gate", 100.0, 120.0, "main"
-        )
-        playlist = response.body.decode("utf-8")
-
-        self.assertEqual(playlist.count("#EXT-X-DISCONTINUITY"), 1)
-        self.assertEqual(playlist.count("#EXT-X-MAP:"), 2)
-        self.assertNotIn("media_offset=", playlist)
-        self.assertLess(
-            playlist.index("#EXT-X-DISCONTINUITY"),
-            playlist.index('second.mp4/init.mp4'),
-        )
-
     def test_exact_preview_reports_requested_and_decoded_timestamps(self) -> None:
         recorder = SimpleNamespace(
             recording_rows_between=lambda *_args, **_kwargs: [{
