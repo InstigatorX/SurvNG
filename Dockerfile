@@ -1,9 +1,13 @@
 FROM node:22-bookworm-slim AS frontend
+ARG SURVNG_GIT_SHA=
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
-RUN npm run build
+# Re-declare the commit so layer cache cannot reuse a stale Vite output when the
+# image tip moves. The value is also stamped into the runtime image below.
+RUN printf '%s\n' "$SURVNG_GIT_SHA" > /build/.survng-frontend-build-id \
+    && npm run build
 
 FROM ubuntu:24.04 AS runtime-base
 
@@ -69,7 +73,13 @@ COPY docker/go2rtc.example.yaml /usr/share/survng/go2rtc.example.yaml
 COPY docker/entrypoint.sh /usr/local/bin/survng-entrypoint
 RUN chmod 755 /usr/local/bin/survng-entrypoint
 COPY --from=frontend /build/survng/static/ ./survng/static/
-RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi
+RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi \
+    && test -f survng/static/index.html \
+    && ls survng/static/assets/App-*.js >/dev/null \
+    && ls survng/static/assets/IncidentsPage-*.js >/dev/null \
+    && ls survng/static/assets/TimelinePages-*.js >/dev/null \
+    && ls survng/static/assets/LivePage-*.js >/dev/null \
+    && ls survng/static/assets/ConfigPage-*.js >/dev/null
 
 RUN mkdir -p /config /data /models \
     && chown survng:survng /config /data /models

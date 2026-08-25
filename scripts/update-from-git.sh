@@ -50,10 +50,10 @@ git pull --ff-only "$REMOTE" "$BRANCH"
 echo "Now at $(git rev-parse --short HEAD)"
 
 compose_files=(-f compose.yaml)
-if [[ -f compose.intel-gpu.yaml ]] && docker compose -f compose.yaml -f compose.intel-gpu.yaml ps --status running --services 2>/dev/null | grep -qx survng; then
+if [[ -f compose.intel-gpu.yaml ]] && docker compose -f compose.yaml -f compose.intel-gpu.yaml ps -a --services 2>/dev/null | grep -qx survng; then
   compose_files+=(-f compose.intel-gpu.yaml)
 fi
-if [[ -f compose.lxc.yaml ]] && docker compose -f compose.yaml -f compose.lxc.yaml ps --status running --services 2>/dev/null | grep -qx survng; then
+if [[ -f compose.lxc.yaml ]] && docker compose -f compose.yaml -f compose.lxc.yaml ps -a --services 2>/dev/null | grep -qx survng; then
   compose_files+=(-f compose.lxc.yaml)
 fi
 if [[ -f compose.storage.yaml ]]; then
@@ -65,14 +65,23 @@ if [[ -z "${SURVNG_GIT_SHA:-}" ]] && command -v git >/dev/null 2>&1; then
   export SURVNG_GIT_SHA
 fi
 
-if command -v docker >/dev/null 2>&1 && docker compose "${compose_files[@]}" ps --status running --services 2>/dev/null | grep -qx survng; then
-  echo "Rebuilding running Docker deployment"
+docker_deployed=0
+if command -v docker >/dev/null 2>&1; then
+  if docker compose "${compose_files[@]}" ps -a --services 2>/dev/null | grep -qx survng; then
+    docker_deployed=1
+  elif docker image inspect survng:local >/dev/null 2>&1; then
+    docker_deployed=1
+  fi
+fi
+
+if [[ "$docker_deployed" -eq 1 ]]; then
+  echo "Rebuilding Docker deployment (frontend is compiled inside the image)"
   if [[ " ${compose_files[*]} " == *" compose.lxc.yaml "* ]]; then
     SURVNG_GIT_SHA="$SURVNG_GIT_SHA" scripts/docker-build-lxc.sh
-    docker compose "${compose_files[@]}" up -d --no-build --remove-orphans
+    docker compose "${compose_files[@]}" up -d --no-build --force-recreate --remove-orphans
   else
     docker compose "${compose_files[@]}" build --pull --build-arg "SURVNG_GIT_SHA=${SURVNG_GIT_SHA}"
-    docker compose "${compose_files[@]}" up -d --remove-orphans
+    docker compose "${compose_files[@]}" up -d --force-recreate --remove-orphans
   fi
   echo "Docker update complete"
   exit 0

@@ -52,10 +52,32 @@ def web_app_manifest(base_path: str) -> dict[str, Any]:
     }
 
 
-def service_worker_script(base_path: str, cache_version: str = "v2") -> str:
-    """Return a network-first service worker that only caches hashed static assets."""
+def normalize_service_worker_cache_version(cache_version: str | None = None) -> str:
+    """Return a filesystem/HTTP-safe cache token for the installable shell."""
+    raw = str(cache_version or "").strip().lower()
+    if not raw:
+        # Fallback when no baked git SHA is available (native/dev without SURVNG_GIT_SHA).
+        # Keep in sync with the last fixed bucket bump on v1.1 before SHA versioning.
+        return "v2"
+    cleaned_chars: list[str] = []
+    for ch in raw:
+        cleaned_chars.append(ch if ch.isalnum() else "-")
+    cleaned = "".join(cleaned_chars).strip("-")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned[:48] if cleaned else "v2"
+
+
+def service_worker_script(base_path: str, cache_version: str | None = None) -> str:
+    """Return a service worker that only caches hashed static assets.
+
+    The cache bucket is versioned (preferably with the baked git SHA) so a new
+    Docker/native image drops prior asset caches on activate. Hashed filenames
+    stay cache-first; HTML/API/live media are never claimed.
+    """
     prefix = str(base_path or "").rstrip("/")
-    cache_name = f"survng-static-{cache_version}"
+    version = normalize_service_worker_cache_version(cache_version)
+    cache_name = f"survng-static-{version}"
     static_prefix = f"{prefix}/static/assets/" if prefix else "/static/assets/"
     return f"""/* SurvNG installable shell — online only; never cache API or live media. */
 const STATIC_CACHE = {json.dumps(cache_name)};

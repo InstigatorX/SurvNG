@@ -70,6 +70,9 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA", dockerfile)
         self.assertIn("/app/SURVNG_GIT_SHA", dockerfile)
         self.assertIn("add-apt-ppa-retry", dockerfile)
+        self.assertIn("npm run build", dockerfile)
+        self.assertIn("IncidentsPage-*.js", dockerfile)
+        self.assertIn("/build/.survng-frontend-build-id", dockerfile)
 
     def test_add_apt_ppa_retry_script_is_executable(self) -> None:
         script = ROOT / "docker" / "add-apt-ppa-retry.sh"
@@ -83,6 +86,9 @@ class DockerPackagingTest(unittest.TestCase):
         text = script.read_text(encoding="utf-8")
         self.assertIn("git pull --ff-only", text)
         self.assertIn("docker compose", text)
+        self.assertIn("--force-recreate", text)
+        self.assertIn("frontend is compiled inside the image", text)
+        self.assertIn("ps -a --services", text)
 
     def test_github_runner_cleanup_script_is_executable(self) -> None:
         script = ROOT / "scripts" / "github-runner-cleanup.sh"

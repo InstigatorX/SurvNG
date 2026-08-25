@@ -80,6 +80,18 @@ jobs:
             --build-arg "SURVNG_GIT_SHA=${GIT_SHA}" \
             --tag "${primary}" \
             .
+          if [ "${TARGET}" != "model-installer" ]; then
+            echo "Verifying frontend assets in ${primary}"
+            docker run --rm --entrypoint /bin/sh "${primary}" -c '
+              set -e
+              test -f /app/survng/static/index.html
+              ls /app/survng/static/assets/App-*.js >/dev/null
+              ls /app/survng/static/assets/IncidentsPage-*.js >/dev/null
+              ls /app/survng/static/assets/TimelinePages-*.js >/dev/null
+              test -s /app/SURVNG_GIT_SHA
+              grep -F "'"${GIT_SHA}"'" /app/SURVNG_GIT_SHA
+            '
+          fi
           for tag in "${tags[@]:1}"; do
             docker tag "${primary}" "${tag}"
           done
