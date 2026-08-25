@@ -22,6 +22,7 @@ from survng.app.pwa import (
 class FrontendRouteDependencies:
     frontend_response: Callable[[str], HTMLResponse]
     base_path: Callable[[], str]
+    cache_version: Callable[[], str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +61,9 @@ def create_frontend_router(
     @router.get("/sw.js", include_in_schema=False)
     def progressive_web_service_worker() -> Response:
         base_path = deps.base_path()
+        cache_version = deps.cache_version() if deps.cache_version is not None else "v1"
         return Response(
-            service_worker_script(base_path),
+            service_worker_script(base_path, cache_version=cache_version),
             media_type="application/javascript; charset=utf-8",
             headers={
                 "Cache-Control": "no-cache",

@@ -63,7 +63,9 @@ with an ad-hoc Dockerfile or `docker commit`.
 
 Pushing to a release branch (`v1.0`, `v1.1`, …) or a version tag such as
 `v1.1.0` runs `.github/workflows/docker-publish.yml` on the self-hosted runner
-and publishes all Dockerfile targets to GHCR:
+and publishes all Dockerfile targets to GHCR. The publish job builds the React
+UI with `npm run build` inside the image and fails the job if core workspace
+bundles (`App`, `IncidentsPage`, `TimelinePages`, …) are missing.
 
 | Image | When | Target |
 | --- | --- | --- |
@@ -84,7 +86,21 @@ Day-to-day deploys can track the branch tip without cutting a release tag:
 
 ```bash
 docker pull ghcr.io/instigatorx/survng:v1.1
+docker compose up -d --force-recreate
 ```
+
+After upgrading, confirm the container is on the expected commit (Admin →
+Product also shows this) and hard-refresh the browser so the installable shell
+picks up the new service-worker cache bucket:
+
+```bash
+docker compose exec survng cat /app/SURVNG_GIT_SHA
+docker compose exec survng ls /app/survng/static/assets/IncidentsPage-*.js
+```
+
+Do not expect a host-side `npm run build` to change a running container: the
+UI is baked into the image. Rebuild or pull a new image, then recreate the
+container.
 
 Pin a specific build with the `sha-…` tag. Use a `v*` tag when you want a
 stable release number. Pull requires a GitHub account with read access to the

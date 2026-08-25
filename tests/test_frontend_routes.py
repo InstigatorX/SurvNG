@@ -52,6 +52,8 @@ class FrontendRouteTest(unittest.TestCase):
 
     def test_progressive_web_app_routes_are_registered(self) -> None:
         from survng.app.main import progressive_web_manifest, progressive_web_service_worker
+        from survng.app.pwa import normalize_service_worker_cache_version
+        from survng.app.product_update import baked_git_sha
 
         manifest = progressive_web_manifest()
         self.assertEqual(manifest.status_code, 200)
@@ -65,6 +67,17 @@ class FrontendRouteTest(unittest.TestCase):
         self.assertIn(b"/api/", worker.body)
         self.assertIn(b"/survng/static/assets/", worker.body)
         self.assertEqual(worker.headers.get("service-worker-allowed"), "/survng/")
+        expected = normalize_service_worker_cache_version(baked_git_sha()).encode("utf-8")
+        self.assertIn(b"survng-static-" + expected, worker.body)
+
+    def test_frontend_html_exposes_runtime_git_sha(self) -> None:
+        from survng.app.main import frontend_response
+
+        response = frontend_response("index.html")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("cache-control"), "no-store")
+        self.assertIn(b"window.__SURVNG_BASE_PATH__", response.body)
+        self.assertIn(b"window.__SURVNG_GIT_SHA__", response.body)
 
 
 if __name__ == "__main__":

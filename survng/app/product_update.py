@@ -156,6 +156,11 @@ def _baked_version() -> dict[str, str]:
     return {"sha": sha, "short_sha": short}
 
 
+def baked_git_sha() -> str:
+    """Return the git SHA baked into this process/image, if any."""
+    return _baked_version().get("sha") or ""
+
+
 def _deployment_mode(repo_root: Path | None) -> str:
     if os.environ.get("SURVNG_CONFIG_PATH", "").startswith("/config"):
         return "docker"

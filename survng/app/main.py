@@ -81,7 +81,7 @@ from .semantic_routes import (
 )
 from .object_tracking import ultralytics_fasttrack_dependency_status
 from .operations_routes import OperationsRouteDependencies, create_operations_router
-from .product_update import ProductUpdateService
+from .product_update import ProductUpdateService, baked_git_sha
 from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .system_telemetry import (
     SystemTelemetryDependencies,
@@ -545,7 +545,13 @@ def frontend_response(filename: str) -> HTMLResponse:
     html = Path("survng/static", filename).read_text(encoding="utf-8")
     html = html.replace('="/static/', f'="{config.base_path}/static/')
     html = html.replace('href="/manifest.webmanifest"', f'href="{config.base_path}/manifest.webmanifest"')
-    runtime_config = f"<script>window.__SURVNG_BASE_PATH__={json.dumps(config.base_path)};</script>"
+    git_sha = baked_git_sha()
+    runtime_config = (
+        "<script>"
+        f"window.__SURVNG_BASE_PATH__={json.dumps(config.base_path)};"
+        f"window.__SURVNG_GIT_SHA__={json.dumps(git_sha)};"
+        "</script>"
+    )
     html = html.replace("</head>", f"  {runtime_config}\n  </head>")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
@@ -1073,6 +1079,7 @@ _frontend_route_bundle = create_frontend_router(
     FrontendRouteDependencies(
         frontend_response=frontend_response,
         base_path=lambda: config.base_path,
+        cache_version=baked_git_sha,
     )
 )
 app.include_router(_frontend_route_bundle.router)
