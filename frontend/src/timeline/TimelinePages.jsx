@@ -35,7 +35,7 @@ import {
 import { browserStorage } from "../storage.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, shouldResumePlaybackAfterSeek } from "../recordingPlayback.mjs";
+import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
@@ -695,6 +695,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const latestAvailabilityRef = useRef(null);
   const pendingSeekEpochRef = useRef(null);
   const pendingSeekModeRef = useRef(null);
+  const seekWatchdogRef = useRef(null);
+  const ignorePauseUntilRef = useRef(0);
   const playbackRetryRef = useRef({ attempts: 0, timer: null });
   const gridRefreshCursorRef = useRef(null);
   const recordingUpdatesInFlightRef = useRef(false);
@@ -1006,6 +1008,55 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setPlaybackWindowRevision((revision) => revision + 1);
   }
 
+  function clearSeekWatchdog() {
+    if (seekWatchdogRef.current) {
+      window.clearTimeout(seekWatchdogRef.current);
+      seekWatchdogRef.current = null;
+    }
+  }
+
+  function scheduleSeekWatchdog(video, mediaTime) {
+    clearSeekWatchdog();
+    if (!video || !Number.isFinite(mediaTime)) return;
+    const tolerance = recordingSeekToleranceSeconds();
+    seekWatchdogRef.current = window.setTimeout(() => {
+      seekWatchdogRef.current = null;
+      if (!Number.isFinite(pendingSeekEpochRef.current)) return;
+      const pendingMode = pendingSeekModeRef.current;
+      if (pendingMode !== "local" && pendingMode !== "window-ready") return;
+      const activeVideo = videoRef.current || video;
+      if (!activeVideo) return;
+      if (!videoReachedSeekTarget(activeVideo, mediaTime, tolerance)) {
+        activeVideo.currentTime = mediaTime;
+        window.setTimeout(() => {
+          if (Number.isFinite(pendingSeekEpochRef.current)) {
+            completePendingRecordingSeek(activeVideo);
+          }
+        }, prefersJpegScrubPreview() ? 400 : 150);
+        return;
+      }
+      completePendingRecordingSeek(activeVideo);
+    }, seekWatchdogDelayMs());
+  }
+
+  function completePendingRecordingSeek(video) {
+    const pendingMode = pendingSeekModeRef.current;
+    if (pendingMode !== "local" && pendingMode !== "window-ready") return;
+    clearSeekWatchdog();
+    const epoch = mediaTimeToEpoch(video.currentTime);
+    if (Number.isFinite(epoch)) {
+      desiredEpochRef.current = epoch;
+      setPlayhead(epoch);
+    }
+    pendingSeekEpochRef.current = null;
+    pendingSeekModeRef.current = null;
+    setPlaybackNotice("");
+    ignorePauseUntilRef.current = performance.now() + ignorePauseAfterSeekMs();
+    if (shouldResumePlaybackAfterSeek({ pendingSeekMode: pendingMode, autoplay: autoplayRef.current }) && video.paused) {
+      requestRecordingPlay(video);
+    }
+  }
+
   function requestRecordingPlay(video, showBlocked = true) {
     if (!video) return;
     video.play().then(() => {
@@ -1055,17 +1106,18 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       && target < loadedPlaybackWindow.end;
     const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
-    if (autoplay && video) requestRecordingPlay(video, false);
     const mediaTime = epochToPlaybackMediaTime(target);
     if (inCurrentWindow && coveredByCurrentManifest && video && Number.isFinite(mediaTime)) {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "local";
       playbackRequestRef.current += 1;
       setPlaybackWindow(null);
-      setPlaybackNotice("Seeking...");
-      video.currentTime = mediaTime;
-      if (autoplay) requestRecordingPlay(video);
-      else setPlaybackNotice("");
+      setPlaybackNotice(autoplay ? "Seeking..." : "");
+      // Start playback in the user-gesture window; Safari often pauses again while seeking.
+      if (autoplay && video.paused) requestRecordingPlay(video, false);
+      seekVideoToTime(video, mediaTime);
+      scheduleSeekWatchdog(video, mediaTime);
+      if (!autoplay) setPlaybackNotice("");
     } else {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "window";
@@ -1148,6 +1200,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setFollowTarget(null);
     pendingSeekEpochRef.current = null;
     pendingSeekModeRef.current = null;
+    clearSeekWatchdog();
     if (Number.isFinite(playhead)) desiredEpochRef.current = playhead;
     setPlayhead(null);
     const video = videoRef.current;
@@ -1366,7 +1419,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "window-ready";
       setPlaybackNotice("Seeking...");
-      video.currentTime = mediaTime;
+      seekVideoToTime(video, mediaTime);
+      scheduleSeekWatchdog(video, mediaTime);
     }
     if (Number.isFinite(target)) {
       desiredEpochRef.current = target;
@@ -1379,11 +1433,21 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
     setPlaybackError("");
     setPlaybackErrorStage("");
-    if (autoplayRef.current) requestRecordingPlay(video);
+    if (autoplayRef.current && !seekRequired) requestRecordingPlay(video);
   }
 
   function handleRecordingTimeUpdate(event) {
-    if (Number.isFinite(pendingSeekEpochRef.current)) return;
+    if (Number.isFinite(pendingSeekEpochRef.current)) {
+      const pendingMode = pendingSeekModeRef.current;
+      if (pendingMode === "local" || pendingMode === "window-ready") {
+        const targetEpoch = pendingSeekEpochRef.current;
+        const targetMediaTime = epochToPlaybackMediaTime(targetEpoch);
+        if (videoReachedSeekTarget(event.currentTarget, targetMediaTime, recordingSeekToleranceSeconds())) {
+          completePendingRecordingSeek(event.currentTarget);
+        }
+      }
+      return;
+    }
     const epoch = mediaTimeToEpoch(event.currentTarget.currentTime);
     if (!Number.isFinite(epoch)) return;
     desiredEpochRef.current = epoch;
@@ -1391,23 +1455,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function handleRecordingSeeked(event) {
-    const pendingMode = pendingSeekModeRef.current;
-    const resumePlayback = shouldResumePlaybackAfterSeek({
-      pendingSeekMode: pendingMode,
-      autoplay: autoplayRef.current,
-    });
-    if (pendingMode === "local" || pendingMode === "window-ready") {
-      const epoch = mediaTimeToEpoch(event.currentTarget.currentTime);
-      if (Number.isFinite(epoch)) {
-        desiredEpochRef.current = epoch;
-        setPlayhead(epoch);
-      }
-      pendingSeekEpochRef.current = null;
-      pendingSeekModeRef.current = null;
-      setPlaybackNotice("");
-      // Seek often pauses on mobile Safari; restore intentional playback after seek settles.
-      if (resumePlayback) requestRecordingPlay(event.currentTarget);
-    }
+    completePendingRecordingSeek(event.currentTarget);
   }
 
   function toggleHeroPlayback() {
@@ -1634,6 +1682,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 if (!Number.isFinite(pendingSeekEpochRef.current)) setPlaybackNotice("");
               }}
               onPause={(event) => {
+                if (performance.now() < ignorePauseUntilRef.current) return;
                 if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
                   autoplayRef.current = false;
                   setHeroPlaying(false);
@@ -2367,6 +2416,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   }
 
   function requestLocalPreview(request) {
+    if (prefersJpegScrubPreview()) return false;
     const video = localPreviewRef.current;
     const mediaTime = playbackMediaTimeForEpoch(previewTimeline, request.epoch);
     if (!localPreviewReady || previewInFlightRef.current || !video || !Number.isFinite(mediaTime)) {
@@ -2387,7 +2437,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     if (Math.abs(video.currentTime - mediaTime) <= 0.04 && video.readyState >= 2) {
       publishLocalPreviewFrame(video, target);
     } else {
-      video.currentTime = mediaTime;
+      seekVideoToTime(video, mediaTime);
     }
     return true;
   }
@@ -2396,7 +2446,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     video.pause();
     setLocalPreviewReady(true);
     const target = localPreviewTargetRef.current;
-    if (target && Number.isFinite(target.mediaTime)) video.currentTime = target.mediaTime;
+    if (target && Number.isFinite(target.mediaTime)) seekVideoToTime(video, target.mediaTime);
   }
 
   function handleLocalPreviewSeeked(event) {
@@ -2457,19 +2507,21 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   function schedulePreview(value, immediate = false) {
     if (!cameraId) return;
     const requestedEpoch = startEpoch + Math.max(0, Math.min(duration, Number(value) || 0));
-    const localMediaTime = localPreviewReady && !previewInFlightRef.current
+    const useLocalPreview = !prefersJpegScrubPreview() && localPreviewReady && !previewInFlightRef.current;
+    const localMediaTime = useLocalPreview
       ? playbackMediaTimeForEpoch(previewTimeline, requestedEpoch)
       : null;
+    const bucketSeconds = scrubPreviewBucketSeconds();
     const previewBucket = Number.isFinite(localMediaTime)
       ? `local:${Math.floor(requestedEpoch * 2)}`
-      : `jpeg:${Math.floor((requestedEpoch - startEpoch) / 5)}`;
+      : `jpeg:${Math.floor((requestedEpoch - startEpoch) / bucketSeconds)}`;
     if (previewLastRequestRef.current.epoch === previewBucket) {
       previewPendingRef.current = null;
       return;
     }
     if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
     const elapsed = performance.now() - previewLastRequestRef.current.at;
-    const delay = immediate ? 0 : Math.max(0, 250 - elapsed);
+    const delay = immediate ? 0 : Math.max(0, scrubPreviewDelayMs() - elapsed);
     previewTimerRef.current = window.setTimeout(() => {
       previewTimerRef.current = null;
       const request = { epoch: requestedEpoch, bucket: previewBucket };
@@ -2516,7 +2568,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     };
     dragRef.current = drag;
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
-    if (previewManifestUrl) setLocalPreviewEnabled(true);
+    if (previewManifestUrl && !prefersJpegScrubPreview()) setLocalPreviewEnabled(true);
     if (drag.precise) setScrubbing(true);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
@@ -2566,7 +2618,6 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       hidePreviewAfterDelay();
       return;
     }
-    schedulePreview(pointerValue(event, drag), true);
     hidePreviewAfterDelay();
     commit(pointerValue(event, drag));
   }
@@ -2679,7 +2730,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
             ><span>{formatExportHandleTime(exportRange.end, timeZone)}</span></button>
           </>
         ) : null}
-        {localPreviewEnabled && previewManifestUrl ? (
+        {localPreviewEnabled && previewManifestUrl && !prefersJpegScrubPreview() ? (
           <ShakaVideo
             ref={localPreviewRef}
             src={previewManifestUrl}

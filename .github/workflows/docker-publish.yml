@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - v1.0
+      - v1.1
     tags:
       - "v*"
   workflow_dispatch:
@@ -67,7 +68,7 @@ jobs:
             tags+=("${image}:${REF_NAME}${SUFFIX}")
           else
             # Moving tip for the release line, plus an immutable commit pin.
-            tags+=("${image}:v1.0${SUFFIX}")
+            tags+=("${image}:${REF_NAME}${SUFFIX}")
             tags+=("${image}:sha-${short_sha}${SUFFIX}")
           fi
 

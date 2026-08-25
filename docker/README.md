@@ -19,7 +19,7 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
 | `scripts/install-docker-models.sh` | Download detector/ReID/Smart Search models and patch `config.json` (uses `survng-model-installer` container by default) |
 | `Dockerfile.model-installer` | One-shot installer image published as `ghcr.io/.../survng:v1.0-model-installer` |
-| `.github/workflows/docker-publish.yml` | Build and push both image targets to GHCR on `v1.0` commits and `v*` tags |
+| `.github/workflows/docker-publish.yml` | Build and push all image targets to GHCR on release-branch commits and `v*` tags |
 | `docker/config.example.json` | Camera-free initial configuration |
 | `docker/go2rtc.example.yaml` | Seeded go2rtc config for the bundled restreamer |
 
