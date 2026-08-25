@@ -158,7 +158,7 @@
 
 .incident-investigation-body {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) minmax(180px, 34%);
+  grid-template-rows: minmax(0, 1fr) minmax(220px, 38%);
   min-height: 0;
 }
 
@@ -191,10 +191,12 @@
 
 .incident-detail-panels {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(220px, 0.85fr);
-  min-height: 0;
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.85fr);
+  min-height: 220px;
+  max-height: 100%;
   border-top: 1px solid var(--line);
   background: var(--panel-solid);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .incident-inspector.embedded {
