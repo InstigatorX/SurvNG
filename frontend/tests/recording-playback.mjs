@@ -7,7 +7,15 @@ import {
   mergeRecordingAvailability,
   playbackMediaTimeForEpoch,
   playbackRowsCoverEpoch,
+  prefersJpegScrubPreview,
+  recordingSeekToleranceSeconds,
+  scrubPreviewBucketSeconds,
+  scrubPreviewDelayMs,
+  seekVideoToTime,
+  seekWatchdogDelayMs,
   shouldResumePlaybackAfterSeek,
+  shouldUseFastSeek,
+  videoReachedSeekTarget,
 } from "../src/recordingPlayback.mjs";
 
 const exportRange = { start: 100, end: 200 };
@@ -52,6 +60,38 @@ assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: "window-ready", au
 assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: "local", autoplay: false }), false);
 assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: "window", autoplay: true }), false);
 assert.equal(shouldResumePlaybackAfterSeek({ pendingSeekMode: null, autoplay: true }), false);
+
+assert.equal(prefersJpegScrubPreview({ preferNativeHls: true, coarsePointer: false }), true);
+assert.equal(prefersJpegScrubPreview({ preferNativeHls: false, coarsePointer: true }), true);
+assert.equal(prefersJpegScrubPreview({ preferNativeHls: false, coarsePointer: false }), false);
+assert.equal(scrubPreviewDelayMs({ coarsePointer: true }), 450);
+assert.equal(scrubPreviewDelayMs({ coarsePointer: false }), 250);
+assert.equal(scrubPreviewBucketSeconds({ coarsePointer: true }), 10);
+assert.equal(scrubPreviewBucketSeconds({ coarsePointer: false }), 5);
+assert.equal(shouldUseFastSeek({ coarsePointer: true }), false);
+assert.equal(shouldUseFastSeek({ preferNativeHls: true }), false);
+assert.equal(shouldUseFastSeek({ coarsePointer: false, preferNativeHls: false }), true);
+assert.equal(recordingSeekToleranceSeconds({ coarsePointer: true }), 0.35);
+assert.equal(seekWatchdogDelayMs({ coarsePointer: true }), 3000);
+assert.equal(videoReachedSeekTarget({ currentTime: 4.92 }, 5, 0.35), true);
+assert.equal(videoReachedSeekTarget({ currentTime: 4.2 }, 5, 0.35), false);
+
+let fastSeekTime = null;
+let currentTimeValue = 0;
+seekVideoToTime({
+  fastSeek(value) { fastSeekTime = value; },
+  get currentTime() { return currentTimeValue; },
+  set currentTime(value) { currentTimeValue = value; },
+}, 12.5, { coarsePointer: false, preferNativeHls: false });
+assert.equal(fastSeekTime, 12.5);
+fastSeekTime = null;
+currentTimeValue = 0;
+seekVideoToTime({
+  fastSeek(value) { fastSeekTime = value; },
+  set currentTime(value) { currentTimeValue = value; },
+}, 4.5, { coarsePointer: true });
+assert.equal(fastSeekTime, null);
+assert.equal(currentTimeValue, 4.5);
 
 const mergedAvailability = mergeRecordingAvailability(
   [
