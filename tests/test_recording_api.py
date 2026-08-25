@@ -74,6 +74,47 @@ class RecordingApiTest(unittest.TestCase):
         self.assertEqual(invalid.exception.status_code, 400)
         recording_rows.assert_not_called()
 
+    def test_native_segment_lookup_uses_indexed_epoch_and_validates_its_path(self) -> None:
+        recorder = Mock()
+        recorder.recording_rows_between.return_value = [{
+            "path": "/recordings/gate/segment.mp4",
+            "start_epoch": 100.0,
+            "end_epoch": 110.0,
+        }]
+        manager = SimpleNamespace(
+            camera=lambda camera_id: object() if camera_id == "gate" else None,
+            recorder=recorder,
+        )
+        expected = Path("/validated/segment.mp4")
+        with patch.object(
+            main._recording_media_runtime,
+            "_recording_storage_path",
+            return_value=expected,
+        ) as storage_path:
+            result = main._recording_media_runtime._recording_segment_path(
+                "gate", 105.0, "live", active_manager=manager
+            )
+
+        self.assertEqual(result, expected)
+        recorder.recording_rows_between.assert_called_once_with(
+            "gate", 104.999, 105.001, "live", discover_missing=False
+        )
+        storage_path.assert_called_once_with(
+            "/recordings/gate/segment.mp4", active_manager=manager
+        )
+
+    def test_native_segment_lookup_rejects_missing_index_row(self) -> None:
+        recorder = Mock()
+        recorder.recording_rows_between.return_value = []
+        manager = SimpleNamespace(camera=lambda _camera_id: object(), recorder=recorder)
+
+        with self.assertRaises(HTTPException) as missing:
+            main._recording_media_runtime._recording_segment_path(
+                "gate", 105.0, active_manager=manager
+            )
+
+        self.assertEqual(missing.exception.status_code, 404)
+
     def test_event_clip_cache_key_preserves_explicit_zero_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = SimpleNamespace(storage_dir=Path(tmpdir))

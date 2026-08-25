@@ -1312,6 +1312,13 @@ _recording_route_bundle = create_recording_router(
         recording_preview_timestamp=(
             _recording_media_runtime._recording_preview_timestamp
         ),
+        recording_segment_path=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_segment_path(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
         recording_day_fmp4_paths=lambda active_manager, *args, **kwargs: (
             _recording_media_runtime._recording_day_fmp4_paths(
                 *args,
@@ -1360,6 +1367,7 @@ update_media_export_metadata = _recording_route_bundle.handlers[
     "update_media_export_metadata"
 ]
 delete_media_export = _recording_route_bundle.handlers["delete_media_export"]
+recording_segment = _recording_route_bundle.handlers["recording_segment"]
 recording_window = _recording_route_bundle.handlers["recording_window"]
 recording_preview = _recording_route_bundle.handlers["recording_preview"]
 recording_updates = _recording_route_bundle.handlers["recording_updates"]

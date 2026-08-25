@@ -71,6 +71,7 @@ class RecordingRouteDependencies:
     recording_day_rows: Callable[..., list[dict]]
     recording_preview_path: Callable[[dict, float], Path]
     recording_preview_timestamp: Callable[[Path], tuple[float | None, str]]
+    recording_segment_path: Callable[..., Path]
     recording_day_fmp4_paths: Callable[..., tuple[Path, Path]]
     recording_file_response: Callable[[Path, str], FileResponse]
     event_clip_window: Callable[..., tuple[float, float]]
@@ -647,6 +648,32 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         }
 
 
+    @router.get("/api/cameras/{camera_id}/recordings/segment.mp4")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_segment(
+        camera_id: str,
+        epoch: float,
+        source: str = "main",
+    ) -> FileResponse:
+        """Serve one indexed recording segment for native browser playback."""
+        active_manager = _require_recording_camera(deps, camera_id)
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail="invalid recording segment time")
+        path = deps.recording_segment_path(
+            active_manager,
+            camera_id,
+            epoch,
+            recording_source(source),
+        )
+        # FileResponse provides byte-range requests needed by native MP4 seeking.
+        # Do not use the fMP4 cache response helper: this is the source recording.
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+
     @router.get("/api/cameras/{camera_id}/recordings/preview.jpg")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_preview(
@@ -1059,6 +1086,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 protect_media_export,
                 update_media_export_metadata,
                 delete_media_export,
+                recording_segment,
                 recording_window,
                 recording_preview,
                 recording_updates,
