@@ -965,6 +965,35 @@ class RecordingMediaRuntime:
             media_offset = expected_offset
         return self._recording_fmp4_files(path, segment_duration, media_offset)
 
+    def _recording_segment_path(self, camera_id: str, epoch: float, source: str='main', *, active_manager: AppManager | None=None) -> Path:
+        """Resolve the indexed source MP4 containing an epoch for native playback."""
+        selected_manager = active_manager or self.manager
+        if selected_manager.camera(camera_id) is None:
+            raise HTTPException(status_code=404, detail='camera not found')
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail='invalid recording segment time')
+        rows = selected_manager.recorder.recording_rows_between(
+            camera_id,
+            epoch - 0.001,
+            epoch + 0.001,
+            recording_source(source),
+            discover_missing=False,
+        )
+        row = next(
+            (
+                candidate for candidate in rows
+                if float(candidate.get('start_epoch') or 0) <= epoch
+                < float(candidate.get('end_epoch') or candidate.get('start_epoch') or 0)
+            ),
+            None,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail='no recording exists at this time')
+        return self._recording_storage_path(
+            row.get('path'),
+            active_manager=selected_manager,
+        )
+
     def _recording_rows(self, camera_id: str, limit: int, source: str='main', *, active_manager: AppManager | None=None) -> list[dict]:
         selected_manager = active_manager or self.manager
         return selected_manager.recorder.recording_rows(camera_id, limit=limit, source=recording_source(source))
