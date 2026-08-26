@@ -285,8 +285,16 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             user = next((item for item in next_config.web_auth.users if item.id == user_id), None)
             if user is None:
                 raise HTTPException(status_code=404, detail="user not found")
-            if body.role == "viewer" and user.role == "admin" and _admin_count(next_config.web_auth.users, excluding=user.id) < 1:
-                raise HTTPException(status_code=409, detail="the last administrator cannot be demoted")
+            last_admin = (
+                body.role == "viewer"
+                and user.role == "admin"
+                and _admin_count(next_config.web_auth.users, excluding=user.id) < 1
+            )
+            if last_admin and next_config.web_auth.enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail="turn off sign-in before demoting the last administrator",
+                )
             if body.display_name is not None:
                 user.display_name = body.display_name.strip() or user.username
             if body.role is not None:
@@ -311,27 +319,33 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
         return {"ok": True, "id": user_id, **result}
 
     @router.delete("/api/auth/users/{user_id}")
-    def delete_user(request: Request, user_id: str) -> dict[str, Any]:
+    def delete_user(request: Request, user_id: str) -> JSONResponse:
         actor = require_admin(request)
         with deps.lock:
             current = deps.get_config()
             user = next((item for item in current.web_auth.users if item.id == user_id), None)
             if user is None:
                 raise HTTPException(status_code=404, detail="user not found")
-            if user.role == "admin" and _admin_count(current.web_auth.users, excluding=user.id) < 1:
-                raise HTTPException(status_code=409, detail="the last administrator cannot be deleted")
-            if actor is not None and actor.id == user_id:
+            remaining_admins = _admin_count(current.web_auth.users, excluding=user.id)
+            deleting_self = actor is not None and actor.id == user_id
+            if deleting_self and remaining_admins >= 1 and current.web_auth.enabled:
                 raise HTTPException(status_code=409, detail="you cannot delete your own account")
             next_config = current.model_copy(deep=True)
             next_config.web_auth.users = [item for item in next_config.web_auth.users if item.id != user_id]
+            if remaining_admins < 1:
+                next_config.web_auth.enabled = False
             effective, result = deps.apply_config(next_config, assign_ids=False)
-        return {
+        payload = {
             "ok": True,
             "id": user_id,
             "enabled": effective.web_auth.enabled,
-            "users": [public_user_payload(user) for user in effective.web_auth.users],
+            "users": [public_user_payload(item) for item in effective.web_auth.users],
             **result,
         }
+        response = JSONResponse(payload)
+        if deleting_self:
+            _clear_session_cookie(response, request)
+        return response
 
     return router
 

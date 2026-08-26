@@ -3,6 +3,17 @@ import { KeyRound, Plus, RefreshCcw, ShieldCheck, Trash2, Upload } from "lucide-
 
 import { fetch } from "../shared/api.js";
 
+function apiDetail(payload, fallback) {
+  const detail = payload?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => item?.msg || item?.message).filter(Boolean);
+    if (messages.length) return messages.join("; ");
+  }
+  if (detail && typeof detail === "object" && typeof detail.message === "string") return detail.message;
+  return fallback;
+}
+
 export function AccessSettings({ config, commitImmediateConfig }) {
   const [users, setUsers] = useState(config.web_auth?.users || []);
   const [enabled, setEnabled] = useState(Boolean(config.web_auth?.enabled));
@@ -54,7 +65,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
         body: JSON.stringify(draft),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not create user");
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not create user"));
       const next = [...users, payload.user];
       setUsers(next);
       syncConfig(enabled, next);
@@ -76,7 +87,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
         body: JSON.stringify({ role }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not update user");
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not update user"));
       const next = users.map((user) => (user.id === userId ? payload.user : user));
       setUsers(next);
       syncConfig(enabled, next);
@@ -87,14 +98,22 @@ export function AccessSettings({ config, commitImmediateConfig }) {
     }
   }
 
-  async function removeUser(userId) {
-    if (!window.confirm("Delete this SurvNG user?")) return;
-    setBusy(userId);
+  async function removeUser(user) {
+    const lastAdmin = user.role === "admin" && users.filter((item) => item.role === "admin").length === 1;
+    const confirmed = window.confirm(
+      lastAdmin && enabled
+        ? "This is the last administrator. Deleting it will turn off sign-in. Continue?"
+        : lastAdmin
+          ? "Delete the last SurvNG administrator?"
+          : "Delete this SurvNG user?",
+    );
+    if (!confirmed) return;
+    setBusy(user.id);
     setError("");
     try {
-      const response = await fetch(`/api/auth/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
+      const response = await fetch(`/api/auth/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not delete user");
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not delete user"));
       setUsers(payload.users || []);
       setEnabled(Boolean(payload.enabled));
       syncConfig(Boolean(payload.enabled), payload.users || []);
@@ -115,7 +134,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
         body: JSON.stringify({ enabled: nextEnabled }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not update sign-in");
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not update sign-in"));
       setEnabled(Boolean(payload.enabled));
       setUsers(payload.users || users);
       syncConfig(Boolean(payload.enabled), payload.users || users);
@@ -140,7 +159,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
         }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not update HTTPS");
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not update HTTPS"));
       setTls(payload);
       commitImmediateConfig(["tls"], {
         enabled: payload.enabled,
@@ -164,7 +183,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
         body: JSON.stringify({ hostname: tlsHostname }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not generate certificate");
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not generate certificate"));
       setTls(payload);
     } catch (caught) {
       setError(caught.message);
@@ -202,7 +221,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
         throw new Error("Choose a certificate and private key file, or paste both PEM blocks.");
       }
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not store certificate");
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not store certificate"));
       setTls(payload);
       form.reset();
     } catch (caught) {
@@ -219,7 +238,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
     try {
       const response = await fetch("/api/tls/apply", { method: "POST" });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not restart SurvNG");
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not restart SurvNG"));
     } catch (caught) {
       setError(caught.message);
       setBusy("");
@@ -249,6 +268,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
           />
           Require sign-in for the browser console
         </label>
+        <p className="settings-help">Turn sign-in off to demote or delete the last administrator. Deleting that account also turns sign-in off.</p>
         <div className="api-token-list">
           {users.map((user) => (
             <article key={user.id}>
@@ -261,7 +281,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
                 <option value="admin">Admin</option>
                 <option value="viewer">Viewer</option>
               </select>
-              <button type="button" className="danger" onClick={() => void removeUser(user.id)} disabled={Boolean(busy)}>
+              <button type="button" className="danger" onClick={() => void removeUser(user)} disabled={Boolean(busy)}>
                 <Trash2 size={14} /> Delete
               </button>
             </article>
