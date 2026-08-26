@@ -1459,7 +1459,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     setTelemetryError("");
     try {
       const params = new URLSearchParams({ hours: "24" });
-      const cameraId = telemetryCamera || config?.cameras?.[0]?.id || "";
+      // An empty scope means the All cameras view. Do not substitute the first
+      // camera here: system histories are intentionally unavailable for a
+      // camera-scoped telemetry request.
+      const cameraId = telemetryCamera;
       if (telemetrySection !== "diagnostics" && cameraId) params.set("camera_id", cameraId);
       const response = await fetch(`/api/telemetry?${params.toString()}`);
       if (!response.ok) throw new Error(`Telemetry failed to load (${response.status})`);

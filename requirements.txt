@@ -1,13 +1,13 @@
-fastapi>=0.141,<1
-uvicorn[standard]>=0.52,<1
-python-multipart>=0.0.20,<1
-websockets>=16,<17
-opencv-python==4.10.0.84
+fastapi>=0.141.1,<1
+uvicorn[standard]>=0.52.4,<1
+python-multipart>=0.0.32,<1
+websockets>=17,<18
+opencv-python==5.0.0.93
 openvino==2026.3.0
-ftfy>=6.1,<7
-regex>=2024.0,<2027
-coremltools>=8,<10; platform_system=="Darwin"
-Pillow>=10,<13; platform_system=="Darwin"
+ftfy>=6.3.1,<7
+regex>=2026.7.19,<2027
+coremltools>=9,<10; platform_system=="Darwin"
+Pillow>=12.3.0,<13; platform_system=="Darwin"
 onvif-zeep==0.2.12
-pydantic>=2.12,<3
+pydantic>=2.13.4,<3
 paho-mqtt>=2.1,<3

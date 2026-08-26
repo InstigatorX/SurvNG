@@ -1,6 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const rootDir = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
   base: "/static/",
@@ -10,10 +13,10 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        main: resolve(__dirname, "index.html"),
-        recordings: resolve(__dirname, "recordings.html"),
-        config: resolve(__dirname, "config.html"),
-        onvif: resolve(__dirname, "onvif.html"),
+        main: resolve(rootDir, "index.html"),
+        recordings: resolve(rootDir, "recordings.html"),
+        config: resolve(rootDir, "config.html"),
+        onvif: resolve(rootDir, "onvif.html"),
       },
       output: {
         entryFileNames: "assets/[name]-[hash].js",

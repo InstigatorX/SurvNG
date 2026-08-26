@@ -1,7 +1,7 @@
 # One-time MobileCLIP2 -> OpenVINO package builder. Not needed by SurvNG at runtime.
-open_clip_torch>=3.2,<4
-timm>=1.0.20,<2
-torch>=2.5,<3
-torchvision>=0.20,<1
-huggingface_hub>=0.34,<2
-Pillow>=10,<13
+open_clip_torch>=3.3.0,<4
+timm>=1.0.28,<2
+torch>=2.13.0,<3
+torchvision>=0.28.0,<1
+huggingface_hub>=1.28.0,<2
+Pillow>=12.3.0,<13
