@@ -557,7 +557,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
   );
 }
 
-export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEventId, cameraNameById, timeZone, onSelect, onReturn, alwaysVisible = false }) {
+export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEventId, cameraNameById, timeZone, onSelect, onReturn }) {
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(false);
 
@@ -590,7 +590,7 @@ export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loa
     };
   }, [anchorEventId]);
 
-  if (!alwaysVisible && !loading && !matches.length) return null;
+  if (!loading && !matches.length) return null;
 
   return (
     <section className="incident-related">
@@ -599,7 +599,6 @@ export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loa
         {selectedEventId ? <button type="button" onClick={onReturn}>Selected incident</button> : null}
       </div>
       {loading ? <p>Finding related incidents…</p> : null}
-      {!loading && !matches.length ? <p>No related incidents found for this appearance.</p> : null}
       {matches.length ? <div className="incident-related-grid">
         {matches.map((match) => {
           const eventId = Number(match.event_id);
@@ -618,9 +617,8 @@ export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loa
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null, embedded = false }) {
+export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
-  const [activeTab, setActiveTab] = useState("details");
   useEffect(() => {
     if (!open) return undefined;
     const inspector = inspectorRef.current;
@@ -644,15 +642,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
     inspector?.addEventListener("keydown", containFocus);
     return () => inspector?.removeEventListener("keydown", containFocus);
   }, [open]);
-  useEffect(() => {
-    setActiveTab("details");
-  }, [incident?.id]);
-  if (!incident) {
-    const emptyClass = embedded ? "incident-inspector embedded" : `incident-inspector${open ? " open" : ""}`;
-    return embedded
-      ? <div id="incident-inspector" className={emptyClass}><div className="empty-state">Select an incident.</div></div>
-      : <aside id="incident-inspector" className={emptyClass}><div className="empty-state">Select an incident.</div></aside>;
-  }
+  if (!incident) return <aside id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`}><div className="empty-state">Select an incident.</div></aside>;
   const inspectedEvent = faceEvent || incident;
   const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
@@ -664,99 +654,67 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
   const after = Number(appConfig?.event_clip_after_seconds ?? 5);
   const window = incidentClipWindow(incident, before, after);
   const clipUrl = Number.isFinite(eventId) ? eventClipUrl(eventId, window.before, window.after) : "";
-  const primaryLabel = objects[0]?.label || incidentLabels(inspectedEvent)[0] || "Incident";
-  const Wrapper = embedded ? "div" : "aside";
-  const wrapperClass = embedded
-    ? "incident-inspector embedded"
-    : `incident-inspector${open ? " open" : ""}`;
 
   return (
-    <Wrapper ref={inspectorRef} id="incident-inspector" className={wrapperClass} role={!embedded && open ? "dialog" : undefined} aria-modal={!embedded && open ? "true" : undefined} aria-labelledby={!embedded && open ? "incident-inspector-title" : undefined}>
+    <aside ref={inspectorRef} id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`} role={open ? "dialog" : undefined} aria-modal={open ? "true" : undefined} aria-labelledby={open ? "incident-inspector-title" : undefined}>
       <div className="incident-inspector-head">
-        <div>
-          <strong id="incident-inspector-title">Incident: {primaryLabel}</strong>
-          <time>{cameraNameById.get(incident.camera_id) || incident.camera_id} · {formatDateTime(inspectedEvent.created_at || incident.created_at, timeZone)}</time>
-        </div>
+        <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(inspectedEvent.created_at || incident.created_at, timeZone)}</time></div>
         {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
       </div>
-      <div className="incident-inspector-tabs" role="tablist" aria-label="Incident details">
-        <button type="button" role="tab" className={activeTab === "details" ? "active" : ""} aria-selected={activeTab === "details"} onClick={() => setActiveTab("details")}>Details</button>
-        <button type="button" role="tab" className={activeTab === "ai" ? "active" : ""} aria-selected={activeTab === "ai"} onClick={() => setActiveTab("ai")}>AI</button>
-        <button type="button" role="tab" className={activeTab === "related" ? "active" : ""} aria-selected={activeTab === "related"} onClick={() => setActiveTab("related")}>Related</button>
-      </div>
-      <div className="incident-inspector-body">
-        {activeTab === "details" ? (
-          <section className="incident-current-summary incident-tab-panel">
-            <dl>
-              <div><dt>Type</dt><dd>{primaryLabel}</dd></div>
-              <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
-              <div><dt>End</dt><dd>{formatTimeOnly(incident.end_at || incident.created_at, timeZone)}</dd></div>
-              <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
-              <div><dt>Camera</dt><dd>{cameraNameById.get(incident.camera_id) || incident.camera_id}</dd></div>
-              <div><dt>Event ID</dt><dd>{eventId || "—"}</dd></div>
-              <div><dt>Trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
-              <div><dt>Zones</dt><dd>{zones.length ? zones.join(", ") : "None"}</dd></div>
-            </dl>
-            {faces.length ? (
-              <div className="incident-inspector-faces">
-                <h4>Faces</h4>
-                {faces.map((face, index) => (
-                  <button type="button" className={`inspector-face ${face.status || "unknown"}`} key={`${face.status}-${face.name}-${index}`} onClick={() => onFaceOpen(face)}>
-                    <strong>{face.name || "Unknown"}</strong>
-                    <span>{face.status === "automatic" ? "Automatic · " : ""}{Math.round(Number(face.confidence || 0) * 100)}%</span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </section>
-        ) : null}
-        {activeTab === "ai" ? (
-          <section className="incident-ai-panel incident-tab-panel">
-            <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
-              <button type="button" className={analysisMode === "clean" ? "active" : ""} aria-pressed={analysisMode === "clean"} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
-              <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
-              <button type="button" className={analysisMode === "ai" ? "active" : ""} aria-pressed={analysisMode === "ai"} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
-            </div>
-            {analysisMode === "tracks" ? <small>{objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
-            {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
-            <div className="incident-ai-detections">
-              {objects.length ? objects.map((object, index) => {
-                const confidence = Math.round(Number(object.confidence || 0) * 100);
-                return (
-                  <div className="inspector-detection ai-detection" key={`${object.label}-${index}`}>
-                    <div className="ai-detection-head"><strong>{object.label}</strong><span>{confidence}%</span></div>
-                    <div className="ai-confidence-bar" aria-hidden="true"><span style={{ width: `${confidence}%` }} /></div>
-                    {object.attributes?.length ? <small>{object.attributes.join(" · ")}</small> : null}
-                  </div>
-                );
-              }) : <p>No eligible object detections.</p>}
-            </div>
-            <details className="incident-technical-details">
-              <summary>Technical details</summary>
-              <div className="incident-technical-body">
-                {objects.length ? <div className="incident-technical-objects">{objects.map((object, index) => {
-                  const box = object.box || {};
-                  return <code key={`${object.label}-${index}`}>{object.label}: {Math.round(Number(box.x1 || 0))}, {Math.round(Number(box.y1 || 0))} → {Math.round(Number(box.x2 || 0))}, {Math.round(Number(box.y2 || 0))}</code>;
-                })}</div> : null}
-                <dl>
-                  <div><dt>Loaded image</dt><dd>{imageSize?.width && imageSize?.height ? `${imageSize.width} × ${imageSize.height} px` : "—"}</dd></div>
-                  <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
-                </dl>
-              </div>
-            </details>
-          </section>
-        ) : null}
-        {activeTab === "related" ? (
-          <section className="incident-tab-panel">
-            <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} alwaysVisible />
-          </section>
-        ) : null}
-      </div>
+      <section className="incident-current-summary">
+        <h3>Current incident</h3>
+        <div className="incident-summary-objects">
+          {objects.length ? objects.map((object, index) => <div className="inspector-detection summary" key={`${object.label}-${index}`}><div><strong>{object.label}</strong><span>{Math.round(Number(object.confidence || 0) * 100)}%</span></div></div>) : <p>No eligible object detections.</p>}
+        </div>
+        <dl>
+          <div><dt>Trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
+          <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
+          <div><dt>Zones</dt><dd>{zones.length ? zones.join(", ") : "None"}</dd></div>
+        </dl>
+      </section>
+      <section className="incident-replay-analysis">
+        <h3>Replay analysis</h3>
+        <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
+          <button type="button" className={analysisMode === "clean" ? "active" : ""} aria-pressed={analysisMode === "clean"} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
+          <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
+          <button type="button" className={analysisMode === "ai" ? "active" : ""} aria-pressed={analysisMode === "ai"} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
+        </div>
+        {analysisMode === "tracks" ? <small>{objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
+        {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
+      </section>
+      <section>
+        <h3>Faces</h3>
+        {faces.length ? faces.map((face, index) => (
+          <button type="button" className={`inspector-face ${face.status || "unknown"}`} key={`${face.status}-${face.name}-${index}`} onClick={() => onFaceOpen(face)}>
+            <strong>{face.name || "Unknown"}</strong>
+            <span>{face.status === "automatic" ? "Automatic · " : ""}{Math.round(Number(face.confidence || 0) * 100)}%{Number(face.candidate_count || 0) > 1 ? ` · ${face.candidate_count} frames` : ""}</span>
+          </button>
+        )) : <p>No recognized faces.</p>}
+      </section>
+      <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
+      <details className="incident-technical-details">
+        <summary>Technical details</summary>
+        <div className="incident-technical-body">
+          {objects.length ? <div className="incident-technical-objects">{objects.map((object, index) => {
+            const box = object.box || {};
+            return <code key={`${object.label}-${index}`}>{object.label}: {Math.round(Number(box.x1 || 0))}, {Math.round(Number(box.y1 || 0))} → {Math.round(Number(box.x2 || 0))}, {Math.round(Number(box.y2 || 0))}</code>;
+          })}</div> : null}
+          <dl>
+            <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
+            <div><dt>Selected trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
+            <div><dt>Additional motion</dt><dd>{incident.motion_observation_count || incident.motion_observations?.length || 0}</dd></div>
+            <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
+            <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
+            <div><dt>End</dt><dd>{formatTimeOnly(incident.end_at || incident.created_at, timeZone)}</dd></div>
+            <div><dt>Loaded image</dt><dd>{imageSize?.width && imageSize?.height ? `${imageSize.width} × ${imageSize.height} px` : "—"}</dd></div>
+          </dl>
+        </div>
+      </details>
       <div className="incident-inspector-actions">
         {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
         {inspectedEvent.snapshot_path && eventSnapshotDownloadUrl(inspectedEvent) ? <a href={eventSnapshotDownloadUrl(inspectedEvent)}><Download size={15} /> Snapshot</a> : null}
         {onAskAssistant ? <button type="button" className="incident-ask-assistant" onClick={() => onAskAssistant("Analyze this incident")}><Sparkles size={15} /> Ask assistant</button> : null}
       </div>
-    </Wrapper>
+    </aside>
   );
 }

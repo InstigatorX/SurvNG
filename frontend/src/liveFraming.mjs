@@ -36,6 +36,5 @@ export function camerasWithLiveFraming(statusCameras, configuredCameras) {
   return (statusCameras || []).map((camera) => ({
     ...camera,
     live_view: configById.get(String(camera?.id || ""))?.live_view || camera?.live_view,
-    map_placement: configById.get(String(camera?.id || ""))?.map_placement || camera?.map_placement,
   }));
 }

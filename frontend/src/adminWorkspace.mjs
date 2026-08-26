@@ -16,7 +16,6 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
       { id: "cameras", label: "Cameras", workspace: "cameras" },
       { id: "detection", label: "Detection", workspace: "general", subsection: "detection" },
       { id: "storage", label: "Storage", workspace: "general", subsection: "storage" },
-      { id: "property-map", label: "Property Map", workspace: "general", subsection: "property-map" },
       { id: "integrations", label: "Integrations", workspace: "general", subsection: "mqtt" },
       { id: "server", label: "Server", workspace: "general", subsection: "general", secondary: true },
     ],
@@ -62,7 +61,6 @@ export function adminDestination(workspace, { generalSection = "general", teleme
 export const GENERAL_SECTION_LABELS = Object.freeze({
   general: "Server",
   storage: "Storage & Retention",
-  "property-map": "Property Map",
   mqtt: "Integrations",
   detection: "Object Detection",
   "motion-review": "Camera Advisor",

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import io
-import asyncio
 import threading
 import unittest
-from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException
 
 from survng.app.config import (
     ApiTokenConfig,
@@ -37,8 +34,6 @@ class ConfigRoutesTest(unittest.TestCase):
         )
         self.manager = Mock()
         self.manager.workers = {"gate": Mock()}
-        self.manager.storage_dir = Path("/tmp/survng-test-storage")
-        self.manager.storage_dir.mkdir(parents=True, exist_ok=True)
         self.save = Mock()
         self.apply = Mock(return_value=(self.config, {
             "apply_mode": "hot",
@@ -235,38 +230,6 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertEqual(first.args[1][0].name, "porch")
         self.assertEqual(rollback.args[1][0].name, "driveway")
         self.publish.assert_not_called()
-
-    def test_site_map_upload_and_delete(self) -> None:
-        upload = self.endpoint("/api/config/site-map", "POST")
-        delete = self.endpoint("/api/config/site-map", "DELETE")
-
-        def apply_and_publish(next_config, **_kwargs):
-            self._publish(next_config)
-            return (next_config, {
-                "apply_mode": "hot",
-                "camera_workers_restarted": False,
-                "subsystems_restarted": [],
-                "hot_updated": ["site_map"],
-            })
-
-        self.apply.side_effect = apply_and_publish
-
-        payload = asyncio.run(upload(UploadFile(filename="map.jpg", file=io.BytesIO(b"\xff\xd8\xff\xd8fake-jpeg"), headers={"content-type": "image/jpeg"})))
-        self.assertTrue(payload["ok"])
-        self.assertEqual(self.config.site_map.image_path, "site-map/property.jpg")
-        image_path = self.manager.storage_dir / "site-map" / "property.jpg"
-        self.assertTrue(image_path.is_file())
-
-        removed = delete()
-        self.assertTrue(removed["ok"])
-        self.assertEqual(self.config.site_map.image_path, "")
-        self.assertFalse(image_path.exists())
-
-    def test_site_map_upload_rejects_non_image(self) -> None:
-        upload = self.endpoint("/api/config/site-map", "POST")
-        with self.assertRaises(HTTPException) as raised:
-            asyncio.run(upload(UploadFile(filename="notes.txt", file=io.BytesIO(b"hello"), headers={"content-type": "text/plain"})))
-        self.assertEqual(raised.exception.status_code, 422)
 
 
 if __name__ == "__main__":

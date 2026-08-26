@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
+  ArrowRight,
+  Camera,
   ChevronLeft,
   ChevronRight,
   Grid2X2,
@@ -18,9 +21,8 @@ import { useStoredState, isMobileViewport } from "../shared/hooks.js";
 import { clearLegacyIncidentFilterStorage } from "../shared/cameras.js";
 import { useAppEvents } from "../shared/events.js";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
-import { incidentLabels, IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
+import { incidentLabels, IncidentObjectBadges, IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
 import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
-import { PropertyMapPanel } from "./PropertyMapPanel.jsx";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
 export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
@@ -575,17 +577,17 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   if (!mobileView) {
     return (
-      <main className="incidents-desktop-page incident-command-center">
+      <main className="incidents-desktop-page with-inspector">
         <section className="bento-card incidents-desktop-shell">
           <div className="incidents-desktop-toolbar">
             <div className="incidents-command-primary">
               <div className="incident-filter-toggle compact" role="group" aria-label="Incident type filter">
-                <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>All Types</button>
+                <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Objects</button>
                 <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
               </div>
               <label className="incident-day-field"><input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" /></label>
               {semanticIncidentControl}
-              <span className="shown-bubble">{displayedIncidentTotal} incidents</span>
+              <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
             </div>
             <div className="incidents-command-filters">
               <div className="incident-filter-selects desktop">
@@ -631,34 +633,27 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
             <section className="incident-investigation">
               <div className="incident-focus-nav">
                 <div className="incident-focus-summary" aria-live="polite">
-                  <strong>{displayedIncident ? `Incident: ${incidentLabels(displayedEvent || displayedIncident).join(", ") || "Motion"}` : "No incident selected"}</strong>
-                  <span>{displayedEvent ? `${cameraNameById.get(displayedIncident.camera_id) || displayedIncident.camera_id} | ${formatDateTime(displayedEvent.created_at || displayedIncident?.created_at, timeZone)}` : ""}</span>
+                  <strong>{displayedIncident ? cameraNameById.get(displayedIncident.camera_id) || displayedIncident.camera_id : "No incident selected"}</strong>
+                  <span>{displayedEvent ? formatDateTime(displayedEvent.created_at || displayedIncident?.created_at, timeZone) : ""}</span>
+                  <div className="pill-row compact"><IncidentObjectBadges labels={displayedEvent ? incidentLabels(displayedEvent) : []} /></div>
                 </div>
-                <div className="incident-focus-actions">
-                  <button type="button" onClick={() => moveFocus(-1)} disabled={focusedIndex <= 0}>Previous</button>
-                  <button type="button" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1}>Next</button>
-                  <span>{focusedIndex >= 0 ? `${incidentPage * incidentsPerPage + focusedIndex + 1} of ${displayedIncidentTotal}` : ""}</span>
-                </div>
+                <span>{focusedIndex >= 0 ? `${incidentPage * incidentsPerPage + focusedIndex + 1} of ${displayedIncidentTotal}` : ""}</span>
                 {relatedPreviewIncident ? <button type="button" onClick={returnToSelectedIncident}>Viewing related appearance · return to selected incident</button> : null}
                 <button ref={tabletInspectorToggleRef} type="button" className="incident-inspector-toggle" onClick={() => setTabletInspectorOpen((open) => !open)} aria-expanded={tabletInspectorOpen} aria-controls="incident-inspector" disabled={!displayedIncident}>Details</button>
               </div>
-              <div className="incident-investigation-body">
-                <div className="incident-desktop-focus">
-                  {focusedIncident ? (
-                    <>
-                      <button type="button" className="incident-focus-arrow previous" onClick={() => moveFocus(-1)} disabled={focusedIndex <= 0} title="Previous incident" aria-label="Previous incident"><ChevronLeft size={26} /></button>
-                      <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
-                    </>
-                  ) : null}
-                  {displayedIncident ? <IncidentCard key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`} incident={displayedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} onImageSize={setFocusedImageSize} /> : <div className="empty-state">No incidents match the current filters.</div>}
-                </div>
-                <div className="incident-detail-panels">
-                  {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
-                  <IncidentInspector embedded open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} onAskAssistant={onAskAssistant} />
-                  <PropertyMapPanel cameras={cameras} activeCameraId={displayedIncident?.camera_id || ""} cameraNameById={cameraNameById} appConfig={appConfig} compact />
-                </div>
+              <div className="incident-desktop-focus">
+                {focusedIncident ? (
+                  <>
+                    <button type="button" className="incident-focus-arrow previous" onClick={() => moveFocus(-1)} disabled={focusedIndex <= 0} title="Previous incident" aria-label="Previous incident"><ChevronLeft size={26} /></button>
+                    <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
+                  </>
+                ) : null}
+                {displayedIncident ? <IncidentCard key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`} incident={displayedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} onImageSize={setFocusedImageSize} /> : <div className="empty-state">No incidents match the current filters.</div>}
               </div>
             </section>
+
+            {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
+            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} onAskAssistant={onAskAssistant} />
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}

@@ -8,25 +8,16 @@ import socket
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from fastapi.responses import FileResponse
 
 from .config import ApiScope, ApiTokenConfig, AppConfig, CameraConfig, DetectionZone, camera_by_id, slugify_camera_id
 from .security import hash_api_token, redact_secret_text
 
 SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__"
-SITE_MAP_DIR = "site-map"
-SITE_MAP_FILENAME = "property"
-SITE_MAP_ALLOWED_TYPES = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -215,39 +206,6 @@ def redacted_config_payload(config: AppConfig) -> dict:
         token["token_hash"] = SECRET_PLACEHOLDER
     payload["cameras"] = [redacted_camera_payload(camera) for camera in config.cameras]
     return payload
-
-
-def _site_map_storage_dir(storage_dir: Path) -> Path:
-    return storage_dir / SITE_MAP_DIR
-
-
-def _resolve_site_map_path(storage_dir: Path, image_path: str) -> Path | None:
-    relative = str(image_path or "").strip().lstrip("/")
-    if not relative:
-        return None
-    candidate = (storage_dir / relative).resolve()
-    root = storage_dir.resolve()
-    if candidate == root or root not in candidate.parents:
-        return None
-    return candidate
-
-
-def _site_map_media_type(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix == ".png":
-        return "image/png"
-    if suffix == ".webp":
-        return "image/webp"
-    return "image/jpeg"
-
-
-def _remove_site_map_files(storage_dir: Path) -> None:
-    directory = _site_map_storage_dir(storage_dir)
-    if not directory.exists():
-        return
-    for path in directory.iterdir():
-        if path.is_file() and path.name.startswith(f"{SITE_MAP_FILENAME}."):
-            path.unlink(missing_ok=True)
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -509,55 +467,5 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             return result
         finally:
             deps.probe_limiter.release()
-
-    @router.get("/api/site-map/image")
-    def get_site_map_image() -> FileResponse:
-        manager = deps.get_manager()
-        image_path = _resolve_site_map_path(manager.storage_dir, deps.get_config().site_map.image_path)
-        if image_path is None or not image_path.is_file():
-            raise HTTPException(status_code=404, detail="site map image not configured")
-        return FileResponse(
-            image_path,
-            media_type=_site_map_media_type(image_path),
-            headers={"Cache-Control": "private, max-age=300"},
-        )
-
-    @router.post("/api/config/site-map")
-    async def upload_site_map(file: UploadFile = File(...)) -> dict[str, Any]:
-        content_type = str(file.content_type or "").split(";", 1)[0].strip().lower()
-        extension = SITE_MAP_ALLOWED_TYPES.get(content_type)
-        if extension is None:
-            raise HTTPException(status_code=422, detail="site map must be a JPEG, PNG, or WebP image")
-        payload = await file.read()
-        if not payload:
-            raise HTTPException(status_code=422, detail="site map image is empty")
-        if len(payload) > 20 * 1024 * 1024:
-            raise HTTPException(status_code=422, detail="site map image exceeds 20 MB")
-        with deps.lock:
-            manager = deps.get_manager()
-            directory = _site_map_storage_dir(manager.storage_dir)
-            directory.mkdir(parents=True, exist_ok=True)
-            _remove_site_map_files(manager.storage_dir)
-            destination = directory / f"{SITE_MAP_FILENAME}{extension}"
-            destination.write_bytes(payload)
-            relative_path = f"{SITE_MAP_DIR}/{destination.name}"
-            next_config = deps.get_config().model_copy(deep=True)
-            next_config.site_map.image_path = relative_path
-            effective, result = deps.apply_config(next_config, assign_ids=False)
-        return {
-            "ok": True,
-            "image_path": effective.site_map.image_path,
-            **result,
-        }
-
-    @router.delete("/api/config/site-map")
-    def delete_site_map() -> dict[str, Any]:
-        with deps.lock:
-            manager = deps.get_manager()
-            _remove_site_map_files(manager.storage_dir)
-            next_config = deps.get_config().model_copy(deep=True)
-            next_config.site_map.image_path = ""
-            effective, result = deps.apply_config(next_config, assign_ids=False)
-        return {"ok": True, "image_path": effective.site_map.image_path, **result}
 
     return router
