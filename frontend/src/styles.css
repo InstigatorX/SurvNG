@@ -2074,14 +2074,22 @@ p {
   object-fit: cover;
 }
 
-/* Object-focus already frames the subject. Cover+16:9 would zoom again and
-   soft-magnify the crop (worse in some top-level windows than iframes). */
-.live-activity-thumb .snapshot-frame.object-focused {
+/* CSS object-focus keeps the crop aspect. Server crops already frame the
+   subject — keep compact tiles at a uniform 16:9. */
+.live-activity-thumb .snapshot-frame.object-focused:not(.object-focus-crop) {
   aspect-ratio: var(--snapshot-aspect, 16 / 9);
 }
 
-.live-activity-thumb .snapshot-frame.object-focused img {
+.live-activity-thumb .snapshot-frame.object-focused:not(.object-focus-crop) img {
   object-fit: contain;
+}
+
+.live-activity-thumb .snapshot-frame.object-focus-crop {
+  aspect-ratio: 16 / 9;
+}
+
+.live-activity-thumb .snapshot-frame.object-focus-crop img {
+  object-fit: cover;
 }
 
 .live-activity-copy {
@@ -3182,6 +3190,14 @@ button.live-overlay-backdrop:active {
 .incident-preview .snapshot-frame {
   height: 100%;
   aspect-ratio: 16 / 10;
+}
+
+.incident-preview .snapshot-frame.object-focus-crop {
+  aspect-ratio: 16 / 10;
+}
+
+.incident-preview .snapshot-frame.object-focus-crop img {
+  object-fit: cover;
 }
 
 .incident-focus .incident-preview {
