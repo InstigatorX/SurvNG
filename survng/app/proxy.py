@@ -88,6 +88,30 @@ def _peer_ip(scope: dict[str, Any]) -> str:
     return ""
 
 
+def _forwarded_client_ip(forwarded_for: str, trusted_proxies: list[str]) -> str | None:
+    """Return the first untrusted hop in an X-Forwarded-For chain.
+
+    Proxies append their address to the right of the header.  Walking from
+    the immediate peer towards the left means an untrusted caller cannot
+    choose the client address by prepending a forged value.
+    """
+    values = [item.strip() for item in forwarded_for.split(",") if item.strip()]
+    if not values:
+        return None
+    addresses = [parse_ip(item) for item in values]
+    # A malformed hop makes the chain ambiguous; leave the original client
+    # information intact rather than trusting a possibly shifted position.
+    if any(address is None for address in addresses):
+        return None
+    for value, address in reversed(list(zip(values, addresses))):
+        assert address is not None  # guarded above
+        if not ip_is_trusted(str(address), trusted_proxies):
+            return value
+    # Every supplied hop is trusted (including the wildcard configuration).
+    # In that case the leftmost value is the only available client address.
+    return values[0]
+
+
 def apply_trusted_proxy_headers(scope: dict[str, Any], trusted_proxies: list[str]) -> dict[str, Any]:
     """Honor X-Forwarded-* only when the immediate peer is a configured proxy."""
     peer = _peer_ip(scope)
@@ -99,8 +123,8 @@ def apply_trusted_proxy_headers(scope: dict[str, Any], trusted_proxies: list[str
         next_scope["scheme"] = proto
     forwarded_for = _scope_header(scope, b"x-forwarded-for")
     if forwarded_for:
-        client_ip = forwarded_for.split(",")[0].strip()
-        if parse_ip(client_ip) is not None:
+        client_ip = _forwarded_client_ip(forwarded_for, trusted_proxies)
+        if client_ip is not None:
             port = 0
             client = scope.get("client")
             if isinstance(client, (tuple, list)) and len(client) > 1:

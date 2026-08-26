@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -52,6 +54,20 @@ def test_trusted_peer_can_set_https_via_header() -> None:
     assert rewritten["client"][0] == "203.0.113.9"
 
 
+def test_forwarded_for_uses_first_untrusted_hop_from_right() -> None:
+    scope = {
+        "type": "http",
+        "scheme": "http",
+        "client": ("10.0.0.2", 40000),
+        "headers": [
+            # The leftmost value is attacker-controlled and must not win.
+            (b"x-forwarded-for", b"192.168.1.9, 198.51.100.23, 10.0.0.1"),
+        ],
+    }
+    rewritten = apply_trusted_proxy_headers(scope, ["10.0.0.0/8"])
+    assert rewritten["client"][0] == "198.51.100.23"
+
+
 def test_invalid_trusted_proxy_is_rejected() -> None:
     from pydantic import ValidationError
 
@@ -59,6 +75,24 @@ def test_invalid_trusted_proxy_is_rejected() -> None:
 
     with pytest.raises(ValidationError):
         ProxyConfig(trusted_proxies=["not-an-ip"])
+
+
+def test_server_disables_uvicorn_proxy_header_processing(monkeypatch: pytest.MonkeyPatch) -> None:
+    import survng.app.__main__ as server_main
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(sys, "argv", ["survng", "--port", "8088"])
+    monkeypatch.setattr(server_main, "load_config", lambda: object())
+    monkeypatch.setattr(
+        server_main,
+        "uvicorn_tls_kwargs",
+        lambda config, port: {"port": port},
+    )
+    monkeypatch.setattr(server_main.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
+
+    server_main.main()
+
+    assert captured["proxy_headers"] is False
 
 
 def test_hsts_only_when_scheme_is_https() -> None:

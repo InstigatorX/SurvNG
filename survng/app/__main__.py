@@ -27,6 +27,9 @@ def main() -> None:
         "reload": args.reload,
         "loop": args.loop,
         "timeout_graceful_shutdown": args.timeout_graceful_shutdown,
+        # Forwarded headers are interpreted by SecurityBoundaryMiddleware,
+        # which applies the configured trusted-proxy policy dynamically.
+        "proxy_headers": False,
     }
     if tls.get("ssl_certfile") and tls.get("ssl_keyfile"):
         kwargs["ssl_certfile"] = tls["ssl_certfile"]
