@@ -36,7 +36,18 @@ export function recordingsHref(context) {
   }));
 }
 
-export const fetch = (resource, options) => window.fetch(
-  typeof resource === "string" ? appUrl(resource) : resource,
-  options,
-);
+export const fetch = async (resource, options) => {
+  const response = await window.fetch(
+    typeof resource === "string" ? appUrl(resource) : resource,
+    options,
+  );
+  const path = typeof resource === "string" ? resource : "";
+  if (
+    response.status === 401
+    && path.startsWith("/api/")
+    && !path.startsWith("/api/auth/")
+  ) {
+    window.dispatchEvent(new Event("survng:auth-required"));
+  }
+  return response;
+};

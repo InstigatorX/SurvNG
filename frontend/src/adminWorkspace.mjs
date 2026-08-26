@@ -17,6 +17,7 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
       { id: "detection", label: "Detection", workspace: "general", subsection: "detection" },
       { id: "storage", label: "Storage", workspace: "general", subsection: "storage" },
       { id: "integrations", label: "Integrations", workspace: "general", subsection: "mqtt" },
+      { id: "access", label: "Access", workspace: "general", subsection: "access" },
       { id: "server", label: "Server", workspace: "general", subsection: "general", secondary: true },
     ],
   },
@@ -62,6 +63,7 @@ export const GENERAL_SECTION_LABELS = Object.freeze({
   general: "Server",
   storage: "Storage & Retention",
   mqtt: "Integrations",
+  access: "Access",
   detection: "Object Detection",
   "motion-review": "Camera Advisor",
 });

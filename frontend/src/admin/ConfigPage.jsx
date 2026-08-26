@@ -18,7 +18,7 @@ import {
   Download,
   Cpu,
   Gauge,
-  Images,
+  KeyRound,
   GripVertical,
   HardDrive,
   Search,
@@ -62,6 +62,7 @@ import { formatDateTime, formatTimeOnly, formatBytes, formatMilliseconds, format
 import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hooks.js";
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
 import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
+import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 
@@ -70,6 +71,7 @@ export const ADMIN_DESTINATION_ICONS = {
   detection: Cpu,
   storage: HardDrive,
   integrations: Radio,
+  access: KeyRound,
   preferences: Cog,
   server: Cog,
   overview: Gauge,
@@ -2239,6 +2241,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 <button type="button" aria-current={generalSection === "general" ? "page" : undefined} className={generalSection === "general" ? "active" : ""} onClick={() => selectAdminSubsection("general", setGeneralSection, "general")}><Cog size={16} /><span>Server</span></button>
                 <button type="button" aria-current={generalSection === "storage" ? "page" : undefined} className={generalSection === "storage" ? "active" : ""} onClick={() => selectAdminSubsection("storage", setGeneralSection, "general")}><HardDrive size={16} /><span>Storage &amp; Retention</span></button>
                 <button type="button" aria-current={generalSection === "mqtt" ? "page" : undefined} className={generalSection === "mqtt" ? "active" : ""} onClick={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}><Radio size={16} /><span>API &amp; MQTT</span></button>
+                <button type="button" aria-current={generalSection === "access" ? "page" : undefined} className={generalSection === "access" ? "active" : ""} onClick={() => selectAdminSubsection("access", setGeneralSection, "general")}><KeyRound size={16} /><span>Access</span></button>
                 <span className="tree-group-label">Intelligence</span>
                 <button type="button" aria-current={generalSection === "detection" ? "page" : undefined} className={generalSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setGeneralSection, "general")}><Cpu size={16} /><span>Object Detection</span></button>
                 <span className="tree-group-label">Tools</span>
@@ -4165,6 +4168,11 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           </div>
         </div>
       ) : null}
+
+      {section === "access" ? (
+        <AccessSettings config={config} commitImmediateConfig={commitImmediateConfig} />
+      ) : null}
+
 
       {section === "mqtt" ? (
         <div className="sub-panel">

@@ -4432,6 +4432,29 @@ button.live-overlay-backdrop:active {
   gap: 10px;
 }
 
+.tls-upload-form {
+  grid-template-columns: 1fr 1fr;
+  align-items: start;
+}
+
+.tls-upload-form .detection-settings-subhead,
+.tls-upload-form button {
+  grid-column: 1 / -1;
+}
+
+.tls-upload-form textarea {
+  width: 100%;
+  min-height: 7.5rem;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--control);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  resize: vertical;
+}
+
 .api-token-scopes {
   display: flex;
   flex-wrap: wrap;

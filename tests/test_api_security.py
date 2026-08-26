@@ -19,6 +19,8 @@ from survng.app.config import (
     CameraConfig,
     MqttConfig,
     OnvifConfig,
+    WebAuthConfig,
+    WebUserConfig,
 )
 from survng.app.config_routes import (
     ConfigProbeRequest,
@@ -29,7 +31,7 @@ from survng.app.config_routes import (
 from survng.app.face_routes import _public_face_observation
 from survng.app.incident_presenter import _event_row
 from survng.app.recording_routes import _public_recording_row
-from survng.app.security import hash_api_token, redact_secret_text
+from survng.app.security import encode_session, hash_api_token, hash_password, redact_secret_text
 
 
 def camera(camera_id: str = "gate", name: str = "Gate") -> CameraConfig:
@@ -62,6 +64,15 @@ class ApiSecretBoundaryTest(unittest.TestCase):
                 token_hash=hash_api_token("survng-api-secret"),
                 scopes=["read", "camera:control"],
             )]),
+            web_auth=WebAuthConfig(
+                session_key="ab" * 32,
+                users=[WebUserConfig(
+                    id="alex",
+                    username="alex",
+                    role="admin",
+                    password_hash="scrypt$16384$8$1$" + ("ab" * 16) + "$" + ("cd" * 32),
+                )],
+            ),
         )
 
         payload = redacted_config_payload(current)
@@ -74,6 +85,8 @@ class ApiSecretBoundaryTest(unittest.TestCase):
             "mqtt-secret",
             "ai-secret",
             hash_api_token("survng-api-secret"),
+            "ab" * 32,
+            "cd" * 32,
         ):
             self.assertNotIn(secret, serialized)
         restored = restore_config_secrets(AppConfig.model_validate(payload), current)
@@ -253,7 +266,84 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(called)
 
-    async def test_read_token_cannot_mutate_camera_state(self) -> None:
+    async def test_enabled_web_auth_requires_a_session_cookie(self) -> None:
+        async def inner(_scope, _receive, _send) -> None:
+            self.fail("unauthenticated request reached the application")
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        messages: list[dict] = []
+        user = WebUserConfig(
+            id="alex",
+            username="alex",
+            display_name="Alex",
+            role="admin",
+            password_hash=hash_password("correct-horse"),
+        )
+        web_auth = WebAuthConfig(enabled=True, session_key="a" * 64, users=[user])
+        with patch.object(main.config, "web_auth", web_auth):
+            await middleware({
+                "type": "http", "scheme": "http", "method": "GET",
+                "path": "/api/cameras", "headers": [(b"host", b"survng.local")],
+            }, self._receive, self._collector(messages))
+
+        self.assertEqual(messages[0]["status"], 401)
+
+    async def test_viewer_session_cannot_mutate_configuration(self) -> None:
+        async def inner(_scope, _receive, _send) -> None:
+            self.fail("viewer reached an admin route")
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        messages: list[dict] = []
+        user = WebUserConfig(
+            id="pat",
+            username="pat",
+            display_name="Pat",
+            role="viewer",
+            password_hash=hash_password("viewer-pass"),
+        )
+        admin = WebUserConfig(
+            id="alex",
+            username="alex",
+            display_name="Alex",
+            role="admin",
+            password_hash=hash_password("correct-horse"),
+        )
+        web_auth = WebAuthConfig(enabled=True, session_key="a" * 64, users=[admin, user])
+        token = encode_session("pat", web_auth.session_key)
+        with patch.object(main.config, "web_auth", web_auth):
+            await middleware({
+                "type": "http", "scheme": "http", "method": "PUT",
+                "path": "/api/config",
+                "headers": [
+                    (b"host", b"survng.local"),
+                    (b"cookie", f"survng_session={token}".encode("ascii")),
+                ],
+            }, self._receive, self._collector(messages))
+
+        self.assertEqual(messages[0]["status"], 403)
+
+    async def test_sign_in_route_remains_public_when_web_auth_is_enabled(self) -> None:
+        called = False
+
+        async def inner(_scope, _receive, _send) -> None:
+            nonlocal called
+            called = True
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        user = WebUserConfig(
+            id="alex",
+            username="alex",
+            role="admin",
+            password_hash=hash_password("correct-horse"),
+        )
+        web_auth = WebAuthConfig(enabled=True, session_key="a" * 64, users=[user])
+        with patch.object(main.config, "web_auth", web_auth):
+            await middleware({
+                "type": "http", "scheme": "http", "method": "POST",
+                "path": "/api/auth/login", "headers": [(b"host", b"survng.local")],
+            }, self._receive, self._collector([]))
+
+        self.assertTrue(called)
         async def inner(_scope, _receive, _send) -> None:
             self.fail("under-scoped request reached the application")
 

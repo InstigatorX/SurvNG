@@ -28,10 +28,11 @@ SurvNG watches your cameras, keeps continuous video history, and helps you find 
 12. [Recordings & storage](storage.md) — how long video is kept and where it lives
 13. [AI assistant](assistant.md) — ask questions about health and incidents
 14. [Integrations](integrations.md) — Home Assistant, MQTT, and API tokens
+15. [Access](access.md) — sign-in roles and HTTPS certificates
 
 ### API
 
-15. [HTTP API](api.md) — endpoints, authentication, and examples
+16. [HTTP API](api.md) — endpoints, authentication, and examples
 
 ## Related technical notes
 

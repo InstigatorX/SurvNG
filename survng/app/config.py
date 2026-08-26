@@ -52,6 +52,68 @@ class ApiAuthConfig(BaseModel):
         return self
 
 
+WebRole = Literal["admin", "viewer"]
+PASSWORD_HASH_PATTERN = (
+    r"^(?:__SURVNG_SECRET_SET__|scrypt\$\d+\$\d+\$\d+\$[0-9a-f]+\$[0-9a-f]+)$"
+)
+
+
+class WebUserConfig(BaseModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z][A-Za-z0-9._-]*$")
+    display_name: str = Field(default="", max_length=128)
+    role: WebRole = "viewer"
+    password_hash: str = Field(min_length=20, max_length=256, pattern=PASSWORD_HASH_PATTERN)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class WebAuthConfig(BaseModel):
+    enabled: bool = False
+    session_key: str = Field(default="", max_length=64, pattern=r"^(?:|[0-9a-f]{64}|__SURVNG_SECRET_SET__)$")
+    users: list[WebUserConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_users(self) -> "WebAuthConfig":
+        user_ids = [user.id for user in self.users]
+        usernames = [user.username.casefold() for user in self.users]
+        if len(user_ids) != len(set(user_ids)):
+            raise ValueError("web user ids must be unique")
+        if len(usernames) != len(set(usernames)):
+            raise ValueError("web usernames must be unique")
+        if self.enabled and not any(user.role == "admin" for user in self.users):
+            raise ValueError("sign-in cannot be enabled without an administrator")
+        if self.enabled and (
+            not self.session_key or self.session_key == "__SURVNG_SECRET_SET__"
+        ):
+            raise ValueError("sign-in requires a session signing key")
+        return self
+
+
+class TlsConfig(BaseModel):
+    enabled: bool = False
+    port: int = Field(default=0, ge=0, le=65535)
+    hostname: str = Field(default="", max_length=255)
+
+    @field_validator("hostname")
+    @classmethod
+    def normalize_hostname(cls, value: str) -> str:
+        host = value.strip().rstrip(".")
+        if not host:
+            return ""
+        if any(ch.isspace() for ch in host) or "/" in host or "@" in host:
+            raise ValueError("TLS hostname must be a DNS name or IP address")
+        return host
+
+
 class OnvifConfig(BaseModel):
     enabled: bool = False
     host: str = Field(default="", max_length=255)
@@ -792,6 +854,8 @@ class AppConfig(BaseModel):
     image_storage: ImageStorageConfig = Field(default_factory=ImageStorageConfig)
     media_storage: MediaStorageConfig = Field(default_factory=MediaStorageConfig)
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
+    web_auth: WebAuthConfig = Field(default_factory=WebAuthConfig)
+    tls: TlsConfig = Field(default_factory=TlsConfig)
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)

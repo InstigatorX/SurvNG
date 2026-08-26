@@ -32,6 +32,7 @@ RUN chmod 755 /usr/local/bin/add-apt-ppa-retry \
         libglib2.0-0 \
         libgomp1 \
         libusb-1.0-0 \
+        openssl \
         procps \
         python3 \
         python3-venv \
@@ -68,7 +69,8 @@ COPY config.example.json /usr/share/survng/config.example.json
 COPY docker/config.example.json /usr/share/survng/config.docker.example.json
 COPY docker/go2rtc.example.yaml /usr/share/survng/go2rtc.example.yaml
 COPY docker/entrypoint.sh /usr/local/bin/survng-entrypoint
-RUN chmod 755 /usr/local/bin/survng-entrypoint
+COPY docker/healthcheck.py /usr/local/bin/survng-healthcheck
+RUN chmod 755 /usr/local/bin/survng-entrypoint /usr/local/bin/survng-healthcheck
 COPY --from=frontend /build/survng/static/ ./survng/static/
 RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi
 
@@ -78,10 +80,10 @@ RUN mkdir -p /config /data /models \
 EXPOSE 8088
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/api/health', timeout=3).read()"
+    CMD python /usr/local/bin/survng-healthcheck
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/survng-entrypoint"]
-CMD ["uvicorn", "survng.app.main:app", "--host", "0.0.0.0", "--port", "8088", "--loop", "asyncio", "--timeout-graceful-shutdown", "45"]
+CMD ["python", "-m", "survng.app", "--host", "0.0.0.0", "--port", "8088", "--loop", "asyncio", "--timeout-graceful-shutdown", "45"]
 
 # Optional Intel OpenVINO GPU and VA-API/QSV userspace. Select this target with
 # docker compose -f compose.yaml -f compose.intel-gpu.yaml up -d --build.

@@ -258,8 +258,10 @@ reboot
 ## Run
 
 ```bash
-uvicorn survng.app.main:app --reload --host 0.0.0.0 --port 8088
+python -m survng.app --reload --host 0.0.0.0 --port 8088
 ```
+
+`python -m survng.app` reads TLS settings from config and attaches certificate files when HTTPS is enabled. Direct `uvicorn survng.app.main:app` still works for HTTP-only development.
 
 Open http://127.0.0.1:8088/survng/ on this machine, or use the server's LAN address from another device, for example `http://192.168.82.12:8088/survng/`.
 

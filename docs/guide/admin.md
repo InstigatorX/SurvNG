@@ -14,7 +14,8 @@ Admin is grouped into practical jobs.
 | **Detection** | Object detection, face recognition, Smart Search, AI analysis models |
 | **Storage** | Retention days, free-space watermarks, evidence image format |
 | **Integrations** | MQTT and Home Assistant discovery |
-| **Server** | General service options, appearance, updates, API tokens |
+| **Access** | Browser users, admin/viewer roles, and HTTPS certificates |
+| **Server** | General service options, appearance, updates |
 
 ## Observe
 
@@ -51,3 +52,4 @@ Some settings apply immediately. Others restart camera workers or heavier servic
 - [Motion & detection](motion-detection.md)
 - [Recordings & storage](storage.md)
 - [Integrations](integrations.md)
+- [Access](access.md)
