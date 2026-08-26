@@ -50,7 +50,8 @@ def redact_secret_text(value: object) -> str:
 
 
 SESSION_COOKIE_NAME = "survng_session"
-SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
+DEFAULT_SESSION_DAYS = 14
+SESSION_TTL_SECONDS = DEFAULT_SESSION_DAYS * 24 * 60 * 60
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
@@ -126,9 +127,20 @@ def _dummy_password_hash() -> str:
     return _DUMMY_PASSWORD_HASH
 
 
-def encode_session(user_id: str, session_key: str, *, now: int | None = None) -> str:
+def session_ttl_seconds(session_days: int = DEFAULT_SESSION_DAYS) -> int:
+    return int(session_days) * 24 * 60 * 60
+
+
+def encode_session(
+    user_id: str,
+    session_key: str,
+    *,
+    now: int | None = None,
+    ttl_seconds: int | None = None,
+) -> str:
     issued = int(time.time() if now is None else now)
-    expires = issued + SESSION_TTL_SECONDS
+    lifetime = SESSION_TTL_SECONDS if ttl_seconds is None else int(ttl_seconds)
+    expires = issued + max(1, lifetime)
     payload = f"{user_id}:{issued}:{expires}"
     digest = hmac.new(
         session_key.encode("utf-8"),

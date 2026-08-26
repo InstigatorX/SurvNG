@@ -276,6 +276,17 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
           Require sign-in for the browser console
         </label>
         <p className="settings-help">Check this box, then Save settings. If no administrator exists yet, SurvNG will ask you to create one. You can also add users here first, then enable sign-in and save.</p>
+        <label>Session length (days)
+          <input
+            type="number"
+            min="1"
+            max="365"
+            step="1"
+            value={config.web_auth?.session_days ?? 14}
+            onChange={(event) => updateConfig(["web_auth", "session_days"], Number(event.target.value))}
+          />
+          <small>How long a signed-in browser stays signed in. Save settings to apply. New sign-ins use this length; current sessions keep their existing expiry.</small>
+        </label>
         <div className="api-token-list">
           {users.map((user) => (
             <article className="access-user-row" key={user.id}>

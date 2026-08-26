@@ -49,6 +49,11 @@ class PasswordAndSessionTest(unittest.TestCase):
         self.assertIsNone(decode_session(token[:-1] + ("0" if token[-1] != "0" else "1"), "a" * 64, now=1_700_000_100))
         self.assertIsNone(decode_session(token, "a" * 64, now=1_700_000_000 + 15 * 24 * 60 * 60))
 
+    def test_session_token_uses_configured_lifetime(self) -> None:
+        token = encode_session("alex", "a" * 64, now=1_700_000_000, ttl_seconds=60)
+        self.assertEqual(decode_session(token, "a" * 64, now=1_700_000_030), "alex")
+        self.assertIsNone(decode_session(token, "a" * 64, now=1_700_000_061))
+
     def test_viewer_scope_is_read_only(self) -> None:
         self.assertEqual(scopes_for_web_role("viewer"), frozenset({"read"}))
         self.assertIn("admin", scopes_for_web_role("admin"))
@@ -82,6 +87,13 @@ class WebAuthConfigTest(unittest.TestCase):
     def test_usernames_are_unique(self) -> None:
         with self.assertRaises(ValidationError):
             WebAuthConfig(users=[make_user("alex"), make_user("Alex")])
+
+    def test_session_days_are_bounded(self) -> None:
+        self.assertEqual(WebAuthConfig().session_days, 14)
+        with self.assertRaises(ValidationError):
+            WebAuthConfig(session_days=0)
+        with self.assertRaises(ValidationError):
+            WebAuthConfig(session_days=366)
 
 
 class AuthRouteTest(unittest.TestCase):
@@ -136,6 +148,14 @@ class AuthRouteTest(unittest.TestCase):
         cookie = response.headers.get("set-cookie") or ""
         self.assertIn("HttpOnly", cookie)
         self.assertIn("samesite=lax", cookie.lower())
+        self.assertIn("max-age=1209600", cookie.lower())
+
+    def test_login_cookie_uses_configured_session_days(self) -> None:
+        self.config.web_auth.session_days = 2
+        response = self.client.post("/api/auth/login", json={"username": "alex", "password": "correct-horse"})
+        self.assertEqual(response.status_code, 200)
+        cookie = (response.headers.get("set-cookie") or "").lower()
+        self.assertIn("max-age=172800", cookie)
 
     def test_login_rejects_bad_password(self) -> None:
         response = self.client.post("/api/auth/login", json={"username": "alex", "password": "nope-nope"})
