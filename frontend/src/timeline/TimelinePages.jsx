@@ -1170,7 +1170,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     });
   }
 
-  function playAt(epoch, autoplay = true, preserveTimelineViewport = false) {
+  function playAt(epoch, autoplay = true, preserveTimelineViewport = false, fastSeek = false) {
     const target = snapToRecording(epoch);
     if (target === null || !activeCameraId) return;
     if (
@@ -1221,7 +1221,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           setPlaybackWindow(null);
           setPlaybackNotice(autoplay ? "Seeking..." : "");
           if (autoplay && video.paused) requestRecordingPlay(video, false);
-          seekVideoToTime(video, localTime, { allowFastSeek: false });
+          seekVideoToTime(video, localTime, { allowFastSeek: fastSeek });
           scheduleNativeSeekWatchdog(video, localTime);
           if (!autoplay) setPlaybackNotice("");
         } else {
@@ -1621,6 +1621,21 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     requestRecordingPlay(video);
   }
 
+  function skipPlayback(seconds, playing = autoplayRef.current || heroPlaying) {
+    const video = videoRef.current;
+    let currentEpoch = Number.isFinite(playhead) ? playhead : desiredEpochRef.current;
+    if (!isAllCameras && video && Number.isFinite(video.currentTime)) {
+      const mediaEpoch = useNativeMobilePlayback
+        ? (nativeSegment ? nativeSegment.start_epoch + Math.max(0, video.currentTime) : null)
+        : mediaTimeToEpoch(video.currentTime);
+      if (Number.isFinite(mediaEpoch)) currentEpoch = mediaEpoch;
+    }
+    if (!Number.isFinite(currentEpoch)) return;
+    // The transport buttons should feel immediate. Timeline clicks remain
+    // exact; a fast seek may land on the nearest decodable keyframe first.
+    playAt(currentEpoch + seconds, playing, false, true);
+  }
+
   function handleRecordingError(error) {
     const detail = describePlaybackError(error);
     console.warn("Recording playback error", { camera: activeCameraId, source, detail, error });
@@ -1819,7 +1834,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             <video
               ref={videoRef}
               src={nativeSegmentUrl}
-              controls
               playsInline
               preload="auto"
               onLoadedMetadata={handleNativeSegmentMetadata}
@@ -1852,7 +1866,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               mimeType="application/vnd.apple.mpegurl"
               startTime={manifestStartTime}
               bufferingGoal={8}
-              controls
+              controls={false}
               playsInline
               preload="auto"
               onReady={handleRecordingReady}
@@ -1888,19 +1902,19 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           ) : null}
           {!isAllCameras && Number.isFinite(playhead) && hasPlaybackMedia && !playbackError ? (
             <div className="recording-grid-controls recording-hero-controls">
-              <button type="button" onClick={() => playAt(playhead - 10, autoplayRef.current || heroPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
+              <button type="button" onClick={() => skipPlayback(-10)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
               <button type="button" className="primary" onClick={toggleHeroPlayback}>
                 {heroPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}
                 {heroPlaying ? "Pause" : "Play"}
               </button>
-              <button type="button" onClick={() => playAt(playhead + 10, autoplayRef.current || heroPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
+              <button type="button" onClick={() => skipPlayback(10)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
               <time>{formatDateTime(playhead, timeZone)}</time>
             </div>
           ) : null}
           {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls">
-            <button type="button" onClick={() => playAt(playhead - 10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
+            <button type="button" onClick={() => skipPlayback(-10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
             <button type="button" className="primary" onClick={() => setGridPlaying((current) => !current)}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
-            <button type="button" onClick={() => playAt(playhead + 10, gridPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
+            <button type="button" onClick={() => skipPlayback(10, gridPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
             <time>{formatDateTime(playhead, timeZone)}</time>
           </div> : null}
         </div>

@@ -10620,6 +10620,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) .recording-hero-controls {
+  right: calc(var(--timeline-companion-width) + 8px);
   bottom: calc(86px + 8px);
 }
 
