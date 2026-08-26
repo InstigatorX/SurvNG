@@ -16,11 +16,11 @@ from pydantic import BaseModel, Field
 from .config import AppConfig, WebRole, WebUserConfig
 from .security import (
     SESSION_COOKIE_NAME,
-    SESSION_TTL_SECONDS,
     authenticate_password,
     encode_session,
     hash_password,
     public_user_payload,
+    session_ttl_seconds,
 )
 
 USERNAME_PATTERN = r"^[A-Za-z][A-Za-z0-9._-]{2,63}$"
@@ -91,11 +91,11 @@ def _request_is_secure(request: Request) -> bool:
     return request.url.scheme == "https" or forwarded == "https"
 
 
-def _attach_session_cookie(response: Response, request: Request, token: str) -> None:
+def _attach_session_cookie(response: Response, request: Request, token: str, *, ttl_seconds: int) -> None:
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
-        max_age=SESSION_TTL_SECONDS,
+        max_age=ttl_seconds,
         httponly=True,
         samesite="lax",
         secure=_request_is_secure(request),
@@ -194,9 +194,10 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             _record_login_failure(key)
             raise HTTPException(status_code=401, detail="invalid username or password")
         _clear_login_failures(key)
-        token = encode_session(user.id, config.web_auth.session_key)
+        ttl = session_ttl_seconds(config.web_auth.session_days)
+        token = encode_session(user.id, config.web_auth.session_key, ttl_seconds=ttl)
         response = JSONResponse(session_payload(config, user))
-        _attach_session_cookie(response, request, token)
+        _attach_session_cookie(response, request, token, ttl_seconds=ttl)
         return response
 
     @router.post("/api/auth/logout")
@@ -222,11 +223,12 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             next_config.web_auth.enabled = True
             effective, result = deps.apply_config(next_config, assign_ids=False)
         user = effective.web_auth.users[0]
-        token = encode_session(user.id, effective.web_auth.session_key)
+        ttl = session_ttl_seconds(effective.web_auth.session_days)
+        token = encode_session(user.id, effective.web_auth.session_key, ttl_seconds=ttl)
         payload = session_payload(effective, user)
         payload.update(result)
         response = JSONResponse(payload, status_code=201)
-        _attach_session_cookie(response, request, token)
+        _attach_session_cookie(response, request, token, ttl_seconds=ttl)
         return response
 
     @router.get("/api/auth/users")

@@ -79,6 +79,7 @@ class WebUserConfig(BaseModel):
 class WebAuthConfig(BaseModel):
     enabled: bool = False
     session_key: str = Field(default="", max_length=64, pattern=r"^(?:|[0-9a-f]{64}|__SURVNG_SECRET_SET__)$")
+    session_days: int = Field(default=14, ge=1, le=365)
     users: list[WebUserConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")

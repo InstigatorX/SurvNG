@@ -20,9 +20,9 @@ Home Assistant and other automations still use **API tokens** under [Integration
 3. **Save settings**.
 4. If no users exist yet, SurvNG asks you to **create the administrator**. Otherwise, sign in with an existing account.
 
-You can also add Admin and Viewer accounts on the Access page before enabling sign-in. User create, role, and delete still apply immediately; the require-sign-in checkbox waits for Save.
+You can also add Admin and Viewer accounts on the Access page before enabling sign-in. User create, role, password, and delete still apply immediately; requiring sign-in and session length wait for Save.
 
-The next visit shows the sign-in screen. Sessions last two weeks and stay on the device as an HTTP-only cookie.
+The next visit shows the sign-in screen. Sessions stay on the device as an HTTP-only cookie for the number of days set under **Session length** (default 14). Changing that length and saving applies to the next sign-in.
 
 To go back to an open LAN console, turn off **Require sign-in** and Save, then demote or delete accounts. Deleting the last administrator also turns sign-in off. While sign-in is required, the last administrator cannot be changed to Viewer.
 
