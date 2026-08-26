@@ -267,6 +267,10 @@ Restrict port 8088 to LAN/VPN or an authenticated reverse proxy.
 Configure cameras under **Admin**. Optional API tokens: **Admin → General →
 API**. The health endpoint stays unauthenticated.
 
+For a remote support case, use **Admin → Diagnostics → Download support
+bundle**. It creates a redacted JSON report suitable for sharing; see the
+[support-bundle guide](README.md#support-bundle).
+
 ## 10. Verify Intel GPU (optional)
 
 Host OpenVINO GPU needs a current Intel userspace stack. Ubuntu 24.04's default

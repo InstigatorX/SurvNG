@@ -12,4 +12,4 @@ Commands in those guides are meant to be pasted in order. Set the variables in
 the first block of the guide you chose, then paste each later block as-is.
 
 Related notes: [docs/docker.md](docs/docker.md), [docker/README.md](docker/README.md),
-[docs/storage.md](docs/storage.md).
+[docs/storage.md](docs/storage.md), and the [support-bundle guide](README.md#support-bundle).

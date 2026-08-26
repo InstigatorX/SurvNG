@@ -540,6 +540,21 @@ Do not use `--enable` until that header injection is in place. Enabling bearer
 authentication without it leaves the page shell reachable but causes its API
 requests to return HTTP 401, making the browser interface appear offline.
 
+### Support bundle
+
+For a remote troubleshooting case, the installing user can open **Admin →
+Diagnostics** and select **Download support bundle**. The resulting JSON file
+is intended to be shared with SurvNG support or attached to an AI-assisted
+diagnosis. It includes the SurvNG version, runtime and camera health, a safe
+configuration snapshot, recent operational events and diagnostics, and up to
+300 recent log entries.
+
+The bundle never includes recordings, snapshots, images, camera stream URLs,
+passwords, API tokens, cookies, private keys, or sensitive filesystem paths.
+Its sections are independently failure-tolerant and the file is capped at
+4 MB. The same administrator-scoped download is available at
+`GET /api/support-bundle`.
+
 ### Integration stream sources
 
 `GET /api/cameras/CAMERA_ID/stream-source?source=live` returns a versioned,

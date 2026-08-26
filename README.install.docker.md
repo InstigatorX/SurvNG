@@ -233,6 +233,10 @@ API bearer tokens (optional) are under **Admin → General → API**. The health
 endpoint stays unauthenticated. Do not turn tokens on until the browser and
 WebSockets will send `Authorization: Bearer …`.
 
+For a remote support case, use **Admin → Diagnostics → Download support
+bundle**. It creates a redacted JSON report suitable for sharing; see the
+[support-bundle guide](README.md#support-bundle).
+
 ## 7. Verify Intel acceleration (GPU image only)
 
 ```bash
