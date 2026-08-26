@@ -285,7 +285,20 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
             value={config.web_auth?.session_days ?? 14}
             onChange={(event) => updateConfig(["web_auth", "session_days"], Number(event.target.value))}
           />
-          <small>How long a signed-in browser stays signed in. Save settings to apply. New sign-ins use this length; current sessions keep their existing expiry.</small>
+          <small>How long a signed-in browser stays signed in. Save settings to apply. New sign-ins use this length; current sessions keep their existing expiry unless you change that user’s password.</small>
+        </label>
+        <label>Trusted reverse proxies
+          <textarea
+            rows={3}
+            value={(config.proxy?.trusted_proxies || ["127.0.0.1", "::1"]).join("\n")}
+            onChange={(event) => updateConfig(
+              ["proxy", "trusted_proxies"],
+              event.target.value.split(/\n|,/).map((item) => item.trim()).filter(Boolean),
+            )}
+            spellCheck="false"
+            placeholder={"127.0.0.1\n::1"}
+          />
+          <small>Only these IPs or CIDRs may set HTTPS and client-IP headers. Use 127.0.0.1 when nginx is on this computer. When nginx is on another server, list that server’s IP (not 127.0.0.1) and do not bind SurvNG to loopback. Docker networks often need 172.16.0.0/12. Save settings to apply. See Help → Reverse proxy.</small>
         </label>
         <div className="api-token-list">
           {users.map((user) => (

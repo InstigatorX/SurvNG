@@ -72,7 +72,7 @@ Treat stream URLs as operational secrets even when passwords are stripped.
 
 ## Network placement
 
-Keep SurvNG on a trusted LAN or VPN, or behind an authenticated reverse proxy. The HTTP API is an administrative surface, not a public internet service.
+Keep SurvNG on a trusted LAN or VPN, or on the internet only with browser sign-in and an HTTPS reverse proxy. Do not publish port `8088`. API bearer tokens stay separate from browser users; give them the smallest scope they need. See [Reverse proxy](reverse-proxy.md).
 
 ## Related
 

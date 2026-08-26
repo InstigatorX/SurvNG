@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import logging
+import os
 import secrets
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -14,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .config import AppConfig, WebRole, WebUserConfig
+from .proxy import ip_is_local
 from .security import (
     SESSION_COOKIE_NAME,
     authenticate_password,
@@ -26,14 +32,18 @@ from .security import (
 USERNAME_PATTERN = r"^[A-Za-z][A-Za-z0-9._-]{2,63}$"
 _LOGIN_WINDOW_SECONDS = 15 * 60
 _LOGIN_MAX_FAILURES = 8
+_LOGIN_IP_MAX_FAILURES = 20
 _LOGIN_FAILURES: dict[str, list[float]] = {}
 _LOGIN_FAILURE_LOCK = threading.Lock()
+_BOOTSTRAP_TOKEN_NAME = "bootstrap.token"
+LOGGER = logging.getLogger(__name__)
 
 
 class AuthCredentials(BaseModel):
     username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
     password: str = Field(min_length=8, max_length=1024)
     display_name: str = Field(default="", max_length=128)
+    bootstrap_token: str = Field(default="", max_length=128)
 
 
 class UserCreateRequest(AuthCredentials):
@@ -60,25 +70,37 @@ class AuthRouteDependencies:
     lock: threading.RLock
 
 
+def _client_ip(request: Request) -> str:
+    if request.client is not None and request.client.host:
+        return request.client.host
+    return ""
+
+
 def _client_key(request: Request, username: str) -> str:
-    host = request.client.host if request.client else "unknown"
-    return f"{host}:{username.strip().casefold()}"
+    return f"{_client_ip(request) or 'unknown'}:{username.strip().casefold()}"
 
 
-def _login_blocked(key: str) -> bool:
+def _login_blocked(key: str, ip: str) -> bool:
     now = time.monotonic()
     with _LOGIN_FAILURE_LOCK:
-        stamps = [stamp for stamp in _LOGIN_FAILURES.get(key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
-        _LOGIN_FAILURES[key] = stamps
-        return len(stamps) >= _LOGIN_MAX_FAILURES
+        user_stamps = [stamp for stamp in _LOGIN_FAILURES.get(key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
+        _LOGIN_FAILURES[key] = user_stamps
+        ip_key = f"{ip or 'unknown'}:"
+        ip_stamps = [stamp for stamp in _LOGIN_FAILURES.get(ip_key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
+        _LOGIN_FAILURES[ip_key] = ip_stamps
+        return len(user_stamps) >= _LOGIN_MAX_FAILURES or len(ip_stamps) >= _LOGIN_IP_MAX_FAILURES
 
 
-def _record_login_failure(key: str) -> None:
+def _record_login_failure(key: str, ip: str) -> None:
     now = time.monotonic()
     with _LOGIN_FAILURE_LOCK:
         stamps = [stamp for stamp in _LOGIN_FAILURES.get(key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
         stamps.append(now)
         _LOGIN_FAILURES[key] = stamps
+        ip_key = f"{ip or 'unknown'}:"
+        ip_stamps = [stamp for stamp in _LOGIN_FAILURES.get(ip_key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
+        ip_stamps.append(now)
+        _LOGIN_FAILURES[ip_key] = ip_stamps
 
 
 def _clear_login_failures(key: str) -> None:
@@ -87,11 +109,21 @@ def _clear_login_failures(key: str) -> None:
 
 
 def _request_is_secure(request: Request) -> bool:
-    forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-    return request.url.scheme == "https" or forwarded == "https"
+    return str(request.scope.get("scheme") or request.url.scheme).lower() in {"https", "wss"}
 
 
-def _attach_session_cookie(response: Response, request: Request, token: str, *, ttl_seconds: int) -> None:
+def _cookie_path(config: AppConfig) -> str:
+    return config.base_path or "/"
+
+
+def _attach_session_cookie(
+    response: Response,
+    request: Request,
+    token: str,
+    *,
+    ttl_seconds: int,
+    config: AppConfig,
+) -> None:
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
@@ -99,14 +131,14 @@ def _attach_session_cookie(response: Response, request: Request, token: str, *, 
         httponly=True,
         samesite="lax",
         secure=_request_is_secure(request),
-        path="/",
+        path=_cookie_path(config),
     )
 
 
-def _clear_session_cookie(response: Response, request: Request) -> None:
+def _clear_session_cookie(response: Response, request: Request, config: AppConfig) -> None:
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
-        path="/",
+        path=_cookie_path(config),
         httponly=True,
         samesite="lax",
         secure=_request_is_secure(request),
@@ -119,6 +151,48 @@ def _ensure_session_key(config: AppConfig) -> AppConfig:
     next_config = config.model_copy(deep=True)
     next_config.web_auth.session_key = secrets.token_hex(32)
     return next_config
+
+
+def bootstrap_token_path(config: AppConfig) -> Path:
+    return Path(config.storage_dir) / _BOOTSTRAP_TOKEN_NAME
+
+
+def load_or_create_bootstrap_token(config: AppConfig) -> str:
+    path = bootstrap_token_path(config)
+    if path.is_file():
+        token = path.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+    token = secrets.token_urlsafe(24)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{token}\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    LOGGER.warning("SurvNG first-admin setup token written to %s", path)
+    return token
+
+
+def clear_bootstrap_token(config: AppConfig) -> None:
+    bootstrap_token_path(config).unlink(missing_ok=True)
+
+
+def _bootstrap_token_matches(config: AppConfig, provided: str) -> bool:
+    stored = load_or_create_bootstrap_token(config)
+    provided_token = provided.strip()
+    if not stored or not provided_token:
+        return False
+    digest = hashlib.sha256(stored.encode("utf-8")).digest()
+    candidate = hashlib.sha256(provided_token.encode("utf-8")).digest()
+    return hmac.compare_digest(digest, candidate)
+
+
+def prepare_bootstrap_token(config: AppConfig) -> None:
+    if config.web_auth.users or not config.web_auth.enabled:
+        clear_bootstrap_token(config)
+        return
+    load_or_create_bootstrap_token(config)
 
 
 def _new_user_id(existing: list[WebUserConfig], username: str) -> str:
@@ -136,10 +210,17 @@ def _admin_count(users: list[WebUserConfig], *, excluding: str = "") -> int:
     return sum(1 for user in users if user.role == "admin" and user.id != excluding)
 
 
-def session_payload(config: AppConfig, user: WebUserConfig | None) -> dict[str, Any]:
+def session_payload(
+    config: AppConfig,
+    user: WebUserConfig | None,
+    *,
+    client_ip: str = "",
+) -> dict[str, Any]:
+    bootstrap_required = bool(config.web_auth.enabled) and not config.web_auth.users
     return {
         "enabled": config.web_auth.enabled,
-        "bootstrap_required": bool(config.web_auth.enabled) and not config.web_auth.users,
+        "bootstrap_required": bootstrap_required,
+        "bootstrap_token_required": bootstrap_required and not ip_is_local(client_ip),
         "user": public_user_payload(user) if user is not None else None,
     }
 
@@ -179,39 +260,51 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
 
     @router.get("/api/auth/session")
     def get_session(request: Request) -> dict[str, Any]:
-        return session_payload(deps.get_config(), current_user(request))
+        return session_payload(deps.get_config(), current_user(request), client_ip=_client_ip(request))
 
     @router.post("/api/auth/login")
     def login(request: Request, body: AuthCredentials) -> JSONResponse:
         config = deps.get_config()
         if not config.web_auth.enabled:
             raise HTTPException(status_code=404, detail="sign-in is not enabled")
+        ip = _client_ip(request)
         key = _client_key(request, body.username)
-        if _login_blocked(key):
+        if _login_blocked(key, ip):
             raise HTTPException(status_code=429, detail="too many failed sign-in attempts; try again later")
         user = authenticate_password(body.username, body.password, config.web_auth)
         if user is None:
-            _record_login_failure(key)
+            _record_login_failure(key, ip)
             raise HTTPException(status_code=401, detail="invalid username or password")
         _clear_login_failures(key)
         ttl = session_ttl_seconds(config.web_auth.session_days)
-        token = encode_session(user.id, config.web_auth.session_key, ttl_seconds=ttl)
-        response = JSONResponse(session_payload(config, user))
-        _attach_session_cookie(response, request, token, ttl_seconds=ttl)
+        token = encode_session(
+            user.id,
+            config.web_auth.session_key,
+            ttl_seconds=ttl,
+            session_epoch=user.session_epoch,
+        )
+        response = JSONResponse(session_payload(config, user, client_ip=ip))
+        _attach_session_cookie(response, request, token, ttl_seconds=ttl, config=config)
         return response
 
     @router.post("/api/auth/logout")
     def logout(request: Request) -> JSONResponse:
         response = JSONResponse({"ok": True})
-        _clear_session_cookie(response, request)
+        _clear_session_cookie(response, request, deps.get_config())
         return response
 
     @router.post("/api/auth/bootstrap", status_code=201)
     def bootstrap(request: Request, body: AuthCredentials) -> JSONResponse:
+        client_ip = _client_ip(request)
         with deps.lock:
             current = deps.get_config()
             if current.web_auth.users:
                 raise HTTPException(status_code=409, detail="an administrator already exists")
+            if not ip_is_local(client_ip) and not _bootstrap_token_matches(current, body.bootstrap_token):
+                raise HTTPException(
+                    status_code=403,
+                    detail="a setup token from this server is required to create the first administrator",
+                )
             next_config = _ensure_session_key(current.model_copy(deep=True))
             next_config.web_auth.users.append(WebUserConfig(
                 id=_new_user_id([], body.username),
@@ -222,13 +315,19 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             ))
             next_config.web_auth.enabled = True
             effective, result = deps.apply_config(next_config, assign_ids=False)
+            clear_bootstrap_token(effective)
         user = effective.web_auth.users[0]
         ttl = session_ttl_seconds(effective.web_auth.session_days)
-        token = encode_session(user.id, effective.web_auth.session_key, ttl_seconds=ttl)
-        payload = session_payload(effective, user)
+        token = encode_session(
+            user.id,
+            effective.web_auth.session_key,
+            ttl_seconds=ttl,
+            session_epoch=user.session_epoch,
+        )
+        payload = session_payload(effective, user, client_ip=client_ip)
         payload.update(result)
         response = JSONResponse(payload, status_code=201)
-        _attach_session_cookie(response, request, token, ttl_seconds=ttl)
+        _attach_session_cookie(response, request, token, ttl_seconds=ttl, config=effective)
         return response
 
     @router.get("/api/auth/users")
@@ -251,6 +350,7 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
                 effective, result = deps.apply_config(next_config, assign_ids=False)
             except ValueError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
+            prepare_bootstrap_token(effective)
         return {
             "ok": True,
             "enabled": effective.web_auth.enabled,
@@ -275,6 +375,8 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             )
             next_config.web_auth.users.append(user)
             effective, result = deps.apply_config(next_config, assign_ids=False)
+            if effective.web_auth.users:
+                clear_bootstrap_token(effective)
         created = next(item for item in effective.web_auth.users if item.id == user.id)
         return {"user": public_user_payload(created), **result}
 
@@ -306,8 +408,8 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
         return {"user": public_user_payload(updated), **result}
 
     @router.put("/api/auth/users/{user_id}/password")
-    def change_password(request: Request, user_id: str, body: PasswordChangeRequest) -> dict[str, Any]:
-        require_admin(request)
+    def change_password(request: Request, user_id: str, body: PasswordChangeRequest) -> JSONResponse:
+        actor = require_admin(request)
         with deps.lock:
             current = deps.get_config()
             next_config = current.model_copy(deep=True)
@@ -315,8 +417,21 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             if user is None:
                 raise HTTPException(status_code=404, detail="user not found")
             user.password_hash = hash_password(body.password)
+            user.session_epoch += 1
             effective, result = deps.apply_config(next_config, assign_ids=False)
-        return {"ok": True, "id": user_id, **result}
+        updated = next(item for item in effective.web_auth.users if item.id == user_id)
+        payload = {"ok": True, "id": user_id, **result}
+        response = JSONResponse(payload)
+        if actor is not None and actor.id == user_id:
+            ttl = session_ttl_seconds(effective.web_auth.session_days)
+            token = encode_session(
+                updated.id,
+                effective.web_auth.session_key,
+                ttl_seconds=ttl,
+                session_epoch=updated.session_epoch,
+            )
+            _attach_session_cookie(response, request, token, ttl_seconds=ttl, config=effective)
+        return response
 
     @router.delete("/api/auth/users/{user_id}")
     def delete_user(request: Request, user_id: str) -> JSONResponse:
@@ -344,7 +459,7 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
         }
         response = JSONResponse(payload)
         if deleting_self:
-            _clear_session_cookie(response, request)
+            _clear_session_cookie(response, request, effective)
         return response
 
     return router

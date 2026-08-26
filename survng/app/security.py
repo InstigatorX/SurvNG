@@ -56,6 +56,11 @@ _SCRYPT_N = 2**14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
 _SCRYPT_DKLEN = 32
+_SCRYPT_MAX_N = 2**16
+_SCRYPT_MAX_R = 16
+_SCRYPT_MAX_P = 4
+_SCRYPT_MAX_DKLEN = 64
+_SCRYPT_MAX_SALT_BYTES = 64
 _DUMMY_PASSWORD_HASH = ""
 
 
@@ -107,17 +112,36 @@ def verify_password(password: str, password_hash: str) -> bool:
         scheme, n_text, r_text, p_text, salt_hex, digest_hex = password_hash.split("$")
         if scheme != "scrypt":
             return False
+        n = int(n_text)
+        r = int(r_text)
+        p = int(p_text)
+        salt = bytes.fromhex(salt_hex)
+        digest = bytes.fromhex(digest_hex)
+        if (
+            n < 2
+            or n > _SCRYPT_MAX_N
+            or n & (n - 1)
+            or r < 1
+            or r > _SCRYPT_MAX_R
+            or p < 1
+            or p > _SCRYPT_MAX_P
+            or not salt
+            or len(salt) > _SCRYPT_MAX_SALT_BYTES
+            or not digest
+            or len(digest) > _SCRYPT_MAX_DKLEN
+        ):
+            return False
         candidate = hashlib.scrypt(
             password.encode("utf-8"),
-            salt=bytes.fromhex(salt_hex),
-            n=int(n_text),
-            r=int(r_text),
-            p=int(p_text),
-            dklen=len(bytes.fromhex(digest_hex)),
+            salt=salt,
+            n=n,
+            r=r,
+            p=p,
+            dklen=len(digest),
         )
     except (AttributeError, ValueError):
         return False
-    return hmac.compare_digest(candidate, bytes.fromhex(digest_hex))
+    return hmac.compare_digest(candidate, digest)
 
 
 def _dummy_password_hash() -> str:
@@ -137,11 +161,13 @@ def encode_session(
     *,
     now: int | None = None,
     ttl_seconds: int | None = None,
+    session_epoch: int = 0,
 ) -> str:
     issued = int(time.time() if now is None else now)
     lifetime = SESSION_TTL_SECONDS if ttl_seconds is None else int(ttl_seconds)
     expires = issued + max(1, lifetime)
-    payload = f"{user_id}:{issued}:{expires}"
+    epoch = max(0, int(session_epoch))
+    payload = f"{user_id}:{issued}:{expires}:{epoch}"
     digest = hmac.new(
         session_key.encode("utf-8"),
         payload.encode("utf-8"),
@@ -150,16 +176,30 @@ def encode_session(
     return f"{payload}:{digest}"
 
 
-def decode_session(token: str, session_key: str, *, now: int | None = None) -> str | None:
+def decode_session(
+    token: str,
+    session_key: str,
+    *,
+    now: int | None = None,
+) -> tuple[str, int] | None:
     try:
-        user_id, issued_text, expires_text, digest = token.split(":")
+        parts = token.split(":")
+        if len(parts) == 5:
+            user_id, issued_text, expires_text, epoch_text, digest = parts
+            epoch = int(epoch_text)
+            payload = f"{user_id}:{issued_text}:{expires_text}:{epoch}"
+        elif len(parts) == 4:
+            user_id, issued_text, expires_text, digest = parts
+            epoch = 0
+            payload = f"{user_id}:{issued_text}:{expires_text}"
+        else:
+            return None
         issued = int(issued_text)
         expires = int(expires_text)
     except ValueError:
         return None
     if not user_id or expires <= int(time.time() if now is None else now) or issued > expires:
         return None
-    payload = f"{user_id}:{issued_text}:{expires_text}"
     expected = hmac.new(
         session_key.encode("utf-8"),
         payload.encode("utf-8"),
@@ -167,7 +207,7 @@ def decode_session(token: str, session_key: str, *, now: int | None = None) -> s
     ).hexdigest()
     if not hmac.compare_digest(digest, expected):
         return None
-    return user_id
+    return user_id, epoch
 
 
 def session_cookie_value(cookie_header: str) -> str:
@@ -198,11 +238,12 @@ def authenticate_session(
     token = session_cookie_value(cookie_header)
     if not token:
         return None
-    user_id = decode_session(token, auth_config.session_key)
-    if user_id is None:
+    decoded = decode_session(token, auth_config.session_key)
+    if decoded is None:
         return None
+    user_id, epoch = decoded
     matched = next((user for user in auth_config.users if user.id == user_id), None)
-    if matched is None:
+    if matched is None or int(getattr(matched, "session_epoch", 0) or 0) != epoch:
         return None
     return principal_for_web_user(matched)
 

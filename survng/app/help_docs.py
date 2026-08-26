@@ -31,6 +31,7 @@ GUIDE_PAGES = (
     ("assistant", "AI assistant"),
     ("integrations", "Integrations"),
     ("access", "Access"),
+    ("reverse-proxy", "Reverse proxy"),
     ("api", "HTTP API"),
 )
 

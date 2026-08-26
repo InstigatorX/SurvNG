@@ -45,9 +45,12 @@ config directory, using an encrypted host disk or secret-backed filesystem when
 required, and backing the file up only to an encrypted destination. Do not put
 credentials in `.env`: Docker environment variables are easier to expose
 through process and container inspection. The Admin API masks stored secrets,
-and SurvNG redacts recognized secret values from its in-memory logs, but port
-8088 must still be limited to the trusted LAN/VPN or an authenticated reverse
-proxy.
+and SurvNG redacts recognized secret values from its in-memory logs.
+
+Treat SurvNG as a private app even in Docker. Prefer signing in (Admin →
+Access), binding `8088` to loopback, and putting TLS on nginx. See
+[Internet, TLS, and reverse proxies](guide/reverse-proxy.md). Do not publish
+the raw SurvNG port to the public internet.
 
 To inspect the build context before publishing an image:
 

@@ -11,6 +11,7 @@ export function LoginScreen({ session, onSignedIn }) {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [bootstrapToken, setBootstrapToken] = useState("");
 
   useEffect(() => {
     document.documentElement.dataset.theme = "dark";
@@ -31,6 +32,7 @@ export function LoginScreen({ session, onSignedIn }) {
           username: username.trim(),
           password,
           display_name: displayName.trim(),
+          bootstrap_token: bootstrap ? bootstrapToken.trim() : "",
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -70,7 +72,9 @@ export function LoginScreen({ session, onSignedIn }) {
         <h1>{bootstrap ? "Create the administrator" : "Sign in"}</h1>
         <p className="login-copy">
           {bootstrap
-            ? "Sign-in is on and this SurvNG host has no users yet. Create an administrator to lock the console to people you trust."
+            ? session?.bootstrap_token_required
+              ? "This request is not from a private network. Create the first administrator, and paste the setup token from this server’s bootstrap.token file."
+              : "Sign-in is on and this SurvNG host has no users yet. Create an administrator to lock the console to people you trust."
             : "Enter your SurvNG credentials to watch live cameras, review incidents, and manage the site."}
         </p>
         <form className="login-form" onSubmit={submit}>
@@ -82,6 +86,19 @@ export function LoginScreen({ session, onSignedIn }) {
                 onChange={(event) => setDisplayName(event.target.value)}
                 autoComplete="name"
                 placeholder="Alex"
+              />
+            </label>
+          ) : null}
+          {bootstrap && session?.bootstrap_token_required ? (
+            <label>
+              Setup token
+              <input
+                value={bootstrapToken}
+                onChange={(event) => setBootstrapToken(event.target.value)}
+                autoComplete="one-time-code"
+                spellCheck="false"
+                required
+                placeholder="from bootstrap.token on the server"
               />
             </label>
           ) : null}
@@ -123,7 +140,9 @@ export function LoginScreen({ session, onSignedIn }) {
         </form>
         <p className="login-foot">
           <ShieldCheck size={14} />
-          {bootstrap ? "Passwords are hashed on this server. SurvNG never stores them in readable form." : "Sessions stay on this device. Ask an administrator for an account."}
+          {bootstrap
+            ? "Passwords are hashed on this server. From the internet, the first administrator also needs the setup token stored on the server."
+            : "Sessions stay on this device. Ask an administrator for an account."}
         </p>
       </main>
     </div>

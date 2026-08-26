@@ -11,6 +11,8 @@ from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
+from .proxy import ProxyConfig
+
 CONFIG_PATH_ENV = "SURVNG_CONFIG_PATH"
 
 ApiScope = Literal["read", "camera:control", "admin"]
@@ -64,6 +66,7 @@ class WebUserConfig(BaseModel):
     display_name: str = Field(default="", max_length=128)
     role: WebRole = "viewer"
     password_hash: str = Field(min_length=20, max_length=256, pattern=PASSWORD_HASH_PATTERN)
+    session_epoch: int = Field(default=0, ge=0)
 
     @field_validator("username")
     @classmethod
@@ -853,6 +856,7 @@ class AppConfig(BaseModel):
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     web_auth: WebAuthConfig = Field(default_factory=WebAuthConfig)
     tls: TlsConfig = Field(default_factory=TlsConfig)
+    proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)
