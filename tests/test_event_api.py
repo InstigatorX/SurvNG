@@ -1193,6 +1193,62 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertIsNotNone(cached)
             self.assertEqual(cached.shape[1], 2560)
 
+    def test_event_thumbnail_object_focus_crops_from_full_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "wide.jpg"
+            snapshot.parent.mkdir(parents=True)
+            frame = np.zeros((400, 2000, 3), dtype=np.uint8)
+            frame[:, :] = (10, 10, 10)
+            frame[150:250, 900:1100] = (0, 0, 255)
+            self.assertTrue(cv2.imwrite(str(snapshot), frame))
+            event = {
+                "id": 1,
+                "snapshot_path": str(snapshot),
+                "objects_json": json.dumps([{
+                    "label": "car",
+                    "incident_eligible": True,
+                    "detection_frame_width": 2000,
+                    "detection_frame_height": 400,
+                    "box": {"x1": 900, "y1": 150, "x2": 1100, "y2": 250},
+                }]),
+            }
+            fake_manager = SimpleNamespace(
+                storage_dir=root,
+                image_cache=LocalImageCache(root / "cache"),
+                events=SimpleNamespace(get=lambda _event_id: event),
+            )
+
+            with patch.object(main, "manager", fake_manager):
+                full = main.event_thumbnail(1, width=640, quality=90)
+                focused = main.event_thumbnail(1, width=640, quality=90, object_focus=True, zoom=1.0)
+
+            full_image = cv2.imread(str(full.path))
+            focused_image = cv2.imread(str(focused.path))
+            self.assertIsNotNone(full_image)
+            self.assertIsNotNone(focused_image)
+            self.assertEqual(full_image.shape[1], 640)
+            self.assertLess(focused_image.shape[1], full_image.shape[1])
+            self.assertGreater(float(focused_image.mean()), float(full_image.mean()))
+            self.assertNotEqual(full.path, focused.path)
+
+    def test_object_focus_crop_rect_tightens_with_zoom(self) -> None:
+        from survng.app.appearance_routes import object_focus_crop_rect
+
+        boxes = [(900, 150, 1100, 250)]
+        loose = object_focus_crop_rect(2000, 400, boxes, zoom=0.5)
+        fitted = object_focus_crop_rect(2000, 400, boxes, zoom=1.0)
+        tight = object_focus_crop_rect(2000, 400, boxes, zoom=2.0)
+        self.assertIsNotNone(loose)
+        self.assertIsNotNone(fitted)
+        self.assertIsNotNone(tight)
+        assert loose is not None and fitted is not None and tight is not None
+        loose_area = (loose[2] - loose[0]) * (loose[3] - loose[1])
+        fitted_area = (fitted[2] - fitted[0]) * (fitted[3] - fitted[1])
+        tight_area = (tight[2] - tight[0]) * (tight[3] - tight[1])
+        self.assertGreater(loose_area, fitted_area)
+        self.assertGreater(fitted_area, tight_area)
+
     def test_webp_snapshot_uses_correct_media_type_and_download_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
