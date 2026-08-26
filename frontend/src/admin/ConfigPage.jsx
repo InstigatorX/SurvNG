@@ -4185,7 +4185,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <option value="auto">Auto crop to objects</option>
               <option value="button">Manual crop button</option>
             </select></label>
-            <label>Object focus zoom<input type="number" min="1" max="5.5" step="0.1" value={config.incident_thumbnail_object_focus_zoom ?? 1} disabled={(config.incident_thumbnail_object_focus || "off") === "off"} onChange={(event) => updateConfig(["incident_thumbnail_object_focus_zoom"], Number(event.target.value))} /><small>1 fits objects with padding; higher values zoom tighter. Hot-applied.</small></label>
+            <label>Object focus zoom<input type="number" min="0.25" max="5.5" step="0.05" value={config.incident_thumbnail_object_focus_zoom ?? 1} disabled={(config.incident_thumbnail_object_focus || "off") === "off"} onChange={(event) => updateConfig(["incident_thumbnail_object_focus_zoom"], Number(event.target.value))} /><small>1 fits objects with padding; below 1 shows more context; above 1 zooms tighter. Compact thumbs are cropped server-side near tile size.</small></label>
             <label>Playback Cache GB<input type="number" min="0.5" max="100" step="0.5" value={config.recording_cache_max_gb ?? 5} onChange={(event) => updateConfig(["recording_cache_max_gb"], Number(event.target.value))} /></label>
             <label>Playback Cache Days<input type="number" min="1" max="90" step="1" value={config.recording_cache_max_days ?? 7} onChange={(event) => updateConfig(["recording_cache_max_days"], Number(event.target.value))} /></label>
           </div>
