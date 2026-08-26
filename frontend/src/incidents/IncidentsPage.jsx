@@ -567,7 +567,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     <div className={`incident-semantic-search ${semanticIncidentActive ? "active" : ""} ${semanticIncidentError ? "error" : ""}`}>
       <form onSubmit={runSemanticIncidentSearch} role="search" aria-label="Semantic incident search">
         <Search size={15} aria-hidden="true" />
-        <input value={semanticIncidentQuery} onChange={(event) => setSemanticIncidentQuery(event.target.value)} placeholder='Describe an incident, e.g. “white delivery truck”' aria-label="Describe incidents to find" disabled={semanticIncidentLoading} />
+        <input value={semanticIncidentQuery} onChange={(event) => setSemanticIncidentQuery(event.target.value)} placeholder="Search incidents…" aria-label="Describe incidents to find" disabled={semanticIncidentLoading} />
         {semanticIncidentActive ? <button type="button" className="secondary" onClick={resetSemanticIncidentSearch} aria-label="Reset semantic incident search">Reset</button> : null}
         <button type="submit" disabled={semanticIncidentLoading || !semanticIncidentQuery.trim()}>{semanticIncidentLoading ? "Searching…" : "Search"}</button>
       </form>
@@ -586,22 +586,16 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
               </div>
               <label className="incident-day-field"><input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" /></label>
-              {semanticIncidentControl}
-              <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
-            </div>
-            <div className="incidents-command-filters">
               <div className="incident-filter-selects desktop">
                 <label><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera"><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
                 <label><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)} aria-label="Incident object"><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
                 <label><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone"><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
                 <label><select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person"><option value="all">All people</option>{incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</select></label>
               </div>
-              <div className="incident-active-filters" aria-label={`${activeIncidentFilterCount} active filters`}>
-                {incidentCameraFilter !== "all" ? <span>Camera: {cameraNameById.get(incidentCameraFilter) || incidentCameraFilter}</span> : null}
-                {incidentObjectFilter !== "all" ? <span>Object: {incidentObjectFilter}</span> : null}
-                {incidentZoneFilter !== "all" ? <span>Zone: {incidentZoneFilter}</span> : null}
-                {incidentPersonFilter !== "all" ? <span>Person: {incidentPeople.find((person) => String(person.id) === incidentPersonFilter)?.name || incidentPersonFilter}</span> : null}
-                {activeIncidentFilterCount ? <button type="button" onClick={clearIncidentFilters}>Clear</button> : <small>All cameras, objects, and zones</small>}
+              {semanticIncidentControl}
+              <div className="incident-toolbar-summary" aria-label={`${activeIncidentFilterCount} active filters`}>
+                {activeIncidentFilterCount ? <button type="button" onClick={clearIncidentFilters}>Clear</button> : null}
+                <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
               </div>
             </div>
           </div>
@@ -631,17 +625,11 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
             </aside>
 
             <section className="incident-investigation">
-              <div className="incident-focus-nav">
-                <div className="incident-focus-summary" aria-live="polite">
-                  <strong>{displayedIncident ? cameraNameById.get(displayedIncident.camera_id) || displayedIncident.camera_id : "No incident selected"}</strong>
-                  <span>{displayedEvent ? formatDateTime(displayedEvent.created_at || displayedIncident?.created_at, timeZone) : ""}</span>
-                  <div className="pill-row compact"><IncidentObjectBadges labels={displayedEvent ? incidentLabels(displayedEvent) : []} /></div>
-                </div>
-                <span>{focusedIndex >= 0 ? `${incidentPage * incidentsPerPage + focusedIndex + 1} of ${displayedIncidentTotal}` : ""}</span>
-                {relatedPreviewIncident ? <button type="button" onClick={returnToSelectedIncident}>Viewing related appearance · return to selected incident</button> : null}
-                <button ref={tabletInspectorToggleRef} type="button" className="incident-inspector-toggle" onClick={() => setTabletInspectorOpen((open) => !open)} aria-expanded={tabletInspectorOpen} aria-controls="incident-inspector" disabled={!displayedIncident}>Details</button>
-              </div>
               <div className="incident-desktop-focus">
+                <div className="incident-focus-actions">
+                  {relatedPreviewIncident ? <button type="button" onClick={returnToSelectedIncident}>Return to selected incident</button> : null}
+                  <button ref={tabletInspectorToggleRef} type="button" className="incident-inspector-toggle" onClick={() => setTabletInspectorOpen((open) => !open)} aria-expanded={tabletInspectorOpen} aria-controls="incident-inspector" disabled={!displayedIncident}>Details</button>
+                </div>
                 {focusedIncident ? (
                   <>
                     <button type="button" className="incident-focus-arrow previous" onClick={() => moveFocus(-1)} disabled={focusedIndex <= 0} title="Previous incident" aria-label="Previous incident"><ChevronLeft size={26} /></button>
@@ -737,4 +725,3 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     </main>
   );
 }
-

@@ -1,6 +1,6 @@
 /* Incident investigation */
 .incidents-desktop-page {
-  height: calc(100dvh - 58px);
+  height: calc(100dvh - var(--topbar-height, 58px));
   min-height: 560px;
   background: var(--canvas);
   padding: 0;
@@ -14,14 +14,15 @@
 }
 
 .incidents-desktop-toolbar {
-  gap: 5px;
+  gap: 3px;
   background: var(--topbar);
-  padding: 6px 10px;
+  padding: 4px 10px;
 }
 
 .incidents-command-primary {
-  grid-template-columns: auto 148px minmax(260px, 1fr) auto;
+  grid-template-columns: auto 124px minmax(420px, 600px) minmax(220px, 1fr) auto;
   align-items: center;
+  gap: 5px;
 }
 
 .incidents-command-primary .incident-filter-toggle {
@@ -41,20 +42,42 @@
 
 .incident-day-field input,
 .incidents-command-filters select {
-  min-height: 36px;
+  min-height: 32px;
   border-radius: 3px;
   font-size: 11px;
 }
 
 .incident-semantic-search form {
-  min-height: 36px;
+  min-height: 32px;
   border-radius: 3px;
   background: var(--control);
 }
 
 .incident-semantic-search button {
+  min-height: 24px;
+  border-radius: 3px;
+}
+
+.incidents-command-primary .incident-filter-selects {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.incidents-command-primary .incident-filter-selects select {
+  min-height: 32px;
+}
+
+.incident-toolbar-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.incident-toolbar-summary button {
   min-height: 28px;
   border-radius: 3px;
+  font-size: 10px;
 }
 
 .incident-active-filters span,
@@ -64,8 +87,21 @@
   font-weight: 550;
 }
 
+/* The toolbar already communicates an active semantic search through its
+ * highlighted input and result count.  Keep the full explanation available
+ * on smaller layouts, but don't spend a desktop toolbar row on it. */
+@media (min-width: 761px) {
+  .incident-semantic-search > small {
+    display: none;
+  }
+}
+
 .incidents-desktop-page.with-inspector .incidents-desktop-workspace {
   grid-template-columns: 306px minmax(0, 1fr) 278px;
+}
+
+.incident-investigation {
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .incident-rail {
@@ -115,30 +151,25 @@
   background: var(--panel-soft);
 }
 
-.incident-focus-nav {
-  min-height: 43px;
-  background: var(--panel-soft);
-  padding-inline: 10px;
-}
-
-.incident-focus-summary>strong {
-  font-size: 12px;
-  font-weight: 620;
-}
-
-.incident-focus-nav>span {
-  font-weight: 540;
-}
-
-.incident-focus-nav button {
-  min-height: 32px;
-  border-radius: 3px;
-  font-weight: 550;
-}
-
 .incident-desktop-focus {
   background: #030708;
   padding: 0;
+}
+
+.incident-focus-actions {
+  position: absolute;
+  z-index: 13;
+  top: 9px;
+  right: 9px;
+  display: flex;
+  gap: 6px;
+}
+
+.incident-focus-actions button {
+  min-height: 32px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 550;
 }
 
 .incident-desktop-focus .incident-card {
@@ -220,8 +251,16 @@
 }
 
 @media (max-width: 1199px) and (min-width: 761px) {
+  .incidents-command-primary {
+    grid-template-columns: auto 124px minmax(280px, 1fr) auto;
+  }
+
+  .incidents-command-primary .incident-filter-selects {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
   .incidents-desktop-page.with-inspector .incidents-desktop-workspace {
     grid-template-columns: 280px minmax(0, 1fr);
   }
 }
-
