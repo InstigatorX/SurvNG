@@ -1,4 +1,5 @@
 export const ADMIN_WORKSPACES = Object.freeze([
+  { id: "home", label: "Configure Home" },
   { id: "general", label: "Settings" },
   { id: "cameras", label: "Cameras" },
   { id: "audit", label: "Motion Audit" },
@@ -42,12 +43,61 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
   },
 ]);
 
+// Operator-facing navigation. Keep the older responsibility map above as the
+// compatibility source for deep links and destination resolution, while this
+// map groups destinations by the job an administrator is trying to accomplish.
+export const ADMIN_NAV_GROUPS = Object.freeze([
+  { id: "configure", label: "Configure", items: [
+    { id: "home", label: "Configure Home", workspace: "home", description: "See what needs attention and jump into setup." },
+    { id: "cameras", label: "Cameras", workspace: "cameras", description: "Add cameras, tune video, motion, and zones." },
+  ] },
+  { id: "intelligence", label: "Intelligence", items: [
+    { id: "detection", label: "Detection", workspace: "general", subsection: "detection", description: "Models, confidence, and object recognition." },
+    { id: "tuneup", label: "Detection Tune-Up", workspace: "calibration", description: "Review evidence and apply bounded improvements." },
+    { id: "advisor", label: "Camera Advisor", workspace: "general", subsection: "motion-review", description: "Get camera-specific recommendations." },
+  ] },
+  { id: "data", label: "Data & Retention", items: [
+    { id: "storage", label: "Storage & Retention", workspace: "general", subsection: "storage", description: "Locations, retention plans, and cleanup." },
+    { id: "maintenance", label: "Storage Maintenance", workspace: "maintenance", description: "Reconcile and repair the media index." },
+  ] },
+  { id: "integrations", label: "Integrations", items: [
+    { id: "integrations", label: "API & MQTT", workspace: "general", subsection: "mqtt", description: "Connect SurvNG to other services." },
+  ] },
+  { id: "security", label: "Security", items: [
+    { id: "access", label: "Users & Access", workspace: "general", subsection: "access", description: "Accounts, sessions, and API tokens." },
+  ] },
+  { id: "system", label: "System", items: [
+    { id: "server", label: "Server Preferences", workspace: "general", subsection: "general", description: "Timezone, appearance, and server behavior." },
+  ] },
+  { id: "observe", label: "Observe", items: [
+    { id: "health", label: "Health", workspace: "telemetry", description: "Runtime health across cameras and services." },
+    { id: "audit", label: "Motion Audit", workspace: "audit", description: "Inspect motion decisions and outcomes." },
+    { id: "diagnostics", label: "Diagnostics", workspace: "telemetry", subsection: "diagnostics", description: "Capture bounded troubleshooting data." },
+    { id: "logs", label: "Logs", workspace: "logs", description: "Review server activity and errors." },
+  ] },
+]);
+
+export const ADMIN_HOME_DESTINATION_IDS = Object.freeze([
+  "cameras",
+  "detection",
+  "storage",
+  "integrations",
+  "access",
+  "server",
+]);
+
+export function adminHomeDestinations() {
+  const destinations = new Map(ADMIN_NAV_GROUPS.flatMap((group) => group.items).map((item) => [item.id, item]));
+  return ADMIN_HOME_DESTINATION_IDS.map((id) => destinations.get(id)).filter(Boolean);
+}
+
 export function normalizeTelemetrySection(value = "") {
   const candidate = String(value || "");
   return candidate === "diagnostics" ? "diagnostics" : "health";
 }
 
 export function adminDestination(workspace, { generalSection = "general", telemetrySection = "health" } = {}) {
+  if (workspace === "home") return ADMIN_NAV_GROUPS[0].items[0];
   return ADMIN_RESPONSIBILITY_GROUPS
     .flatMap((group) => group.items)
     .find((item) => item.workspace === workspace && (

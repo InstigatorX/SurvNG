@@ -262,6 +262,185 @@
   grid-column: 1 / -1;
 }
 
+.admin-workspace-home {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.admin-workspace-home>.settings-panel {
+  grid-column: 1;
+}
+
+.admin-config-home {
+  overflow-y: auto;
+}
+
+.admin-home-inner {
+  width: min(1080px, 100%);
+  margin: 0 auto;
+  padding: clamp(22px, 4vw, 48px);
+}
+
+.admin-home-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 28px;
+}
+
+.admin-home-hero h1 {
+  margin: 5px 0 8px;
+  font-size: clamp(24px, 3vw, 34px);
+  font-weight: 680;
+  letter-spacing: -.035em;
+}
+
+.admin-home-hero p,
+.admin-home-section-head p {
+  max-width: 640px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.admin-home-hero>svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+  opacity: .8;
+}
+
+.admin-eyebrow {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.admin-home-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-home-summary article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--admin-card-radius);
+  background: var(--subtle);
+  padding: 14px;
+}
+
+.admin-home-summary-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--control));
+  color: var(--accent);
+}
+
+.admin-home-summary article div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.admin-home-summary strong {
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-home-summary small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-home-summary em {
+  grid-column: 2;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.admin-home-summary em.good { color: var(--ok, #2b9b67); }
+.admin-home-summary em.attention { color: var(--warn, #c78a27); }
+
+.admin-home-section-head {
+  margin: 34px 0 14px;
+}
+
+.admin-home-section-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  letter-spacing: -.02em;
+}
+
+.admin-home-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-home-actions button {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--admin-card-radius);
+  background: var(--subtle);
+  padding: 16px;
+  color: var(--ink);
+  text-align: left;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+
+.admin-home-actions button:hover {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  background: color-mix(in srgb, var(--accent) 7%, var(--subtle));
+  transform: translateY(-1px);
+}
+
+.admin-home-actions button>svg:first-child { flex: 0 0 auto; color: var(--accent); }
+.admin-home-actions button>svg:last-child { flex: 0 0 auto; margin-left: auto; color: var(--muted); }
+.admin-home-actions button span { display: grid; min-width: 0; gap: 4px; }
+.admin-home-actions button strong { font-size: 13px; }
+.admin-home-actions button small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+
+.admin-home-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 28px;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.admin-home-footer span,
+.admin-home-footer button { display: inline-flex; align-items: center; gap: 6px; }
+.admin-home-footer button { border: 0; background: transparent; color: var(--accent); font-size: 11px; font-weight: 650; }
+
+@media (max-width: 760px) {
+  .admin-home-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-home-actions { grid-template-columns: 1fr; }
+  .admin-home-footer { align-items: flex-start; flex-direction: column; }
+}
+
 .admin-workspace-general {
   grid-template-columns: minmax(0, 1fr);
 }

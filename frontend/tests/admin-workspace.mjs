@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace } from "../src/adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace } from "../src/adminWorkspace.mjs";
 
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[0].items.slice(0, 5).map((item) => item.label), ["Cameras", "Detection", "Storage", "Integrations", "Access"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[1].items.slice(0, 2).map((item) => item.label), ["Health", "Audit"]);
 assert.equal(adminDestination("general", { generalSection: "storage" }).id, "storage");
+assert.deepEqual(adminHomeDestinations().map((item) => item.id), ["cameras", "detection", "storage", "integrations", "access", "server"]);
+assert.equal(adminDestination("home").id, "home");
 assert.equal(adminDestination("telemetry", { telemetrySection: "diagnostics" }).id, "diagnostics");
 assert.equal(adminDestination("telemetry", { telemetrySection: "health" }).id, "health");
 assert.equal(adminDestination("logs").id, "logs");

@@ -23,6 +23,7 @@ import {
   HardDrive,
   Search,
   ListTree,
+  LayoutDashboard,
   Monitor,
   Moon,
   Pause,
@@ -53,7 +54,7 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { insertZonePointWithIndex } from "../zoneGeometry.mjs";
-import { ADMIN_RESPONSIBILITY_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, readAdminWorkspace } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, readAdminWorkspace } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
 import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
@@ -67,6 +68,7 @@ import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
+  home: LayoutDashboard,
   cameras: Camera,
   detection: Cpu,
   storage: HardDrive,
@@ -801,7 +803,7 @@ export function MaintenanceViewer({ state }) {
 export function CalibrationLab({ cameras, runtimeStatus = [], timeZone, onCommandBarChange = null }) {
   const [runs, setRuns] = useState([]);
   const [changeSets, setChangeSets] = useState([]);
-  const [section, setSection] = useStoredState("survng.detectionTuneup.section.v1", "tuneup");
+  const [section, setSection] = useState("tuneup");
   const [wizardStep, setWizardStep] = useStoredJsonState("survng.detectionTuneup.step.v1", 1);
   const [selectedRunId, setSelectedRunId] = useStoredJsonState("survng.detectionTuneup.run.v1", null);
   const [selectedRecommendations, setSelectedRecommendations] = useStoredJsonState("survng.detectionTuneup.recommendations.v1", []);
@@ -1120,6 +1122,8 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [maintenanceError, setMaintenanceError] = useState("");
   const [adminNavOpen, setAdminNavOpen] = useState(false);
   const [calibrationCommandBar, setCalibrationCommandBar] = useState(null);
+  const [generalViewNonce, setGeneralViewNonce] = useState(0);
+  const [calibrationViewNonce, setCalibrationViewNonce] = useState(0);
   const [apiTokenSecretVisible, setApiTokenSecretVisible] = useState(false);
   const configLoadSequence = useRef(0);
   const adminHistoryWriteRef = useRef(true);
@@ -1205,9 +1209,20 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     const nextSubsection = destination.subsection || "";
     const alreadySelected = nextWorkspace === settingsTab && (
       nextWorkspace === "general"
-        ? (nextSubsection || "general") === generalSection
+        ? nextSubsection === "detection"
+          ? false
+          : nextSubsection === "motion-review"
+            ? generalSection === "motion-review" && selectedId === (cameras[0]?.id || "")
+            : (nextSubsection || "general") === generalSection
+        : nextWorkspace === "cameras"
+          ? cameraSection === "settings" && selectedId === (cameras[0]?.id || "")
         : nextWorkspace === "telemetry"
           ? normalizeTelemetrySection(nextSubsection || "health") === telemetrySection
+            && (normalizeTelemetrySection(nextSubsection || "health") !== "health" || !telemetryCamera)
+        : nextWorkspace === "calibration"
+          ? false
+          : nextWorkspace === "audit"
+            ? auditCamera === (cameras[0]?.id || "") && auditCategory === "all" && auditOutcome === "all" && auditPage === 0
           : true
     );
     if (alreadySelected) {
@@ -1219,14 +1234,45 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       setApiTokenSecretVisible(false);
     }
     if (!confirmDiscardAdminChanges("Switch sections and discard unsaved changes?")) return;
-    if (nextWorkspace === "general") setGeneralSection(nextSubsection || "general");
-    if (nextWorkspace === "telemetry") setTelemetrySection(normalizeTelemetrySection(nextSubsection || "health"));
+    if (nextWorkspace === "general") {
+      setGeneralSection(nextSubsection || "general");
+      if (nextSubsection === "detection") setGeneralViewNonce((current) => current + 1);
+      if (nextSubsection === "motion-review") setSelectedId(cameras[0]?.id || "");
+    }
+    if (nextWorkspace === "cameras") {
+      setCameraSection("settings");
+      setSelectedId(cameras[0]?.id || "");
+    }
+    if (nextWorkspace === "telemetry") {
+      const telemetryDestination = normalizeTelemetrySection(nextSubsection || "health");
+      setTelemetrySection(telemetryDestination);
+      if (telemetryDestination === "health") setTelemetryCamera("");
+      if (telemetryDestination === "diagnostics") {
+        setDiagnosticScope("system");
+        setDiagnosticDuration("3600");
+      }
+    }
+    if (nextWorkspace === "calibration") setCalibrationViewNonce((current) => current + 1);
+    if (nextWorkspace === "audit") {
+      setAuditCamera(cameras[0]?.id || "");
+      setAuditCategory("all");
+      setAuditOutcome("all");
+      setAuditPage(0);
+      setSelectedAuditId(null);
+    }
     const options = nextWorkspace === "general"
-      ? { subsection: nextSubsection === "general" ? "" : nextSubsection }
+      ? {
+        subsection: nextSubsection === "general" ? "" : nextSubsection,
+        camera: nextSubsection === "motion-review" ? cameras[0]?.id || "" : "",
+      }
+      : nextWorkspace === "cameras"
+        ? { camera: cameras[0]?.id || "" }
       : nextWorkspace === "telemetry"
         ? nextSubsection === "diagnostics"
           ? { subsection: "diagnostics" }
-          : { camera: telemetryCamera }
+          : {}
+        : nextWorkspace === "audit"
+          ? { camera: cameras[0]?.id || "" }
         : adminLocationOptions(nextWorkspace);
     const search = adminWorkspaceSearch(nextWorkspace, window.location.search, options);
     const location = appUrl(`/admin${search}`);
@@ -2217,12 +2263,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           <button type="button" className="admin-navigation-close" aria-label="Close Admin menu" onClick={() => setAdminNavOpen(false)}><X size={18} /></button>
         </div>
         <nav>
-          {ADMIN_RESPONSIBILITY_GROUPS.map((group) => <section key={group.id} aria-labelledby={`admin-group-${group.id}`}>
+          {ADMIN_NAV_GROUPS.map((group) => <section key={group.id} aria-labelledby={`admin-group-${group.id}`}>
             <h2 id={`admin-group-${group.id}`}>{group.label}</h2>
             {group.items.map((destination) => {
               const Icon = ADMIN_DESTINATION_ICONS[destination.id] || Cog;
               const active = activeAdminDestination.id === destination.id;
-              return <button id={`admin-destination-${destination.id}`} type="button" className={`${active ? "active" : ""}${destination.secondary ? " secondary" : ""}`} aria-current={active ? "page" : undefined} onClick={() => selectAdminDestination(destination)} key={destination.id}><Icon size={16} /><span>{destination.label}</span></button>;
+              return <button id={`admin-destination-${destination.id}`} type="button" className={`${active ? "active" : ""}${destination.secondary ? " secondary" : ""}`} aria-current={active ? "page" : undefined} onClick={() => selectAdminDestination(destination)} key={destination.id} title={destination.description}><Icon size={16} /><span>{destination.label}</span></button>;
             })}
           </section>)}
         </nav>
@@ -2236,7 +2282,27 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
       <div className={`admin-workspace-surface admin-workspace-${settingsTab}`}>
 
-        {settingsTab === "general" ? (
+        {settingsTab === "home" ? (
+          <section id="admin-panel-home" className="bento-card config-editor settings-panel admin-config-home" aria-labelledby="admin-home-title">
+            <div className="admin-home-inner">
+              <header className="admin-home-hero">
+                <div><span className="admin-eyebrow">Configure</span><h1 id="admin-home-title">Make SurvNG work for your scenes</h1><p>Start with a camera, then tune intelligence, storage, and connections as your system grows.</p></div>
+                <ShieldCheck size={34} aria-hidden="true" />
+              </header>
+              <div className="admin-home-summary" aria-label="System setup summary">
+                <article><span className="admin-home-summary-icon"><Camera size={18} /></span><div><strong>{cameras.length}</strong><small>{cameras.length === 1 ? "Camera configured" : "Cameras configured"}</small></div><em className={cameras.length ? "good" : "attention"}>{cameras.length ? "Ready" : "Start here"}</em></article>
+                <article><span className="admin-home-summary-icon"><ShieldCheck size={18} /></span><div><strong>{runtimeStatus.filter((item) => item.running !== false).length}/{cameras.length}</strong><small>Camera workers running</small></div><em className={cameras.length && runtimeStatus.filter((item) => item.running !== false).length === cameras.length ? "good" : "attention"}>{cameras.length && runtimeStatus.filter((item) => item.running !== false).length === cameras.length ? "Healthy" : "Review"}</em></article>
+                <article><span className="admin-home-summary-icon"><Cpu size={18} /></span><div><strong>{detectorStatus?.running === false ? "Offline" : config.detector ? "Enabled" : "Not set"}</strong><small>Detection engine</small></div><em className={detectorStatus?.running === false ? "attention" : "good"}>{detectorStatus?.running === false ? "Check" : "Ready"}</em></article>
+                <article><span className="admin-home-summary-icon"><HardDrive size={18} /></span><div><strong>{retentionStatus?.state ? String(retentionStatus.state).replaceAll("_", " ") : "Calculating"}</strong><small>Storage plan</small></div><em className={retentionStatus?.state === "error" ? "attention" : "good"}>{retentionStatus?.state === "error" ? "Review" : "Tracked"}</em></article>
+              </div>
+              <div className="admin-home-section-head"><div><h2>Choose a task</h2><p>Configuration is organized by the outcome you want, with advanced controls inside each area.</p></div></div>
+              <div className="admin-home-actions">
+                {adminHomeDestinations().map((destination) => { const Icon = ADMIN_DESTINATION_ICONS[destination.id] || Cog; return <button type="button" key={destination.id} onClick={() => selectAdminDestination(destination)}><Icon size={20} /><span><strong>{destination.label}</strong><small>{destination.description}</small></span><ChevronRight size={16} /></button>; })}
+              </div>
+              <div className="admin-home-footer"><span><CircleDot size={14} />Changes are scoped to the area you edit.</span><button type="button" onClick={() => selectAdminDestination(ADMIN_NAV_GROUPS.find((group) => group.id === "observe")?.items[0])}>View system health <ArrowRight size={15} /></button></div>
+            </div>
+          </section>
+        ) : settingsTab === "general" ? (
           <>
             <section className="bento-card camera-tree config-tree settings-section-tree">
               <div className="tree-list">
@@ -2253,6 +2319,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             </section>
             <section id="admin-panel-general" className="bento-card config-editor settings-panel" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
               <GeneralSettings
+                key={`general-${generalSection}-${generalViewNonce}`}
                 config={config}
                 updateConfig={updateConfig}
                 commitImmediateConfig={commitImmediateConfig}
@@ -2314,7 +2381,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             </section>
           </>
         ) : settingsTab === "calibration" ? (
-          <CalibrationLab cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
+          <CalibrationLab key={`calibration-${calibrationViewNonce}`} cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
         ) : settingsTab === "telemetry" ? (
           <>
             <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
@@ -3693,7 +3760,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
   const [apiTokenError, setApiTokenError] = useState("");
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
-  const [detectionSection, setDetectionSection] = useStoredState("survng.adminDetectionSection.v1", "object");
+  const [detectionSection, setDetectionSection] = useState("object");
   const mediaLocations = config.media_storage?.locations || [];
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
