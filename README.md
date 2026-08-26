@@ -285,12 +285,12 @@ SurvNG normally. Do not start the container alongside the systemd service: both
 would record the same cameras and consume duplicate ONVIF connections. See
 [docs/docker.md](docs/docker.md) before migrating an existing installation.
 
-SurvNG's HTTP API is an administrative interface and does not provide its own
-user authentication. Keep port `8088` limited to trusted LAN/VPN clients with a
-host firewall, or place it behind an authenticated reverse proxy. Do not expose
-the port directly to the public internet. SurvNG rejects cross-origin state
-changes and masks stored credentials in API responses, but those protections do
-not replace network access control and authentication.
+SurvNG can be published on the internet when **browser sign-in is enabled** and
+a reverse proxy terminates HTTPS. Keep port `8088` on localhost (or a private
+network) and follow [docs/guide/reverse-proxy.md](docs/guide/reverse-proxy.md).
+Do not expose the raw SurvNG port. Cross-origin API calls are rejected and
+stored credentials are masked in API responses; those controls do not replace
+sign-in and a trusted proxy.
 
 ### Reverse proxy subpath
 

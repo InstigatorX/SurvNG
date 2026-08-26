@@ -26,7 +26,13 @@ The next visit shows the sign-in screen. Sessions stay on the device as an HTTP-
 
 To go back to an open LAN console, turn off **Require sign-in** and Save, then demote or delete accounts. Deleting the last administrator also turns sign-in off. While sign-in is required, the last administrator cannot be changed to Viewer.
 
-Passwords are stored as scrypt hashes. SurvNG never writes the password itself into `config.json`.
+Passwords are stored as scrypt hashes. SurvNG never writes the password itself into `config.json`. Changing a password signs out that user’s other browsers.
+
+## Internet and nginx
+
+Sign-in must be on before the port is public. SurvNG trusts `X-Forwarded-Proto` and `X-Forwarded-For` only from the addresses in **Trusted reverse proxies** (default: this computer’s localhost).
+
+Full nginx config, Docker networks, firewall, and the first-admin **setup token**: [Reverse proxy](reverse-proxy.md).
 
 ## HTTPS
 

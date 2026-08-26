@@ -176,12 +176,13 @@ def restore_config_secrets(incoming: AppConfig, current: AppConfig) -> AppConfig
         restored.web_auth.session_key = current.web_auth.session_key
     current_users = {user.id: user for user in current.web_auth.users}
     for user in restored.web_auth.users:
-        if user.password_hash != SECRET_PLACEHOLDER:
-            continue
         existing_user = current_users.get(user.id)
-        if existing_user is None:
-            raise ValueError("new web users must be created through Access")
-        user.password_hash = existing_user.password_hash
+        if user.password_hash == SECRET_PLACEHOLDER:
+            if existing_user is None:
+                raise ValueError("new web users must be created through Access")
+            user.password_hash = existing_user.password_hash
+        if existing_user is not None:
+            user.session_epoch = existing_user.session_epoch
     current_by_id = {camera.id: camera for camera in current.cameras}
     same_shape = len(restored.cameras) == len(current.cameras)
     restored.cameras = [

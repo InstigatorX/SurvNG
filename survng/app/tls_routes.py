@@ -106,8 +106,15 @@ def create_tls_router(deps: TlsRouteDependencies) -> APIRouter:
         private_key: UploadFile = File(...),
     ) -> dict[str, Any]:
         try:
-            cert_text = (await certificate.read()).decode("utf-8")
-            key_text = (await private_key.read()).decode("utf-8")
+            cert_bytes = await certificate.read(256_001)
+            key_bytes = await private_key.read(256_001)
+        except Exception as error:
+            raise HTTPException(status_code=422, detail="certificate files could not be read") from error
+        if len(cert_bytes) > 256_000 or len(key_bytes) > 256_000:
+            raise HTTPException(status_code=413, detail="certificate files must be 256 KB or smaller")
+        try:
+            cert_text = cert_bytes.decode("utf-8")
+            key_text = key_bytes.decode("utf-8")
         except UnicodeDecodeError as error:
             raise HTTPException(status_code=422, detail="certificate files must be UTF-8 PEM text") from error
         return install_pem(cert_text, key_text)

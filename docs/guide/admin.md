@@ -14,7 +14,7 @@ Admin is grouped into practical jobs.
 | **Detection** | Object detection, face recognition, Smart Search, AI analysis models |
 | **Storage** | Retention days, free-space watermarks, evidence image format |
 | **Integrations** | MQTT and Home Assistant discovery |
-| **Access** | Browser users, admin/viewer roles, and HTTPS certificates |
+| **Access** | Browser users, admin/viewer roles, HTTPS, and trusted reverse proxies |
 | **Server** | General service options, appearance, updates |
 
 ## Observe
@@ -53,3 +53,4 @@ Some settings apply immediately. Others restart camera workers or heavier servic
 - [Recordings & storage](storage.md)
 - [Integrations](integrations.md)
 - [Access](access.md)
+- [Reverse proxy](reverse-proxy.md)

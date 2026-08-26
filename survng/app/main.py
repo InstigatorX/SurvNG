@@ -36,7 +36,7 @@ from .config_routes import (
     create_config_router,
 )
 from .appearance_routes import AppearanceRouteDependencies, create_appearance_router
-from .auth_routes import AuthRouteDependencies, create_auth_router
+from .auth_routes import AuthRouteDependencies, create_auth_router, prepare_bootstrap_token
 from .camera_api_routes import (
     CameraApiDependencies,
     create_camera_api_router,
@@ -92,6 +92,7 @@ from .system_telemetry import (
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
 from .training_routes import TrainingRouteDependencies, create_training_router
+from .proxy import apply_trusted_proxy_headers, request_is_secure
 from .security import (
     authenticate_api_token,
     authenticate_session,
@@ -226,9 +227,10 @@ def _origin_tuple(
 def _trusted_request_origins(scope: dict) -> set[tuple[str, str, int]]:
     """Return allowed browser origins for the current request authority.
 
-    Uvicorn applies forwarding headers only for its configured trusted proxies
-    and publishes the resulting protocol as ``scope['scheme']``. Raw Host and
-    X-Forwarded-Proto headers are therefore never allowed to select the scheme.
+    SurvNG applies ``X-Forwarded-Proto`` only when the immediate peer is in
+    ``proxy.trusted_proxies``, then publishes that protocol as
+    ``scope['scheme']``. Untrusted clients cannot choose the scheme from
+    headers. Raw Host is still not used to select the scheme.
 
     When explicit trusted origins are configured they are authoritative. The
     fallback uses the HTTP Host authority because it is the only public
@@ -315,6 +317,8 @@ class SecurityBoundaryMiddleware:
 
     async def __call__(self, scope, receive, send) -> None:
         scope_type = scope.get("type")
+        if scope_type in {"http", "websocket"}:
+            scope = apply_trusted_proxy_headers(scope, config.proxy.trusted_proxies)
         api_path = _api_scope_path(scope)
         method = str(scope.get("method") or "GET")
         if scope_type in {"http", "websocket"} and api_path.startswith("/api/"):
@@ -408,6 +412,8 @@ class SecurityBoundaryMiddleware:
                 }
                 if _api_scope_path(scope).startswith("/api/"):
                     additions[b"cache-control"] = b"no-store"
+                if request_is_secure(scope):
+                    additions[b"strict-transport-security"] = b"max-age=31536000; includeSubDomains"
                 headers.extend(
                     (name, value)
                     for name, value in additions.items()
@@ -780,6 +786,7 @@ def apply_config_update(
         current = config
         if manager_owned_config(current) != manager_owned_config(effective):
             applied = reload_manager(effective, assign_ids=False, persist=persist)
+            prepare_bootstrap_token(applied)
             return applied, {
                 "apply_mode": "manager_reload",
                 "camera_workers_restarted": True,
@@ -795,6 +802,7 @@ def apply_config_update(
         config = effective
         if effective.ffmpeg_path != previous_ffmpeg_path:
             _recording_media_runtime.clear_hardware_probe_caches()
+        prepare_bootstrap_token(effective)
         return effective, result
 
 
@@ -853,6 +861,7 @@ async def lifespan(app: FastAPI):
             "early ONVIF shutdown signal is unavailable on this platform"
         )
     _record_process_lifecycle("startup_started")
+    prepare_bootstrap_token(config)
     get_manager().start_all()
     try:
         media_exports = _recording_media_runtime._media_export_manager()

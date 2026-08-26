@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from survng.app.auth_routes import AuthRouteDependencies, create_auth_router
+from survng.app.auth_routes import (
+    AuthRouteDependencies,
+    create_auth_router,
+    load_or_create_bootstrap_token,
+)
 from survng.app.config import AppConfig, WebAuthConfig, WebUserConfig
 from survng.app.config_routes import restore_config_secrets
 from survng.app.security import (
@@ -42,17 +46,27 @@ class PasswordAndSessionTest(unittest.TestCase):
         self.assertTrue(verify_password("correct-horse", digest))
         self.assertFalse(verify_password("wrong-horse", digest))
 
+    def test_verify_password_rejects_expensive_parameters(self) -> None:
+        huge = "scrypt$1048576$8$1$" + ("ab" * 16) + "$" + ("cd" * 32)
+        self.assertFalse(verify_password("correct-horse", huge))
+
     def test_session_token_expires_and_rejects_tampering(self) -> None:
         token = encode_session("alex", "a" * 64, now=1_700_000_000)
-        self.assertEqual(decode_session(token, "a" * 64, now=1_700_000_100), "alex")
+        self.assertEqual(decode_session(token, "a" * 64, now=1_700_000_100), ("alex", 0))
         self.assertIsNone(decode_session(token, "b" * 64, now=1_700_000_100))
         self.assertIsNone(decode_session(token[:-1] + ("0" if token[-1] != "0" else "1"), "a" * 64, now=1_700_000_100))
         self.assertIsNone(decode_session(token, "a" * 64, now=1_700_000_000 + 15 * 24 * 60 * 60))
 
     def test_session_token_uses_configured_lifetime(self) -> None:
         token = encode_session("alex", "a" * 64, now=1_700_000_000, ttl_seconds=60)
-        self.assertEqual(decode_session(token, "a" * 64, now=1_700_000_030), "alex")
+        self.assertEqual(decode_session(token, "a" * 64, now=1_700_000_030), ("alex", 0))
         self.assertIsNone(decode_session(token, "a" * 64, now=1_700_000_061))
+
+    def test_password_change_invalidates_older_session_tokens(self) -> None:
+        token = encode_session("alex", "a" * 64, now=1_700_000_000, session_epoch=0)
+        self.assertEqual(decode_session(token, "a" * 64, now=1_700_000_100), ("alex", 0))
+        later = encode_session("alex", "a" * 64, now=1_700_000_000, session_epoch=2)
+        self.assertEqual(decode_session(later, "a" * 64, now=1_700_000_100), ("alex", 2))
 
     def test_viewer_scope_is_read_only(self) -> None:
         self.assertEqual(scopes_for_web_role("viewer"), frozenset({"read"}))
@@ -75,6 +89,18 @@ class WebAuthConfigTest(unittest.TestCase):
         auth = WebAuthConfig(enabled=True, users=[])
         self.assertTrue(auth.enabled)
         self.assertEqual(auth.users, [])
+
+    def test_config_save_does_not_reset_session_epoch(self) -> None:
+        user = make_user()
+        user.session_epoch = 4
+        current = AppConfig(
+            web_auth=WebAuthConfig(enabled=True, session_key="a" * 64, users=[user]),
+        )
+        payload = current.model_dump(mode="json")
+        payload["web_auth"]["users"][0]["session_epoch"] = 0
+        payload["web_auth"]["users"][0]["password_hash"] = "__SURVNG_SECRET_SET__"
+        restored = restore_config_secrets(AppConfig.model_validate(payload), current)
+        self.assertEqual(restored.web_auth.users[0].session_epoch, 4)
 
     def test_enabling_sign_in_through_config_save_mints_a_session_key(self) -> None:
         current = AppConfig()
@@ -179,12 +205,17 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(response.json(), {
             "enabled": False,
             "bootstrap_required": False,
+            "bootstrap_token_required": False,
             "user": None,
         })
         self.config.web_auth.enabled = True
         response = self.client.get("/api/auth/session")
         self.assertEqual(response.json()["bootstrap_required"], True)
         self.assertTrue(response.json()["enabled"])
+        self.assertFalse(response.json()["bootstrap_token_required"])
+        with patch("survng.app.auth_routes.ip_is_local", return_value=False):
+            remote = self.client.get("/api/auth/session")
+        self.assertTrue(remote.json()["bootstrap_token_required"])
 
     def test_settings_can_enable_sign_in_before_the_first_user(self) -> None:
         self.config.web_auth = WebAuthConfig()
@@ -241,12 +272,43 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(authenticate_password("pat", "new-viewer-pass", self.config.web_auth))
         self.assertIsNone(authenticate_password("pat", "viewer-pass", self.config.web_auth))
+        self.assertEqual(self.config.web_auth.users[1].session_epoch, 1)
+
+    def test_password_change_rejects_older_session_cookie(self) -> None:
+        self._sign_in(self.viewer)
+        self.assertIsNotNone(authenticate_session(
+            f"{SESSION_COOKIE_NAME}={encode_session('pat', self.config.web_auth.session_key, session_epoch=0)}",
+            self.config.web_auth,
+        ))
+        response = self.client.put("/api/auth/users/pat/password", json={"password": "rotated-secret"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(authenticate_session(
+            f"{SESSION_COOKIE_NAME}={encode_session('pat', self.config.web_auth.session_key, session_epoch=0)}",
+            self.config.web_auth,
+        ))
 
     def test_password_can_be_changed_while_sign_in_is_off(self) -> None:
         self.config.web_auth.enabled = False
         response = self.client.put("/api/auth/users/alex/password", json={"password": "brand-new-secret"})
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(authenticate_password("alex", "brand-new-secret", self.config.web_auth))
+
+    def test_public_bootstrap_requires_the_server_setup_token(self) -> None:
+        self.config.web_auth = WebAuthConfig()
+        with patch("survng.app.auth_routes.ip_is_local", return_value=False):
+            denied = self.client.post("/api/auth/bootstrap", json={
+                "username": "rootadmin",
+                "password": "bootstrap-secret",
+            })
+            self.assertEqual(denied.status_code, 403)
+            token = load_or_create_bootstrap_token(self.config)
+            allowed = self.client.post("/api/auth/bootstrap", json={
+                "username": "rootadmin",
+                "password": "bootstrap-secret",
+                "bootstrap_token": token,
+            })
+        self.assertEqual(allowed.status_code, 201)
+        self.assertEqual(self.config.web_auth.users[0].username, "rootadmin")
 
 
 class SessionPrincipalTest(unittest.TestCase):

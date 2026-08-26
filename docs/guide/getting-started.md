@@ -18,6 +18,8 @@ If the host already requires sign-in, use the account an administrator created f
 
 To lock a new install, open **Admin → Access**, enable sign-in, Save settings, and create the administrator if prompted. Details: [Access](access.md).
 
+If this host will be reachable from the internet, turn sign-in on **before** opening a public port, and put nginx (or another proxy) in front. Step-by-step: [Reverse proxy](reverse-proxy.md).
+
 ![Live camera grid](images/live-command-center.png)
 
 ## 2. Check that the server looks healthy
@@ -106,4 +108,4 @@ See [Zones](zones.md).
 
 ## Security reminder
 
-SurvNG’s browser interface and HTTP API are meant for a trusted home or business network (or an authenticated reverse proxy). Do not publish port `8088` directly to the public internet.
+On a private LAN you can leave sign-in off. If this host will be on the internet, turn sign-in on first, put HTTPS on nginx (or another reverse proxy), and do not publish port `8088`. Full steps: [Reverse proxy](reverse-proxy.md).
