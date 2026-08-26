@@ -4547,6 +4547,37 @@ button.live-overlay-backdrop:active {
   margin: 0;
 }
 
+.access-session-list {
+  display: grid;
+  gap: 6px;
+}
+
+.access-session-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  padding: 9px;
+}
+
+.access-session-list article > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.access-session-list span,
+.access-session-list small {
+  color: var(--muted);
+}
+
+.access-session-list small {
+  font-size: 0.74rem;
+}
+
 .tls-upload-form {
   grid-template-columns: 1fr 1fr;
   align-items: start;
@@ -4621,6 +4652,11 @@ button.live-overlay-backdrop:active {
     width: 100%;
     max-width: none;
     flex: 1 1 auto;
+  }
+
+  .access-session-list article {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

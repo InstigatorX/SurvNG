@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { KeyRound, Network, Plus, RefreshCcw, ShieldCheck, Trash2, Upload } from "lucide-react";
+import { KeyRound, MonitorSmartphone, Network, Plus, RefreshCcw, ShieldCheck, Trash2, Upload } from "lucide-react";
 
 import { fetch } from "../shared/api.js";
 
@@ -35,8 +35,24 @@ function parseTrustedProxies(text) {
   )];
 }
 
+function formatSessionTime(value) {
+  const date = new Date(Number(value) * 1000);
+  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+}
+
+function formatSessionDuration(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (days) return `${days}d ${hours}h`;
+  if (hours) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
 export function AccessSettings({ config, updateConfig, commitImmediateConfig, onOpenApiTokens = null }) {
   const [users, setUsers] = useState(config.web_auth?.users || []);
+  const [sessions, setSessions] = useState([]);
   const enabled = Boolean(config.web_auth?.enabled);
   const [passwordEdits, setPasswordEdits] = useState({});
   const [tls, setTls] = useState(null);
@@ -49,12 +65,14 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
   const [accessSection, setAccessSection] = useState("users");
 
   async function load() {
-    const [usersResponse, tlsResponse] = await Promise.all([
+    const [usersResponse, tlsResponse, sessionsResponse] = await Promise.all([
       fetch("/api/auth/users"),
       fetch("/api/tls"),
+      fetch("/api/auth/sessions"),
     ]);
     const userPayload = await usersResponse.json().catch(() => ({}));
     const tlsPayload = await tlsResponse.json().catch(() => ({}));
+    const sessionsPayload = await sessionsResponse.json().catch(() => ({}));
     if (usersResponse.ok) {
       setUsers(userPayload.users || []);
     }
@@ -63,6 +81,7 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
       setTlsHostname(tlsPayload.hostname || "");
       setTlsPort(tlsPayload.port || 0);
     }
+    if (sessionsResponse.ok) setSessions(sessionsPayload.sessions || []);
   }
 
   useEffect(() => {
@@ -165,6 +184,24 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
       if (Boolean(payload.enabled) !== enabled) {
         commitImmediateConfig(["web_auth", "enabled"], Boolean(payload.enabled));
       }
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function terminateSession(session) {
+    const user = users.find((item) => item.id === session.user_id);
+    const name = user ? userLabel(user) : session.user_id;
+    if (!window.confirm(`Terminate ${name}'s session from ${session.client_ip || "an unknown address"}?`)) return;
+    setBusy(`session-${session.id}`);
+    setError("");
+    try {
+      const response = await fetch(`/api/auth/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not terminate session"));
+      setSessions((current) => current.filter((item) => item.id !== session.id));
     } catch (caught) {
       setError(caught.message);
     } finally {
@@ -275,7 +312,7 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
   return (
     <div className="sub-panel access-settings subsection-workspace">
       <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs security-subsection-tabs" aria-label="Security settings">
-        {[['users', 'Users & sign-in', KeyRound], ['https', 'HTTPS certificates', ShieldCheck], ['proxies', 'Trusted proxies', Network]].map(([value, label, Icon]) => (
+        {[['users', 'Users & sign-in', KeyRound], ['sessions', 'Sessions', MonitorSmartphone], ['https', 'HTTPS certificates', ShieldCheck], ['proxies', 'Trusted proxies', Network]].map(([value, label, Icon]) => (
           <button type="button" key={value} className={accessSection === value ? "active" : ""} aria-pressed={accessSection === value} onClick={() => setAccessSection(value)}><Icon size={15} />{label}</button>
         ))}
         {onOpenApiTokens ? <button type="button" className="security-api-token-link" onClick={onOpenApiTokens}><KeyRound size={15} />API tokens <span aria-hidden="true">↗</span></button> : null}
@@ -361,6 +398,31 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
           <label className="access-role-field">Role<select className="access-role-select" value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}><option value="admin">Admin</option><option value="viewer">Viewer</option></select></label>
           <button type="submit" className="primary" disabled={busy === "user"}>{busy === "user" ? <RefreshCcw className="spin" size={15} /> : <Plus size={15} />} Add user</button>
         </form>
+      </section>
+
+      <section className="api-access-settings" hidden={accessSection !== "sessions"}>
+        <div className="detection-settings-subhead">
+          <div>
+            <strong className="section-heading-with-icon"><span className="section-heading-icon"><MonitorSmartphone size={16} /></span>Active sessions</strong>
+            <small>Signed-in browsers. Sessions expire automatically; ending one signs that browser out on its next request.</small>
+          </div>
+          <button type="button" onClick={() => void load()} disabled={Boolean(busy)}><RefreshCcw size={15} /> Refresh</button>
+        </div>
+        {sessions.length ? <div className="access-session-list">
+          {sessions.map((session) => {
+            const user = users.find((item) => item.id === session.user_id);
+            const lastSeen = Number(session.last_seen_at) * 1000;
+            const active = Number.isFinite(lastSeen) && Date.now() - lastSeen < 2 * 60 * 1000;
+            return <article key={session.id}>
+              <div>
+                <strong>{user ? userLabel(user) : session.user_id}</strong>
+                <span>{session.client_ip || "IP unavailable"} · {active ? "Active now" : `Last seen ${formatSessionTime(session.last_seen_at)}`}</span>
+                <small>Signed in {formatSessionTime(session.issued_at)} · Logged in {formatSessionDuration(session.duration_seconds)} · Expires {formatSessionTime(session.expires_at)}</small>
+              </div>
+              <button type="button" onClick={() => void terminateSession(session)} disabled={busy === `session-${session.id}`}><Trash2 size={15} /> {busy === `session-${session.id}` ? "Ending…" : "End session"}</button>
+            </article>;
+          })}
+        </div> : <p className="settings-help">No signed-in browser sessions are active.</p>}
       </section>
 
       <section className="api-access-settings" hidden={accessSection !== "proxies"}>

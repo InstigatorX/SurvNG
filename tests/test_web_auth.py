@@ -24,6 +24,10 @@ from survng.app.security import (
     hash_password,
     is_public_api_path,
     required_api_scope,
+    list_web_sessions,
+    register_web_session,
+    revoke_web_session,
+    session_times,
     scopes_for_web_role,
     verify_password,
 )
@@ -40,6 +44,24 @@ def make_user(username: str = "alex", role: str = "admin", password: str = "corr
 
 
 class PasswordAndSessionTest(unittest.TestCase):
+    def test_web_session_registry_lists_metadata_without_cookie_secret(self) -> None:
+        token = encode_session("alex", "a" * 64, now=1_700_000_000, ttl_seconds=3600)
+        register_web_session(token, "alex", 1_700_000_000, 1_700_003_600, "192.0.2.10")
+        sessions = [item for item in list_web_sessions(now=1_700_000_060) if item["user_id"] == "alex"]
+        self.assertTrue(sessions)
+        self.assertEqual(sessions[0]["client_ip"], "192.0.2.10")
+        self.assertEqual(sessions[0]["duration_seconds"], 60)
+        self.assertNotIn(token, sessions[0].values())
+        self.assertTrue(revoke_web_session(sessions[0]["id"]))
+
+    def test_revoked_session_cookie_is_rejected(self) -> None:
+        auth = WebAuthConfig(enabled=True, session_key="a" * 64, users=[make_user()])
+        token = encode_session("alex", auth.session_key)
+        issued, expires = session_times(token) or (0, 1)
+        register_web_session(token, "alex", issued, expires)
+        self.assertTrue(revoke_web_session(list_web_sessions()[0]["id"]))
+        self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={token}", auth))
+
     def test_password_round_trip_and_rejects_wrong_secret(self) -> None:
         digest = hash_password("correct-horse")
         self.assertTrue(digest.startswith("scrypt$"))
@@ -182,6 +204,20 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         cookie = (response.headers.get("set-cookie") or "").lower()
         self.assertIn("max-age=172800", cookie)
+
+    def test_admin_can_list_and_terminate_a_browser_session(self) -> None:
+        login = self.client.post("/api/auth/login", json={"username": "alex", "password": "correct-horse"})
+        token = login.cookies.get(SESSION_COOKIE_NAME)
+        self.client.cookies.set(SESSION_COOKIE_NAME, token)
+        listed = self.client.get("/api/auth/sessions")
+        self.assertEqual(listed.status_code, 200)
+        sessions = listed.json()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["user_id"], "alex")
+        self.assertNotIn("survng_session", sessions[0].values())
+        ended = self.client.delete(f"/api/auth/sessions/{sessions[0]['id']}")
+        self.assertEqual(ended.status_code, 200)
+        self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={token}", self.config.web_auth))
 
     def test_login_rejects_bad_password(self) -> None:
         response = self.client.post("/api/auth/login", json={"username": "alex", "password": "nope-nope"})

@@ -4,8 +4,11 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
+import threading
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from urllib.parse import unquote
 
@@ -52,6 +55,111 @@ def redact_secret_text(value: object) -> str:
 SESSION_COOKIE_NAME = "survng_session"
 DEFAULT_SESSION_DAYS = 14
 SESSION_TTL_SECONDS = DEFAULT_SESSION_DAYS * 24 * 60 * 60
+_SESSION_REGISTRY_LIMIT = 1000
+_SESSION_REGISTRY_LOCK = threading.RLock()
+
+
+@dataclass(slots=True)
+class WebSessionRecord:
+    """Non-secret metadata for a signed browser session."""
+
+    token_digest: str
+    user_id: str
+    issued_at: int
+    expires_at: int
+    last_seen_at: int
+    client_ip: str
+
+
+_WEB_SESSIONS: dict[str, WebSessionRecord] = {}
+_REVOKED_WEB_SESSIONS: dict[str, int] = {}
+
+
+def _session_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def register_web_session(token: str, user_id: str, issued_at: int, expires_at: int, client_ip: str = "") -> None:
+    digest = _session_digest(token)
+    now = int(time.time())
+    with _SESSION_REGISTRY_LOCK:
+        _prune_web_sessions(now)
+        _WEB_SESSIONS[digest] = WebSessionRecord(
+            token_digest=digest,
+            user_id=user_id,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            last_seen_at=now,
+            client_ip=client_ip,
+        )
+        if len(_WEB_SESSIONS) > _SESSION_REGISTRY_LIMIT:
+            oldest = min(_WEB_SESSIONS.values(), key=lambda item: item.last_seen_at)
+            _WEB_SESSIONS.pop(oldest.token_digest, None)
+
+
+def touch_web_session(token: str, client_ip: str = "") -> None:
+    now = int(time.time())
+    digest = _session_digest(token)
+    with _SESSION_REGISTRY_LOCK:
+        _prune_web_sessions(now)
+        record = _WEB_SESSIONS.get(digest)
+        if record is not None:
+            record.last_seen_at = now
+            if client_ip:
+                record.client_ip = client_ip
+
+
+def revoke_web_session(session_id: str) -> bool:
+    with _SESSION_REGISTRY_LOCK:
+        for digest, record in tuple(_WEB_SESSIONS.items()):
+            if digest == session_id or digest.startswith(session_id):
+                _WEB_SESSIONS.pop(digest, None)
+                _REVOKED_WEB_SESSIONS[digest] = record.expires_at
+                return True
+    return False
+
+
+def revoke_web_sessions_for_user(user_id: str) -> int:
+    with _SESSION_REGISTRY_LOCK:
+        matching = [digest for digest, record in _WEB_SESSIONS.items() if record.user_id == user_id]
+        for digest in matching:
+            record = _WEB_SESSIONS.pop(digest)
+            _REVOKED_WEB_SESSIONS[digest] = record.expires_at
+        return len(matching)
+
+
+def list_web_sessions(now: int | None = None) -> list[dict[str, Any]]:
+    current = int(time.time() if now is None else now)
+    with _SESSION_REGISTRY_LOCK:
+        _prune_web_sessions(current)
+        return [
+            {
+                "id": record.token_digest[:16],
+                "user_id": record.user_id,
+                "issued_at": record.issued_at,
+                "last_seen_at": record.last_seen_at,
+                "expires_at": record.expires_at,
+                "client_ip": record.client_ip,
+                "duration_seconds": max(0, current - record.issued_at),
+            }
+            for record in sorted(_WEB_SESSIONS.values(), key=lambda item: item.last_seen_at, reverse=True)
+        ]
+
+
+def _prune_web_sessions(now: int) -> None:
+    for digest, record in tuple(_WEB_SESSIONS.items()):
+        if record.expires_at <= now:
+            _WEB_SESSIONS.pop(digest, None)
+    for digest, expires_at in tuple(_REVOKED_WEB_SESSIONS.items()):
+        if expires_at <= now:
+            _REVOKED_WEB_SESSIONS.pop(digest, None)
+
+
+def is_web_session_revoked(token: str) -> bool:
+    digest = _session_digest(token)
+    with _SESSION_REGISTRY_LOCK:
+        _prune_web_sessions(int(time.time()))
+        return digest in _REVOKED_WEB_SESSIONS
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
@@ -162,12 +270,14 @@ def encode_session(
     now: int | None = None,
     ttl_seconds: int | None = None,
     session_epoch: int = 0,
+    nonce: str | None = None,
 ) -> str:
     issued = int(time.time() if now is None else now)
     lifetime = SESSION_TTL_SECONDS if ttl_seconds is None else int(ttl_seconds)
     expires = issued + max(1, lifetime)
     epoch = max(0, int(session_epoch))
-    payload = f"{user_id}:{issued}:{expires}:{epoch}"
+    token_nonce = nonce or secrets.token_hex(16)
+    payload = f"{user_id}:{issued}:{expires}:{epoch}:{token_nonce}"
     digest = hmac.new(
         session_key.encode("utf-8"),
         payload.encode("utf-8"),
@@ -184,7 +294,13 @@ def decode_session(
 ) -> tuple[str, int] | None:
     try:
         parts = token.split(":")
-        if len(parts) == 5:
+        if len(parts) == 6:
+            user_id, issued_text, expires_text, epoch_text, nonce, digest = parts
+            epoch = int(epoch_text)
+            if not nonce:
+                return None
+            payload = f"{user_id}:{issued_text}:{expires_text}:{epoch}:{nonce}"
+        elif len(parts) == 5:
             user_id, issued_text, expires_text, epoch_text, digest = parts
             epoch = int(epoch_text)
             payload = f"{user_id}:{issued_text}:{expires_text}:{epoch}"
@@ -218,6 +334,21 @@ def session_cookie_value(cookie_header: str) -> str:
     return ""
 
 
+def session_times(token: str) -> tuple[int, int] | None:
+    """Return signed session timestamps without exposing or validating secrets."""
+    try:
+        parts = token.split(":")
+        if len(parts) not in {4, 5, 6}:
+            return None
+        issued = int(parts[1])
+        expires = int(parts[2])
+    except (IndexError, ValueError):
+        return None
+    if not parts[0] or issued > expires:
+        return None
+    return issued, expires
+
+
 def principal_for_web_user(user: WebUserConfig) -> ApiPrincipal:
     return ApiPrincipal(
         user.id,
@@ -236,7 +367,7 @@ def authenticate_session(
     if not auth_config.enabled or not auth_config.session_key:
         return None
     token = session_cookie_value(cookie_header)
-    if not token:
+    if not token or is_web_session_revoked(token):
         return None
     decoded = decode_session(token, auth_config.session_key)
     if decoded is None:

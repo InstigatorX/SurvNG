@@ -26,6 +26,11 @@ from .security import (
     encode_session,
     hash_password,
     public_user_payload,
+    register_web_session,
+    revoke_web_session,
+    revoke_web_sessions_for_user,
+    session_cookie_value,
+    session_times,
     session_ttl_seconds,
 )
 
@@ -283,12 +288,17 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             ttl_seconds=ttl,
             session_epoch=user.session_epoch,
         )
+        issued, expires = session_times(token) or (int(time.time()), int(time.time()) + ttl)
+        register_web_session(token, user.id, issued, expires, ip)
         response = JSONResponse(session_payload(config, user, client_ip=ip))
         _attach_session_cookie(response, request, token, ttl_seconds=ttl, config=config)
         return response
 
     @router.post("/api/auth/logout")
     def logout(request: Request) -> JSONResponse:
+        token = session_cookie_value(request.headers.get("cookie", ""))
+        if token:
+            revoke_web_session(hashlib.sha256(token.encode("utf-8")).hexdigest())
         response = JSONResponse({"ok": True})
         _clear_session_cookie(response, request, deps.get_config())
         return response
@@ -324,6 +334,8 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             ttl_seconds=ttl,
             session_epoch=user.session_epoch,
         )
+        issued, expires = session_times(token) or (int(time.time()), int(time.time()) + ttl)
+        register_web_session(token, user.id, issued, expires, client_ip)
         payload = session_payload(effective, user, client_ip=client_ip)
         payload.update(result)
         response = JSONResponse(payload, status_code=201)
@@ -338,6 +350,22 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             "enabled": auth.enabled,
             "users": [public_user_payload(user) for user in auth.users],
         }
+
+    @router.get("/api/auth/sessions")
+    def list_sessions(request: Request) -> dict[str, Any]:
+        require_admin(request)
+        from .security import list_web_sessions
+
+        return {"sessions": list_web_sessions()}
+
+    @router.delete("/api/auth/sessions/{session_id}")
+    def terminate_session(request: Request, session_id: str) -> dict[str, bool]:
+        require_admin(request)
+        if len(session_id) != 16 or any(character not in "0123456789abcdef" for character in session_id):
+            raise HTTPException(status_code=400, detail="invalid session id")
+        if not revoke_web_session(session_id):
+            raise HTTPException(status_code=404, detail="session not found")
+        return {"ok": True}
 
     @router.put("/api/auth/settings")
     def put_settings(request: Request, body: WebAuthSettingsRequest) -> dict[str, Any]:
@@ -418,6 +446,7 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
                 raise HTTPException(status_code=404, detail="user not found")
             user.password_hash = hash_password(body.password)
             user.session_epoch += 1
+            revoke_web_sessions_for_user(user.id)
             effective, result = deps.apply_config(next_config, assign_ids=False)
         updated = next(item for item in effective.web_auth.users if item.id == user_id)
         payload = {"ok": True, "id": user_id, **result}
@@ -447,6 +476,7 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
                 raise HTTPException(status_code=409, detail="you cannot delete your own account")
             next_config = current.model_copy(deep=True)
             next_config.web_auth.users = [item for item in next_config.web_auth.users if item.id != user_id]
+            revoke_web_sessions_for_user(user_id)
             if remaining_admins < 1:
                 next_config.web_auth.enabled = False
             effective, result = deps.apply_config(next_config, assign_ids=False)

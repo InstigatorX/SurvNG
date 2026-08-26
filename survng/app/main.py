@@ -96,6 +96,8 @@ from .proxy import apply_trusted_proxy_headers, request_is_secure
 from .security import (
     authenticate_api_token,
     authenticate_session,
+    session_cookie_value,
+    touch_web_session,
     is_public_api_path,
     redact_secret_text,
     required_api_scope,
@@ -334,6 +336,11 @@ class SecurityBoundaryMiddleware:
             if principal is not None:
                 scope = dict(scope)
                 scope["survng_principal"] = principal
+                if getattr(principal, "kind", None) == "user":
+                    touch_web_session(
+                        session_cookie_value(_scope_header(scope, b"cookie")),
+                        str((scope.get("client") or ("",))[0] or ""),
+                    )
             needs_auth = (
                 (config.api_auth.enabled or config.web_auth.enabled)
                 and not is_public_api_path(method, api_path)

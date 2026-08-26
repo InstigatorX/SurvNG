@@ -102,8 +102,9 @@ def tls_status(config: AppConfig) -> dict[str, Any]:
         "port": config.tls.port,
         "hostname": config.tls.hostname,
         "certificate_present": present,
-        "certificate_path": str(cert_path) if present else "",
-        "error": error,
+        # The management UI only needs to know whether the material is usable.
+        # Do not expose host filesystem layout or command/library diagnostics.
+        "error": "certificate validation failed" if error else "",
         **details,
     }
 

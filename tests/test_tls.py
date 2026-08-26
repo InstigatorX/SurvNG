@@ -43,6 +43,7 @@ class TlsMaterialTest(unittest.TestCase):
             self.assertTrue(Path(kwargs["ssl_certfile"]).is_file())
             inspect = tls_status(config)
             self.assertTrue(inspect["certificate_present"])
+            self.assertNotIn("certificate_path", inspect)
             self.assertIn("survng.test", inspect.get("subject", "") + " ".join(inspect.get("subject_alt_names") or []))
 
     @unittest.skipUnless(which("openssl"), "openssl is required to generate certificates")
