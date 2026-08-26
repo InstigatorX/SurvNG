@@ -2159,9 +2159,7 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
         return response.json();
       })
       .then(setCameras)
-      .catch((loadError) => {
-        if (loadError.name !== "AbortError") setError(loadError.message || "Unable to load cameras");
-      });
+      .catch(() => {});
     return () => controller.abort();
   }, []);
 
@@ -2193,12 +2191,8 @@ export function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       setTotal(Number(listResult.value.total) || 0);
     }
     if (summaryResult.status === "fulfilled") setSummary(summaryResult.value);
-    const failure = listResult.status === "rejected"
-      ? listResult.reason
-      : summaryResult.status === "rejected"
-        ? summaryResult.reason
-        : null;
-    if (failure?.name !== "AbortError") setError(failure?.message || "Unable to load exports");
+    const failure = listResult.status === "rejected" ? listResult.reason : null;
+    if (failure && failure.name !== "AbortError") setError(failure.message || "Unable to load exports");
     setLoading(false);
   }
 
