@@ -22,8 +22,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .assistant import AssistantAnswer, AssistantChatRequest, AssistantEvidence, AssistantProvider, AssistantToolCall, IncidentVisualReviewer, strip_assistant_citation_markers
-from .assistant_investigation import correlate_incident_timeline
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, ai_provider_configured, motion_audit_interpretation, motion_paradigm_context, validate_tuning_value
+from .cross_camera_trace import build_cross_camera_trace, prioritize_trace_candidates
 from .calibration import apply_calibration_changes, build_calibration_report, calibration_configuration_fingerprint, calibration_setting_value
 from .camera_intelligence import aggregate_camera_intelligence, compare_camera_intelligence_results, select_balanced_samples
 from .config import AppConfig, CameraConfig, camera_by_id
@@ -1702,109 +1702,58 @@ class IntelligenceService:
         ordered = list(dict.fromkeys([*suggestions, *[str(item).strip() for item in fallback if str(item).strip()]]))
         return ordered[:4]
 
-    def _assistant_prioritize_trace_candidates(self, candidate_summaries: list[dict[str, Any]], appearance_matches: list[dict[str, Any]], appearance_event_ids: set[int], distance_from_anchor: Callable[[dict[str, Any]], float], *, limit: int=500) -> list[dict[str, Any]]:
-        """Keep strongest appearance evidence before filling a bounded temporal scan."""
-        candidate_summaries = sorted(candidate_summaries, key=distance_from_anchor)
-        appearance_summaries = [summary for summary in candidate_summaries if any((int(event.get('id') or 0) in appearance_event_ids for event in summary.get('events') or []))]
-        appearance_score_by_event = {int(item.get('event_id') or 0): float(item.get('similarity') or 0.0) for item in appearance_matches if item.get('visually_similar')}
-        appearance_summaries.sort(key=lambda summary: max((appearance_score_by_event.get(int(event.get('id') or 0), 0.0) for event in summary.get('events') or []), default=0.0), reverse=True)
-        retained_ids = {id(summary) for summary in appearance_summaries}
-        retained_appearance = appearance_summaries[:min(100, limit)]
-        return retained_appearance + [summary for summary in candidate_summaries if id(summary) not in retained_ids][:max(0, limit - len(retained_appearance))]
-
     def _assistant_trace_across_cameras(self, call: AssistantToolCall, request: AssistantChatRequest, active_manager: AppManager) -> list[AssistantEvidence]:
         event_id = call.event_id or request.context.incident_event_id
         if not event_id and (not call.face_name.strip()) and (not call.object_label.strip()):
             return []
-        anchor = self.deps.incident_queries.resolve_event(active_manager, int(event_id)) if event_id else None
-        if event_id and anchor is None:
+        try:
+            timeline_data = build_cross_camera_trace(
+                active_manager,
+                resolve_event=self.deps.incident_queries.resolve_event,
+                hydrate=self.deps.incident_queries.hydrate,
+                with_faces=self.deps.incident_queries.with_faces,
+                event_id=int(event_id) if event_id else None,
+                object_label=call.object_label,
+                face_name=call.face_name,
+                start_at=call.start_at,
+                end_at=call.end_at,
+                time_zone=request.context.time_zone,
+                limit=min(call.limit, 12),
+            )
+        except LookupError:
             return []
-        try:
-            selected_zone = ZoneInfo(request.context.time_zone)
-        except (ZoneInfoNotFoundError, ValueError):
-            selected_zone = ZoneInfo('America/New_York')
-        now = datetime.now(timezone.utc)
-        try:
-            anchor_at = datetime.fromisoformat(str((anchor or {}).get('start_at') or '').replace('Z', '+00:00'))
         except ValueError:
-            anchor_at = now
-        if anchor_at.tzinfo is None:
-            anchor_at = anchor_at.replace(tzinfo=timezone.utc)
-        default_start = anchor_at - timedelta(minutes=15) if anchor else now - timedelta(hours=24)
-        default_end = anchor_at + timedelta(minutes=15) if anchor else now
-        start = self._assistant_parse_datetime(call.start_at, selected_zone) or default_start
-        end = self._assistant_parse_datetime(call.end_at, selected_zone) or default_end
-        if end <= start:
-            start, end = (end, start)
-        start = max(start, end - timedelta(hours=24))
-        appearance_matches: list[dict[str, Any]] = []
-        appearance_index = getattr(active_manager, 'appearance_index', None)
-        if event_id and appearance_index is not None:
-            try:
-                appearance_matches = appearance_index.matches(int(event_id), start_at=start.isoformat(), end_at=end.isoformat(), cross_camera_only=True, limit=100)
-            except Exception:
-                LOGGER.exception('cross-camera appearance lookup failed for event %s', event_id)
-        appearance_event_ids = {int(item.get('event_id') or 0) for item in appearance_matches if item.get('visually_similar')}
-        rows = [_event_row(row) for row in active_manager.events.between_compact(start.isoformat(), end.isoformat())]
-        summaries = _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS)
-        wanted_label = call.object_label.strip().lower()
-        anchor_labels = {str(label).strip().lower() for label in (anchor or {}).get('labels') or [] if str(label).strip()}
-        target_labels = {wanted_label} if wanted_label else anchor_labels
-        candidate_summaries = [summary for summary in summaries if not target_labels or target_labels & {str(label).strip().lower() for label in summary.get('labels') or []} or bool(call.face_name.strip()) or any((int(event.get('id') or 0) in appearance_event_ids for event in summary.get('events') or []))]
-
-        def distance_from_anchor(summary: dict[str, Any]) -> float:
-            parsed = self._assistant_parse_datetime(str(summary.get('start_at') or ''), selected_zone)
-            return abs(parsed.timestamp() - anchor_at.timestamp()) if parsed is not None else float('inf')
-        candidate_summaries = self._assistant_prioritize_trace_candidates(candidate_summaries, appearance_matches, appearance_event_ids, distance_from_anchor)
-        candidates = self.deps.incident_queries.with_faces(active_manager, self.deps.incident_queries.hydrate(active_manager, candidate_summaries))
-        correlation_anchor = anchor or {'representative_event_id': 0, 'camera_id': '', 'start_at': start.isoformat(), 'labels': [call.object_label] if call.object_label else [], 'faces': []}
-        matches = correlate_incident_timeline(correlation_anchor, candidates, object_label=call.object_label, face_name=call.face_name, limit=min(call.limit, 12))
-        incident_by_event_id: dict[int, dict[str, Any]] = {}
-        for incident in candidates:
-            representative_id = int(incident.get('representative_event_id') or 0)
-            if representative_id > 0:
-                incident_by_event_id[representative_id] = incident
-            for event in incident.get('events') or []:
-                candidate_event_id = int(event.get('id') or 0)
-                if candidate_event_id > 0:
-                    incident_by_event_id[candidate_event_id] = incident
-        matches_by_event_id = {int(item.get('event_id') or 0): item for item in matches}
-        for appearance in appearance_matches:
-            if not appearance.get('visually_similar'):
-                continue
-            matched_incident = incident_by_event_id.get(int(appearance['event_id']))
-            if matched_incident is None:
-                continue
-            representative_id = int(matched_incident.get('representative_event_id') or appearance['event_id'])
-            similarity = float(appearance.get('similarity') or 0.0)
-            reason = f'{str(appearance.get('model_kind') or 'object').title()} appearance is {round(similarity * 100)}% similar using the same ReID model'
-            existing = matches_by_event_id.get(representative_id)
-            if existing is not None:
-                existing.setdefault('reasons', []).append(reason)
-                existing['appearance_similarity'] = round(similarity, 4)
-                if existing.get('match_strength') not in {'confirmed_identity', 'possible_identity'}:
-                    existing['match_strength'] = 'appearance_similarity'
-                    existing['confidence'] = round(similarity, 3)
-                continue
-            matched_at = str(matched_incident.get('start_at') or appearance.get('created_at') or '')
-            matched_epoch = self._assistant_parse_datetime(matched_at, selected_zone)
-            item = {'incident': matched_incident, 'event_id': representative_id, 'camera_id': str(matched_incident.get('camera_id') or appearance.get('camera_id') or ''), 'start_at': matched_at, 'seconds_from_anchor': round(matched_epoch.timestamp() - anchor_at.timestamp() if matched_epoch is not None else 0.0, 1), 'match_strength': 'appearance_similarity', 'confidence': round(similarity, 3), 'appearance_similarity': round(similarity, 4), 'reasons': [reason]}
-            matches.append(item)
-            matches_by_event_id[representative_id] = item
-        strength_rank = {'confirmed_identity': 4, 'possible_identity': 3, 'appearance_similarity': 2, 'context_candidate': 1}
-        matches = sorted(sorted(matches, key=lambda item: (-strength_rank.get(str(item.get('match_strength') or ''), 0), -float(item.get('confidence') or 0.0), abs(float(item.get('seconds_from_anchor') or 0.0))))[:min(call.limit, 12)], key=lambda item: str(item.get('start_at') or ''))
-        confirmed = sum((item['match_strength'] == 'confirmed_identity' for item in matches))
-        possible = sum((item['match_strength'] == 'possible_identity' for item in matches))
-        contextual = sum((item['match_strength'] == 'context_candidate' for item in matches))
-        appearance_similar = sum((item['match_strength'] == 'appearance_similarity' for item in matches))
-        timeline_data = {'anchor_event_id': int(event_id) if event_id else None, 'anchor_camera_id': (anchor or {}).get('camera_id'), 'start_at': start.isoformat(), 'end_at': end.isoformat(), 'object_label': call.object_label, 'face_name': call.face_name, 'matches': [{key: item.get(key) for key in ('event_id', 'camera_id', 'start_at', 'seconds_from_anchor', 'match_strength', 'confidence', 'reasons', 'appearance_similarity')} for item in matches], 'limitations': ['Confirmed recognized faces can link incidents across cameras.', 'Possible face matches remain uncertain.', 'Shared person, vehicle, or animal labels plus nearby time provide context only.', 'Appearance similarity uses durable, model-versioned ReID vectors and is stronger than a shared class label, but it is not proof of identity.', 'Camera angle, lighting, occlusion, and visually similar subjects can change the score.', 'Only the strongest 12 candidates and at most 24 hours are returned.']}
-        trace = AssistantEvidence(evidence_id=f'E-trace-{event_id or 'search'}', kind='cross_camera_timeline', title='Cross-camera investigation timeline', summary=f'Found {len(matches)} bounded timeline candidate(s): {confirmed} confirmed identity, {possible} possible identity, {appearance_similar} appearance-similar, and {contextual} context-only.', data=timeline_data, href=self._assistant_incident_evidence(anchor, int(event_id)).href if anchor and event_id else '/incidents', client_data={'timeline': timeline_data})
+            return []
+        anchor = (
+            self.deps.incident_queries.resolve_event(active_manager, int(event_id))
+            if event_id
+            else None
+        )
+        trace = AssistantEvidence(
+            evidence_id=f"E-trace-{event_id or 'search'}",
+            kind="cross_camera_timeline",
+            title="Cross-camera investigation timeline",
+            summary=timeline_data["summary"],
+            data=timeline_data,
+            href=self._assistant_incident_evidence(anchor, int(event_id)).href
+            if anchor and event_id
+            else "/incidents",
+            client_data={"timeline": timeline_data},
+        )
         evidence = [trace]
         if anchor and event_id:
             evidence.append(self._assistant_incident_evidence(anchor, int(event_id)))
-        for item in matches:
-            incident = item['incident']
-            evidence.append(self._assistant_incident_evidence(incident, int(item['event_id'])))
+        for item in timeline_data.get("matches") or []:
+            match_event_id = int(item.get("event_id") or 0)
+            if match_event_id <= 0:
+                continue
+            incident = self.deps.incident_queries.resolve_event(
+                active_manager, match_event_id
+            )
+            if incident is not None:
+                evidence.append(
+                    self._assistant_incident_evidence(incident, match_event_id)
+                )
         return evidence
 
     def _assistant_execute_tool(self, call: AssistantToolCall, request: AssistantChatRequest, active_config: AppConfig, active_manager: AppManager) -> list[AssistantEvidence]:
@@ -2002,7 +1951,7 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
         '_assistant_motion_change_previews': service._assistant_motion_change_previews,
         '_assistant_motion_config_fingerprint': service._assistant_motion_config_fingerprint,
         '_assistant_parse_datetime': service._assistant_parse_datetime,
-        '_assistant_prioritize_trace_candidates': service._assistant_prioritize_trace_candidates,
+        'prioritize_trace_candidates': prioritize_trace_candidates,
         '_assistant_recent_activity_summary': service._assistant_recent_activity_summary,
         '_assistant_search_incidents': service._assistant_search_incidents,
         '_assistant_semantic_search': service._assistant_semantic_search,

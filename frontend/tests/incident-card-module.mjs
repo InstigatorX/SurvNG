@@ -13,6 +13,7 @@ assert.match(incidentCard, /export function IncidentCard\(/);
 assert.match(incidentCard, /export function IncidentInspector\(/);
 assert.match(incidentCard, /export function IncidentClipLayer\(/);
 assert.match(incidentCard, /export function RelatedAppearanceIncidents\(/);
+assert.match(incidentCard, /export function CrossCameraTracePanel\(/);
 assert.doesNotMatch(incidentCard, /export function IncidentListItem\(/);
 assert.match(incidentCard, /prefersNativeMobilePlayback\(\)/);
 assert.match(incidentCard, /url: info\.downloadUrl, mimeType: "video\/mp4"/);

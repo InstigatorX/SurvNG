@@ -872,7 +872,7 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(trace.call_args.args[1].context.incident_event_id, 42)
 
     def test_trace_candidate_cap_preserves_strong_appearance_matches(self) -> None:
-        from survng.app import main
+        from survng.app.cross_camera_trace import prioritize_trace_candidates
 
         candidates = [
             {
@@ -888,7 +888,7 @@ class AssistantApiTest(unittest.TestCase):
             "visually_similar": True,
         }]
 
-        selected = main._intelligence_route_bundle.service._assistant_prioritize_trace_candidates(
+        selected = prioritize_trace_candidates(
             candidates,
             appearance,
             {601},
@@ -942,7 +942,7 @@ class AssistantApiTest(unittest.TestCase):
         with (
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
             patch(
-                "survng.app.intelligence_routes._incident_rows", return_value=[match]
+                "survng.app.cross_camera_trace._incident_rows", return_value=[match]
             ),
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
@@ -1005,7 +1005,7 @@ class AssistantApiTest(unittest.TestCase):
         with (
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
             patch(
-                "survng.app.intelligence_routes._incident_rows", return_value=[match]
+                "survng.app.cross_camera_trace._incident_rows", return_value=[match]
             ),
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
