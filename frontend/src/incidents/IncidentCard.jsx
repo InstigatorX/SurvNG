@@ -164,7 +164,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   );
 }
 
-export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
@@ -431,7 +431,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
                   onClick={(clickEvent) => { clickEvent.stopPropagation(); selectMosaicEvent(event); }}
                   aria-label={`Focus event at ${formatTimeOnly(event.created_at || incident.created_at, timeZone)}`}
                 >
-                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail allowObjectFocus={false} showAnnotations showTracking={false}>
+                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations showTracking={false}>
                     <IncidentSourceDot trigger={eventTrigger} className="incident-mosaic-source" />
                     <div className="incident-mosaic-hud">
                       <time>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</time>
@@ -453,7 +453,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
           <div className={`incident-evidence incident-evidence-${evidenceItems.length}`} role="group" aria-label="Incident evidence frames">
             {evidenceItems.map((item) => (
               <button type="button" className="incident-evidence-tile" key={item.key} onClick={(event) => { event.stopPropagation(); selectEvidenceItem(item); }} aria-label={`Focus ${item.label.toLowerCase()} frame`}>
-                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail allowObjectFocus={false} showAnnotations={item.kind === "snapshot"} showTracking={false}>
+                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={item.kind === "snapshot"} showTracking={false}>
                   <div className="incident-evidence-hud">
                     <strong>{item.label}</strong>
                     <time>{formatTimeOnly(item.event.created_at, timeZone)}</time>
@@ -469,6 +469,8 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
             alt="incident snapshot"
             zoom={desktopWorkspace && expanded ? snapshotZoom : null}
             highQualityZoom={desktopWorkspace && expanded && snapshotZoom.scale > 1}
+            objectFocusMode={(!desktopWorkspace || !expanded) ? thumbnailObjectFocus : "button"}
+            objectFocusZoom={thumbnailObjectFocusZoom}
             showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
             showTracking={false}
             incidentEligibleOnly

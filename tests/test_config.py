@@ -124,6 +124,8 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(AppConfig().database_dir, "")
         self.assertEqual(AppConfig().recording_index_dir, "")
         self.assertFalse(AppConfig().incident_thumbnail_annotations)
+        self.assertEqual(AppConfig().incident_thumbnail_object_focus, "off")
+        self.assertEqual(AppConfig().incident_thumbnail_object_focus_zoom, 1.0)
         self.assertFalse(AppConfig().api_auth.enabled)
         self.assertFalse(AppConfig().web_auth.enabled)
         self.assertEqual(AppConfig().web_auth.session_days, 14)
@@ -173,6 +175,22 @@ class AppConfigTest(unittest.TestCase):
             AppConfig(event_clip_before_seconds=-1)
         with self.assertRaises(ValidationError):
             AppConfig(event_clip_after_seconds=3601)
+
+    def test_incident_thumbnail_object_focus_modes_and_zoom(self) -> None:
+        self.assertEqual(
+            AppConfig(incident_thumbnail_object_focus="auto").incident_thumbnail_object_focus,
+            "auto",
+        )
+        self.assertEqual(
+            AppConfig(incident_thumbnail_object_focus_zoom=2.25).incident_thumbnail_object_focus_zoom,
+            2.25,
+        )
+        with self.assertRaises(ValidationError):
+            AppConfig(incident_thumbnail_object_focus="crop")
+        with self.assertRaises(ValidationError):
+            AppConfig(incident_thumbnail_object_focus_zoom=0.5)
+        with self.assertRaises(ValidationError):
+            AppConfig(incident_thumbnail_object_focus_zoom=6.0)
 
     def test_motion_qualification_width_defaults_and_camera_override(self) -> None:
         config = AppConfig.model_validate({

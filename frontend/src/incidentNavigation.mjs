@@ -223,6 +223,53 @@ export function showIncidentCardAnnotations(expanded, thumbnailAnnotations) {
   return !expanded && Boolean(thumbnailAnnotations);
 }
 
+export const INCIDENT_THUMBNAIL_OBJECT_FOCUS_MODES = Object.freeze(["off", "auto", "button"]);
+
+export function normalizeIncidentThumbnailObjectFocus(mode) {
+  const value = String(mode || "off").trim().toLowerCase();
+  return INCIDENT_THUMBNAIL_OBJECT_FOCUS_MODES.includes(value) ? value : "off";
+}
+
+export function incidentThumbnailObjectFocusEnabled(mode) {
+  const normalized = normalizeIncidentThumbnailObjectFocus(mode);
+  return normalized === "auto" || normalized === "button";
+}
+
+export function normalizeIncidentThumbnailObjectFocusZoom(zoom) {
+  const value = Number(zoom);
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(5.5, Math.max(1, value));
+}
+
+export function incidentObjectFocusStyle(frameSize, renderedBoxes, zoom = 1) {
+  if (!frameSize?.width || !frameSize?.height || !Array.isArray(renderedBoxes) || !renderedBoxes.length) {
+    return null;
+  }
+  const minX = Math.max(0, Math.min(...renderedBoxes.map((box) => Number(box.left) || 0)));
+  const minY = Math.max(0, Math.min(...renderedBoxes.map((box) => Number(box.top) || 0)));
+  const maxX = Math.min(frameSize.width, Math.max(...renderedBoxes.map((box) => (Number(box.left) || 0) + (Number(box.width) || 0))));
+  const maxY = Math.min(frameSize.height, Math.max(...renderedBoxes.map((box) => (Number(box.top) || 0) + (Number(box.height) || 0))));
+  const boxWidth = Math.max(1, maxX - minX);
+  const boxHeight = Math.max(1, maxY - minY);
+  const padX = Math.max(frameSize.width * 0.04, boxWidth * 0.35);
+  const padY = Math.max(frameSize.height * 0.04, boxHeight * 0.35);
+  const cropX1 = Math.max(0, minX - padX);
+  const cropY1 = Math.max(0, minY - padY);
+  const cropX2 = Math.min(frameSize.width, maxX + padX);
+  const cropY2 = Math.min(frameSize.height, maxY + padY);
+  const cropWidth = Math.max(1, cropX2 - cropX1);
+  const cropHeight = Math.max(1, cropY2 - cropY1);
+  const centerX = cropX1 + cropWidth / 2;
+  const centerY = cropY1 + cropHeight / 2;
+  const fitScale = Math.min((frameSize.width * 0.82) / cropWidth, (frameSize.height * 0.82) / cropHeight);
+  const zoomFactor = normalizeIncidentThumbnailObjectFocusZoom(zoom);
+  const scale = Math.min(5.5, Math.max(1, fitScale * zoomFactor));
+  return {
+    transform: `translate3d(${frameSize.width / 2 - centerX * scale}px, ${frameSize.height / 2 - centerY * scale}px, 0) scale(${scale})`,
+    transformOrigin: "0 0",
+  };
+}
+
 export function incidentProgressiveImageWidth(renderedWidth, devicePixelRatio = 1) {
   const width = Math.max(0, Number(renderedWidth) || 0);
   const ratio = Math.max(1, Math.min(4, Number(devicePixelRatio) || 1));

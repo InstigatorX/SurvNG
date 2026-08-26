@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailObjectFocusEnabled, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -68,6 +68,33 @@ assert.deepEqual(incidentEvidenceFrames({}), []);
 assert.equal(showIncidentCardAnnotations(false, true), true);
 assert.equal(showIncidentCardAnnotations(false, false), false);
 assert.equal(showIncidentCardAnnotations(true, true), false);
+assert.equal(normalizeIncidentThumbnailObjectFocus("AUTO"), "auto");
+assert.equal(normalizeIncidentThumbnailObjectFocus("button"), "button");
+assert.equal(normalizeIncidentThumbnailObjectFocus("nope"), "off");
+assert.equal(incidentThumbnailObjectFocusEnabled("auto"), true);
+assert.equal(incidentThumbnailObjectFocusEnabled("off"), false);
+assert.equal(normalizeIncidentThumbnailObjectFocusZoom(2.5), 2.5);
+assert.equal(normalizeIncidentThumbnailObjectFocusZoom(0.2), 1);
+assert.equal(normalizeIncidentThumbnailObjectFocusZoom(9), 5.5);
+{
+  const base = incidentObjectFocusStyle(
+    { width: 200, height: 100 },
+    [{ left: 80, top: 40, width: 40, height: 20 }],
+    1,
+  );
+  const tighter = incidentObjectFocusStyle(
+    { width: 200, height: 100 },
+    [{ left: 80, top: 40, width: 40, height: 20 }],
+    2,
+  );
+  assert.ok(base);
+  assert.ok(tighter);
+  const baseScale = Number(/scale\(([^)]+)\)/.exec(base.transform)?.[1]);
+  const tighterScale = Number(/scale\(([^)]+)\)/.exec(tighter.transform)?.[1]);
+  assert.ok(baseScale >= 1);
+  assert.ok(tighterScale > baseScale);
+  assert.equal(incidentObjectFocusStyle({ width: 200, height: 100 }, [], 1), null);
+}
 assert.equal(incidentProgressiveImageWidth(0, 1), 1280);
 assert.equal(incidentProgressiveImageWidth(390, 3), 1280);
 assert.equal(incidentProgressiveImageWidth(1440, 1), 1920);

@@ -26,6 +26,9 @@
   "ffmpeg_path": "ffmpeg",
   "event_clip_before_seconds": 5.0,
   "event_clip_after_seconds": 5.0,
+  "incident_thumbnail_annotations": false,
+  "incident_thumbnail_object_focus": "off",
+  "incident_thumbnail_object_focus_zoom": 1.0,
   "recording_segment_seconds": 10.0,
   "image_storage": {
     "format": "webp",

@@ -4131,8 +4131,18 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             <label>Recording Segment Seconds<input type="number" min="2" max="300" step="1" value={config.recording_segment_seconds ?? 10} onChange={(event) => updateConfig(["recording_segment_seconds"], Number(event.target.value))} /></label>
             <label>Event Clip Before<input type="number" min="0" max="30" step="1" value={config.event_clip_before_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_before_seconds"], Number(event.target.value))} /></label>
             <label>Event Clip After<input type="number" min="0" max="30" step="1" value={config.event_clip_after_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_after_seconds"], Number(event.target.value))} /></label>
+            <label>Incident thumbnail object focus<select value={config.incident_thumbnail_object_focus || "off"} onChange={(event) => updateConfig(["incident_thumbnail_object_focus"], event.target.value)}>
+              <option value="off">Off (full frame)</option>
+              <option value="auto">Auto crop to objects</option>
+              <option value="button">Manual crop button</option>
+            </select></label>
+            <label>Object focus zoom<input type="number" min="1" max="5.5" step="0.1" value={config.incident_thumbnail_object_focus_zoom ?? 1} disabled={(config.incident_thumbnail_object_focus || "off") === "off"} onChange={(event) => updateConfig(["incident_thumbnail_object_focus_zoom"], Number(event.target.value))} /><small>1 fits objects with padding; higher values zoom tighter. Hot-applied.</small></label>
             <label>Playback Cache GB<input type="number" min="0.5" max="100" step="0.5" value={config.recording_cache_max_gb ?? 5} onChange={(event) => updateConfig(["recording_cache_max_gb"], Number(event.target.value))} /></label>
             <label>Playback Cache Days<input type="number" min="1" max="90" step="1" value={config.recording_cache_max_days ?? 7} onChange={(event) => updateConfig(["recording_cache_max_days"], Number(event.target.value))} /></label>
+          </div>
+          <div className="prewarm-setting">
+            <label className="check-field"><input type="checkbox" checked={config.incident_thumbnail_annotations ?? false} onChange={(event) => updateConfig(["incident_thumbnail_annotations"], event.target.checked)} /> Show detection boxes on incident thumbnails</label>
+            <p>Draws stored object boxes on compact incident thumbnails in Incidents and Live Recent Activity. Object crop/zoom works independently of this overlay.</p>
           </div>
           <div className="prewarm-setting">
             <label className="check-field"><input type="checkbox" checked={config.recording_cache_prewarm ?? true} onChange={(event) => updateConfig(["recording_cache_prewarm"], event.target.checked)} /> Prewarm finalized recordings</label>
