@@ -168,6 +168,8 @@ EXTERNAL = {
     "normalizeIncidentThumbnailObjectFocusZoom": "../incidentNavigation.mjs",
     "incidentThumbnailObjectFocusEnabled": "../incidentNavigation.mjs",
     "incidentObjectFocusStyle": "../incidentNavigation.mjs",
+    "incidentObjectFocusThumbnailWidth": "../incidentNavigation.mjs",
+    "incidentObjectFocusMaxScale": "../incidentNavigation.mjs",
     "motionAuditRegions": "../motionAudit.mjs",
     "addSemanticSearchHistory": "../semanticSearchState.mjs",
     "clearSemanticSearchSession": "../semanticSearchState.mjs",

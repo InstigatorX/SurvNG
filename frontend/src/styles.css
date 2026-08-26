@@ -3224,6 +3224,12 @@ button.live-overlay-backdrop:active {
   will-change: auto;
 }
 
+.snapshot-frame.object-focused.high-quality-zoom .snapshot-layer img {
+  image-rendering: auto;
+  /* Mild local contrast helps soft crops without inventing detail. */
+  filter: contrast(1.06) saturate(1.04);
+}
+
 .snapshot-layer img,
 .snapshot-layer .empty-thumb {
   display: block;
