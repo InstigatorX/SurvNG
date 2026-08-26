@@ -33,7 +33,7 @@ import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
 import { eventSnapshotUrl, eventThumbnailUrl, eventClipUrl, eventStreamUrl } from "./mediaUrls.js";
-import { ShakaVideo } from "./media.jsx";
+import { prefersNativeMobilePlayback, ShakaVideo } from "./media.jsx";
 
 export function eventObjects(event) {
   return event.objects || [];
@@ -751,10 +751,12 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
       setClipLoading(true);
       setClipError("");
       setVideoActive(false);
-      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled);
+      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled, prefersNativeMobilePlayback());
       if (!info) return;
       setClipInfo(info);
-      setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
+      setPlayback(prefersNativeMobilePlayback()
+        ? { url: info.downloadUrl, mimeType: "video/mp4" }
+        : { url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
     }
     loadClipSettings();
     return () => { cancelled = true; };
@@ -1216,7 +1218,34 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
           />
           {videoActive && clipInfo && playback && !clipError ? (
             <>
-              <ShakaVideo
+              {playback.mimeType === "video/mp4" ? <video
+                key={playback.key || playback.url}
+                className="event-video-layer"
+                ref={clipVideoRef}
+                src={playback.url}
+                autoPlay
+                controls
+                playsInline
+                preload="metadata"
+                onLoadedMetadata={(event) => {
+                  const video = event.currentTarget;
+                  setPlaybackOriginTime(0);
+                  const playbackStartOffset = Math.max(0, Number(clipInfo.playbackStartOffset) || 0);
+                  if (playbackStartOffset > 0) {
+                    video.currentTime = Number.isFinite(video.duration)
+                      ? Math.min(playbackStartOffset, Math.max(0, video.duration - 0.25))
+                      : playbackStartOffset;
+                  }
+                  setClipLoading(false);
+                  setClipError("");
+                }}
+                onError={() => {
+                  setClipLoading(false);
+                  setVideoActive(false);
+                  setClipError("No recording window found");
+                }}
+                onClick={(event) => event.stopPropagation()}
+              /> : <ShakaVideo
                 key={playback.key || playback.url}
                 className="event-video-layer"
                 ref={clipVideoRef}
@@ -1259,7 +1288,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
                   }
                 }}
                 onClick={(event) => event.stopPropagation()}
-              />
+              />}
               <DebugDetectionOverlay
                 videoRef={clipVideoRef}
                 active={detectionDebug}
@@ -1438,7 +1467,7 @@ export async function eventStreamTimelineStart(streamUrl, requestedWindowStartEp
   }
 }
 
-export async function loadIncidentClipInfo(event, isCancelled = () => false) {
+export async function loadIncidentClipInfo(event, isCancelled = () => false, preferNativeMp4 = false) {
   const eventId = Number(event?.representative_event_id || event?.id);
   if (!Number.isFinite(eventId)) return null;
   let before = 5;
@@ -1460,9 +1489,9 @@ export async function loadIncidentClipInfo(event, isCancelled = () => false) {
   const anchorEpoch = eventEpoch(event);
   const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
   const streamUrl = eventStreamUrl(eventId, window.before, window.after);
-  const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
+  const timelineStartEpoch = !preferNativeMp4 && Number.isFinite(requestedWindowStartEpoch)
     ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
-    : null;
+    : requestedWindowStartEpoch;
   if (isCancelled()) return null;
   const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
   return {

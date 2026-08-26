@@ -40,12 +40,12 @@ import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
 import { appUrl, mediaUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
-import { ALL_RECORDING_CAMERAS_ID } from "../shared/constants.js";
+import { ALL_RECORDING_CAMERAS_ID, PREFER_NATIVE_HLS } from "../shared/constants.js";
 import { formatDateTime, formatTimeOnly, formatExportHandleTime, formatBytes, formatDuration } from "../shared/format.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
 import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
-import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl } from "../shared/mediaUrls.js";
+import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingMobileWindowUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
 import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
 import { usePollingData } from "../shared/polling.js";
@@ -724,6 +724,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [playbackWindow, setPlaybackWindow] = useState(null);
   const [playbackWindowRevision, setPlaybackWindowRevision] = useState(0);
   const [manifestRetryToken, setManifestRetryToken] = useState(0);
+  const [nativeSegment, setNativeSegment] = useState(null);
+  const [nativeSegmentRetryToken, setNativeSegmentRetryToken] = useState(0);
   const [recordingIndexRevision, setRecordingIndexRevision] = useState(0);
   const [followTarget, setFollowTarget] = useState(null);
   const [exportRange, setExportRange] = useState(null);
@@ -780,9 +782,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     return recordingPlaybackTimeline(playbackDetail.rows);
   }, [playbackDetail]);
   const loadedPlaybackWindow = playbackDetail;
-  const manifestUrl = !isAllCameras && activeCameraId && playbackDetail && playbackTimeline.length
+  const useNativeMobilePlayback = PREFER_NATIVE_HLS || Boolean(window.matchMedia?.("(pointer: coarse)").matches);
+  const manifestUrl = !useNativeMobilePlayback && !isAllCameras && activeCameraId && playbackDetail && playbackTimeline.length
     ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
+  const nativeSegmentUrl = useNativeMobilePlayback && !isAllCameras && activeCameraId && nativeSegment
+    ? `${recordingMobileWindowUrl(activeCameraId, nativeSegment.start_epoch, source)}&reload=${nativeSegmentRetryToken}`
+    : "";
+  const hasPlaybackMedia = Boolean(manifestUrl || nativeSegmentUrl);
   const manifestStartTime = useMemo(() => {
     if (!playbackTimeline.length) return null;
     const retainedEpoch = desiredEpochRef.current;
@@ -993,6 +1000,19 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     return clip.media_start + Math.max(0, Math.min(clip.media_end - clip.media_start - 0.01, epoch - clip.start_epoch));
   }
 
+  function nativeSegmentAt(epoch) {
+    if (!Number.isFinite(epoch)) return null;
+    return playbackTimeline.find((item) => item.start_epoch <= epoch && epoch < item.end_epoch) || null;
+  }
+
+  function nativeSegmentLocalTime(segment, epoch, video = null) {
+    if (!segment || !Number.isFinite(epoch)) return null;
+    const indexedDuration = Math.max(0, segment.end_epoch - segment.start_epoch);
+    const mediaDuration = Number(video?.duration);
+    const duration = Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : indexedDuration;
+    return Math.max(0, Math.min(Math.max(0, duration - 0.01), epoch - segment.start_epoch));
+  }
+
   function windowAround(epoch) {
     const windowSeconds = 15 * 60;
     const bucket = Math.floor(Math.max(0, epoch - dayStart) / windowSeconds);
@@ -1057,6 +1077,85 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
   }
 
+  function completePendingNativeSeek(video) {
+    const pendingMode = pendingSeekModeRef.current;
+    if (pendingMode !== "native-local" && pendingMode !== "native-ready") return;
+    clearSeekWatchdog();
+    const segment = nativeSegment;
+    if (segment) {
+      const epoch = segment.start_epoch + Math.max(0, Number(video.currentTime) || 0);
+      desiredEpochRef.current = epoch;
+      setPlayhead(epoch);
+    }
+    pendingSeekEpochRef.current = null;
+    pendingSeekModeRef.current = null;
+    setPlaybackNotice("");
+    ignorePauseUntilRef.current = performance.now() + ignorePauseAfterSeekMs();
+    if (autoplayRef.current && video.paused) requestRecordingPlay(video);
+  }
+
+  function scheduleNativeSeekWatchdog(video, localTime) {
+    clearSeekWatchdog();
+    if (!video || !Number.isFinite(localTime)) return;
+    const tolerance = recordingSeekToleranceSeconds({ preferNativeHls: true });
+    seekWatchdogRef.current = window.setTimeout(() => {
+      seekWatchdogRef.current = null;
+      if (!Number.isFinite(pendingSeekEpochRef.current)) return;
+      if (!videoReachedSeekTarget(video, localTime, tolerance)) {
+        video.currentTime = localTime;
+        window.setTimeout(() => completePendingNativeSeek(video), 400);
+        return;
+      }
+      completePendingNativeSeek(video);
+    }, seekWatchdogDelayMs({ preferNativeHls: true }));
+  }
+
+  function handleNativeSegmentMetadata(event) {
+    const video = event.currentTarget;
+    if (!nativeSegment) return;
+    video.playbackRate = normalizedTimelinePlaybackRate(playbackRate);
+    if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
+    playbackRetryRef.current = { attempts: 0, timer: null };
+    const retained = Number.isFinite(pendingSeekEpochRef.current)
+      ? pendingSeekEpochRef.current
+      : desiredEpochRef.current;
+    const target = Number.isFinite(retained)
+      ? Math.max(nativeSegment.start_epoch, Math.min(nativeSegment.end_epoch - 0.01, retained))
+      : nativeSegment.start_epoch;
+    const localTime = nativeSegmentLocalTime(nativeSegment, target, video);
+    const seekRequired = Number.isFinite(localTime) && Math.abs(video.currentTime - localTime) > 0.05;
+    desiredEpochRef.current = target;
+    setPlayhead(target);
+    setPlaybackError("");
+    setPlaybackErrorStage("");
+    if (seekRequired) {
+      pendingSeekEpochRef.current = target;
+      pendingSeekModeRef.current = "native-ready";
+      setPlaybackNotice("Seeking...");
+      seekVideoToTime(video, localTime, { allowFastSeek: false });
+      scheduleNativeSeekWatchdog(video, localTime);
+      return;
+    }
+    pendingSeekEpochRef.current = null;
+    pendingSeekModeRef.current = null;
+    setPlaybackNotice("");
+    if (autoplayRef.current) requestRecordingPlay(video);
+  }
+
+  function handleNativeSegmentTimeUpdate(event) {
+    if (!nativeSegment) return;
+    if (Number.isFinite(pendingSeekEpochRef.current)) {
+      const localTime = nativeSegmentLocalTime(nativeSegment, pendingSeekEpochRef.current, event.currentTarget);
+      if (videoReachedSeekTarget(event.currentTarget, localTime, recordingSeekToleranceSeconds({ preferNativeHls: true }))) {
+        completePendingNativeSeek(event.currentTarget);
+      }
+      return;
+    }
+    const epoch = nativeSegment.start_epoch + Math.max(0, Number(event.currentTarget.currentTime) || 0);
+    desiredEpochRef.current = epoch;
+    setPlayhead(epoch);
+  }
+
   function requestRecordingPlay(video, showBlocked = true) {
     if (!video) return;
     video.play().then(() => {
@@ -1106,6 +1205,43 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       && target < loadedPlaybackWindow.end;
     const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
+    if (useNativeMobilePlayback) {
+      const recording = inCurrentWindow ? nativeSegmentAt(target) : null;
+      if (recording) {
+        const windowStart = Math.floor(target / 120) * 120;
+        const segment = { start_epoch: windowStart, end_epoch: windowStart + 120 };
+        const sameSegment = nativeSegment
+          && nativeSegment.start_epoch === segment.start_epoch
+          && nativeSegment.end_epoch === segment.end_epoch;
+        if (sameSegment && video && video.readyState >= 1) {
+          const localTime = nativeSegmentLocalTime(segment, target, video);
+          pendingSeekEpochRef.current = target;
+          pendingSeekModeRef.current = "native-local";
+          playbackRequestRef.current += 1;
+          setPlaybackWindow(null);
+          setPlaybackNotice(autoplay ? "Seeking..." : "");
+          if (autoplay && video.paused) requestRecordingPlay(video, false);
+          seekVideoToTime(video, localTime, { allowFastSeek: false });
+          scheduleNativeSeekWatchdog(video, localTime);
+          if (!autoplay) setPlaybackNotice("");
+        } else {
+          pendingSeekEpochRef.current = target;
+          pendingSeekModeRef.current = "native-ready";
+          setPlaybackWindow(null);
+          setPlaybackNotice("Loading recording...");
+          setNativeSegment({
+            start_epoch: segment.start_epoch,
+            end_epoch: segment.end_epoch,
+          });
+        }
+      } else {
+        pendingSeekEpochRef.current = target;
+        pendingSeekModeRef.current = "window";
+        setPlaybackNotice("Loading recording...");
+        requestPlaybackWindow(nextWindow);
+      }
+      return;
+    }
     const mediaTime = epochToPlaybackMediaTime(target);
     if (inCurrentWindow && coveredByCurrentManifest && video && Number.isFinite(mediaTime)) {
       pendingSeekEpochRef.current = target;
@@ -1197,6 +1333,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setGridPlaying(false);
     gridRefreshCursorRef.current = null;
     setManifestRetryToken(0);
+    setNativeSegment(null);
+    setNativeSegmentRetryToken(0);
     setFollowTarget(null);
     pendingSeekEpochRef.current = null;
     pendingSeekModeRef.current = null;
@@ -1323,6 +1461,18 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           rows,
           revision: requestId,
         });
+        if (useNativeMobilePlayback) {
+          const target = Number.isFinite(pendingSeekEpochRef.current)
+            ? pendingSeekEpochRef.current
+            : desiredEpochRef.current;
+          const segment = rows.find((item) => (
+            Number(item.start_epoch) <= target && target < Number(item.end_epoch)
+          ));
+          if (!segment) throw new Error("No recording segment exists at this time");
+          pendingSeekModeRef.current = "native-ready";
+          const windowStart = Math.floor(target / 120) * 120;
+          setNativeSegment({ start_epoch: windowStart, end_epoch: windowStart + 120 });
+        }
       })
       .catch((error) => {
         if (error.name !== "AbortError" && requestId === playbackRequestRef.current) {
@@ -1481,7 +1631,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       return;
     }
     if (playbackRetryRef.current.timer) return;
-    if (playbackRetryRef.current.attempts < 4 && manifestUrl) {
+    if (playbackRetryRef.current.attempts < 4 && hasPlaybackMedia) {
       playbackRetryRef.current.attempts += 1;
       const attempt = playbackRetryRef.current.attempts;
       const delay = Math.min(5_000, 750 * (2 ** (attempt - 1)));
@@ -1490,7 +1640,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       setPlaybackNotice(`Playback interrupted (${detail}). Retrying ${attempt}/4...`);
       playbackRetryRef.current.timer = window.setTimeout(() => {
         playbackRetryRef.current.timer = null;
-        setManifestRetryToken((token) => token + 1);
+        if (useNativeMobilePlayback) setNativeSegmentRetryToken((token) => token + 1);
+        else setManifestRetryToken((token) => token + 1);
       }, delay);
       return;
     }
@@ -1521,14 +1672,18 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       setManifestRetryToken((token) => token + 1);
       return;
     }
+    if (nativeSegmentUrl) {
+      setNativeSegmentRetryToken((token) => token + 1);
+      return;
+    }
     const target = Number.isFinite(desiredEpochRef.current) ? desiredEpochRef.current : Date.now() / 1000;
     requestPlaybackWindow(windowAround(target));
   }
 
   function continueRecordingPlayback() {
-    const lastSegment = playbackTimeline[playbackTimeline.length - 1];
-    if (!lastSegment) return;
-    const nextEpoch = lastSegment.end_epoch + 0.01;
+    const endedSegment = useNativeMobilePlayback ? nativeSegment : playbackTimeline[playbackTimeline.length - 1];
+    if (!endedSegment) return;
+    const nextEpoch = endedSegment.end_epoch + 0.01;
     const nextRange = timeline.find((item) => item.end_epoch > nextEpoch);
     if (nextRange) {
       playAt(Math.max(nextEpoch, nextRange.start_epoch), true);
@@ -1660,6 +1815,36 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             playing={gridPlaying}
             onSelect={(selectedCameraId) => { checkpointTimelineView(); setCameraId(selectedCameraId); }}
           /> : null}
+          {!isAllCameras && nativeSegmentUrl ? (
+            <video
+              ref={videoRef}
+              src={nativeSegmentUrl}
+              controls
+              playsInline
+              preload="auto"
+              onLoadedMetadata={handleNativeSegmentMetadata}
+              onError={(event) => {
+                const error = event.currentTarget.error;
+                handleRecordingError(error || new Error("Native recording playback failed"));
+              }}
+              onTimeUpdate={handleNativeSegmentTimeUpdate}
+              onSeeked={(event) => completePendingNativeSeek(event.currentTarget)}
+              onEnded={continueRecordingPlayback}
+              onPlay={() => {
+                autoplayRef.current = true;
+                setHeroPlaying(true);
+                setPlaybackBlocked(false);
+                if (!Number.isFinite(pendingSeekEpochRef.current)) setPlaybackNotice("");
+              }}
+              onPause={(event) => {
+                if (performance.now() < ignorePauseUntilRef.current) return;
+                if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                  autoplayRef.current = false;
+                  setHeroPlaying(false);
+                }
+              }}
+            />
+          ) : null}
           {!isAllCameras && manifestUrl ? (
             <ShakaVideo
               ref={videoRef}
@@ -1701,7 +1886,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               Play recording
             </button>
           ) : null}
-          {!isAllCameras && Number.isFinite(playhead) && manifestUrl && !playbackError ? (
+          {!isAllCameras && Number.isFinite(playhead) && hasPlaybackMedia && !playbackError ? (
             <div className="recording-grid-controls recording-hero-controls">
               <button type="button" onClick={() => playAt(playhead - 10, autoplayRef.current || heroPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
               <button type="button" className="primary" onClick={toggleHeroPlayback}>

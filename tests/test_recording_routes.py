@@ -6,6 +6,8 @@ import threading
 from types import SimpleNamespace
 from unittest import TestCase
 
+from fastapi import HTTPException
+
 from survng.app.recording_routes import (
     RecordingRouteDependencies,
     create_recording_router,
@@ -56,6 +58,7 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
         recording_day_rows=lambda *_args, **_kwargs: [],
         recording_preview_path=lambda *_args, **_kwargs: Path("preview.jpg"),
         recording_preview_timestamp=lambda _path: (None, "requested_offset"),
+        recording_segment_path=lambda *_args, **_kwargs: Path("segment.mp4"),
         recording_day_fmp4_paths=lambda *_args, **_kwargs: (
             Path("init.mp4"),
             Path("media.m4s"),
@@ -67,6 +70,33 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
+    def test_native_segment_uses_indexed_epoch_lookup(self) -> None:
+        manager = _Manager("current")
+        requested: list[tuple[object, ...]] = []
+        dependencies = replace(
+            _dependencies(lambda: manager),
+            recording_segment_path=lambda *args: (
+                requested.append(args) or Path("segment.mp4")
+            ),
+        )
+
+        response = create_recording_router(dependencies).handlers[
+            "recording_segment"
+        ]("gate", 105.0, "live")
+
+        self.assertEqual(requested, [(manager, "gate", 105.0, "live")])
+        self.assertEqual(response.media_type, "video/mp4")
+        self.assertEqual(response.headers["cache-control"], "private, max-age=3600")
+
+    def test_native_segment_rejects_invalid_epoch_before_lookup(self) -> None:
+        dependencies = _dependencies(lambda: _Manager("current"))
+        with self.assertRaises(HTTPException) as invalid:
+            create_recording_router(dependencies).handlers["recording_segment"](
+                "gate", float("nan"), "main"
+            )
+
+        self.assertEqual(invalid.exception.status_code, 400)
+
     def test_exact_preview_reports_requested_and_decoded_timestamps(self) -> None:
         recorder = SimpleNamespace(
             recording_rows_between=lambda *_args, **_kwargs: [{
