@@ -1,5 +1,7 @@
 # SurvNG Docker deployment
 
+Pasteable first-install commands: [README.install.docker.md](../README.install.docker.md).
+
 This directory contains the container entrypoint and a camera-free example
 configuration. The repository root contains the `Dockerfile` and Compose files.
 Docker is optional; the native virtualenv/systemd deployment remains supported.
