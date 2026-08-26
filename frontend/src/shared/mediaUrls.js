@@ -11,10 +11,20 @@ export function eventSnapshotDownloadUrl(event) {
   return snapshotUrl ? `${snapshotUrl}?download=true` : "";
 }
 
-export function eventThumbnailUrl(event, width = 720, quality = 82) {
+export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}) {
   if (event?.snapshot_url) return appUrl(event.snapshot_url);
   const eventId = Number(event?.representative_event_id || event?.id);
-  return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/thumbnail.jpg?width=${width}&quality=${quality}`) : "";
+  if (!Number.isFinite(eventId)) return "";
+  const params = new URLSearchParams({
+    width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 720)))),
+    quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
+  });
+  if (options?.objectFocus) {
+    params.set("object_focus", "true");
+    const zoom = Number(options.zoom);
+    if (Number.isFinite(zoom)) params.set("zoom", String(zoom));
+  }
+  return appUrl(`/api/events/${eventId}/thumbnail.jpg?${params.toString()}`);
 }
 export function eventClipUrl(eventId, before = 5, after = 5, source = "main") {
   const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });

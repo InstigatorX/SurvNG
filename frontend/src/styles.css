@@ -2074,6 +2074,16 @@ p {
   object-fit: cover;
 }
 
+/* Object-focus already frames the subject. Cover+16:9 would zoom again and
+   soft-magnify the crop (worse in some top-level windows than iframes). */
+.live-activity-thumb .snapshot-frame.object-focused {
+  aspect-ratio: var(--snapshot-aspect, 16 / 9);
+}
+
+.live-activity-thumb .snapshot-frame.object-focused img {
+  object-fit: contain;
+}
+
 .live-activity-copy {
   display: grid;
   min-width: 0;
@@ -3215,6 +3225,12 @@ button.live-overlay-backdrop:active {
   position: absolute;
   inset: 0;
   transition: transform 180ms ease;
+}
+
+.snapshot-frame.is-transforming .snapshot-layer {
+  /* Only promote a transform layer while actively scaling/panning. Permanent
+     will-change keeps a soft compositor texture that looks mushy after zoom,
+     and that softness varies between top-level windows and iframes. */
   will-change: transform;
 }
 
@@ -3228,6 +3244,13 @@ button.live-overlay-backdrop:active {
   image-rendering: auto;
   /* Mild local contrast helps soft crops without inventing detail. */
   filter: contrast(1.06) saturate(1.04);
+}
+
+.snapshot-frame.object-focus-crop .snapshot-layer img {
+  /* Server already cropped from the full snapshot; avoid magnifying a
+     downscaled full-frame raster. */
+  image-rendering: auto;
+  filter: none;
 }
 
 .snapshot-layer img,

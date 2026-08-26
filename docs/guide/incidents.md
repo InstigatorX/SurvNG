@@ -30,17 +30,17 @@ Incidents can show one primary piece of evidence at a time (**Focus**) or a dens
 
 Snapshots often load a lighter preview first, then a sharper original when you zoom. That keeps browsing responsive on slower links.
 
-## Thumbnail object crop
+## Thumbnail object focus
 
 Under **Admin → Storage**, you can crop compact incident thumbnails to detected objects:
 
 - **Off** keeps the full frame (default)
-- **Auto crop** zooms thumbnails to the object union
-- **Manual crop button** shows a crop control on cards that support it
+- **Auto** crops thumbnails to the object union
+- **Manual button** shows a focus control on cards that support it
 
-**Object focus zoom** (1.0–5.5) tightens that crop. Detection-box overlays are a separate checkbox and do not need to be on for crop/zoom.
+**Object focus zoom** (0.25–5.5) tightens or loosens that crop. `1` fits objects with padding; values below `1` show more context (useful for distant tiny detections); values above `1` zoom tighter. Detection-box overlays are a separate checkbox and do not need to be on for focus/zoom.
 
-Focused thumbnails request a higher-resolution raster (and fall back to the stored snapshot when needed). Zoom is also capped so SurvNG does not magnify past the pixels available for the object — distant tiny detections stay softer than close ones, but without empty blur.
+Focused compact thumbnails are cropped from the **full-resolution snapshot on the server**, then resized near the tile size — so the client downloads a small crop instead of a large full-frame JPEG. Expanded viewers can still use CSS focus when a manual button is shown. Zoom is capped so SurvNG does not over-crop distant detections into empty blur.
 
 ## Clean, AI, and tracks
 

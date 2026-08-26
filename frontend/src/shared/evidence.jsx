@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
-import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectFocusThumbnailWidth, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
+import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
@@ -154,7 +154,6 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   const [objectFocused, setObjectFocused] = useState(focusMode === "auto");
   const [progressiveState, setProgressiveState] = useState({ key: "", base: false, intermediate: false, full: false });
   const progressiveReady = progressiveState.key === progressiveImageKey ? progressiveState : { base: false, intermediate: false, full: false };
-  const imageReady = loadedImageKey === progressiveImageKey;
   const devicePixelRatio = Math.max(1, Math.min(4, Number(window.devicePixelRatio) || 1));
   const displayPixelWidth = (frameSize?.width || 0) * devicePixelRatio;
   const progressiveWidth = incidentProgressiveImageWidth(frameSize?.width, devicePixelRatio);
@@ -177,18 +176,26 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
       scale,
     };
   }, [imageSize, renderingFrameSize?.height, renderingFrameSize?.width]);
-  const canFocus = focusMode !== "off" && boxes.length > 0 && renderedImage;
-  const showFocusButton = canFocus && objectFocusControls;
+  const hasFocusableObjects = focusMode !== "off" && boxes.length > 0;
   const preferFocused = focusMode === "auto" || (focusMode === "button" && !objectFocusControls);
-  const wantsFocusRaster = Boolean(canFocus && (objectFocused || preferFocused));
-  const focusThumbnailWidth = incidentObjectFocusThumbnailWidth(frameSize?.width, devicePixelRatio, focusZoom);
-  const focusThumbnailQuality = focusThumbnailWidth >= 1920 ? 90 : 86;
-  // Tiny distant objects still lack pixels at 2560; use the stored original.
-  const useFocusSnapshot = wantsFocusRaster && focusThumbnailWidth >= 2560;
-  const thumbnailSrc = useFocusSnapshot
-    ? eventSnapshotUrl(event)
-    : eventThumbnailUrl(event, wantsFocusRaster ? focusThumbnailWidth : 720, wantsFocusRaster ? focusThumbnailQuality : 82);
-  const focusImageKey = `${progressiveImageKey}:focus:${useFocusSnapshot ? "full" : focusThumbnailWidth}`;
+  const useServerObjectCrop = Boolean(thumbnail && hasFocusableObjects && (objectFocused || preferFocused));
+  const canFocus = hasFocusableObjects && (useServerObjectCrop || renderedImage);
+  const showFocusButton = canFocus && objectFocusControls;
+  // Crop from the full snapshot on the server, then encode near display size.
+  const focusThumbnailWidth = Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * devicePixelRatio)));
+  const focusThumbnailQuality = 90;
+  const thumbnailSrc = useServerObjectCrop
+    ? eventThumbnailUrl(event, focusThumbnailWidth, focusThumbnailQuality, { objectFocus: true, zoom: focusZoom })
+    : eventThumbnailUrl(event);
+  const focusImageKey = `${progressiveImageKey}:object-focus:${focusThumbnailWidth}:${focusZoom}`;
+  const imageReady = loadedImageKey === progressiveImageKey
+    || (useServerObjectCrop && loadedImageKey === focusImageKey);
+  const focusCrop = useMemo(() => {
+    if (!useServerObjectCrop) return null;
+    const sourceWidth = boxCoordinateSize?.width || imageSize?.width;
+    const sourceHeight = boxCoordinateSize?.height || imageSize?.height;
+    return incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, focusZoom);
+  }, [boxCoordinateSize?.height, boxCoordinateSize?.width, boxes, focusZoom, imageSize?.height, imageSize?.width, useServerObjectCrop]);
 
   useLayoutEffect(() => {
     setObjectFocused(preferFocused && boxes.length > 0);
@@ -239,6 +246,20 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
 
   const renderedBoxes = useMemo(() => {
     if (!renderedImage || !frameSize) return [];
+    if (useServerObjectCrop && focusCrop) {
+      const scaleX = renderedImage.width / focusCrop.width;
+      const scaleY = renderedImage.height / focusCrop.height;
+      return boxes.map((box) => ({
+        ...box,
+        left: renderedImage.x + (box.x1 - focusCrop.x1) * scaleX,
+        top: renderedImage.y + (box.y1 - focusCrop.y1) * scaleY,
+        width: (box.x2 - box.x1) * scaleX,
+        height: (box.y2 - box.y1) * scaleY,
+        maskPoints: box.maskPolygon
+          .map(([x, y]) => `${renderedImage.x + (x - focusCrop.x1) * scaleX},${renderedImage.y + (y - focusCrop.y1) * scaleY}`)
+          .join(" "),
+      })).filter((box) => box.width > 0 && box.height > 0);
+    }
     const sourceWidth = boxCoordinateSize?.width || imageSize?.width;
     const sourceHeight = boxCoordinateSize?.height || imageSize?.height;
     if (!sourceWidth || !sourceHeight) return [];
@@ -252,7 +273,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
       height: (box.y2 - box.y1) * scaleY,
       maskPoints: box.maskPolygon.map(([x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
     })).filter((box) => box.width > 0 && box.height > 0);
-  }, [boxes, boxCoordinateSize?.height, boxCoordinateSize?.width, frameSize, imageSize, renderedImage]);
+  }, [boxes, boxCoordinateSize?.height, boxCoordinateSize?.width, focusCrop, frameSize, imageSize, renderedImage, useServerObjectCrop]);
 
   const renderedTracks = useMemo(() => {
     if (!renderedImage || !frameSize) return [];
@@ -275,9 +296,10 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
     () => incidentObjectFocusMaxScale(imageSize?.width, renderedImage?.width, devicePixelRatio),
     [devicePixelRatio, imageSize?.width, renderedImage?.width],
   );
+  // Compact thumbs use server crop; expanded/manual viewers still CSS-zoom a full-frame raster.
   const focusStyle = useMemo(
-    () => (canFocus ? incidentObjectFocusStyle(frameSize, renderedBoxes, focusZoom, focusMaxScale) : null),
-    [canFocus, focusMaxScale, focusZoom, frameSize, renderedBoxes],
+    () => (!useServerObjectCrop && canFocus ? incidentObjectFocusStyle(frameSize, renderedBoxes, focusZoom, focusMaxScale) : null),
+    [canFocus, focusMaxScale, focusZoom, frameSize, renderedBoxes, useServerObjectCrop],
   );
 
   const zoomLayerStyle = zoomLayout ? {
@@ -289,14 +311,15 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   } : null;
   const activeLayerStyle = objectFocused && focusStyle ? focusStyle : zoomLayerStyle || layerStyle;
   const aspect = imageSize ? `${imageSize.width} / ${imageSize.height}` : undefined;
-  const prefersHighQualityRaster = highQualityZoom || wantsFocusRaster;
+  const prefersHighQualityRaster = highQualityZoom || (objectFocused && !useServerObjectCrop);
+  const isTransforming = Boolean(activeLayerStyle?.transform);
 
   return (
-    <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${prefersHighQualityRaster ? "high-quality-zoom" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
+    <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${useServerObjectCrop ? "object-focus-crop" : ""} ${prefersHighQualityRaster ? "high-quality-zoom" : ""} ${isTransforming ? "is-transforming" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
       <div className="snapshot-layer" style={activeLayerStyle || undefined}>
         {event?.snapshot_path && eventSnapshotUrl(event) ? (
-          progressive ? (
-            <div className={`snapshot-progressive-stack ${progressiveReady.full || useFocusSnapshot ? "full-resolution-ready" : ""}`}>
+          progressive && !useServerObjectCrop ? (
+            <div className={`snapshot-progressive-stack ${progressiveReady.full ? "full-resolution-ready" : ""}`}>
               <img
                 key={`${progressiveImageKey}-base`}
                 className="snapshot-progressive-base"
@@ -309,14 +332,14 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
                 <img
                   key={`${progressiveImageKey}-intermediate`}
                   className={`snapshot-progressive-image snapshot-intermediate-image ${progressiveReady.intermediate ? "ready" : ""}`}
-                  src={eventThumbnailUrl(event, Math.max(progressiveWidth, wantsFocusRaster ? focusThumbnailWidth : 0), wantsFocusRaster ? focusThumbnailQuality : progressiveQuality)}
+                  src={eventThumbnailUrl(event, progressiveWidth, progressiveQuality)}
                   alt=""
                   aria-hidden="true"
                   decoding="async"
                   onLoad={(loadEvent) => markProgressiveReady("intermediate", loadEvent)}
                 />
               ) : null}
-              {shouldLoadFullResolution || useFocusSnapshot ? (
+              {shouldLoadFullResolution ? (
                 <img
                   key={`${progressiveImageKey}-full`}
                   className={`snapshot-progressive-image snapshot-full-resolution-image ${progressiveReady.full ? "ready" : ""}`}
@@ -329,7 +352,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
                 />
               ) : null}
             </div>
-          ) : <img className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? thumbnailSrc : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, thumbnail && wantsFocusRaster ? focusImageKey : progressiveImageKey)} />
+          ) : <img className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? thumbnailSrc : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey)} />
         ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {imageReady && showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
