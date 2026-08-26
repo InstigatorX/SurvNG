@@ -643,19 +643,6 @@ a.button {
     top: 0;
   }
 
-  #admin-panel-cameras>.camera-section-tabs {
-    position: sticky;
-    top: 0;
-    z-index: 3;
-    background: var(--panel-solid);
-  }
-
-  .admin-workspace-general .detection-settings>.detection-subsection-tabs {
-    position: sticky;
-    top: 0;
-    z-index: 3;
-    background: var(--panel-solid);
-  }
 }
 
 /* Shared incident source marker used by Live Activity and Incident investigation. */

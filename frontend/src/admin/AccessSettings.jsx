@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { KeyRound, Plus, RefreshCcw, ShieldCheck, Trash2, Upload } from "lucide-react";
+import { KeyRound, Network, Plus, RefreshCcw, ShieldCheck, Trash2, Upload } from "lucide-react";
 
 import { fetch } from "../shared/api.js";
 
@@ -35,7 +35,7 @@ function parseTrustedProxies(text) {
   )];
 }
 
-export function AccessSettings({ config, updateConfig, commitImmediateConfig }) {
+export function AccessSettings({ config, updateConfig, commitImmediateConfig, onOpenApiTokens = null }) {
   const [users, setUsers] = useState(config.web_auth?.users || []);
   const enabled = Boolean(config.web_auth?.enabled);
   const [passwordEdits, setPasswordEdits] = useState({});
@@ -46,6 +46,7 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
   const [tlsHostname, setTlsHostname] = useState(config.tls?.hostname || "");
   const [tlsPort, setTlsPort] = useState(config.tls?.port || 0);
   const [proxyText, setProxyText] = useState(() => formatTrustedProxies(config.proxy?.trusted_proxies));
+  const [accessSection, setAccessSection] = useState("users");
 
   async function load() {
     const [usersResponse, tlsResponse] = await Promise.all([
@@ -272,12 +273,18 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
   }
 
   return (
-    <div className="sub-panel access-settings">
-      <h3>Users &amp; HTTPS</h3>
-      <section className="api-access-settings">
+    <div className="sub-panel access-settings subsection-workspace">
+      <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs security-subsection-tabs" aria-label="Security settings">
+        {[['users', 'Users & sign-in', KeyRound], ['https', 'HTTPS certificates', ShieldCheck], ['proxies', 'Trusted proxies', Network]].map(([value, label, Icon]) => (
+          <button type="button" key={value} className={accessSection === value ? "active" : ""} aria-pressed={accessSection === value} onClick={() => setAccessSection(value)}><Icon size={15} />{label}</button>
+        ))}
+        {onOpenApiTokens ? <button type="button" className="security-api-token-link" onClick={onOpenApiTokens}><KeyRound size={15} />API tokens <span aria-hidden="true">↗</span></button> : null}
+      </nav>
+      <div className="subsection-workspace-content">
+      <section className="api-access-settings" hidden={accessSection !== "users"}>
         <div className="detection-settings-subhead">
           <div>
-            <strong>Sign-in</strong>
+            <strong className="section-heading-with-icon"><span className="section-heading-icon"><KeyRound size={16} /></span>Sign-in</strong>
             <small>Local SurvNG accounts. Administrators can change settings; viewers can watch cameras and review incidents.</small>
           </div>
         </div>
@@ -301,23 +308,6 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
             onChange={(event) => updateConfig(["web_auth", "session_days"], Number(event.target.value))}
           />
           <small>How long a signed-in browser stays signed in. Save settings to apply. New sign-ins use this length; current sessions keep their existing expiry unless you change that user’s password.</small>
-        </label>
-        <label className="trusted-proxies-field">Trusted reverse proxies
-          <textarea
-            className="trusted-proxies-input"
-            rows={4}
-            value={proxyText}
-            onChange={(event) => {
-              const text = event.target.value;
-              setProxyText(text);
-              updateConfig(["proxy", "trusted_proxies"], parseTrustedProxies(text));
-            }}
-            spellCheck="false"
-            wrap="off"
-            autoComplete="off"
-            placeholder={"127.0.0.1\n::1"}
-          />
-          <small>One IP or CIDR per line (commas are also fine). Only these addresses may set HTTPS and client-IP headers. Use 127.0.0.1 when nginx is on this computer. When nginx is on another server, list that server’s IP (not 127.0.0.1) and do not bind SurvNG to loopback. Docker networks often need 172.16.0.0/12. Save settings to apply. See Help → Reverse proxy.</small>
         </label>
         <div className="api-token-list">
           {users.map((user) => (
@@ -373,10 +363,20 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
         </form>
       </section>
 
-      <section className="api-access-settings">
+      <section className="api-access-settings" hidden={accessSection !== "proxies"}>
+        <div className="detection-settings-subhead">
+          <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Network size={16} /></span>Trusted reverse proxies</strong><small>Only listed proxy addresses may set HTTPS and client-IP headers.</small></div>
+        </div>
+        <label className="trusted-proxies-field">Proxy addresses
+          <textarea className="trusted-proxies-input" rows={6} value={proxyText} onChange={(event) => { const text = event.target.value; setProxyText(text); updateConfig(["proxy", "trusted_proxies"], parseTrustedProxies(text)); }} spellCheck="false" wrap="off" autoComplete="off" placeholder={"127.0.0.1\n::1"} />
+          <small>One IP or CIDR per line (commas are also fine). Use 127.0.0.1 when nginx is on this computer; Docker networks often need 172.16.0.0/12. Save settings to apply. See Help → Reverse proxy.</small>
+        </label>
+      </section>
+
+      <section className="api-access-settings" hidden={accessSection !== "https"}>
         <div className="detection-settings-subhead">
           <div>
-            <strong>HTTPS</strong>
+            <strong className="section-heading-with-icon"><span className="section-heading-icon"><ShieldCheck size={16} /></span>HTTPS</strong>
             <small>Serve the console with TLS. Generate a self-signed certificate for LAN use, or upload a certificate and private key from your CA.</small>
           </div>
           <div className="admin-action-status">
@@ -420,6 +420,7 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
         </form>
       </section>
       {error ? <div className="error-banner">{error}</div> : null}
+      </div>
     </div>
   );
 }

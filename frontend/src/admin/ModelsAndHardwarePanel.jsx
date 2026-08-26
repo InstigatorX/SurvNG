@@ -140,7 +140,7 @@ export function ModelsAndHardwarePanel({ config, updateConfig, detectorModels = 
 
   return (
     <section className="telemetry-section models-hardware-panel">
-      <div className="telemetry-section-head"><div><h3>Models &amp; Hardware</h3><p>Compare detector models and inspect accelerator readiness.</p></div></div>
+      <div className="telemetry-section-head"><div><h3 className="section-heading-with-icon"><span className="section-heading-icon"><Cpu size={16} /></span>Models &amp; Hardware</h3><p>Compare detector models and inspect accelerator readiness.</p></div></div>
       <section className="detection-settings-card wide-card model-evaluation-card">
         <header className="detection-settings-card-head">
           <div className="detection-settings-card-icon"><Gauge size={18} /></div>

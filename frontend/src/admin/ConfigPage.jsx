@@ -1022,16 +1022,15 @@ export function CalibrationLab({ cameras, runtimeStatus = [], timeZone, onComman
   }, {});
   const completed = Number(selectedRun?.result?.progress?.completed || 0);
   const total = Number(selectedRun?.result?.progress?.total || selectedRun?.camera_ids?.length || 0);
-  return <>
-    <section className="bento-card camera-tree config-tree settings-section-tree calibration-tree">
-      <div className="tree-list tuneup-section-list" role="tablist" aria-label="Detection Tune-Up sections" onKeyDown={(event) => { const next = nextTabId(["tuneup", "monitoring", "history"], section, event.key); if (!next) return; event.preventDefault(); setSection(next); window.requestAnimationFrame(() => document.getElementById(`tuneup-tab-${next}`)?.focus()); }}>
+  return <section id="admin-panel-calibration" className="bento-card config-editor settings-panel settings-panel-wide calibration-panel" aria-labelledby="admin-destination-tuneup">
+    <div className="calibration-tabs-shell">
+      <div className="tree-list tuneup-section-list admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label="Detection Tune-Up sections" onKeyDown={(event) => { const next = nextTabId(["tuneup", "monitoring", "history"], section, event.key); if (!next) return; event.preventDefault(); setSection(next); window.requestAnimationFrame(() => document.getElementById(`tuneup-tab-${next}`)?.focus()); }}>
         <button id="tuneup-tab-tuneup" type="button" tabIndex={section === "tuneup" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "tuneup" ? "active" : ""} onClick={() => setSection("tuneup")} role="tab" aria-selected={section === "tuneup"}><Sparkles size={16} /><span>Tune-Up</span></button>
         <button id="tuneup-tab-monitoring" type="button" tabIndex={section === "monitoring" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "monitoring" ? "active" : ""} onClick={() => setSection("monitoring")} role="tab" aria-selected={section === "monitoring"}><Activity size={16} /><span>Monitoring{monitoringSets.length ? <em>{monitoringSets.length}</em> : null}</span></button>
         <button id="tuneup-tab-history" type="button" tabIndex={section === "history" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "history" ? "active" : ""} onClick={() => setSection("history")} role="tab" aria-selected={section === "history"}><Clock3 size={16} /><span>History</span></button>
       </div>
       {activeRun ? <button type="button" className="tuneup-resume-card" onClick={() => { setSelectedRunId(activeRun.id); setSection("tuneup"); setWizardStep(3); }}><RefreshCcw className="spin" size={16} /><span><strong>Review in progress</strong><small>{tuneupHistoryTitle(activeRun, cameras)}</small></span></button> : null}
-    </section>
-    <section id="admin-panel-calibration" className="bento-card config-editor settings-panel calibration-panel" aria-labelledby="admin-destination-tuneup">
+    </div>
       {error ? <div className="error-banner">{error}</div> : null}
       <div id="tuneup-section-panel" role="tabpanel" aria-labelledby={`tuneup-tab-${section}`}>
         {section === "tuneup" ? <div className="tuneup-workflow">
@@ -1049,8 +1048,7 @@ export function CalibrationLab({ cameras, runtimeStatus = [], timeZone, onComman
         {section === "monitoring" ? <div className="tuneup-monitoring">{monitoringSets.length ? monitoringSets.map((item) => { const rolledBack = new Set(item.rolled_back_change_ids || []); const remaining = (item.changes || []).filter((change) => !rolledBack.has(change.id)); const [outcome, tone] = tuneupOutcome(item); const affected = [...new Set((item.changes || []).flatMap((change) => change.camera_id ? [change.camera_id] : (runs.find((run) => run.id === item.run_id)?.camera_ids || [])))]; return <article className="tuneup-monitor-card" key={item.id}><header><span><strong>{item.status === "collecting" ? "Monitoring changes" : item.status === "reviewing" ? "Reviewing results" : outcome}</strong><small>{formatDateTime(item.created_at, timeZone)} · {item.changes?.length || 0} changes</small></span><em className={tone}>{String(item.status).replaceAll("_", " ")}</em></header>{item.status === "collecting" ? <div className="tuneup-countdown"><Clock3 size={19} /><span><strong>{item.seconds_until_ready > 86400 ? `${Math.ceil(item.seconds_until_ready / 86400)} days remaining` : item.seconds_until_ready > 3600 ? `${Math.ceil(item.seconds_until_ready / 3600)} hours remaining` : "Ready for review"}</strong><small>SurvNG is collecting matched follow-up evidence.</small></span></div> : null}<div className="tuneup-health-list">{affected.map((cameraId) => { const status = statuses.get(cameraId) || {}; const healthy = status.running !== false && status.frame_fresh !== false; return <span className={healthy ? "healthy" : "unhealthy"} key={cameraId}><CircleDot size={13} />{cameras.find((camera) => camera.id === cameraId)?.name || cameraId}</span>; })}</div>{item.evaluation?.summary ? <p>{item.evaluation.summary}</p> : null}<details><summary>Applied changes</summary>{remaining.map((change) => <div className="tuneup-change-row" key={change.id}><span>{TUNEUP_SETTING_NAMES[change.setting] || String(change.setting).split(".").pop().replaceAll("_", " ")}</span><b>{tuneupValue(change.before)} → {tuneupValue(change.after)}</b><button onClick={() => void rollback(item, { changeIds: [change.id] })} disabled={busy}><Undo2 size={14} />Undo</button></div>)}</details><footer>{item.status === "collecting" && item.seconds_until_ready <= 0 ? <button onClick={() => void evaluate(item)} disabled={busy}><Activity size={15} />Review now</button> : null}{item.status === "evaluated" ? <><button onClick={runAnotherTuneup}><Plus size={15} />Run another</button><button className="primary" onClick={() => void simpleAction(`/api/calibration/change-sets/${item.id}/keep`, "Changes could not be marked as kept")} disabled={busy}><Check size={15} />Keep changes</button></> : null}{remaining.length ? <button onClick={() => void rollback(item)} disabled={busy}><Undo2 size={15} />Undo changes</button> : null}</footer></article>; }) : <div className="empty-state"><ShieldCheck size={28} /><strong>No tune-up is being monitored</strong><span>Apply a recommendation to begin a before-and-after review.</span><button className="primary" onClick={runAnotherTuneup}>Run a tune-up</button></div>}</div> : null}
         {section === "history" ? <div className="tuneup-history"><div className="tuneup-history-actions"><span>{runs.length} recent review{runs.length === 1 ? "" : "s"}</span><button className="primary" onClick={runAnotherTuneup}><Plus size={15} />Run another tune-up</button></div>{runs.map((run) => { const applied = changeSets.filter((item) => item.run_id === run.id && item.action === "apply"); return <article key={run.id}><button type="button" onClick={() => { setSelectedRunId(run.id); setSection("tuneup"); setWizardStep(run.status === "completed" ? 4 : 3); }}><span><strong>{tuneupHistoryTitle(run, cameras)}</strong><small>{formatDateTime(run.created_at, timeZone)} · {String(run.status).replaceAll("_", " ")}</small></span><ArrowRight size={16} /></button><div><span>{applied.reduce((count, item) => count + Number(item.changes?.length || 0), 0)} changes applied</span>{applied.map((item) => <em key={item.id}>{item.evaluation?.summary || String(item.status).replaceAll("_", " ")}</em>)}</div>{applied.map((item) => { const rolledBack = new Set(item.rolled_back_change_ids || []); const remaining = (item.changes || []).filter((change) => !rolledBack.has(change.id)); return remaining.length ? <details className="tuneup-history-changes" key={item.id}><summary>Review or undo {remaining.length} applied change{remaining.length === 1 ? "" : "s"}</summary>{remaining.map((change) => <div className="tuneup-change-row" key={change.id}><span>{change.camera_id ? cameras.find((camera) => camera.id === change.camera_id)?.name || change.camera_id : "System default"} · {TUNEUP_SETTING_NAMES[change.setting] || String(change.setting).split(".").pop().replaceAll("_", " ")}</span><b>{tuneupValue(change.before)} → {tuneupValue(change.after)}</b><button onClick={() => void rollback(item, { changeIds: [change.id] })} disabled={busy}><Undo2 size={14} />Undo</button></div>)}</details> : null; })}</article>; })}{!runs.length ? <div className="empty-state">No tune-ups have been run yet.</div> : null}</div> : null}
       </div>
-    </section>
-  </>;
+  </section>;
 }
 
 export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContextChange }) {
@@ -2182,15 +2180,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     if (settingsTab === "audit") {
       return {
         scope: (
-          <CameraScopePicker
-            className="section-title-picker"
-            cameras={cameras}
-            runtimeStatus={runtimeStatus}
-            value={auditCamera}
-            onChange={selectAuditCamera}
-            allOption={{ value: "", label: "All cameras" }}
-            ariaLabel="Motion Audit camera"
-          />
+          <>
+            <CameraScopePicker className="section-title-picker" cameras={cameras} runtimeStatus={runtimeStatus} value={auditCamera} onChange={selectAuditCamera} allOption={{ value: "", label: "All cameras" }} ariaLabel="Motion Audit camera" />
+            <label className="admin-command-filter">Category<select value={auditCategory} onChange={(event) => { setAuditCategory(event.target.value); setAuditPage(0); }}><option value="all">All categories</option><option value="visual_backup">Visual backup</option><option value="active_followup">Active-event follow-up</option><option value="qualification">Filtered motion</option></select></label>
+            <label className="admin-command-filter">Outcome<select value={auditOutcome} onChange={(event) => { setAuditOutcome(event.target.value); setAuditPage(0); }}><option value="all">All outcomes</option><option value="object">Object found</option><option value="clear">No object</option><option value="not_run">Detection skipped</option></select></label>
+          </>
         ),
         meta: <AdminCommandLabel>{auditCategoryTitle}</AdminCommandLabel>,
         actions: <button type="button" onClick={() => loadMotionAudit(auditPage)} disabled={auditLoading}><RefreshCcw className={auditLoading ? "spin" : ""} size={16} /> Refresh</button>,
@@ -2324,6 +2318,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 updateConfig={updateConfig}
                 commitImmediateConfig={commitImmediateConfig}
                 onTokenSecretVisibleChange={setApiTokenSecretVisible}
+                onOpenApiTokens={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}
                 timeZone={timeZone}
                 setTimeZone={setTimeZone}
                 theme={theme}
@@ -2345,28 +2340,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
             </section>
           </>
         ) : settingsTab === "audit" ? (
-          <>
-            <section className="bento-card camera-tree config-tree settings-section-tree motion-audit-filters">
-              <div className="motion-audit-filter-fields">
-                <label>Category<select value={auditCategory} onChange={(event) => { setAuditCategory(event.target.value); setAuditPage(0); }}>
-                  <option value="all">All categories</option>
-                  <option value="visual_backup">Visual backup</option>
-                  <option value="active_followup">Active-event follow-up</option>
-                  <option value="qualification">Filtered motion</option>
-                </select></label>
-              </div>
-              <div className="tree-list">
-                {[
-                  ["all", "All outcomes"],
-                  ["object", "Object found"],
-                  ["clear", "No object"],
-                  ["not_run", "Detection skipped"],
-                ].map(([value, label]) => (
-                  <button type="button" className={auditOutcome === value ? "active" : ""} aria-pressed={auditOutcome === value} key={value} onClick={() => { setAuditOutcome(value); setAuditPage(0); }}><Activity size={16} /><span>{label}</span></button>
-                ))}
-              </div>
-            </section>
-            <section id="admin-panel-audit" className="bento-card config-editor settings-panel motion-audit-panel" aria-labelledby="admin-destination-audit">
+          <section id="admin-panel-audit" className="bento-card config-editor settings-panel settings-panel-wide motion-audit-panel" aria-labelledby="admin-destination-audit">
               <MotionAuditViewer
                 items={auditItems}
                 total={auditTotal}
@@ -2378,8 +2352,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 timeZone={timeZone}
                 onOpen={(item) => setSelectedAuditId(item.id)}
               />
-            </section>
-          </>
+          </section>
         ) : settingsTab === "calibration" ? (
           <CalibrationLab key={`calibration-${calibrationViewNonce}`} cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
         ) : settingsTab === "telemetry" ? (
@@ -2433,7 +2406,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           </section>
         ) : (
           <>
-            <section id="admin-panel-cameras" className="bento-card config-editor settings-panel settings-panel-wide admin-workspace-cameras">
+            <section id="admin-panel-cameras" className="bento-card config-editor settings-panel settings-panel-wide admin-workspace-cameras subsection-workspace">
 
               {cameraOrderEditing ? <section className="sub-panel camera-order-panel" aria-label="Camera order">
                 <div className="tree-list">
@@ -2492,7 +2465,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 </div>
               </section> : null}
 
-              {selectedCamera ? <div id="camera-section-tabs" className="admin-section-tabs camera-section-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`} onKeyDown={(event) => moveTabFocus(event, CAMERA_ADMIN_SECTIONS, cameraSection, (next) => selectAdminSubsection(next, setCameraSection, "cameras"))}>
+              {selectedCamera ? <div id="camera-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`} onKeyDown={(event) => moveTabFocus(event, CAMERA_ADMIN_SECTIONS, cameraSection, (next) => selectAdminSubsection(next, setCameraSection, "cameras"))}>
                 <button id="camera-tab-settings" data-tab-id="settings" tabIndex={cameraSection === "settings" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => selectAdminSubsection("settings", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
                 <button id="camera-tab-motion" data-tab-id="motion" tabIndex={cameraSection === "motion" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "motion" ? "active" : ""} onClick={() => selectAdminSubsection("motion", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "motion"}><Activity size={15} />Motion/Object</button>
                 <button id="camera-tab-zones" data-tab-id="zones" tabIndex={cameraSection === "zones" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "zones" ? "active" : ""} onClick={() => selectAdminSubsection("zones", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "zones"}><Crop size={15} />Zones</button>
@@ -2530,7 +2503,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                     {cameraSection === "settings" ? <>
                       <div className="camera-connectivity-grid">
                         <section className="sub-panel camera-stream-panel" aria-labelledby={`camera-stream-title-${selectedCamera.id}`}>
-                          <h3 id={`camera-stream-title-${selectedCamera.id}`}>Streams</h3>
+                          <h3 id={`camera-stream-title-${selectedCamera.id}`} className="section-heading-with-icon"><span className="section-heading-icon"><Camera size={16} /></span>Streams</h3>
                           <div className="field-row stream-field-row camera-stream-url-fields">
                             <div className="stream-field">
                               <div className="stream-field-head">
@@ -3749,7 +3722,7 @@ export function RetentionSummary({ status }) {
   );
 }
 
-export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section }) {
+export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, onOpenApiTokens = null, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
   const [productUpdate, setProductUpdate] = useState(null);
@@ -3761,6 +3734,8 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const [apiTokenError, setApiTokenError] = useState("");
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
   const [detectionSection, setDetectionSection] = useState("object");
+  const [storageSection, setStorageSection] = useState("locations");
+  const [apiSection, setApiSection] = useState("tokens");
   const mediaLocations = config.media_storage?.locations || [];
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
@@ -4071,9 +4046,9 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   }
 
   return (
-    <div className={`general-settings-content config-form${section === "detection" ? " detection-settings-content" : ""}`}>
+    <div className={`general-settings-content config-form${section === "detection" ? " detection-settings-content" : ""}${["storage", "access", "mqtt"].includes(section) ? " subsection-settings-content" : ""}`}>
       {section === "general" ? (
-        <div className="sub-panel">
+        <div className="sub-panel general-preferences-panel">
           <h3>General</h3>
           <label>Timezone<select value={timeZone} onChange={(event) => setTimeZone(event.target.value)}>
             {US_TIME_ZONES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
@@ -4139,16 +4114,21 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       ) : null}
 
       {section === "storage" ? (
-        <div className="sub-panel">
-          <h3>Storage</h3>
-          <div className="admin-field-grid">
+        <div className="sub-panel subsection-workspace">
+          <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs storage-subsection-tabs" aria-label="Storage and retention settings">
+            {[['locations', 'Locations', HardDrive], ['media', 'Media', Monitor], ['retention', 'Retention & Cleanup', Clock3], ['advanced', 'Advanced', Wrench]].map(([value, label, Icon]) => (
+              <button type="button" key={value} className={storageSection === value ? "active" : ""} aria-pressed={storageSection === value} onClick={() => setStorageSection(value)}><Icon size={15} />{label}</button>
+            ))}
+          </nav>
+          <div className="subsection-workspace-content">
+          <div className="admin-field-grid" hidden={storageSection !== "locations"}>
             <label>Storage Directory<input value={config.storage_dir || ""} onChange={(event) => updateConfig(["storage_dir"], event.target.value)} /></label>
             <label>Metadata Database Directory<input value={config.database_dir || ""} onChange={(event) => updateConfig(["database_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
             <label>Recording Index Directory<input value={config.recording_index_dir || ""} onChange={(event) => updateConfig(["recording_index_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
           </div>
-          <section className="media-storage-settings">
+          <section className="media-storage-settings" hidden={storageSection !== "locations"}>
             <div className="retention-heading">
-              <div><h4>Media locations</h4><p>Place recordings and related media on one or more independently managed filesystems. At least one location is required.</p></div>
+              <div><h4 className="section-heading-with-icon"><span className="section-heading-icon"><HardDrive size={16} /></span>Media locations</h4><p>Place recordings and related media on one or more independently managed filesystems. At least one location is required.</p></div>
               <button type="button" onClick={addMediaLocation}><Plus size={15} /> Add location</button>
             </div>
             <div className="admin-field-grid">
@@ -4179,7 +4159,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
             <p className="retention-protection"><ShieldCheck size={15} /> Databases, indexes, models, and playback cache remain on local SurvNG storage. A required mount is never replaced by its empty mountpoint.</p>
           </section>
-          <div className="prewarm-setting">
+          <div className="prewarm-setting" hidden={storageSection !== "media"}>
             <h4>Evidence image storage</h4>
             <div className="field-row">
               <label>Format<select value={config.image_storage?.format || "webp"} onChange={(event) => updateConfig(["image_storage", "format"], event.target.value)}><option value="webp">WebP (recommended)</option><option value="jpeg">JPEG</option></select></label>
@@ -4187,7 +4167,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
             <p>Controls newly saved incident and motion-audit images. Higher quality preserves more forensic detail but uses more space. Existing images are left unchanged, and live snapshots remain JPEG for compatibility.</p>
           </div>
-          <div className="admin-field-grid">
+          <div className="admin-field-grid" hidden={storageSection !== "advanced"}>
             <label>FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} /></label>
             <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}>
               <option value="auto">Auto (VAAPI preferred)</option>
@@ -4195,10 +4175,12 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <option value="qsv">Intel QSV</option>
               <option value="off">Off</option>
             </select></label>
+          </div>
+          <div className="admin-field-grid" hidden={storageSection !== "media"}>
             <label>Recording Segment Seconds<input type="number" min="2" max="300" step="1" value={config.recording_segment_seconds ?? 10} onChange={(event) => updateConfig(["recording_segment_seconds"], Number(event.target.value))} /></label>
             <label>Event Clip Before<input type="number" min="0" max="30" step="1" value={config.event_clip_before_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_before_seconds"], Number(event.target.value))} /></label>
             <label>Event Clip After<input type="number" min="0" max="30" step="1" value={config.event_clip_after_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_after_seconds"], Number(event.target.value))} /></label>
-            <label>Incident thumbnail object focus<select value={config.incident_thumbnail_object_focus || "off"} onChange={(event) => updateConfig(["incident_thumbnail_object_focus"], event.target.value)}>
+            <label>Incident thumbnail object focus<select className="incident-thumbnail-focus-select" value={config.incident_thumbnail_object_focus || "off"} onChange={(event) => updateConfig(["incident_thumbnail_object_focus"], event.target.value)}>
               <option value="off">Off (full frame)</option>
               <option value="auto">Auto crop to objects</option>
               <option value="button">Manual crop button</option>
@@ -4207,18 +4189,18 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             <label>Playback Cache GB<input type="number" min="0.5" max="100" step="0.5" value={config.recording_cache_max_gb ?? 5} onChange={(event) => updateConfig(["recording_cache_max_gb"], Number(event.target.value))} /></label>
             <label>Playback Cache Days<input type="number" min="1" max="90" step="1" value={config.recording_cache_max_days ?? 7} onChange={(event) => updateConfig(["recording_cache_max_days"], Number(event.target.value))} /></label>
           </div>
-          <div className="prewarm-setting">
+          <div className="prewarm-setting" hidden={storageSection !== "media"}>
             <label className="check-field"><input type="checkbox" checked={config.incident_thumbnail_annotations ?? false} onChange={(event) => updateConfig(["incident_thumbnail_annotations"], event.target.checked)} /> Show detection boxes on incident thumbnails</label>
             <p>Draws stored object boxes on compact incident thumbnails in Incidents and Live Recent Activity. Object crop/zoom works independently of this overlay.</p>
           </div>
-          <div className="prewarm-setting">
+          <div className="prewarm-setting" hidden={storageSection !== "media"}>
             <label className="check-field"><input type="checkbox" checked={config.recording_cache_prewarm ?? true} onChange={(event) => updateConfig(["recording_cache_prewarm"], event.target.checked)} /> Prewarm finalized recordings</label>
             <p>Prepares each completed recording in the background so it opens faster on iPhone and in browsers. It trades additional remux work and playback-cache space for a shorter initial loading delay.</p>
           </div>
-          {recordingCache ? <div className="probe-result"><strong>Playback Cache</strong><span>{formatBytes(recordingCache.bytes)} used across {recordingCache.entries} fragments</span><span>{formatBytes(recordingCache.max_bytes)} limit, {recordingCache.max_days} day maximum age</span><span>{recordingCache.metrics?.playback_hits || 0} hits / {recordingCache.metrics?.playback_misses || 0} misses, {recordingCache.metrics?.playback_avg_remux_ms || 0} ms average remux</span></div> : null}
-          <div className="retention-settings">
+          {recordingCache ? <div className="probe-result" hidden={storageSection !== "media"}><strong>Playback Cache</strong><span>{formatBytes(recordingCache.bytes)} used across {recordingCache.entries} fragments</span><span>{formatBytes(recordingCache.max_bytes)} limit, {recordingCache.max_days} day maximum age</span><span>{recordingCache.metrics?.playback_hits || 0} hits / {recordingCache.metrics?.playback_misses || 0} misses, {recordingCache.metrics?.playback_avg_remux_ms || 0} ms average remux</span></div> : null}
+          <div className="retention-settings" hidden={storageSection !== "retention"}>
             <div className="retention-heading">
-              <div><h4>Media retention</h4><p>Daily recording and incident-snapshot planning with lightweight cleanup checks every 15 minutes.</p></div>
+              <div><h4 className="section-heading-with-icon"><span className="section-heading-icon"><Clock3 size={16} /></span>Media retention</h4><p>Daily recording and incident-snapshot planning with lightweight cleanup checks every 15 minutes.</p></div>
               <span className={`retention-state ${retentionStatus?.state || "starting"}`}>
                 {String(retentionStatus?.state || "calculating").replaceAll("_", " ")}
                 {retentionStatus?.progress && Number(retentionStatus.progress.initial_bytes || 0) > 0
@@ -4246,20 +4228,24 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
             <p className="retention-protection"><ShieldCheck size={15} /> Incident snapshots expire only after their configured history; face-reference images, incident clips, metadata databases, and the newest five minutes of recording remain protected.</p>
           </div>
+          </div>
         </div>
       ) : null}
 
       {section === "access" ? (
-        <AccessSettings config={config} updateConfig={updateConfig} commitImmediateConfig={commitImmediateConfig} />
+        <AccessSettings config={config} updateConfig={updateConfig} commitImmediateConfig={commitImmediateConfig} onOpenApiTokens={onOpenApiTokens} />
       ) : null}
 
 
       {section === "mqtt" ? (
-        <div className="sub-panel">
-          <h3>API</h3>
-          <section className="api-access-settings">
+        <div className="sub-panel subsection-workspace">
+          <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="API and MQTT settings">
+            {[["tokens", "API Tokens", KeyRound], ["mqtt", "MQTT", Radio], ["ai", "AI Provider", Sparkles]].map(([value, label, Icon]) => <button type="button" key={value} className={apiSection === value ? "active" : ""} aria-pressed={apiSection === value} onClick={() => setApiSection(value)}><Icon size={15} />{label}</button>)}
+          </nav>
+          <div className="subsection-workspace-content">
+          <section className="api-access-settings api-token-settings" hidden={apiSection !== "tokens"}>
             <div className="detection-settings-subhead">
-              <div><strong>API access tokens</strong><small>Long-lived credentials for Home Assistant and other integrations. Secrets are displayed only once and are never stored in readable form.</small></div>
+              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><KeyRound size={16} /></span>API access tokens</strong><small>Long-lived credentials for Home Assistant and other integrations. Secrets are displayed only once and are never stored in readable form.</small></div>
               <div className="admin-action-status"><span className="admin-action-kind">Save settings to apply</span><span className={`retention-state ${config.api_auth?.enabled ? "running" : "idle"}`}>{config.api_auth?.enabled ? "Enforced" : "Not enforced"}</span></div>
             </div>
             <div className="api-auth-toggle">
@@ -4297,9 +4283,9 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             {apiTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this token now</strong><code>{apiTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(apiTokenSecret)}><Copy size={14} /> Copy</button><small>It cannot be displayed again after you leave this page.</small></div> : null}
             {apiTokenError ? <div className="error-banner">{apiTokenError}</div> : null}
           </section>
-          <section className="api-access-settings mqtt-access-settings">
+          <section className="api-access-settings mqtt-access-settings" hidden={apiSection !== "mqtt"}>
             <div className="detection-settings-subhead">
-              <div><strong>MQTT</strong><small>Broker connection, Home Assistant discovery, incident publishing, and server telemetry.</small></div>
+              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>MQTT</strong><small>Broker connection, Home Assistant discovery, incident publishing, and server telemetry.</small></div>
               <div className="admin-action-status"><span className="admin-action-kind">Save settings to apply</span><span className={`retention-state ${mqttStatus?.connected ? "running" : "idle"}`}>{mqttStatus?.connected ? "Connected" : config.mqtt?.enabled ? "Disconnected" : "Disabled"}</span></div>
             </div>
             <div className="admin-field-grid">
@@ -4321,9 +4307,9 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
             {mqttStatus ? <div className={`probe-result ${mqttStatus.connected ? "ok" : ""}`}><strong>Connection details</strong><span>{mqttStatus.host || "No broker"}:{mqttStatus.port || 1883}</span><span>{mqttStatus.messages_published || 0} published · {mqttStatus.publish_failures || 0} publish failures</span><span>Commands: {mqttStatus.command_subscriptions_active ? "ready" : mqttStatus.connected ? "not subscribed" : "offline"} · {mqttStatus.commands_received || 0} accepted · {mqttStatus.commands_rejected || 0} rejected · {mqttStatus.command_errors || 0} failed · {mqttStatus.command_queue_depth || 0} queued</span>{mqttStatus.server_status_enabled ? <span>Server: {mqttStatus.server_lifecycle || "starting"} · {mqttStatus.server_state?.health || "pending"} · {mqttStatus.server_state?.activity || "idle"} · every {mqttStatus.server_metrics_interval_seconds || 30}s · {mqttStatus.server_state_topic}</span> : null}{mqttStatus.incident_events_enabled ? <span>Incidents: {mqttStatus.incident_topic} ({mqttStatus.pending_incidents || 0} pending)</span> : null}{mqttStatus.server_status_error ? <span>Server metrics: {mqttStatus.server_status_error}</span> : null}{mqttStatus.last_error ? <span>{mqttStatus.last_error}</span> : null}</div> : null}
           </section>
-          <section className="api-access-settings ai-provider-settings" id="ai-provider-settings">
+          <section className="api-access-settings ai-provider-settings" id="ai-provider-settings" hidden={apiSection !== "ai"}>
             <div className="detection-settings-subhead">
-              <div><strong>AI Provider</strong><small>Shared provider for the assistant, Motion Audit reviews, and Camera Advisor.</small></div>
+              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Sparkles size={16} /></span>AI Provider</strong><small>Shared provider for the assistant, Motion Audit reviews, and Camera Advisor.</small></div>
               <span className="admin-action-kind">Save settings to apply</span>
             </div>
             <div className="detection-field-grid">
@@ -4342,14 +4328,16 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /><span>Allow confirmed changes</span></label>
             </div>
           </section>
+          </div>
         </div>
       ) : null}
 
       {section === "detection" ? (
-        <div className="detection-settings">
+        <div className="detection-settings subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
             {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
+          <div className="detection-settings-content">
           {detectionSection === "object" ? <section className="detection-settings-card primary">
             <header className="detection-settings-card-head">
               <div className="detection-settings-card-icon"><ScanFace size={18} /></div>
@@ -4616,6 +4604,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label>Minimum Lead Over Next Person<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_margin ?? 0.12} onChange={(event) => updateConfig(["detector", "face_auto_identify_margin"], Number(event.target.value))} /></label>
             </div>
           </details> : null}
+          </div>
         </div>
       ) : null}
 

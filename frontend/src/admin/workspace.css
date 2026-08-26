@@ -1,4 +1,8 @@
 /* Unified Admin workspace */
+.settings-grid [hidden] {
+  display: none !important;
+}
+
 .settings-grid {
   --admin-card-radius: 8px;
   --admin-card-padding: 14px;
@@ -212,6 +216,21 @@
 
 .admin-command-bar .camera-command-bar button {
   min-height: 38px;
+}
+
+.admin-command-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.admin-command-filter select {
+  min-height: 36px;
+  max-width: 150px;
+  font-size: 12px;
 }
 
 .admin-command-bar .log-command-controls {
@@ -489,6 +508,11 @@
   font-size: 13px;
 }
 
+.settings-grid .incident-thumbnail-focus-select {
+  height: var(--admin-field-height);
+  min-height: var(--admin-field-height);
+}
+
 .settings-grid .general-settings-content {
   gap: 14px;
   padding: var(--admin-panel-inset);
@@ -513,6 +537,70 @@
   font-weight: 650;
 }
 
+.settings-grid .general-preferences-panel {
+  width: 50%;
+}
+
+.settings-grid .api-token-settings {
+  width: 50%;
+}
+
+@media (max-width: 900px) {
+  .settings-grid .general-preferences-panel {
+    width: 100%;
+  }
+
+  .settings-grid .api-token-settings {
+    width: 100%;
+  }
+}
+
+/* Keep the top-level subsection bars anchored identically to Camera settings. */
+.settings-grid .general-settings-content.subsection-settings-content {
+  gap: 0;
+  padding: 0;
+}
+
+.settings-grid .subsection-workspace {
+  border: 0;
+  border-radius: 0;
+  background: var(--panel-solid);
+  padding: 0;
+}
+
+.settings-grid .subsection-workspace-content {
+  display: grid;
+  gap: var(--admin-panel-inset);
+  padding: var(--admin-panel-inset);
+}
+
+.settings-grid .calibration-tabs-shell .tuneup-section-list {
+  display: flex;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--admin-card-radius);
+  background: var(--subtle);
+  padding: 5px;
+}
+
+.settings-grid .calibration-tabs-shell .tuneup-section-list button {
+  display: inline-flex;
+  width: auto;
+  min-height: 44px;
+  border: 1px solid transparent;
+  border-left: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 12px;
+}
+
+.settings-grid .calibration-tabs-shell .tuneup-section-list button.active {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+  background: color-mix(in srgb, var(--accent) 14%, var(--control));
+  color: var(--accent);
+}
+
 /* Shared Configure visual language: section cards, fields, and subsection tabs. */
 .settings-grid .detection-settings-card,
 .settings-grid .media-storage-settings,
@@ -531,6 +619,65 @@
 .settings-grid .api-access-settings,
 .settings-grid .media-storage-settings {
   padding: var(--admin-card-padding);
+}
+
+/* Match the Access pattern: shade each section card, not the whole workspace. */
+.settings-grid .sub-panel:not(.subsection-workspace) {
+  background: var(--control-muted);
+}
+
+.settings-grid .detection-settings .detection-field-grid,
+.settings-grid .detection-settings .detection-feature-body {
+  background: transparent;
+}
+
+/* Detection follows the Camera editor's flush submenu-to-section layout. */
+.settings-grid .detection-settings {
+  padding: 0;
+  display: block;
+}
+
+.settings-grid .detection-settings-content {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+  padding: var(--admin-panel-inset);
+}
+
+.settings-grid .detection-settings-content>.wide-card,
+.settings-grid .detection-settings-content>.detection-settings-card.primary {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 900px) {
+  .settings-grid .detection-settings-content {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Storage and Detection keep light boundaries instead of raised shaded cards. */
+.settings-grid .detection-settings-card,
+.settings-grid .media-storage-settings {
+  background: transparent;
+}
+
+.settings-grid .section-heading-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.settings-grid .section-heading-icon {
+  display: inline-grid;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--control));
+  color: var(--accent);
 }
 
 .settings-grid .media-location-card,
@@ -565,6 +712,16 @@
   font-weight: 650;
 }
 
+/* Section titles stand on their own; keep help beside individual controls instead. */
+.settings-grid .detection-settings-card-head p,
+.settings-grid .detection-settings-subhead small,
+.settings-grid .detection-feature-card>summary small,
+.settings-grid .retention-heading p,
+.settings-grid .telemetry-section-head p,
+.settings-grid .models-hardware-head p {
+  display: none;
+}
+
 .settings-grid .admin-section-tabs {
   gap: 5px;
   border-color: var(--line);
@@ -583,6 +740,10 @@
   border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
   background: color-mix(in srgb, var(--accent) 14%, var(--control));
   color: var(--accent);
+}
+
+#admin-panel-cameras>.camera-section-tabs {
+  margin: 0;
 }
 
 /* Observe and Act use the same three-surface hierarchy as Configure: panel,
