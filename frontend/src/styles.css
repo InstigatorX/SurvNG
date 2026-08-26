@@ -4512,7 +4512,8 @@ button.live-overlay-backdrop:active {
   grid-column: 1 / -1;
 }
 
-.tls-upload-form textarea {
+.tls-upload-form textarea,
+.access-settings .trusted-proxies-input {
   width: 100%;
   min-height: 7.5rem;
   padding: 8px 10px;
@@ -4522,6 +4523,9 @@ button.live-overlay-backdrop:active {
   color: var(--ink);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre;
+  overflow: auto;
   resize: vertical;
 }
 

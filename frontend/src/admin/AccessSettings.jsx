@@ -21,6 +21,20 @@ function apiDetail(payload, fallback) {
   return fallback;
 }
 
+function formatTrustedProxies(value) {
+  const items = Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
+  return items.length ? items.join("\n") : "127.0.0.1\n::1";
+}
+
+function parseTrustedProxies(text) {
+  return [...new Set(
+    String(text || "")
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  )];
+}
+
 export function AccessSettings({ config, updateConfig, commitImmediateConfig }) {
   const [users, setUsers] = useState(config.web_auth?.users || []);
   const enabled = Boolean(config.web_auth?.enabled);
@@ -31,6 +45,7 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
   const [error, setError] = useState("");
   const [tlsHostname, setTlsHostname] = useState(config.tls?.hostname || "");
   const [tlsPort, setTlsPort] = useState(config.tls?.port || 0);
+  const [proxyText, setProxyText] = useState(() => formatTrustedProxies(config.proxy?.trusted_proxies));
 
   async function load() {
     const [usersResponse, tlsResponse] = await Promise.all([
@@ -287,18 +302,22 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
           />
           <small>How long a signed-in browser stays signed in. Save settings to apply. New sign-ins use this length; current sessions keep their existing expiry unless you change that user’s password.</small>
         </label>
-        <label>Trusted reverse proxies
+        <label className="trusted-proxies-field">Trusted reverse proxies
           <textarea
-            rows={3}
-            value={(config.proxy?.trusted_proxies || ["127.0.0.1", "::1"]).join("\n")}
-            onChange={(event) => updateConfig(
-              ["proxy", "trusted_proxies"],
-              event.target.value.split(/\n|,/).map((item) => item.trim()).filter(Boolean),
-            )}
+            className="trusted-proxies-input"
+            rows={4}
+            value={proxyText}
+            onChange={(event) => {
+              const text = event.target.value;
+              setProxyText(text);
+              updateConfig(["proxy", "trusted_proxies"], parseTrustedProxies(text));
+            }}
             spellCheck="false"
+            wrap="off"
+            autoComplete="off"
             placeholder={"127.0.0.1\n::1"}
           />
-          <small>Only these IPs or CIDRs may set HTTPS and client-IP headers. Use 127.0.0.1 when nginx is on this computer. When nginx is on another server, list that server’s IP (not 127.0.0.1) and do not bind SurvNG to loopback. Docker networks often need 172.16.0.0/12. Save settings to apply. See Help → Reverse proxy.</small>
+          <small>One IP or CIDR per line (commas are also fine). Only these addresses may set HTTPS and client-IP headers. Use 127.0.0.1 when nginx is on this computer. When nginx is on another server, list that server’s IP (not 127.0.0.1) and do not bind SurvNG to loopback. Docker networks often need 172.16.0.0/12. Save settings to apply. See Help → Reverse proxy.</small>
         </label>
         <div className="api-token-list">
           {users.map((user) => (
