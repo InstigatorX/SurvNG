@@ -136,7 +136,7 @@ export function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusControls = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
+export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
   const boxCoordinateSize = incidentDetectionFrameSize(event);
@@ -184,18 +184,31 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   // Crop from the full snapshot on the server, then encode near display size.
   const focusThumbnailWidth = Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * devicePixelRatio)));
   const focusThumbnailQuality = 90;
+  const focusAspect = objectFocusAspect?.width > 0 && objectFocusAspect?.height > 0 ? objectFocusAspect : null;
   const thumbnailSrc = useServerObjectCrop
-    ? eventThumbnailUrl(event, focusThumbnailWidth, focusThumbnailQuality, { objectFocus: true, zoom: focusZoom })
+    ? eventThumbnailUrl(event, focusThumbnailWidth, focusThumbnailQuality, {
+      objectFocus: true,
+      zoom: focusZoom,
+      aspectWidth: focusAspect?.width,
+      aspectHeight: focusAspect?.height,
+    })
     : eventThumbnailUrl(event);
-  const focusImageKey = `${progressiveImageKey}:object-focus:${focusThumbnailWidth}:${focusZoom}`;
+  const focusImageKey = `${progressiveImageKey}:object-focus:${focusThumbnailWidth}:${focusZoom}:${focusAspect?.width || 0}x${focusAspect?.height || 0}`;
   const imageReady = loadedImageKey === progressiveImageKey
     || (useServerObjectCrop && loadedImageKey === focusImageKey);
   const focusCrop = useMemo(() => {
     if (!useServerObjectCrop) return null;
     const sourceWidth = boxCoordinateSize?.width || imageSize?.width;
     const sourceHeight = boxCoordinateSize?.height || imageSize?.height;
-    return incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, focusZoom);
-  }, [boxCoordinateSize?.height, boxCoordinateSize?.width, boxes, focusZoom, imageSize?.height, imageSize?.width, useServerObjectCrop]);
+    return incidentObjectFocusCropRect(
+      sourceWidth,
+      sourceHeight,
+      boxes,
+      focusZoom,
+      focusAspect?.width,
+      focusAspect?.height,
+    );
+  }, [boxCoordinateSize?.height, boxCoordinateSize?.width, boxes, focusAspect?.height, focusAspect?.width, focusZoom, imageSize?.height, imageSize?.width, useServerObjectCrop]);
 
   useLayoutEffect(() => {
     setObjectFocused(preferFocused && boxes.length > 0);

@@ -92,11 +92,61 @@ def _clamp_object_focus_zoom(zoom: float) -> float:
     return float(min(5.5, max(0.25, value)))
 
 
+def _fit_crop_to_aspect(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    frame_width: int,
+    frame_height: int,
+    aspect_width: float,
+    aspect_height: float,
+) -> tuple[int, int, int, int]:
+    """Expand a subject crop with background until it matches the target aspect."""
+    target_aspect = aspect_width / aspect_height
+    crop_width = x2 - x1
+    crop_height = y2 - y1
+    center_x = (x1 + x2) * 0.5
+    center_y = (y1 + y2) * 0.5
+    if crop_width / crop_height > target_aspect:
+        crop_height = crop_width / target_aspect
+    else:
+        crop_width = crop_height * target_aspect
+    x1 = center_x - crop_width * 0.5
+    x2 = center_x + crop_width * 0.5
+    y1 = center_y - crop_height * 0.5
+    y2 = center_y + crop_height * 0.5
+
+    if x2 - x1 > frame_width:
+        x1, x2 = 0.0, float(frame_width)
+    elif x1 < 0:
+        x2 -= x1
+        x1 = 0.0
+    elif x2 > frame_width:
+        x1 -= x2 - frame_width
+        x2 = float(frame_width)
+        x1 = max(0.0, x1)
+
+    if y2 - y1 > frame_height:
+        y1, y2 = 0.0, float(frame_height)
+    elif y1 < 0:
+        y2 -= y1
+        y1 = 0.0
+    elif y2 > frame_height:
+        y1 -= y2 - frame_height
+        y2 = float(frame_height)
+        y1 = max(0.0, y1)
+
+    return int(np.floor(x1)), int(np.floor(y1)), int(np.ceil(x2)), int(np.ceil(y2))
+
+
 def object_focus_crop_rect(
     frame_width: int,
     frame_height: int,
     boxes: list[tuple[int, int, int, int]],
     zoom: float = 1.0,
+    aspect_width: float = 0.0,
+    aspect_height: float = 0.0,
 ) -> tuple[int, int, int, int] | None:
     """Union object boxes with zoom-scaled padding in snapshot pixel space.
 
@@ -124,6 +174,11 @@ def object_focus_crop_rect(
     y2 = min(frame_height, int(np.ceil(max_y + pad_y)))
     if x2 <= x1 or y2 <= y1:
         return None
+    if aspect_width > 0 and aspect_height > 0:
+        return _fit_crop_to_aspect(
+            float(x1), float(y1), float(x2), float(y2),
+            frame_width, frame_height, aspect_width, aspect_height,
+        )
     return (x1, y1, x2, y2)
 
 
@@ -131,10 +186,14 @@ def _object_focus_thumbnail_frame(
     frame: np.ndarray,
     event: dict[str, Any],
     zoom: float = 1.0,
+    aspect_width: float = 0.0,
+    aspect_height: float = 0.0,
 ) -> np.ndarray:
     frame_height, frame_width = frame.shape[:2]
     boxes = _event_object_boxes(event, frame_width, frame_height)
-    crop = object_focus_crop_rect(frame_width, frame_height, boxes, zoom)
+    crop = object_focus_crop_rect(
+        frame_width, frame_height, boxes, zoom, aspect_width, aspect_height,
+    )
     if crop is None:
         return frame
     x1, y1, x2, y2 = crop
@@ -236,11 +295,17 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         quality: int = 82,
         object_focus: bool = False,
         zoom: float = 1.0,
+        aspect_w: float = 0.0,
+        aspect_h: float = 0.0,
     ) -> FileResponse:
         safe_width = max(160, min(int(width), 2560))
         safe_quality = max(50, min(int(quality), 95))
         focus_enabled = bool(object_focus)
         focus_zoom = _clamp_object_focus_zoom(zoom)
+        focus_aspect_w = max(0.0, float(aspect_w))
+        focus_aspect_h = max(0.0, float(aspect_h))
+        if focus_enabled and (focus_aspect_w <= 0 or focus_aspect_h <= 0):
+            focus_aspect_w, focus_aspect_h = 16.0, 9.0
 
         def response(active_manager: AppManager) -> FileResponse:
             event = active_manager.events.get(event_id)
@@ -259,7 +324,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             identity = (
                 f"{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:"
-                f"{safe_width}:{safe_quality}:{int(focus_enabled)}:{focus_zoom:.3f}"
+                f"{safe_width}:{safe_quality}:{int(focus_enabled)}:{focus_zoom:.3f}:"
+                f"{focus_aspect_w:.3f}:{focus_aspect_h:.3f}"
             )
 
             def build() -> bytes:
@@ -269,7 +335,9 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                         status_code=404, detail="snapshot is unavailable"
                     )
                 if focus_enabled:
-                    frame = _object_focus_thumbnail_frame(frame, event, focus_zoom)
+                    frame = _object_focus_thumbnail_frame(
+                        frame, event, focus_zoom, focus_aspect_w, focus_aspect_h,
+                    )
                 return _jpeg_thumbnail(frame, safe_width, safe_quality)
 
             cached = active_manager.image_cache.get_or_create(

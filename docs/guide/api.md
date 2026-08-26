@@ -155,7 +155,7 @@ curl -s http://127.0.0.1:8088/api/config | python -m json.tool
 | GET | `/api/incidents/search` | Filtered incident search |
 | GET | `/api/incidents/by-event/{event_id}` | Incident containing an event |
 | GET | `/api/events/{event_id}/snapshot.jpg` | Full evidence image |
-| GET | `/api/events/{event_id}/thumbnail.jpg` | Resized thumbnail (`object_focus=true` crops to detected objects from the full snapshot before resize; optional `zoom`) |
+| GET | `/api/events/{event_id}/thumbnail.jpg` | Resized thumbnail (`object_focus=true` crops to detected objects from the full snapshot before resize; optional `zoom`, `aspect_w`, `aspect_h`) |
 | GET | `/api/events/{event_id}/clip.mp4` | Generated clip |
 | GET | `/api/events/{event_id}/stream.m3u8` | HLS around the event |
 | GET | `/api/events/{event_id}/related-incidents` | Nearby related incidents |

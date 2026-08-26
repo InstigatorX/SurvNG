@@ -91,6 +91,19 @@ assert.ok(incidentObjectFocusMaxScale(2560, 160, 2) >= 5);
   assert.ok(fitted.width * fitted.height > tight.width * tight.height);
 }
 {
+  const crop = incidentObjectFocusCropRect(
+    1920,
+    1080,
+    [{ x1: 400, y1: 200, x2: 600, y2: 500 }],
+    1,
+    16,
+    9,
+  );
+  assert.ok(crop);
+  assert.ok(Math.abs((crop.width / crop.height) - (16 / 9)) < 0.02);
+  assert.ok(crop.x1 <= 400 && crop.y1 <= 200 && crop.x2 >= 600 && crop.y2 >= 500);
+}
+{
   const base = incidentObjectFocusStyle(
     { width: 200, height: 100 },
     [{ left: 80, top: 40, width: 40, height: 20 }],
