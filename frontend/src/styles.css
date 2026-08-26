@@ -2089,7 +2089,7 @@ p {
 }
 
 .live-activity-thumb .snapshot-frame.object-focus-crop img {
-  object-fit: contain;
+  object-fit: cover;
 }
 
 .live-activity-copy {
@@ -3197,7 +3197,7 @@ button.live-overlay-backdrop:active {
 }
 
 .incident-preview .snapshot-frame.object-focus-crop img {
-  object-fit: contain;
+  object-fit: cover;
 }
 
 .incident-focus .incident-preview {

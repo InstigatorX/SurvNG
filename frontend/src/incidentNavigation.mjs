@@ -241,7 +241,7 @@ export function normalizeIncidentThumbnailObjectFocusZoom(zoom) {
   return Math.min(5.5, Math.max(0.25, value));
 }
 
-export function incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, zoom = 1) {
+export function incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, zoom = 1, aspectWidth = 0, aspectHeight = 0) {
   const width = Math.max(0, Number(sourceWidth) || 0);
   const height = Math.max(0, Number(sourceHeight) || 0);
   if (!width || !height || !Array.isArray(boxes) || !boxes.length) return null;
@@ -255,10 +255,55 @@ export function incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, zo
   const boxHeight = Math.max(1, maxY - minY);
   const padX = Math.max(width * 0.06, boxWidth * 0.45) / zoomFactor;
   const padY = Math.max(height * 0.08, boxHeight * 0.65) / zoomFactor;
-  const x1 = Math.max(0, Math.floor(minX - padX));
-  const y1 = Math.max(0, Math.floor(minY - padY));
-  const x2 = Math.min(width, Math.ceil(maxX + padX));
-  const y2 = Math.min(height, Math.ceil(maxY + padY));
+  let x1 = Math.max(0, Math.floor(minX - padX));
+  let y1 = Math.max(0, Math.floor(minY - padY));
+  let x2 = Math.min(width, Math.ceil(maxX + padX));
+  let y2 = Math.min(height, Math.ceil(maxY + padY));
+  if (x2 <= x1 || y2 <= y1) return null;
+  const aspectW = Number(aspectWidth);
+  const aspectH = Number(aspectHeight);
+  if (Number.isFinite(aspectW) && Number.isFinite(aspectH) && aspectW > 0 && aspectH > 0) {
+    const targetAspect = aspectW / aspectH;
+    let cropWidth = x2 - x1;
+    let cropHeight = y2 - y1;
+    const centerX = (x1 + x2) * 0.5;
+    const centerY = (y1 + y2) * 0.5;
+    if (cropWidth / cropHeight > targetAspect) {
+      cropHeight = cropWidth / targetAspect;
+    } else {
+      cropWidth = cropHeight * targetAspect;
+    }
+    x1 = centerX - cropWidth * 0.5;
+    x2 = centerX + cropWidth * 0.5;
+    y1 = centerY - cropHeight * 0.5;
+    y2 = centerY + cropHeight * 0.5;
+    if (x2 - x1 > width) {
+      x1 = 0;
+      x2 = width;
+    } else if (x1 < 0) {
+      x2 -= x1;
+      x1 = 0;
+    } else if (x2 > width) {
+      x1 -= x2 - width;
+      x2 = width;
+      x1 = Math.max(0, x1);
+    }
+    if (y2 - y1 > height) {
+      y1 = 0;
+      y2 = height;
+    } else if (y1 < 0) {
+      y2 -= y1;
+      y1 = 0;
+    } else if (y2 > height) {
+      y1 -= y2 - height;
+      y2 = height;
+      y1 = Math.max(0, y1);
+    }
+    x1 = Math.floor(x1);
+    y1 = Math.floor(y1);
+    x2 = Math.ceil(x2);
+    y2 = Math.ceil(y2);
+  }
   if (x2 <= x1 || y2 <= y1) return null;
   return { x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
 }

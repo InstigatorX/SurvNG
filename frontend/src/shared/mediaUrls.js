@@ -23,6 +23,12 @@ export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}
     params.set("object_focus", "true");
     const zoom = Number(options.zoom);
     if (Number.isFinite(zoom)) params.set("zoom", String(zoom));
+    const aspectW = Number(options.aspectWidth);
+    const aspectH = Number(options.aspectHeight);
+    if (Number.isFinite(aspectW) && Number.isFinite(aspectH) && aspectW > 0 && aspectH > 0) {
+      params.set("aspect_w", String(aspectW));
+      params.set("aspect_h", String(aspectH));
+    }
   }
   return appUrl(`/api/events/${eventId}/thumbnail.jpg?${params.toString()}`);
 }
