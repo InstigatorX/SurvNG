@@ -310,7 +310,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
     height: `${zoomLayout.height}px`,
   } : null;
   const activeLayerStyle = objectFocused && focusStyle ? focusStyle : zoomLayerStyle || layerStyle;
-  const aspect = imageSize ? `${imageSize.width} / ${imageSize.height}` : undefined;
+  const aspect = !useServerObjectCrop && imageSize ? `${imageSize.width} / ${imageSize.height}` : undefined;
   const prefersHighQualityRaster = highQualityZoom || (objectFocused && !useServerObjectCrop);
   const isTransforming = Boolean(activeLayerStyle?.transform);
 
