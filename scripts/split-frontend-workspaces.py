@@ -168,6 +168,7 @@ EXTERNAL = {
     "normalizeIncidentThumbnailObjectFocusZoom": "../incidentNavigation.mjs",
     "incidentThumbnailObjectFocusEnabled": "../incidentNavigation.mjs",
     "incidentObjectFocusStyle": "../incidentNavigation.mjs",
+    "incidentObjectFocusCropRect": "../incidentNavigation.mjs",
     "incidentObjectFocusThumbnailWidth": "../incidentNavigation.mjs",
     "incidentObjectFocusMaxScale": "../incidentNavigation.mjs",
     "motionAuditRegions": "../motionAudit.mjs",

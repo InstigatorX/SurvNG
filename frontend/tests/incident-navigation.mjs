@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectFocusThumbnailWidth, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailObjectFocusEnabled, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectFocusThumbnailWidth, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailObjectFocusEnabled, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -74,13 +74,22 @@ assert.equal(normalizeIncidentThumbnailObjectFocus("nope"), "off");
 assert.equal(incidentThumbnailObjectFocusEnabled("auto"), true);
 assert.equal(incidentThumbnailObjectFocusEnabled("off"), false);
 assert.equal(normalizeIncidentThumbnailObjectFocusZoom(2.5), 2.5);
-assert.equal(normalizeIncidentThumbnailObjectFocusZoom(0.2), 1);
+assert.equal(normalizeIncidentThumbnailObjectFocusZoom(0.5), 0.5);
+assert.equal(normalizeIncidentThumbnailObjectFocusZoom(0.2), 0.25);
 assert.equal(normalizeIncidentThumbnailObjectFocusZoom(9), 5.5);
 assert.equal(incidentObjectFocusThumbnailWidth(140, 2, 1), 1280);
 assert.equal(incidentObjectFocusThumbnailWidth(180, 2, 2), 1920);
 assert.equal(incidentObjectFocusThumbnailWidth(220, 3, 3), 2560);
 assert.ok(Math.abs(incidentObjectFocusMaxScale(720, 160, 2) - 3.0375) < 1e-9);
 assert.ok(incidentObjectFocusMaxScale(2560, 160, 2) >= 5);
+{
+  const loose = incidentObjectFocusCropRect(2000, 400, [{ x1: 900, y1: 150, x2: 1100, y2: 250 }], 0.5);
+  const fitted = incidentObjectFocusCropRect(2000, 400, [{ x1: 900, y1: 150, x2: 1100, y2: 250 }], 1);
+  const tight = incidentObjectFocusCropRect(2000, 400, [{ x1: 900, y1: 150, x2: 1100, y2: 250 }], 2);
+  assert.ok(loose && fitted && tight);
+  assert.ok(loose.width * loose.height > fitted.width * fitted.height);
+  assert.ok(fitted.width * fitted.height > tight.width * tight.height);
+}
 {
   const base = incidentObjectFocusStyle(
     { width: 200, height: 100 },
@@ -92,6 +101,11 @@ assert.ok(incidentObjectFocusMaxScale(2560, 160, 2) >= 5);
     [{ left: 80, top: 40, width: 40, height: 20 }],
     2,
   );
+  const looser = incidentObjectFocusStyle(
+    { width: 200, height: 100 },
+    [{ left: 80, top: 40, width: 40, height: 20 }],
+    0.5,
+  );
   const capped = incidentObjectFocusStyle(
     { width: 200, height: 100 },
     [{ left: 80, top: 40, width: 40, height: 20 }],
@@ -100,11 +114,15 @@ assert.ok(incidentObjectFocusMaxScale(2560, 160, 2) >= 5);
   );
   assert.ok(base);
   assert.ok(tighter);
+  assert.ok(looser);
   const baseScale = Number(/scale\(([^)]+)\)/.exec(base.transform)?.[1]);
   const tighterScale = Number(/scale\(([^)]+)\)/.exec(tighter.transform)?.[1]);
+  const looserScale = Number(/scale\(([^)]+)\)/.exec(looser.transform)?.[1]);
   const cappedScale = Number(/scale\(([^)]+)\)/.exec(capped.transform)?.[1]);
   assert.ok(baseScale >= 1);
   assert.ok(tighterScale > baseScale);
+  assert.ok(looserScale < baseScale);
+  assert.ok(looserScale >= 1);
   assert.equal(cappedScale, 1.5);
   assert.equal(incidentObjectFocusStyle({ width: 200, height: 100 }, [], 1), null);
 }

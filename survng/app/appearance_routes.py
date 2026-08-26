@@ -45,6 +45,101 @@ def _jpeg_thumbnail(frame: np.ndarray, width: int, quality: int) -> bytes:
     return encoded.tobytes()
 
 
+def _event_object_boxes(event: dict[str, Any], frame_width: int, frame_height: int) -> list[tuple[int, int, int, int]]:
+    """Return incident-eligible object boxes mapped into snapshot pixel space."""
+    try:
+        objects = json.loads(str(event.get("objects_json") or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        objects = event.get("objects")
+    if not isinstance(objects, list):
+        return []
+    boxes: list[tuple[int, int, int, int]] = []
+    for item in objects:
+        if not isinstance(item, dict):
+            continue
+        if item.get("incident_eligible") is False or item.get("snapshot_visible") is False:
+            continue
+        if not str(item.get("label") or "").strip():
+            continue
+        box = item.get("box")
+        if not isinstance(box, dict):
+            continue
+        try:
+            source_width = max(1, int(item.get("detection_frame_width") or frame_width))
+            source_height = max(1, int(item.get("detection_frame_height") or frame_height))
+            x1 = int(float(box["x1"]) * frame_width / source_width)
+            y1 = int(float(box["y1"]) * frame_height / source_height)
+            x2 = int(float(box["x2"]) * frame_width / source_width)
+            y2 = int(float(box["y2"]) * frame_height / source_height)
+        except (KeyError, TypeError, ValueError):
+            continue
+        x1 = max(0, min(frame_width, x1))
+        y1 = max(0, min(frame_height, y1))
+        x2 = max(0, min(frame_width, x2))
+        y2 = max(0, min(frame_height, y2))
+        if x2 > x1 and y2 > y1:
+            boxes.append((x1, y1, x2, y2))
+    return boxes
+
+
+def _clamp_object_focus_zoom(zoom: float) -> float:
+    try:
+        value = float(zoom)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(value):
+        return 1.0
+    return float(min(5.5, max(0.25, value)))
+
+
+def object_focus_crop_rect(
+    frame_width: int,
+    frame_height: int,
+    boxes: list[tuple[int, int, int, int]],
+    zoom: float = 1.0,
+) -> tuple[int, int, int, int] | None:
+    """Union object boxes with zoom-scaled padding in snapshot pixel space.
+
+    Zoom ``1`` matches the prior client fit padding. Values below ``1`` add
+    context; values above ``1`` tighten toward the objects. The crop is taken
+    from the full-resolution snapshot before any downscale, so object pixels
+    are preserved the way a screen grab would preserve them.
+    """
+    if frame_width <= 0 or frame_height <= 0 or not boxes:
+        return None
+    zoom_factor = _clamp_object_focus_zoom(zoom)
+    min_x = min(box[0] for box in boxes)
+    min_y = min(box[1] for box in boxes)
+    max_x = max(box[2] for box in boxes)
+    max_y = max(box[3] for box in boxes)
+    box_width = max(1, max_x - min_x)
+    box_height = max(1, max_y - min_y)
+    pad_x = max(frame_width * 0.04, box_width * 0.35) / zoom_factor
+    pad_y = max(frame_height * 0.04, box_height * 0.35) / zoom_factor
+    x1 = max(0, int(np.floor(min_x - pad_x)))
+    y1 = max(0, int(np.floor(min_y - pad_y)))
+    x2 = min(frame_width, int(np.ceil(max_x + pad_x)))
+    y2 = min(frame_height, int(np.ceil(max_y + pad_y)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def _object_focus_thumbnail_frame(
+    frame: np.ndarray,
+    event: dict[str, Any],
+    zoom: float = 1.0,
+) -> np.ndarray:
+    frame_height, frame_width = frame.shape[:2]
+    boxes = _event_object_boxes(event, frame_width, frame_height)
+    crop = object_focus_crop_rect(frame_width, frame_height, boxes, zoom)
+    if crop is None:
+        return frame
+    x1, y1, x2, y2 = crop
+    focused = frame[y1:y2, x1:x2]
+    return focused if focused.size else frame
+
+
 def _appearance_family_labels(event: dict[str, Any], tracking: Any) -> set[str]:
     try:
         objects = json.loads(str(event.get("objects_json") or "[]"))
@@ -134,10 +229,16 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
 
     @router.get("/api/events/{event_id}/thumbnail.jpg")
     def event_thumbnail(
-        event_id: int, width: int = 640, quality: int = 82
+        event_id: int,
+        width: int = 640,
+        quality: int = 82,
+        object_focus: bool = False,
+        zoom: float = 1.0,
     ) -> FileResponse:
         safe_width = max(160, min(int(width), 2560))
         safe_quality = max(50, min(int(quality), 95))
+        focus_enabled = bool(object_focus)
+        focus_zoom = _clamp_object_focus_zoom(zoom)
 
         def response(active_manager: AppManager) -> FileResponse:
             event = active_manager.events.get(event_id)
@@ -156,7 +257,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             identity = (
                 f"{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:"
-                f"{safe_width}:{safe_quality}"
+                f"{safe_width}:{safe_quality}:{int(focus_enabled)}:{focus_zoom:.3f}"
             )
 
             def build() -> bytes:
@@ -165,6 +266,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                     raise HTTPException(
                         status_code=404, detail="snapshot is unavailable"
                     )
+                if focus_enabled:
+                    frame = _object_focus_thumbnail_frame(frame, event, focus_zoom)
                 return _jpeg_thumbnail(frame, safe_width, safe_quality)
 
             cached = active_manager.image_cache.get_or_create(

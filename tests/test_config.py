@@ -185,10 +185,14 @@ class AppConfigTest(unittest.TestCase):
             AppConfig(incident_thumbnail_object_focus_zoom=2.25).incident_thumbnail_object_focus_zoom,
             2.25,
         )
+        self.assertEqual(
+            AppConfig(incident_thumbnail_object_focus_zoom=0.5).incident_thumbnail_object_focus_zoom,
+            0.5,
+        )
         with self.assertRaises(ValidationError):
             AppConfig(incident_thumbnail_object_focus="crop")
         with self.assertRaises(ValidationError):
-            AppConfig(incident_thumbnail_object_focus_zoom=0.5)
+            AppConfig(incident_thumbnail_object_focus_zoom=0.2)
         with self.assertRaises(ValidationError):
             AppConfig(incident_thumbnail_object_focus_zoom=6.0)
 

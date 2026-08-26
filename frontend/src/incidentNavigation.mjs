@@ -238,7 +238,29 @@ export function incidentThumbnailObjectFocusEnabled(mode) {
 export function normalizeIncidentThumbnailObjectFocusZoom(zoom) {
   const value = Number(zoom);
   if (!Number.isFinite(value)) return 1;
-  return Math.min(5.5, Math.max(1, value));
+  return Math.min(5.5, Math.max(0.25, value));
+}
+
+export function incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, zoom = 1) {
+  const width = Math.max(0, Number(sourceWidth) || 0);
+  const height = Math.max(0, Number(sourceHeight) || 0);
+  if (!width || !height || !Array.isArray(boxes) || !boxes.length) return null;
+  const zoomFactor = normalizeIncidentThumbnailObjectFocusZoom(zoom);
+  const minX = Math.min(...boxes.map((box) => Number(box.x1)));
+  const minY = Math.min(...boxes.map((box) => Number(box.y1)));
+  const maxX = Math.max(...boxes.map((box) => Number(box.x2)));
+  const maxY = Math.max(...boxes.map((box) => Number(box.y2)));
+  if (![minX, minY, maxX, maxY].every(Number.isFinite) || maxX <= minX || maxY <= minY) return null;
+  const boxWidth = Math.max(1, maxX - minX);
+  const boxHeight = Math.max(1, maxY - minY);
+  const padX = Math.max(width * 0.04, boxWidth * 0.35) / zoomFactor;
+  const padY = Math.max(height * 0.04, boxHeight * 0.35) / zoomFactor;
+  const x1 = Math.max(0, Math.floor(minX - padX));
+  const y1 = Math.max(0, Math.floor(minY - padY));
+  const x2 = Math.min(width, Math.ceil(maxX + padX));
+  const y2 = Math.min(height, Math.ceil(maxY + padY));
+  if (x2 <= x1 || y2 <= y1) return null;
+  return { x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
 }
 
 export function incidentObjectFocusThumbnailWidth(frameWidth, devicePixelRatio = 1, zoomFactor = 1) {
