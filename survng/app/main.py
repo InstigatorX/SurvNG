@@ -36,6 +36,7 @@ from .config_routes import (
     create_config_router,
 )
 from .appearance_routes import AppearanceRouteDependencies, create_appearance_router
+from .auth_routes import AuthRouteDependencies, create_auth_router
 from .camera_api_routes import (
     CameraApiDependencies,
     create_camera_api_router,
@@ -89,8 +90,15 @@ from .system_telemetry import (
     create_system_telemetry_router,
 )
 from .system_routes import SystemRouteDependencies, create_system_router
+from .tls_routes import TlsRouteDependencies, create_tls_router
 from .training_routes import TrainingRouteDependencies, create_training_router
-from .security import authenticate_api_token, redact_secret_text, required_api_scope
+from .security import (
+    authenticate_api_token,
+    authenticate_session,
+    is_public_api_path,
+    redact_secret_text,
+    required_api_scope,
+)
 from .storage_maintenance import StorageMaintenanceRunner
 
 config = load_config()
@@ -308,38 +316,53 @@ class SecurityBoundaryMiddleware:
     async def __call__(self, scope, receive, send) -> None:
         scope_type = scope.get("type")
         api_path = _api_scope_path(scope)
-        if (
-            scope_type in {"http", "websocket"}
-            and api_path.startswith("/api/")
-            and api_path != "/api/health"
-            and config.api_auth.enabled
-        ):
+        method = str(scope.get("method") or "GET")
+        if scope_type in {"http", "websocket"} and api_path.startswith("/api/"):
             authorization = _scope_header(scope, b"authorization")
-            principal = authenticate_api_token(authorization, config.api_auth)
-            required_scope = required_api_scope(
-                str(scope.get("method") or "GET"), api_path
+            principal = None
+            if config.api_auth.enabled:
+                principal = authenticate_api_token(authorization, config.api_auth)
+            if principal is None and config.web_auth.enabled:
+                principal = authenticate_session(
+                    _scope_header(scope, b"cookie"),
+                    config.web_auth,
+                )
+            if principal is not None:
+                scope = dict(scope)
+                scope["survng_principal"] = principal
+            needs_auth = (
+                (config.api_auth.enabled or config.web_auth.enabled)
+                and not is_public_api_path(method, api_path)
             )
-            if principal is None or not principal.permits(required_scope):
-                if scope_type == "websocket":
-                    await send({"type": "websocket.close", "code": 1008})
-                else:
-                    status = 401 if principal is None else 403
-                    headers = {"Cache-Control": "no-store"}
-                    if status == 401:
-                        headers["WWW-Authenticate"] = 'Bearer realm="SurvNG"'
-                    response = JSONResponse(
-                        {
-                            "detail": (
-                                "valid bearer token required"
-                                if status == 401
-                                else f"API token requires {required_scope} scope"
+            if needs_auth:
+                required_scope = required_api_scope(method, api_path)
+                if principal is None or not principal.permits(required_scope):
+                    if scope_type == "websocket":
+                        await send({"type": "websocket.close", "code": 1008})
+                    else:
+                        status = 401 if principal is None else 403
+                        headers = {"Cache-Control": "no-store"}
+                        if status == 401:
+                            headers["WWW-Authenticate"] = (
+                                'Bearer realm="SurvNG"'
+                                if config.api_auth.enabled and not config.web_auth.enabled
+                                else 'Session realm="SurvNG"'
                             )
-                        },
-                        status_code=status,
-                        headers=headers,
-                    )
-                    await response(scope, receive, send)
-                return
+                        response = JSONResponse(
+                            {
+                                "detail": (
+                                    "sign-in required"
+                                    if status == 401 and config.web_auth.enabled and not authorization
+                                    else "valid bearer token required"
+                                    if status == 401
+                                    else f"requires {required_scope} scope"
+                                )
+                            },
+                            status_code=status,
+                            headers=headers,
+                        )
+                        await response(scope, receive, send)
+                    return
         if (
             scope_type == "http"
             and APPLICATION_STOPPING.is_set()
@@ -935,6 +958,25 @@ app.include_router(
             validate_config=validate_manager_configuration,
             lock=MANAGER_RELOAD_LOCK,
             probe_limiter=CONFIG_PROBE_LIMITER,
+        )
+    )
+)
+app.include_router(
+    create_auth_router(
+        AuthRouteDependencies(
+            get_config=lambda: config,
+            apply_config=apply_config_update,
+            lock=MANAGER_RELOAD_LOCK,
+        )
+    )
+)
+app.include_router(
+    create_tls_router(
+        TlsRouteDependencies(
+            get_config=lambda: config,
+            apply_config=apply_config_update,
+            request_server_restart=_request_server_restart,
+            lock=MANAGER_RELOAD_LOCK,
         )
     )
 )

@@ -172,6 +172,16 @@ def restore_config_secrets(incoming: AppConfig, current: AppConfig) -> AppConfig
         if existing is None:
             raise ValueError("new API tokens must provide their own token hash")
         token.token_hash = existing.token_hash
+    if restored.web_auth.session_key == SECRET_PLACEHOLDER:
+        restored.web_auth.session_key = current.web_auth.session_key
+    current_users = {user.id: user for user in current.web_auth.users}
+    for user in restored.web_auth.users:
+        if user.password_hash != SECRET_PLACEHOLDER:
+            continue
+        existing_user = current_users.get(user.id)
+        if existing_user is None:
+            raise ValueError("new web users must be created through Access")
+        user.password_hash = existing_user.password_hash
     current_by_id = {camera.id: camera for camera in current.cameras}
     same_shape = len(restored.cameras) == len(current.cameras)
     restored.cameras = [
@@ -204,6 +214,10 @@ def redacted_config_payload(config: AppConfig) -> dict:
     payload["audit_ai"]["api_key"] = SECRET_PLACEHOLDER if config.audit_ai.api_key else ""
     for token in payload["api_auth"]["tokens"]:
         token["token_hash"] = SECRET_PLACEHOLDER
+    if payload["web_auth"].get("session_key"):
+        payload["web_auth"]["session_key"] = SECRET_PLACEHOLDER
+    for user in payload["web_auth"]["users"]:
+        user["password_hash"] = SECRET_PLACEHOLDER
     payload["cameras"] = [redacted_camera_payload(camera) for camera in config.cameras]
     return payload
 

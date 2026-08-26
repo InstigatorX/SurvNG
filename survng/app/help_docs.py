@@ -30,6 +30,7 @@ GUIDE_PAGES = (
     ("storage", "Recordings & storage"),
     ("assistant", "AI assistant"),
     ("integrations", "Integrations"),
+    ("access", "Access"),
     ("api", "HTTP API"),
 )
 

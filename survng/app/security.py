@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
-from collections.abc import Iterable
+import time
 from dataclasses import dataclass
 
-from .config import ApiAuthConfig, ApiScope
+from urllib.parse import unquote
+
+from .config import ApiAuthConfig, ApiScope, WebAuthConfig, WebRole, WebUserConfig
 
 
 _SECRET_URL_RE = re.compile(
@@ -46,14 +49,186 @@ def redact_secret_text(value: object) -> str:
     return _SECRET_FIELD_RE.sub(lambda match: f"{match.group(1)}***", redacted)
 
 
+SESSION_COOKIE_NAME = "survng_session"
+SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_DKLEN = 32
+_DUMMY_PASSWORD_HASH = ""
+
+
 @dataclass(frozen=True, slots=True)
 class ApiPrincipal:
     token_id: str
     name: str
     scopes: frozenset[ApiScope]
+    kind: str = "token"
+    role: str | None = None
+    username: str | None = None
 
     def permits(self, required_scope: ApiScope) -> bool:
         return "admin" in self.scopes or required_scope in self.scopes
+
+
+def scopes_for_web_role(role: WebRole) -> frozenset[ApiScope]:
+    if role == "admin":
+        return frozenset({"admin"})
+    return frozenset({"read"})
+
+
+def public_user_payload(user: WebUserConfig) -> dict[str, str]:
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name or user.username,
+        "role": user.role,
+    }
+
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=_SCRYPT_N,
+        r=_SCRYPT_R,
+        p=_SCRYPT_P,
+        dklen=_SCRYPT_DKLEN,
+    )
+    return (
+        f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${digest.hex()}"
+    )
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        scheme, n_text, r_text, p_text, salt_hex, digest_hex = password_hash.split("$")
+        if scheme != "scrypt":
+            return False
+        candidate = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=bytes.fromhex(salt_hex),
+            n=int(n_text),
+            r=int(r_text),
+            p=int(p_text),
+            dklen=len(bytes.fromhex(digest_hex)),
+        )
+    except (AttributeError, ValueError):
+        return False
+    return hmac.compare_digest(candidate, bytes.fromhex(digest_hex))
+
+
+def _dummy_password_hash() -> str:
+    global _DUMMY_PASSWORD_HASH
+    if not _DUMMY_PASSWORD_HASH:
+        _DUMMY_PASSWORD_HASH = hash_password("survng-dummy-password")
+    return _DUMMY_PASSWORD_HASH
+
+
+def encode_session(user_id: str, session_key: str, *, now: int | None = None) -> str:
+    issued = int(time.time() if now is None else now)
+    expires = issued + SESSION_TTL_SECONDS
+    payload = f"{user_id}:{issued}:{expires}"
+    digest = hmac.new(
+        session_key.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload}:{digest}"
+
+
+def decode_session(token: str, session_key: str, *, now: int | None = None) -> str | None:
+    try:
+        user_id, issued_text, expires_text, digest = token.split(":")
+        issued = int(issued_text)
+        expires = int(expires_text)
+    except ValueError:
+        return None
+    if not user_id or expires <= int(time.time() if now is None else now) or issued > expires:
+        return None
+    payload = f"{user_id}:{issued_text}:{expires_text}"
+    expected = hmac.new(
+        session_key.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(digest, expected):
+        return None
+    return user_id
+
+
+def session_cookie_value(cookie_header: str) -> str:
+    for part in cookie_header.split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator and name == SESSION_COOKIE_NAME:
+            return unquote(value.strip())
+    return ""
+
+
+def principal_for_web_user(user: WebUserConfig) -> ApiPrincipal:
+    return ApiPrincipal(
+        user.id,
+        user.display_name or user.username,
+        scopes_for_web_role(user.role),
+        kind="user",
+        role=user.role,
+        username=user.username,
+    )
+
+
+def authenticate_session(
+    cookie_header: str,
+    auth_config: WebAuthConfig,
+) -> ApiPrincipal | None:
+    if not auth_config.enabled or not auth_config.session_key:
+        return None
+    token = session_cookie_value(cookie_header)
+    if not token:
+        return None
+    user_id = decode_session(token, auth_config.session_key)
+    if user_id is None:
+        return None
+    matched = next((user for user in auth_config.users if user.id == user_id), None)
+    if matched is None:
+        return None
+    return principal_for_web_user(matched)
+
+
+def find_web_user(auth_config: WebAuthConfig, username: str) -> WebUserConfig | None:
+    wanted = username.strip().casefold()
+    matched = None
+    for user in auth_config.users:
+        if user.username.casefold() == wanted:
+            matched = user
+    return matched
+
+
+def authenticate_password(
+    username: str,
+    password: str,
+    auth_config: WebAuthConfig,
+) -> WebUserConfig | None:
+    user = find_web_user(auth_config, username)
+    password_hash = user.password_hash if user is not None else _dummy_password_hash()
+    if not verify_password(password, password_hash):
+        return None
+    return user
+
+
+def is_public_api_path(method: str, path: str) -> bool:
+    normalized = method.upper()
+    if path == "/api/health":
+        return True
+    if path == "/api/auth/session" and normalized in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    if path == "/api/auth/login" and normalized == "POST":
+        return True
+    if path == "/api/auth/logout" and normalized == "POST":
+        return True
+    if path == "/api/auth/bootstrap" and normalized == "POST":
+        return True
+    return False
 
 
 def hash_api_token(token: str) -> str:
@@ -93,6 +268,10 @@ def required_api_scope(method: str, path: str) -> ApiScope:
     # Process logs can contain operationally sensitive context even after
     # redaction, so they are not part of the integration-facing read surface.
     if path == "/api/logs":
+        return "admin"
+    if path.startswith("/api/tls"):
+        return "admin"
+    if path.startswith("/api/auth/") and path not in {"/api/auth/session", "/api/auth/login", "/api/auth/logout", "/api/auth/bootstrap"}:
         return "admin"
     if normalized_method in {"GET", "HEAD", "OPTIONS"}:
         return "read"

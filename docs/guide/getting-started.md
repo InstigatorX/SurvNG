@@ -14,6 +14,10 @@ On another device on the same network, use the server’s LAN address instead of
 
 You should land on **Live**. The left side lists the main workspaces: Live, Incidents, Timeline, Exports, Search, People, and Admin.
 
+If the host already requires sign-in, use the account an administrator created for you.
+
+To lock a new install, open **Admin → Access**, create an administrator, and enable sign-in. Details: [Access](access.md).
+
 ![Live camera grid](images/live-command-center.png)
 
 ## 2. Check that the server looks healthy

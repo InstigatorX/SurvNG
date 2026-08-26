@@ -11,6 +11,7 @@ import {
   Gauge,
   HardDrive,
   Search,
+  LogOut,
   Monitor,
   PanelLeftClose,
   PanelLeftOpen,
@@ -40,7 +41,7 @@ export const WORKSPACE_ICONS = Object.freeze({
   admin: Cog,
 });
 
-export function MobileMoreSheet({ links, page, onClose }) {
+export function MobileMoreSheet({ links, page, session = null, onClose }) {
   const modalRef = useModalFocus(onClose);
   return createPortal((
     <div ref={modalRef} className="mobile-more-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-more-title">
@@ -48,15 +49,19 @@ export function MobileMoreSheet({ links, page, onClose }) {
       <div id="mobile-more-panel" className="mobile-more-panel" tabIndex={-1}>
         <header><h2 id="mobile-more-title">More</h2><button type="button" data-modal-initial onClick={onClose} aria-label="Close more menu"><X size={20} /></button></header>
         {links.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} href={href} key={id}><Icon size={20} /><span>{label}</span></a>)}
-        <a href={appUrl("/admin?section=telemetry")}><Gauge size={20} /><span>System status</span></a>
-        <a href={appUrl("/admin?section=general")}><Sun size={20} /><span>Appearance</span></a>
+        {session?.user?.role === "viewer" ? null : (
+          <>
+            <a href={appUrl("/admin?section=telemetry")}><Gauge size={20} /><span>System status</span></a>
+            <a href={appUrl("/admin?section=general")}><Sun size={20} /><span>Appearance</span></a>
+          </>
+        )}
         <a href={appUrl("/help")}><CircleHelp size={20} /><span>Help</span></a>
       </div>
     </div>
   ), document.body);
 }
 
-export function Shell({ page, theme, recordingContext, children }) {
+export function Shell({ page, theme, recordingContext, session = null, onSignOut = null, children }) {
   const shellRef = useRef(null);
   const topbarRef = useRef(null);
   const workspaceHeadingRef = useRef(null);
@@ -75,7 +80,7 @@ export function Shell({ page, theme, recordingContext, children }) {
       WORKSPACE_ICONS[id],
     ];
   };
-  const workspaceLinks = [...DESKTOP_PRIMARY_WORKSPACES, "admin"].map(workspaceLink);
+  const workspaceLinks = [...DESKTOP_PRIMARY_WORKSPACES, ...(session?.user?.role === "viewer" ? [] : ["admin"])].map(workspaceLink);
   const mobileLinks = MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more").map(workspaceLink);
   const mobilePrimaryIds = new Set(MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more"));
   const moreLinks = workspaceLinks.filter(([id]) => !mobilePrimaryIds.has(id));
@@ -139,6 +144,12 @@ export function Shell({ page, theme, recordingContext, children }) {
         <button type="button" className="workspace-rail-toggle" onClick={() => setRailCollapsedValue(railCollapsed ? "false" : "true")} aria-label={railCollapsed ? "Expand navigation" : "Collapse navigation"} title={railCollapsed ? "Expand navigation" : "Collapse navigation"}>
           {railCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}<span>{railCollapsed ? "Expand" : "Collapse"}</span>
         </button>
+        {session?.user ? (
+          <div className="workspace-account">
+            <span><strong>{session.user.display_name || session.user.username}</strong><small>{session.user.role}</small></span>
+            {onSignOut ? <button type="button" onClick={onSignOut} aria-label="Sign out" title="Sign out"><LogOut size={16} /></button> : null}
+          </div>
+        ) : null}
       </aside>
       <header ref={topbarRef} className="topbar">
         <a className="brand-block mobile-brand-block" href={appUrl("/")} aria-label="SurvNG Live">
@@ -161,7 +172,7 @@ export function Shell({ page, theme, recordingContext, children }) {
         {mobileLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} href={href} key={id}><Icon size={21} /><span>{label}</span></a>)}
         <button ref={mobileMoreButtonRef} type="button" className={!mobilePrimaryIds.has(page) || mobileMoreOpen ? "active" : ""} onClick={() => setMobileMoreOpen((current) => !current)} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-panel"><Rows3 size={21} /><span>More</span></button>
       </nav>
-      {mobileMoreOpen ? <MobileMoreSheet links={moreLinks} page={page} onClose={() => setMobileMoreOpen(false)} /> : null}
+      {mobileMoreOpen ? <MobileMoreSheet links={moreLinks} page={page} session={session} onClose={() => setMobileMoreOpen(false)} /> : null}
     </div>
   );
 }

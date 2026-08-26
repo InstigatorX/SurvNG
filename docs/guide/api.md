@@ -12,9 +12,20 @@ SurvNG exposes an HTTP API used by the browser UI and by automations. This page 
 
 ### Authentication
 
-Authentication is optional and off by default.
+Browser users and API tokens are optional and off by default.
 
-When enabled, send:
+#### Browser sessions
+
+Enable sign-in under **Admin → Access**. The UI then uses an HTTP-only session cookie after `POST /api/auth/login`.
+
+| Role | Typical use |
+| --- | --- |
+| `admin` | Full console, including configuration |
+| `viewer` | Watch and review; cannot change configuration |
+
+#### API tokens
+
+When API authentication is enabled, send:
 
 ```http
 Authorization: Bearer YOUR_TOKEN
@@ -26,9 +37,9 @@ Authorization: Bearer YOUR_TOKEN
 | `camera:control` | Start/stop camera, recording, detection |
 | `admin` | Change configuration, run maintenance, most POST/PUT/PATCH/DELETE |
 
-`GET /api/health` stays open for simple uptime checks.
+`GET /api/health` and the sign-in routes stay reachable without a session.
 
-See [Integrations](integrations.md) for creating tokens.
+See [Integrations](integrations.md) for creating tokens and [Access](access.md) for browser users.
 
 ### Quick health check
 
@@ -60,6 +71,13 @@ curl -s http://127.0.0.1:8088/api/health
 | GET | `/api/integrations/home-assistant` | Home Assistant integration summary |
 | GET | `/api/logs` | Recent logs (`admin`) |
 | GET | `/api/events/stream` | Server-sent events for live UI updates |
+| GET | `/api/auth/session` | Current browser session |
+| POST | `/api/auth/login` | Sign in |
+| POST | `/api/auth/logout` | Sign out |
+| GET | `/api/auth/users` | List local users (`admin`) |
+| GET | `/api/tls` | HTTPS certificate status (`admin`) |
+| POST | `/api/tls/upload` | Store a PEM certificate and key from files (`admin`) |
+| POST | `/api/tls/certificate` | Store pasted PEM certificate and key (`admin`) |
 
 ### Example: system status
 

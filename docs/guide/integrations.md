@@ -58,7 +58,7 @@ Send it as:
 Authorization: Bearer YOUR_TOKEN
 ```
 
-Important: do not enable enforcement until your reverse proxy (or other trusted path) can inject that header for the browser UI. Otherwise the page shell loads but API calls return 401.
+Important: browser users (Admin → Access) and API tokens can both be enabled. The UI uses a session cookie; automations keep using `Authorization: Bearer`.
 
 ## Stream sources for Home Assistant
 
@@ -77,5 +77,6 @@ Keep SurvNG on a trusted LAN or VPN, or behind an authenticated reverse proxy. T
 ## Related
 
 - [HTTP API](api.md)
+- [Access](access.md)
 - [Admin](admin.md)
 - [Cameras](cameras.md)

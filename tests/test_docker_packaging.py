@@ -131,7 +131,7 @@ class DockerPackagingTest(unittest.TestCase):
             "COPY docker/entrypoint.sh /usr/local/bin/survng-entrypoint",
             dockerfile,
         )
-        self.assertIn("RUN chmod 755 /usr/local/bin/survng-entrypoint", dockerfile)
+        self.assertIn("RUN chmod 755 /usr/local/bin/survng-entrypoint /usr/local/bin/survng-healthcheck", dockerfile)
 
     def test_lxc_builder_is_persistent_and_scope_limited(self) -> None:
         script = (ROOT / "scripts" / "docker-build-lxc.sh").read_text(

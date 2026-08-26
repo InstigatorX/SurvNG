@@ -125,6 +125,8 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(AppConfig().recording_index_dir, "")
         self.assertFalse(AppConfig().incident_thumbnail_annotations)
         self.assertFalse(AppConfig().api_auth.enabled)
+        self.assertFalse(AppConfig().web_auth.enabled)
+        self.assertFalse(AppConfig().tls.enabled)
 
     def test_api_auth_requires_tokens_and_unique_ids(self) -> None:
         digest = "a" * 64

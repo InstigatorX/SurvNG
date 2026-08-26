@@ -15,9 +15,12 @@ import "./shell/responsive.css";
 import "./admin/workspace.css";
 import "./shell/mobile.css";
 
-import { appPathname, appUrl } from "./shared/api.js";
+import "./auth/login.css";
+
+import { appPathname, appUrl, fetch } from "./shared/api.js";
 import { DEFAULT_TIME_ZONE, THEMES } from "./shared/constants.js";
 import { useStoredState } from "./shared/hooks.js";
+import { LoginScreen } from "./auth/LoginScreen.jsx";
 import { Shell } from "./shell/Shell.jsx";
 import { AssistantPanel } from "./assistant/AssistantPanel.jsx";
 import { RuntimeStateProvider } from "./shared/runtimeState.jsx";
@@ -46,14 +49,38 @@ function App() {
   const [theme, setTheme] = useStoredState("survng.theme", "dark");
   const [recordingContext, setRecordingContext] = useState(null);
   const [assistantAsk, setAssistantAsk] = useState(null);
+  const [session, setSession] = useState(null);
   const pathname = appPathname();
   const workspace = resolveWorkspace(pathname);
   const page = workspace?.id || "not-found";
   const canonicalPath = canonicalWorkspaceUrl(pathname, window.location.search, window.location.hash);
   const [assistantContext, setAssistantContext] = useState({ page });
+  const viewer = session?.user?.role === "viewer";
   function askAssistant(prompt) {
     setAssistantAsk({ id: Date.now(), prompt: String(prompt || "").trim() || "Analyze this incident" });
   }
+  async function loadSession() {
+    try {
+      const response = await fetch("/api/auth/session");
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not read session");
+      setSession(payload);
+    } catch {
+      setSession({ enabled: false, bootstrap_required: false, user: null });
+    }
+  }
+  async function signOut() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    setSession((current) => ({ ...(current || {}), user: null, enabled: true }));
+  }
+  useEffect(() => {
+    void loadSession();
+    function onAuthRequired() {
+      setSession((current) => current ? { ...current, user: null, enabled: true } : { enabled: true, user: null, bootstrap_required: false });
+    }
+    window.addEventListener("survng:auth-required", onAuthRequired);
+    return () => window.removeEventListener("survng:auth-required", onAuthRequired);
+  }, []);
   useEffect(() => {
     const nextUrl = appUrl(canonicalPath);
     const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
@@ -74,26 +101,33 @@ function App() {
       media.removeListener?.(sync);
     };
   }, [theme]);
+  if (!session) {
+    return <main className="workspace-not-found" aria-busy="true"><p>Loading SurvNG…</p></main>;
+  }
+  if (session.enabled && !session.user) {
+    return <LoginScreen session={session} onSignedIn={setSession} />;
+  }
+  const workspacePage = viewer && page === "admin" ? "live" : page;
   return (
-    <RuntimeStateProvider><Shell page={page} theme={theme} recordingContext={recordingContext}>
+    <RuntimeStateProvider><Shell page={workspacePage} theme={theme} recordingContext={recordingContext} session={session} onSignOut={() => void signOut()}>
       <Suspense fallback={<WorkspaceFallback />}>
-        {page === "admin"
+        {workspacePage === "admin"
           ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
-          : page === "exports"
+          : workspacePage === "exports"
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-            : page === "timeline"
+            : workspacePage === "timeline"
               ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
-              : page === "search"
+              : workspacePage === "search"
                 ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-                : page === "incidents"
+                : workspacePage === "incidents"
                   ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} onAskAssistant={askAssistant} />
-                  : page === "people"
+                  : workspacePage === "people"
                     ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-                    : page === "live"
+                    : workspacePage === "live"
                       ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
                       : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       </Suspense>
-      <AssistantPanel pageContext={{ ...assistantContext, page }} timeZone={timeZone} askRequest={assistantAsk} onAskRequestHandled={() => setAssistantAsk(null)} />
+      {viewer ? null : <AssistantPanel pageContext={{ ...assistantContext, page: workspacePage }} timeZone={timeZone} askRequest={assistantAsk} onAskRequestHandled={() => setAssistantAsk(null)} />}
     </Shell></RuntimeStateProvider>
   );
 }
