@@ -40,6 +40,8 @@ Under **Admin → Storage**, you can crop compact incident thumbnails to detecte
 
 **Object focus zoom** (1.0–5.5) tightens that crop. Detection-box overlays are a separate checkbox and do not need to be on for crop/zoom.
 
+Focused thumbnails request a higher-resolution raster (and fall back to the stored snapshot when needed). Zoom is also capped so SurvNG does not magnify past the pixels available for the object — distant tiny detections stay softer than close ones, but without empty blur.
+
 ## Clean, AI, and tracks
 
 Depending on what SurvNG stored for the incident, you may switch between:

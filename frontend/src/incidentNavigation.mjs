@@ -241,7 +241,26 @@ export function normalizeIncidentThumbnailObjectFocusZoom(zoom) {
   return Math.min(5.5, Math.max(1, value));
 }
 
-export function incidentObjectFocusStyle(frameSize, renderedBoxes, zoom = 1) {
+export function incidentObjectFocusThumbnailWidth(frameWidth, devicePixelRatio = 1, zoomFactor = 1) {
+  const width = Math.max(160, Number(frameWidth) || 160);
+  const ratio = Math.max(1, Math.min(4, Number(devicePixelRatio) || 1));
+  const zoom = normalizeIncidentThumbnailObjectFocusZoom(zoomFactor);
+  // Object focus CSS-scales the raster; request enough pixels for a sharp crop.
+  const required = Math.ceil(width * ratio * Math.min(5.5, Math.max(3.5, zoom * 2.5)));
+  if (required <= 1280) return 1280;
+  if (required <= 1920) return 1920;
+  return 2560;
+}
+
+export function incidentObjectFocusMaxScale(sourceWidth, renderedImageWidth, devicePixelRatio = 1, maxStretch = 1.35) {
+  const source = Math.max(0, Number(sourceWidth) || 0);
+  const rendered = Math.max(0, Number(renderedImageWidth) || 0);
+  const ratio = Math.max(1, Math.min(4, Number(devicePixelRatio) || 1));
+  if (!source || !rendered) return 5.5;
+  return Math.min(5.5, Math.max(1, (maxStretch * source) / (rendered * ratio)));
+}
+
+export function incidentObjectFocusStyle(frameSize, renderedBoxes, zoom = 1, maxScale = 5.5) {
   if (!frameSize?.width || !frameSize?.height || !Array.isArray(renderedBoxes) || !renderedBoxes.length) {
     return null;
   }
@@ -263,7 +282,8 @@ export function incidentObjectFocusStyle(frameSize, renderedBoxes, zoom = 1) {
   const centerY = cropY1 + cropHeight / 2;
   const fitScale = Math.min((frameSize.width * 0.82) / cropWidth, (frameSize.height * 0.82) / cropHeight);
   const zoomFactor = normalizeIncidentThumbnailObjectFocusZoom(zoom);
-  const scale = Math.min(5.5, Math.max(1, fitScale * zoomFactor));
+  const scaleCap = Math.min(5.5, Math.max(1, Number(maxScale) || 5.5));
+  const scale = Math.min(scaleCap, Math.max(1, fitScale * zoomFactor));
   return {
     transform: `translate3d(${frameSize.width / 2 - centerX * scale}px, ${frameSize.height / 2 - centerY * scale}px, 0) scale(${scale})`,
     transformOrigin: "0 0",
