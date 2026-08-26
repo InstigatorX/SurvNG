@@ -1249,6 +1249,18 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertGreater(loose_area, fitted_area)
         self.assertGreater(fitted_area, tight_area)
 
+    def test_object_focus_crop_rect_biases_vertical_padding(self) -> None:
+        from survng.app.appearance_routes import object_focus_crop_rect
+
+        boxes = [(400, 200, 600, 500)]
+        crop = object_focus_crop_rect(1920, 1080, boxes, zoom=1.0)
+        self.assertIsNotNone(crop)
+        assert crop is not None
+        x1, y1, _, _ = crop
+        pad_top = boxes[0][1] - y1
+        pad_left = boxes[0][0] - x1
+        self.assertGreater(pad_top, pad_left)
+
     def test_webp_snapshot_uses_correct_media_type_and_download_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
