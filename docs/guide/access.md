@@ -22,6 +22,8 @@ Home Assistant and other automations still use **API tokens** under [Integration
 
 The next visit shows the sign-in screen. Sessions last two weeks and stay on the device as an HTTP-only cookie.
 
+To go back to an open LAN console, turn off **Require sign-in**, then demote or delete accounts. Deleting the last administrator also turns sign-in off. While sign-in is required, the last administrator cannot be changed to Viewer.
+
 Passwords are stored as scrypt hashes. SurvNG never writes the password itself into `config.json`.
 
 ## HTTPS

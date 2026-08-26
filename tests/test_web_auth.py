@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from survng.app.auth_routes import AuthRouteDependencies, create_auth_router
 from survng.app.config import AppConfig, WebAuthConfig, WebUserConfig
 from survng.app.security import (
+    SESSION_COOKIE_NAME,
     authenticate_password,
     authenticate_session,
     decode_session,
@@ -83,6 +84,20 @@ class AuthRouteTest(unittest.TestCase):
         )
         self.apply = Mock(side_effect=self._apply)
         self.app = FastAPI()
+
+        @self.app.middleware("http")
+        async def attach_session_principal(request, call_next):
+            auth = self.config.web_auth
+            principal = authenticate_session(request.headers.get("cookie") or "", auth)
+            if principal is None and not auth.enabled and auth.session_key:
+                principal = authenticate_session(
+                    request.headers.get("cookie") or "",
+                    auth.model_copy(update={"enabled": True}),
+                )
+            if principal is not None:
+                request.scope["survng_principal"] = principal
+            return await call_next(request)
+
         self.app.include_router(create_auth_router(AuthRouteDependencies(
             get_config=lambda: self.config,
             apply_config=self.apply,
@@ -93,6 +108,11 @@ class AuthRouteTest(unittest.TestCase):
     def _apply(self, next_config: AppConfig, assign_ids: bool = False) -> tuple[AppConfig, dict[str, object]]:
         self.config = next_config
         return next_config, {"apply_mode": "hot", "subsystems_restarted": []}
+
+    def _sign_in(self, user: WebUserConfig | None = None) -> None:
+        actor = user or self.admin
+        token = encode_session(actor.id, self.config.web_auth.session_key or "a" * 64)
+        self.client.cookies.set(SESSION_COOKIE_NAME, token)
 
     def test_login_sets_http_only_cookie(self) -> None:
         response = self.client.post("/api/auth/login", json={"username": "alex", "password": "correct-horse"})
@@ -119,11 +139,46 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(self.config.web_auth.users[0].role, "admin")
         self.assertEqual(len(self.config.web_auth.session_key), 64)
 
-    def test_cannot_delete_last_admin(self) -> None:
+    def test_can_delete_last_admin_after_sign_in_is_disabled(self) -> None:
         self.config.web_auth.enabled = False
         self.config.web_auth.users = [self.admin]
         response = self.client.delete("/api/auth/users/alex")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.config.web_auth.users, [])
+        self.assertFalse(self.config.web_auth.enabled)
+
+    def test_can_demote_last_admin_after_sign_in_is_disabled(self) -> None:
+        self.config.web_auth.enabled = False
+        self.config.web_auth.users = [self.admin]
+        response = self.client.patch("/api/auth/users/alex", json={"role": "viewer"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.config.web_auth.users[0].role, "viewer")
+        self.assertFalse(self.config.web_auth.enabled)
+
+    def test_cannot_demote_last_admin_while_sign_in_is_required(self) -> None:
+        self._sign_in()
+        self.config.web_auth.users = [self.admin]
+        response = self.client.patch("/api/auth/users/alex", json={"role": "viewer"})
         self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.config.web_auth.users[0].role, "admin")
+
+    def test_deleting_last_admin_turns_sign_in_off(self) -> None:
+        self._sign_in()
+        self.config.web_auth.users = [self.admin]
+        response = self.client.delete("/api/auth/users/alex")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.config.web_auth.enabled)
+        self.assertEqual(self.config.web_auth.users, [])
+        cookie = response.headers.get("set-cookie") or ""
+        self.assertIn(SESSION_COOKIE_NAME, cookie)
+
+    def test_cannot_delete_own_account_while_another_admin_exists(self) -> None:
+        other = make_user("root", role="admin", password="other-admin")
+        self.config.web_auth.users = [self.admin, other, self.viewer]
+        self._sign_in(self.admin)
+        response = self.client.delete("/api/auth/users/alex")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(len(self.config.web_auth.users), 3)
 
 
 class SessionPrincipalTest(unittest.TestCase):
