@@ -4636,8 +4636,7 @@ button.live-overlay-backdrop:active {
   padding: 8px 10px;
 }
 
-.live-framing-heading,
-.live-framing-actions {
+.live-framing-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4678,8 +4677,8 @@ button.live-overlay-backdrop:active {
 
 .live-framing-workspace {
   display: grid;
-  grid-template-columns: minmax(260px, 320px) minmax(260px, 1fr);
-  align-items: stretch;
+  grid-template-columns: minmax(300px, 420px) minmax(320px, 1fr);
+  align-items: start;
   gap: 10px;
 }
 
@@ -4687,6 +4686,7 @@ button.live-overlay-backdrop:active {
   position: relative;
   aspect-ratio: 16 / 9;
   min-width: 0;
+  width: 100%;
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
@@ -4717,40 +4717,80 @@ button.live-overlay-backdrop:active {
 
 .live-framing-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  width: min(100%, 360px);
+  justify-self: start;
   align-content: start;
-  gap: 6px 8px;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--subtle);
+  padding: 12px;
 }
 
-.live-framing-controls label {
+.live-framing-controls h4,
+.live-framing-focus h5 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.live-framing-field {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) minmax(110px, 180px);
+  min-width: 0;
+  grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
-  gap: 6px 10px;
+  gap: 8px;
   font-size: 10px;
 }
 
-.live-framing-controls label select,
-.live-framing-controls label input {
-  grid-column: 2;
+.live-framing-field>span,
+.live-framing-focus label>span {
+  min-width: 0;
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.live-framing-field select {
+  min-width: 0;
+  width: 100%;
   min-height: 32px;
   margin: 0;
   padding-block: 4px;
 }
 
-.live-framing-actions {
-  display: flex;
-  justify-content: flex-start;
-  flex-wrap: wrap;
+.live-framing-focus {
+  display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
-.live-framing-actions button {
-  align-self: end;
+.live-framing-focus>div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.live-framing-focus label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 9px;
+}
+
+.config-form .live-framing-focus input,
+.config-form .live-framing-field input {
+  box-sizing: content-box;
+  flex: 0 0 auto;
+  inline-size: 5ch !important;
+  width: 5ch !important;
+  min-width: 5ch !important;
   min-height: 32px;
-  padding: 0 8px;
-  font-size: 10px;
-  white-space: nowrap;
+  margin: 0;
+  padding-block: 4px;
 }
 
 @media (max-width: 1100px) {
@@ -4798,17 +4838,17 @@ button.live-overlay-backdrop:active {
     white-space: normal;
   }
 
-  .live-framing-source button,
-  .live-framing-actions button {
+  .live-framing-source button {
     min-height: 44px;
   }
 
-  .live-framing-controls label {
-    grid-template-columns: minmax(0, 1fr) minmax(96px, 42%);
+  .live-framing-controls {
+    width: 100%;
   }
 
-  .live-framing-controls label select,
-  .live-framing-controls label input {
+  .live-framing-field select,
+  .live-framing-focus input,
+  .live-framing-field input {
     min-height: 44px;
   }
 }

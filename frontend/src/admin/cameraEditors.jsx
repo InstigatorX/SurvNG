@@ -2,8 +2,6 @@ import React, { useEffect, useState } from "react";
 import {
   Camera,
   Copy,
-  RefreshCcw,
-  RotateCcw,
 } from "lucide-react";
 import { liveFramingStyle, normalizedLiveFraming } from "../liveFraming.mjs";
 import { appUrl } from "../shared/api.js";
@@ -83,12 +81,6 @@ export function LiveViewFramingEditor({ camera, onChange }) {
   const framing = normalizedLiveFraming(camera, source);
   const sourceName = source === "main" ? "Main" : "Sub";
   const update = (field, value) => onChange(["live_view", source, field], value);
-  const reset = () => onChange(["live_view", source], {
-    fit: "cover",
-    focal_x: 50,
-    focal_y: 50,
-    zoom: 1,
-  });
 
   useEffect(() => {
     setSource(camera.live_stream_url ? "live" : "main");
@@ -116,25 +108,21 @@ export function LiveViewFramingEditor({ camera, onChange }) {
         <span>{sourceName} preview</span>
       </div>
       <div className="live-framing-controls">
-        <label><span>Tile fill</span>
+        <h4>Framing controls</h4>
+        <label className="live-framing-field live-framing-fill"><span>Tile fill</span>
           <select value={framing.fit} onChange={(event) => update("fit", event.target.value)}>
             <option value="cover">Fill frame (crop edges)</option>
             <option value="contain">Fit entire image</option>
           </select>
         </label>
-        <label><span>Horizontal focus (%)</span>
-          <input type="number" min="0" max="100" step="1" value={Math.round(framing.focalX)} onChange={(event) => update("focal_x", Number(event.target.value))} />
-        </label>
-        <label><span>Vertical focus (%)</span>
-          <input type="number" min="0" max="100" step="1" value={Math.round(framing.focalY)} onChange={(event) => update("focal_y", Number(event.target.value))} />
-        </label>
-        <label><span>Display zoom (×)</span>
-          <input type="number" min="1" max="3" step="0.05" value={framing.zoom.toFixed(2)} onChange={(event) => update("zoom", Number(event.target.value))} />
-        </label>
-        <div className="live-framing-actions">
-          <button type="button" onClick={() => setPreviewRevision(Date.now())}><RefreshCcw size={15} /> Refresh preview</button>
-          <button type="button" onClick={reset}><RotateCcw size={15} /> Reset {sourceName}</button>
-        </div>
+        <section className="live-framing-focus" aria-labelledby={`live-framing-focus-${camera.id}`}>
+          <h5 id={`live-framing-focus-${camera.id}`}>Focus</h5>
+          <div>
+            <label><span>Horizontal (%)</span><input type="number" size="5" min="0" max="100" step="1" value={Math.round(framing.focalX)} onChange={(event) => update("focal_x", Number(event.target.value))} /></label>
+            <label><span>Vertical (%)</span><input type="number" size="5" min="0" max="100" step="1" value={Math.round(framing.focalY)} onChange={(event) => update("focal_y", Number(event.target.value))} /></label>
+          </div>
+        </section>
+        <label className="live-framing-field"><span>Display zoom (×)</span><input type="number" size="5" min="1" max="3" step="0.05" value={framing.zoom.toFixed(2)} onChange={(event) => update("zoom", Number(event.target.value))} /></label>
       </div>
     </div>
   </section>;
