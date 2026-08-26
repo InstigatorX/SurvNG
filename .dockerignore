@@ -49,6 +49,4 @@ survng/static/
 
 # Development-only material.
 tests/
-docs/**/*.png
-docs/**/*.jpg
 core*

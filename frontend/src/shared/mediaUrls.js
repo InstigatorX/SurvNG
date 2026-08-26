@@ -64,6 +64,19 @@ export function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
   return appUrl(`/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`);
 }
 
+export function recordingSegmentUrl(cameraId, epoch, source) {
+  const params = new URLSearchParams({
+    epoch: epoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/segment.mp4?${params.toString()}`);
+}
+
+export function recordingMobileWindowUrl(cameraId, epoch, source) {
+  const params = new URLSearchParams({ epoch: epoch.toFixed(3), source });
+  return appUrl(`/api/cameras/${cameraId}/recordings/mobile-window.mp4?${params.toString()}`);
+}
+
 export function recordingGridDayUrl(startEpoch, endEpoch, source, includeIdentities = true) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),

@@ -33,6 +33,7 @@ from .recording_media import (
 
 RECORDING_LOOKUP_LIMIT = 20_000
 RECORDING_PLAYBACK_WINDOW_SECONDS = 15 * 60
+MOBILE_PLAYBACK_WINDOW_SECONDS = 120
 
 
 class MediaExportRequest(BaseModel):
@@ -71,6 +72,7 @@ class RecordingRouteDependencies:
     recording_day_rows: Callable[..., list[dict]]
     recording_preview_path: Callable[[dict, float], Path]
     recording_preview_timestamp: Callable[[Path], tuple[float | None, str]]
+    recording_segment_path: Callable[..., Path]
     recording_day_fmp4_paths: Callable[..., tuple[Path, Path]]
     recording_file_response: Callable[[Path, str], FileResponse]
     event_clip_window: Callable[..., tuple[float, float]]
@@ -647,6 +649,48 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         }
 
 
+    @router.get("/api/cameras/{camera_id}/recordings/segment.mp4")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_segment(
+        camera_id: str,
+        epoch: float,
+        source: str = "main",
+    ) -> FileResponse:
+        """Serve one indexed recording segment for native browser playback."""
+        active_manager = _require_recording_camera(deps, camera_id)
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail="invalid recording segment time")
+        path = deps.recording_segment_path(
+            active_manager,
+            camera_id,
+            epoch,
+            recording_source(source),
+        )
+        # FileResponse provides byte-range requests needed by native MP4 seeking.
+        # Do not use the fMP4 cache response helper: this is the source recording.
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    @router.get("/api/cameras/{camera_id}/recordings/mobile-window.mp4")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def recording_mobile_window(camera_id: str, epoch: float, source: str = "main") -> FileResponse:
+        active_manager = _require_recording_camera(deps, camera_id)
+        if not math.isfinite(epoch) or epoch <= 0:
+            raise HTTPException(status_code=400, detail="invalid recording window time")
+        window_start = math.floor(epoch / MOBILE_PLAYBACK_WINDOW_SECONDS) * MOBILE_PLAYBACK_WINDOW_SECONDS
+        clip_path = deps.ensure_event_clip(
+            active_manager,
+            {"id": int(window_start), "camera_id": camera_id,
+             "created_at": datetime.fromtimestamp(window_start, timezone.utc).isoformat()},
+            before=0.0, after=float(MOBILE_PLAYBACK_WINDOW_SECONDS),
+            source=recording_source(source),
+        )
+        return FileResponse(clip_path, media_type="video/mp4", headers={"Cache-Control": "private, max-age=3600"})
+
+
     @router.get("/api/cameras/{camera_id}/recordings/preview.jpg")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_preview(
@@ -1059,6 +1103,8 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 protect_media_export,
                 update_media_export_metadata,
                 delete_media_export,
+                recording_segment,
+                recording_mobile_window,
                 recording_window,
                 recording_preview,
                 recording_updates,
