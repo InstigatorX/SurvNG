@@ -71,7 +71,6 @@ def ip_is_local(ip: str) -> bool:
         address.is_loopback
         or address.is_private
         or address.is_link_local
-        or address.is_reserved
     )
 
 

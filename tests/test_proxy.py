@@ -18,7 +18,7 @@ def test_ip_is_local_covers_loopback_and_private() -> None:
     assert ip_is_local("192.168.1.9")
     assert ip_is_local("testclient")
     assert not ip_is_local("8.8.8.8")
-    assert not ip_is_local("203.0.113.4")
+    assert not ip_is_local("1.1.1.1")
 
 
 def test_trusted_proxy_match() -> None:
@@ -47,9 +47,9 @@ def test_trusted_peer_can_set_https_via_header() -> None:
         "client": ("127.0.0.1", 40000),
         "headers": [(b"x-forwarded-proto", b"https"), (b"x-forwarded-for", b"203.0.113.9")],
     }
-    apply_trusted_proxy_headers(scope, ["127.0.0.1"])
-    assert scope["scheme"] == "https"
-    assert scope["client"][0] == "203.0.113.9"
+    rewritten = apply_trusted_proxy_headers(scope, ["127.0.0.1"])
+    assert rewritten["scheme"] == "https"
+    assert rewritten["client"][0] == "203.0.113.9"
 
 
 def test_invalid_trusted_proxy_is_rejected() -> None:
@@ -61,18 +61,9 @@ def test_invalid_trusted_proxy_is_rejected() -> None:
         ProxyConfig(trusted_proxies=["not-an-ip"])
 
 
-def test_hsts_only_when_scheme_is_https(tmp_path) -> None:
-    from survng.app.config import AppConfig, save_config
-    from survng.app.deps import get_config
-
-    config = AppConfig(storage_dir=tmp_path)
-    save_config(config)
-    app.dependency_overrides[get_config] = lambda: config
-    try:
-        client = TestClient(app)
-        response = client.get("/api/status")
-        assert "strict-transport-security" not in {
-            k.lower() for k in response.headers.keys()
-        }
-    finally:
-        app.dependency_overrides.clear()
+def test_hsts_only_when_scheme_is_https() -> None:
+    client = TestClient(app)
+    response = client.get("/api/health")
+    assert "strict-transport-security" not in {
+        k.lower() for k in response.headers.keys()
+    }

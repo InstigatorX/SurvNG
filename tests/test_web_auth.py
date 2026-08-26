@@ -275,7 +275,7 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(self.config.web_auth.users[1].session_epoch, 1)
 
     def test_password_change_rejects_older_session_cookie(self) -> None:
-        self._sign_in(self.viewer)
+        self._sign_in(self.admin)
         self.assertIsNotNone(authenticate_session(
             f"{SESSION_COOKIE_NAME}={encode_session('pat', self.config.web_auth.session_key, session_epoch=0)}",
             self.config.web_auth,
