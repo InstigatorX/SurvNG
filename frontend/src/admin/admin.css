@@ -645,7 +645,14 @@ a.button {
 
   #admin-panel-cameras>.camera-section-tabs {
     position: sticky;
-    top: 58px;
+    top: 0;
+    z-index: 3;
+    background: var(--panel-solid);
+  }
+
+  .admin-workspace-general .detection-settings>.detection-subsection-tabs {
+    position: sticky;
+    top: 0;
     z-index: 3;
     background: var(--panel-solid);
   }
@@ -884,4 +891,3 @@ a.button {
 .camera-order-panel {
   margin: 0 18px 12px;
 }
-

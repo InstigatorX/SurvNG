@@ -2425,7 +2425,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 </div>
               </section> : null}
 
-              {selectedCamera ? <div id="camera-section-tabs" className="camera-section-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`} onKeyDown={(event) => moveTabFocus(event, CAMERA_ADMIN_SECTIONS, cameraSection, (next) => selectAdminSubsection(next, setCameraSection, "cameras"))}>
+              {selectedCamera ? <div id="camera-section-tabs" className="admin-section-tabs camera-section-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`} onKeyDown={(event) => moveTabFocus(event, CAMERA_ADMIN_SECTIONS, cameraSection, (next) => selectAdminSubsection(next, setCameraSection, "cameras"))}>
                 <button id="camera-tab-settings" data-tab-id="settings" tabIndex={cameraSection === "settings" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => selectAdminSubsection("settings", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
                 <button id="camera-tab-motion" data-tab-id="motion" tabIndex={cameraSection === "motion" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "motion" ? "active" : ""} onClick={() => selectAdminSubsection("motion", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "motion"}><Activity size={15} />Motion/Object</button>
                 <button id="camera-tab-zones" data-tab-id="zones" tabIndex={cameraSection === "zones" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "zones" ? "active" : ""} onClick={() => selectAdminSubsection("zones", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "zones"}><Crop size={15} />Zones</button>
@@ -4004,7 +4004,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   }
 
   return (
-    <div className="general-settings-content config-form">
+    <div className={`general-settings-content config-form${section === "detection" ? " detection-settings-content" : ""}`}>
       {section === "general" ? (
         <div className="sub-panel">
           <h3>General</h3>
@@ -4255,8 +4255,8 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
 
       {section === "detection" ? (
         <div className="detection-settings">
-          <nav className="detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection"], ["tracking", "Tracking & ReID"], ["search", "Smart Search"], ["motion", "Motion Validation"], ["faces", "Face Recognition"]].map(([value, label]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}>{label}</button>)}
+          <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
+            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           {detectionSection === "object" ? <section className="detection-settings-card primary">
             <header className="detection-settings-card-head">

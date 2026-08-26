@@ -4319,7 +4319,7 @@ button.live-overlay-backdrop:active {
 }
 
 #admin-panel-cameras>.camera-section-tabs {
-  margin: 14px 14px 0;
+  margin: 0 var(--admin-panel-inset);
 }
 
 #admin-panel-general>.section-head,
@@ -4335,16 +4335,17 @@ button.live-overlay-backdrop:active {
   display: flex;
   grid-column: 1 / -1;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   overflow-x: auto;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--subtle);
-  padding: 6px;
+  padding: 5px;
 }
 
 .detection-subsection-tabs button {
   flex: 0 0 auto;
+  min-height: 44px;
   border-color: transparent;
   background: transparent;
   color: var(--muted);
@@ -4861,7 +4862,7 @@ button.live-overlay-backdrop:active {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
   gap: 12px;
-  padding: 12px;
+  padding: 0 var(--admin-panel-inset) var(--admin-panel-inset);
 }
 
 .detection-settings-card {
