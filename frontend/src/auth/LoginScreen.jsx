@@ -34,7 +34,17 @@ export function LoginScreen({ session, onSignedIn }) {
         }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "Could not sign in");
+      if (!response.ok) {
+        if (response.status === 409 && bootstrap) {
+          const sessionResponse = await fetch("/api/auth/session");
+          const nextSession = await sessionResponse.json().catch(() => ({}));
+          if (sessionResponse.ok && !nextSession.bootstrap_required) {
+            onSignedIn(nextSession);
+            return;
+          }
+        }
+        throw new Error(payload.detail || "Could not sign in");
+      }
       onSignedIn(payload);
     } catch (caught) {
       setError(caught.message || "Could not sign in");
@@ -60,7 +70,7 @@ export function LoginScreen({ session, onSignedIn }) {
         <h1>{bootstrap ? "Create the administrator" : "Sign in"}</h1>
         <p className="login-copy">
           {bootstrap
-            ? "This SurvNG host has no users yet. Create an administrator to lock the console to people you trust."
+            ? "Sign-in is on and this SurvNG host has no users yet. Create an administrator to lock the console to people you trust."
             : "Enter your SurvNG credentials to watch live cameras, review incidents, and manage the site."}
         </p>
         <form className="login-form" onSubmit={submit}>
