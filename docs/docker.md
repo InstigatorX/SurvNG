@@ -1,5 +1,9 @@
 # Docker installation
 
+Pasteable first-install commands (published image, dedicated user, no Git
+checkout) are in [README.install.docker.md](../README.install.docker.md). Native
+systemd install: [README.install.systemd.md](../README.install.systemd.md).
+
 Docker is an optional SurvNG deployment. It does not replace the native
 virtualenv and systemd installation.
 
