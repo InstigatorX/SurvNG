@@ -4170,7 +4170,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       ) : null}
 
       {section === "access" ? (
-        <AccessSettings config={config} commitImmediateConfig={commitImmediateConfig} />
+        <AccessSettings config={config} updateConfig={updateConfig} commitImmediateConfig={commitImmediateConfig} />
       ) : null}
 
 

@@ -197,7 +197,18 @@ def restore_config_secrets(incoming: AppConfig, current: AppConfig) -> AppConfig
         )
         for index, camera in enumerate(restored.cameras)
     ]
-    return AppConfig.model_validate(restored.model_dump(mode="json"))
+    restored = AppConfig.model_validate(restored.model_dump(mode="json"))
+    return ensure_web_auth_session_key(restored)
+
+
+def ensure_web_auth_session_key(config: AppConfig) -> AppConfig:
+    if not config.web_auth.enabled:
+        return config
+    if config.web_auth.session_key and config.web_auth.session_key != SECRET_PLACEHOLDER:
+        return config
+    next_config = config.model_copy(deep=True)
+    next_config.web_auth.session_key = secrets.token_hex(32)
+    return next_config
 
 
 def redacted_camera_payload(camera: CameraConfig) -> dict:

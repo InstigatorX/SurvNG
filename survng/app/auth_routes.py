@@ -139,7 +139,7 @@ def _admin_count(users: list[WebUserConfig], *, excluding: str = "") -> int:
 def session_payload(config: AppConfig, user: WebUserConfig | None) -> dict[str, Any]:
     return {
         "enabled": config.web_auth.enabled,
-        "bootstrap_required": not config.web_auth.users,
+        "bootstrap_required": bool(config.web_auth.enabled) and not config.web_auth.users,
         "user": public_user_payload(user) if user is not None else None,
     }
 

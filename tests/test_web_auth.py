@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from survng.app.auth_routes import AuthRouteDependencies, create_auth_router
 from survng.app.config import AppConfig, WebAuthConfig, WebUserConfig
+from survng.app.config_routes import restore_config_secrets
 from survng.app.security import (
     SESSION_COOKIE_NAME,
     authenticate_password,
@@ -60,10 +61,23 @@ class PasswordAndSessionTest(unittest.TestCase):
 
 
 class WebAuthConfigTest(unittest.TestCase):
-    def test_sign_in_requires_an_administrator(self) -> None:
+    def test_sign_in_requires_an_administrator_when_users_exist(self) -> None:
         user = make_user("pat", role="viewer")
         with self.assertRaises(ValidationError):
             WebAuthConfig(enabled=True, session_key="a" * 64, users=[user])
+
+    def test_sign_in_can_be_enabled_before_the_first_user(self) -> None:
+        auth = WebAuthConfig(enabled=True, users=[])
+        self.assertTrue(auth.enabled)
+        self.assertEqual(auth.users, [])
+
+    def test_enabling_sign_in_through_config_save_mints_a_session_key(self) -> None:
+        current = AppConfig()
+        payload = current.model_dump(mode="json")
+        payload["web_auth"]["enabled"] = True
+        restored = restore_config_secrets(AppConfig.model_validate(payload), current)
+        self.assertTrue(restored.web_auth.enabled)
+        self.assertEqual(len(restored.web_auth.session_key), 64)
 
     def test_usernames_are_unique(self) -> None:
         with self.assertRaises(ValidationError):
@@ -137,6 +151,27 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertTrue(self.config.web_auth.enabled)
         self.assertEqual(self.config.web_auth.users[0].role, "admin")
+        self.assertEqual(len(self.config.web_auth.session_key), 64)
+
+    def test_session_asks_for_bootstrap_only_when_sign_in_is_on_without_users(self) -> None:
+        self.config.web_auth = WebAuthConfig()
+        response = self.client.get("/api/auth/session")
+        self.assertEqual(response.json(), {
+            "enabled": False,
+            "bootstrap_required": False,
+            "user": None,
+        })
+        self.config.web_auth.enabled = True
+        response = self.client.get("/api/auth/session")
+        self.assertEqual(response.json()["bootstrap_required"], True)
+        self.assertTrue(response.json()["enabled"])
+
+    def test_settings_can_enable_sign_in_before_the_first_user(self) -> None:
+        self.config.web_auth = WebAuthConfig()
+        response = self.client.put("/api/auth/settings", json={"enabled": True})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.config.web_auth.enabled)
+        self.assertEqual(self.config.web_auth.users, [])
         self.assertEqual(len(self.config.web_auth.session_key), 64)
 
     def test_can_delete_last_admin_after_sign_in_is_disabled(self) -> None:

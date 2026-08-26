@@ -14,9 +14,9 @@ function apiDetail(payload, fallback) {
   return fallback;
 }
 
-export function AccessSettings({ config, commitImmediateConfig }) {
+export function AccessSettings({ config, updateConfig, commitImmediateConfig }) {
   const [users, setUsers] = useState(config.web_auth?.users || []);
-  const [enabled, setEnabled] = useState(Boolean(config.web_auth?.enabled));
+  const enabled = Boolean(config.web_auth?.enabled);
   const [tls, setTls] = useState(null);
   const [draft, setDraft] = useState({ username: "", display_name: "", password: "", role: "viewer" });
   const [busy, setBusy] = useState("");
@@ -33,7 +33,6 @@ export function AccessSettings({ config, commitImmediateConfig }) {
     const tlsPayload = await tlsResponse.json().catch(() => ({}));
     if (usersResponse.ok) {
       setUsers(userPayload.users || []);
-      setEnabled(Boolean(userPayload.enabled));
     }
     if (tlsResponse.ok) {
       setTls(tlsPayload);
@@ -46,8 +45,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
     void load();
   }, []);
 
-  function syncConfig(nextEnabled, nextUsers) {
-    commitImmediateConfig(["web_auth", "enabled"], nextEnabled);
+  function syncUsers(nextUsers) {
     commitImmediateConfig(["web_auth", "users"], nextUsers.map((user) => ({
       ...user,
       password_hash: user.password_hash || "__SURVNG_SECRET_SET__",
@@ -68,7 +66,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
       if (!response.ok) throw new Error(apiDetail(payload, "Could not create user"));
       const next = [...users, payload.user];
       setUsers(next);
-      syncConfig(enabled, next);
+      syncUsers(next);
       setDraft({ username: "", display_name: "", password: "", role: "viewer" });
     } catch (caught) {
       setError(caught.message);
@@ -90,7 +88,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
       if (!response.ok) throw new Error(apiDetail(payload, "Could not update user"));
       const next = users.map((user) => (user.id === userId ? payload.user : user));
       setUsers(next);
-      syncConfig(enabled, next);
+      syncUsers(next);
     } catch (caught) {
       setError(caught.message);
     } finally {
@@ -115,29 +113,10 @@ export function AccessSettings({ config, commitImmediateConfig }) {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(apiDetail(payload, "Could not delete user"));
       setUsers(payload.users || []);
-      setEnabled(Boolean(payload.enabled));
-      syncConfig(Boolean(payload.enabled), payload.users || []);
-    } catch (caught) {
-      setError(caught.message);
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function toggleSignIn(nextEnabled) {
-    setBusy("signin");
-    setError("");
-    try {
-      const response = await fetch("/api/auth/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: nextEnabled }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(apiDetail(payload, "Could not update sign-in"));
-      setEnabled(Boolean(payload.enabled));
-      setUsers(payload.users || users);
-      syncConfig(Boolean(payload.enabled), payload.users || users);
+      syncUsers(payload.users || []);
+      if (Boolean(payload.enabled) !== enabled) {
+        commitImmediateConfig(["web_auth", "enabled"], Boolean(payload.enabled));
+      }
     } catch (caught) {
       setError(caught.message);
     } finally {
@@ -255,7 +234,7 @@ export function AccessSettings({ config, commitImmediateConfig }) {
             <small>Local SurvNG accounts. Administrators can change settings; viewers can watch cameras and review incidents.</small>
           </div>
           <div className="admin-action-status">
-            <span className="admin-action-kind">Applies immediately</span>
+            <span className="admin-action-kind">Save settings to apply</span>
             <span className={`retention-state ${enabled ? "running" : "idle"}`}>{enabled ? "Required" : "Open LAN"}</span>
           </div>
         </div>
@@ -263,12 +242,12 @@ export function AccessSettings({ config, commitImmediateConfig }) {
           <input
             type="checkbox"
             checked={enabled}
-            disabled={Boolean(busy) || ( !enabled && !users.some((user) => user.role === "admin"))}
-            onChange={(event) => void toggleSignIn(event.target.checked)}
+            disabled={Boolean(busy)}
+            onChange={(event) => updateConfig(["web_auth", "enabled"], event.target.checked)}
           />
           Require sign-in for the browser console
         </label>
-        <p className="settings-help">Turn sign-in off to demote or delete the last administrator. Deleting that account also turns sign-in off.</p>
+        <p className="settings-help">Check this box, then Save settings. If no administrator exists yet, SurvNG will ask you to create one. You can also add users here first, then enable sign-in and save.</p>
         <div className="api-token-list">
           {users.map((user) => (
             <article key={user.id}>

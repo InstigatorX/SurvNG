@@ -89,12 +89,8 @@ class WebAuthConfig(BaseModel):
             raise ValueError("web user ids must be unique")
         if len(usernames) != len(set(usernames)):
             raise ValueError("web usernames must be unique")
-        if self.enabled and not any(user.role == "admin" for user in self.users):
+        if self.enabled and self.users and not any(user.role == "admin" for user in self.users):
             raise ValueError("sign-in cannot be enabled without an administrator")
-        if self.enabled and (
-            not self.session_key or self.session_key == "__SURVNG_SECRET_SET__"
-        ):
-            raise ValueError("sign-in requires a session signing key")
         return self
 
 

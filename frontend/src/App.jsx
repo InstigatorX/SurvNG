@@ -71,12 +71,12 @@ function App() {
   }
   async function signOut() {
     await fetch("/api/auth/logout", { method: "POST" });
-    setSession((current) => ({ ...(current || {}), user: null, enabled: true }));
+    setSession((current) => ({ ...(current || {}), user: null, enabled: true, bootstrap_required: false }));
   }
   useEffect(() => {
     void loadSession();
     function onAuthRequired() {
-      setSession((current) => current ? { ...current, user: null, enabled: true } : { enabled: true, user: null, bootstrap_required: false });
+      void loadSession();
     }
     window.addEventListener("survng:auth-required", onAuthRequired);
     return () => window.removeEventListener("survng:auth-required", onAuthRequired);

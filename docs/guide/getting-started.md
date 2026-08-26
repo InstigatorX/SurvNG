@@ -16,7 +16,7 @@ You should land on **Live**. The left side lists the main workspaces: Live, Inci
 
 If the host already requires sign-in, use the account an administrator created for you.
 
-To lock a new install, open **Admin → Access**, create an administrator, and enable sign-in. Details: [Access](access.md).
+To lock a new install, open **Admin → Access**, enable sign-in, Save settings, and create the administrator if prompted. Details: [Access](access.md).
 
 ![Live camera grid](images/live-command-center.png)
 

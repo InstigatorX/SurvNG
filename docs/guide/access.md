@@ -2,7 +2,7 @@
 
 **Access** covers who can open SurvNG in a browser and whether the console is served over HTTPS.
 
-Sign-in is optional and off by default, matching SurvNG’s LAN-first install. When you are ready to lock the console, create an administrator and require sign-in.
+Sign-in is optional and off by default, matching SurvNG’s LAN-first install. When you are ready to lock the console, require sign-in and create an administrator.
 
 ## Roles
 
@@ -16,13 +16,15 @@ Home Assistant and other automations still use **API tokens** under [Integration
 ## Turn on sign-in
 
 1. Open **Admin → Access**.
-2. Add at least one **Admin** user.
-3. Optionally add **Viewer** accounts for family or staff.
-4. Enable **Require sign-in for the browser console**.
+2. Enable **Require sign-in for the browser console**.
+3. **Save settings**.
+4. If no users exist yet, SurvNG asks you to **create the administrator**. Otherwise, sign in with an existing account.
+
+You can also add Admin and Viewer accounts on the Access page before enabling sign-in. User create, role, and delete still apply immediately; the require-sign-in checkbox waits for Save.
 
 The next visit shows the sign-in screen. Sessions last two weeks and stay on the device as an HTTP-only cookie.
 
-To go back to an open LAN console, turn off **Require sign-in**, then demote or delete accounts. Deleting the last administrator also turns sign-in off. While sign-in is required, the last administrator cannot be changed to Viewer.
+To go back to an open LAN console, turn off **Require sign-in** and Save, then demote or delete accounts. Deleting the last administrator also turns sign-in off. While sign-in is required, the last administrator cannot be changed to Viewer.
 
 Passwords are stored as scrypt hashes. SurvNG never writes the password itself into `config.json`.
 
