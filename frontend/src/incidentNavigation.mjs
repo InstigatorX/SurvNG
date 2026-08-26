@@ -253,8 +253,8 @@ export function incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, zo
   if (![minX, minY, maxX, maxY].every(Number.isFinite) || maxX <= minX || maxY <= minY) return null;
   const boxWidth = Math.max(1, maxX - minX);
   const boxHeight = Math.max(1, maxY - minY);
-  const padX = Math.max(width * 0.04, boxWidth * 0.35) / zoomFactor;
-  const padY = Math.max(height * 0.04, boxHeight * 0.35) / zoomFactor;
+  const padX = Math.max(width * 0.06, boxWidth * 0.45) / zoomFactor;
+  const padY = Math.max(height * 0.08, boxHeight * 0.65) / zoomFactor;
   const x1 = Math.max(0, Math.floor(minX - padX));
   const y1 = Math.max(0, Math.floor(minY - padY));
   const x2 = Math.min(width, Math.ceil(maxX + padX));

@@ -114,8 +114,10 @@ def object_focus_crop_rect(
     max_y = max(box[3] for box in boxes)
     box_width = max(1, max_x - min_x)
     box_height = max(1, max_y - min_y)
-    pad_x = max(frame_width * 0.04, box_width * 0.35) / zoom_factor
-    pad_y = max(frame_height * 0.04, box_height * 0.35) / zoom_factor
+    # Detection boxes often miss head/feet; bias vertical padding so compact
+    # thumbs show the full subject even when that adds background.
+    pad_x = max(frame_width * 0.06, box_width * 0.45) / zoom_factor
+    pad_y = max(frame_height * 0.08, box_height * 0.65) / zoom_factor
     x1 = max(0, int(np.floor(min_x - pad_x)))
     y1 = max(0, int(np.floor(min_y - pad_y)))
     x2 = min(frame_width, int(np.ceil(max_x + pad_x)))
