@@ -453,6 +453,8 @@ def required_api_scope(method: str, path: str) -> ApiScope:
     # redaction, so they are not part of the integration-facing read surface.
     if path == "/api/logs":
         return "admin"
+    if path == "/api/support-bundle":
+        return "admin"
     if path.startswith("/api/tls"):
         return "admin"
     if path.startswith("/api/auth/") and path not in {"/api/auth/session", "/api/auth/login", "/api/auth/logout", "/api/auth/bootstrap"}:

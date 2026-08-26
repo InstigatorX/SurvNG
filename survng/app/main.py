@@ -82,6 +82,7 @@ from .semantic_routes import (
 )
 from .object_tracking import ultralytics_fasttrack_dependency_status
 from .operations_routes import OperationsRouteDependencies, create_operations_router
+from .support_bundle import SupportBundleDependencies, create_support_bundle_router
 from .product_update import ProductUpdateService
 from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .system_telemetry import (
@@ -1014,6 +1015,16 @@ app.include_router(
             storage_maintenance=STORAGE_MAINTENANCE,
             request_server_restart=_request_server_restart,
             product_update=PRODUCT_UPDATE,
+        )
+    )
+)
+app.include_router(
+    create_support_bundle_router(
+        SupportBundleDependencies(
+            get_manager=get_manager,
+            get_config=lambda: config,
+            system_status=SYSTEM_TELEMETRY.system_status,
+            log_rows=lambda: tuple(LOG_LINES),
         )
     )
 )

@@ -2361,6 +2361,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
               {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
               <div id="telemetry-view-panel" className="telemetry-tab-panel" role="tabpanel">{telemetrySection === "diagnostics" ? <div className="telemetry-diagnostics">
                 <ModelsAndHardwarePanel config={config} updateConfig={updateConfig} detectorModels={detectorModels} accelerator={accelerator} />
+                <section className="telemetry-section support-bundle-section">
+                  <div className="telemetry-section-head"><div><h3>Support bundle</h3><p>Download one redacted system report to share when you need help troubleshooting. It includes software and runtime status, safe configuration, recent health events, diagnostics, and logs—never video, images, passwords, tokens, cookies, private keys, or camera stream URLs.</p></div><a className="button primary" href={appUrl("/api/support-bundle")} download="survng-support-bundle.json"><Download size={15} />Download support bundle</a></div>
+                </section>
                 <section className="telemetry-section">
                   <div className="telemetry-section-head"><div><h3>Temporary diagnostics</h3><p>Capture detailed troubleshooting data for a limited time. Sessions stop automatically and never include images, video, or credentials.</p></div></div>
                   <div className="telemetry-diagnostic-controls">
