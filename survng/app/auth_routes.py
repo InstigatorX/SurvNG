@@ -305,9 +305,7 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
 
     @router.put("/api/auth/users/{user_id}/password")
     def change_password(request: Request, user_id: str, body: PasswordChangeRequest) -> dict[str, Any]:
-        actor = require_admin(request)
-        if actor.id != user_id:
-            require_admin(request)
+        require_admin(request)
         with deps.lock:
             current = deps.get_config()
             next_config = current.model_copy(deep=True)

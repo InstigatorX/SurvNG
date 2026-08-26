@@ -3,6 +3,13 @@ import { KeyRound, Plus, RefreshCcw, ShieldCheck, Trash2, Upload } from "lucide-
 
 import { fetch } from "../shared/api.js";
 
+function userLabel(user) {
+  const display = String(user.display_name || "").trim();
+  const username = String(user.username || "").trim();
+  if (display && display.toLowerCase() !== username.toLowerCase()) return display;
+  return username;
+}
+
 function apiDetail(payload, fallback) {
   const detail = payload?.detail;
   if (typeof detail === "string" && detail.trim()) return detail;
@@ -17,6 +24,7 @@ function apiDetail(payload, fallback) {
 export function AccessSettings({ config, updateConfig, commitImmediateConfig }) {
   const [users, setUsers] = useState(config.web_auth?.users || []);
   const enabled = Boolean(config.web_auth?.enabled);
+  const [passwordEdits, setPasswordEdits] = useState({});
   const [tls, setTls] = useState(null);
   const [draft, setDraft] = useState({ username: "", display_name: "", password: "", role: "viewer" });
   const [busy, setBusy] = useState("");
@@ -89,6 +97,30 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
       const next = users.map((user) => (user.id === userId ? payload.user : user));
       setUsers(next);
       syncUsers(next);
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function changePassword(user) {
+    const password = String(passwordEdits[user.id] || "");
+    if (password.length < 8) {
+      setError("New password must be at least 8 characters.");
+      return;
+    }
+    setBusy(`${user.id}-password`);
+    setError("");
+    try {
+      const response = await fetch(`/api/auth/users/${encodeURIComponent(user.id)}/password`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(apiDetail(payload, "Could not update password"));
+      setPasswordEdits((current) => ({ ...current, [user.id]: "" }));
     } catch (caught) {
       setError(caught.message);
     } finally {
@@ -233,10 +265,6 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
             <strong>Sign-in</strong>
             <small>Local SurvNG accounts. Administrators can change settings; viewers can watch cameras and review incidents.</small>
           </div>
-          <div className="admin-action-status">
-            <span className="admin-action-kind">Save settings to apply</span>
-            <span className={`retention-state ${enabled ? "running" : "idle"}`}>{enabled ? "Required" : "Open LAN"}</span>
-          </div>
         </div>
         <label className="check-field">
           <input
@@ -250,28 +278,54 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
         <p className="settings-help">Check this box, then Save settings. If no administrator exists yet, SurvNG will ask you to create one. You can also add users here first, then enable sign-in and save.</p>
         <div className="api-token-list">
           {users.map((user) => (
-            <article key={user.id}>
+            <article className="access-user-row" key={user.id}>
               <div>
-                <strong>{user.display_name || user.username}</strong>
-                <code>{user.username}</code>
-                <small>{user.role}</small>
+                <strong>{userLabel(user)}</strong>
+                {userLabel(user).toLowerCase() === String(user.username || "").toLowerCase()
+                  ? null
+                  : <code>{user.username}</code>}
               </div>
-              <select value={user.role} disabled={Boolean(busy)} onChange={(event) => void setRole(user.id, event.target.value)}>
+              <select
+                className="access-role-select"
+                value={user.role}
+                aria-label={`Role for ${userLabel(user)}`}
+                disabled={Boolean(busy)}
+                onChange={(event) => void setRole(user.id, event.target.value)}
+              >
                 <option value="admin">Admin</option>
                 <option value="viewer">Viewer</option>
               </select>
+              <label className="access-password-field">
+                <span className="visually-hidden">New password for {userLabel(user)}</span>
+                <input
+                  type="password"
+                  value={passwordEdits[user.id] || ""}
+                  placeholder="New password"
+                  minLength={8}
+                  autoComplete="new-password"
+                  disabled={Boolean(busy)}
+                  onChange={(event) => setPasswordEdits((current) => ({ ...current, [user.id]: event.target.value }))}
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => void changePassword(user)}
+                disabled={Boolean(busy) || String(passwordEdits[user.id] || "").length < 8}
+              >
+                <KeyRound size={14} /> Set password
+              </button>
               <button type="button" className="danger" onClick={() => void removeUser(user)} disabled={Boolean(busy)}>
                 <Trash2 size={14} /> Delete
               </button>
             </article>
           ))}
-          {!users.length ? <p className="settings-help">No users yet. Create an administrator before requiring sign-in.</p> : null}
+          {!users.length ? <p className="settings-help">No users yet. Add an administrator here, or enable sign-in and save to create one.</p> : null}
         </div>
-        <form className="api-token-create" onSubmit={createUser}>
+        <form className="api-token-create access-user-create" onSubmit={createUser}>
           <label>Username<input value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} placeholder="alex" required minLength={3} /></label>
           <label>Display name<input value={draft.display_name} onChange={(event) => setDraft((current) => ({ ...current, display_name: event.target.value }))} placeholder="Alex" /></label>
           <label>Password<input type="password" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} required minLength={8} autoComplete="new-password" /></label>
-          <label>Role<select value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}><option value="admin">Admin</option><option value="viewer">Viewer</option></select></label>
+          <label className="access-role-field">Role<select className="access-role-select" value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}><option value="admin">Admin</option><option value="viewer">Viewer</option></select></label>
           <button type="submit" className="primary" disabled={busy === "user"}>{busy === "user" ? <RefreshCcw className="spin" size={15} /> : <Plus size={15} />} Add user</button>
         </form>
       </section>

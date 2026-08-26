@@ -215,6 +215,19 @@ class AuthRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(len(self.config.web_auth.users), 3)
 
+    def test_password_can_be_changed_while_sign_in_is_on(self) -> None:
+        self._sign_in()
+        response = self.client.put("/api/auth/users/pat/password", json={"password": "new-viewer-pass"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(authenticate_password("pat", "new-viewer-pass", self.config.web_auth))
+        self.assertIsNone(authenticate_password("pat", "viewer-pass", self.config.web_auth))
+
+    def test_password_can_be_changed_while_sign_in_is_off(self) -> None:
+        self.config.web_auth.enabled = False
+        response = self.client.put("/api/auth/users/alex/password", json={"password": "brand-new-secret"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(authenticate_password("alex", "brand-new-secret", self.config.web_auth))
+
 
 class SessionPrincipalTest(unittest.TestCase):
     def test_cookie_authenticates_configured_user(self) -> None:

@@ -4469,6 +4469,38 @@ button.live-overlay-backdrop:active {
   gap: 10px;
 }
 
+.access-user-create {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 7.5rem auto;
+}
+
+.access-user-row {
+  flex-wrap: wrap;
+}
+
+.access-user-row > div {
+  flex: 1 1 8rem;
+}
+
+.access-user-row > button {
+  flex: 0 0 auto;
+}
+
+.access-role-field {
+  width: 7.5rem;
+}
+
+.access-settings .access-role-select {
+  width: 7.5rem;
+  max-width: 7.5rem;
+  flex: 0 0 7.5rem;
+}
+
+.access-password-field {
+  flex: 1 1 10rem;
+  min-width: 9rem;
+  margin: 0;
+}
+
 .tls-upload-form {
   grid-template-columns: 1fr 1fr;
   align-items: start;
@@ -4529,8 +4561,16 @@ button.live-overlay-backdrop:active {
 }
 
 @media (max-width: 900px) {
-  .api-token-create {
+  .api-token-create,
+  .access-user-create {
     grid-template-columns: 1fr;
+  }
+
+  .access-role-field,
+  .access-settings .access-role-select {
+    width: 100%;
+    max-width: none;
+    flex: 1 1 auto;
   }
 }
 
