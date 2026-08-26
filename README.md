@@ -148,9 +148,12 @@ npm --prefix frontend run build
 The React frontend in `frontend/` is the default interface. Its production build is emitted into `survng/static/`, which FastAPI serves for `/` and `/recordings`.
 
 Native installs can pull product updates from Git under **Admin → General →
-Check for Updates / Update**, or by running `scripts/update-from-git.sh` on the
-host. Docker upgrades still rebuild the image from the host checkout; see
-[README.install](README.install) section 10.
+Check for Updates / Update**, or by running the upgrade steps in
+[README.install.systemd.md](README.install.systemd.md). Docker upgrades pull a
+published image or rebuild from a checkout; see
+[README.install.docker.md](README.install.docker.md).
+
+Full host install (pasteable): [README.install](README.install).
 
 ### Intel GPU runtime upgrade
 
@@ -268,9 +271,9 @@ Open http://127.0.0.1:8088/survng/ on this machine, or use the server's LAN addr
 ### Optional Docker installation
 
 Docker is an alternative deployment path; the native virtualenv/systemd path
-remains supported. The production image builds the React UI, installs FFmpeg,
-runs SurvNG as a configurable non-root UID/GID, and keeps configuration,
-databases, models, and recordings outside the image.
+remains supported. Pasteable host setup (published GHCR image, dedicated user,
+Compose) is in [README.install.docker.md](README.install.docker.md). Native
+systemd setup is in [README.install.systemd.md](README.install.systemd.md).
 
 ```bash
 cp .env.example .env
