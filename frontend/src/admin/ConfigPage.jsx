@@ -4193,7 +4193,22 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           <section className="api-access-settings">
             <div className="detection-settings-subhead">
               <div><strong>API access tokens</strong><small>Long-lived credentials for Home Assistant and other integrations. Secrets are displayed only once and are never stored in readable form.</small></div>
-              <div className="admin-action-status"><span className="admin-action-kind">Applies immediately</span><span className={`retention-state ${config.api_auth?.enabled ? "running" : "idle"}`}>{config.api_auth?.enabled ? "Enforced" : "Not enforced"}</span></div>
+              <div className="admin-action-status"><span className="admin-action-kind">Save settings to apply</span><span className={`retention-state ${config.api_auth?.enabled ? "running" : "idle"}`}>{config.api_auth?.enabled ? "Enforced" : "Not enforced"}</span></div>
+            </div>
+            <div className="api-auth-toggle">
+              <label className="check-field">
+                <input
+                  type="checkbox"
+                  checked={Boolean(config.api_auth?.enabled)}
+                  disabled={!config.api_auth?.enabled && !(config.api_auth?.tokens || []).length}
+                  onChange={(event) => updateConfig(["api_auth", "enabled"], event.target.checked)}
+                />
+                Require API authentication
+              </label>
+              <p className="settings-help">
+                When enabled, API clients must send a valid scoped <code>Authorization: Bearer</code> token. Create at least one token before enabling this setting; Home Assistant will not connect while API authentication is disabled.
+              </p>
+              {!(config.api_auth?.tokens || []).length ? <p className="settings-help">Create a token below first. The control becomes available after the token is saved.</p> : null}
             </div>
             <div className="api-token-list">
               {(config.api_auth?.tokens || []).map((token) => (
