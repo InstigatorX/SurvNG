@@ -18,7 +18,7 @@ import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPat
 import { appUrl, fetch } from "../shared/api.js";
 import { formatDateTime, formatTimeOnly, formatDuration } from "../shared/format.js";
 import { eventSnapshotDownloadUrl, eventClipUrl } from "../shared/mediaUrls.js";
-import { ShakaVideo } from "../shared/media.jsx";
+import { prefersNativeMobilePlayback, ShakaVideo } from "../shared/media.jsx";
 import {
   DebugDetectionOverlay,
   IncidentObjectBadges,
@@ -59,10 +59,12 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
       setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
-      const info = await loadIncidentClipInfo(event, () => cancelled);
+      const info = await loadIncidentClipInfo(event, () => cancelled, prefersNativeMobilePlayback());
       if (!info) return;
       setClipInfo(info);
-      setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
+      setPlayback(prefersNativeMobilePlayback()
+        ? { url: info.downloadUrl, mimeType: "video/mp4" }
+        : { url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
     }
     loadClipSettings();
     return () => { cancelled = true; };
@@ -73,7 +75,30 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
     <div className="incident-video-layer" onClick={(event) => event.stopPropagation()}>
       {clipInfo && playback && !clipError ? (
         <>
-          <ShakaVideo
+          {playback.mimeType === "video/mp4" ? <video
+            ref={videoRef}
+            src={playback.url}
+            autoPlay
+            controls
+            playsInline
+            preload="metadata"
+            onLoadedMetadata={(event) => {
+              const video = event.currentTarget;
+              setPlaybackOriginTime(0);
+              if (clipInfo.playbackStartOffset > 0) {
+                video.currentTime = Number.isFinite(video.duration)
+                  ? Math.min(clipInfo.playbackStartOffset, Math.max(0, video.duration - 0.25))
+                  : clipInfo.playbackStartOffset;
+              }
+              setClipLoading(false);
+              setClipError("");
+            }}
+            onError={() => {
+              setClipLoading(false);
+              setClipError("No recording window found");
+            }}
+            onEnded={onEnded}
+          /> : <ShakaVideo
             ref={videoRef}
             src={playback.url}
             mimeType={playback.mimeType}
@@ -112,7 +137,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
               }
             }}
             onEnded={onEnded}
-          />
+          />}
           {analysisMode === "tracks" && storedTracks.length ? (
             <StoredTrackVideoOverlay
               videoRef={videoRef}
