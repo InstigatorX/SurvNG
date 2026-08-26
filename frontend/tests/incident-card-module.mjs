@@ -14,12 +14,17 @@ assert.match(incidentCard, /export function IncidentInspector\(/);
 assert.match(incidentCard, /export function IncidentClipLayer\(/);
 assert.match(incidentCard, /export function RelatedAppearanceIncidents\(/);
 assert.doesNotMatch(incidentCard, /export function IncidentListItem\(/);
+assert.match(incidentCard, /prefersNativeMobilePlayback\(\)/);
+assert.match(incidentCard, /url: info\.downloadUrl, mimeType: "video\/mp4"/);
+assert.match(incidentCard, /playback\.mimeType === "video\/mp4" \? <video/);
 
 assert.match(evidence, /export function IncidentListItem\(/);
 assert.match(evidence, /export function SnapshotImage\(/);
 assert.match(evidence, /export function EventOverlay\(/);
 assert.doesNotMatch(evidence, /export function IncidentCard\(/);
 assert.doesNotMatch(evidence, /export function IncidentInspector\(/);
+assert.match(evidence, /loadIncidentClipInfo\(viewerEvent, \(\) => cancelled, prefersNativeMobilePlayback\(\)\)/);
+assert.match(evidence, /playback\.mimeType === "video\/mp4" \? <video/);
 
 assert.match(incidentsPage, /import \{ IncidentCard, IncidentInspector \} from "\.\/IncidentCard\.jsx"/);
 assert.match(livePage, /import \{ IncidentListItem, EventOverlay \} from "\.\.\/shared\/evidence\.jsx"/);

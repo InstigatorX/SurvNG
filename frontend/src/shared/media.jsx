@@ -11,6 +11,13 @@ export function loadShaka() {
   return shakaImport;
 }
 
+// Touch browsers are considerably more reliable with a normal MP4 resource
+// than with an fMP4 HLS playlist through MSE.  Timeline uses the same policy.
+export function prefersNativeMobilePlayback() {
+  return PREFER_NATIVE_HLS
+    || (typeof window !== "undefined" && Boolean(window.matchMedia?.("(pointer: coarse)").matches));
+}
+
 export const ShakaVideo = forwardRef(function ShakaVideo({
   src,
   mimeType,
@@ -25,19 +32,13 @@ export const ShakaVideo = forwardRef(function ShakaVideo({
 }, forwardedRef) {
   const videoRef = useRef(null);
   const [runtime, setRuntime] = useState(null);
-  const [nativeControlsVisible, setNativeControlsVisible] = useState(() => (
-    PREFER_NATIVE_HLS
-    || (typeof window !== "undefined" && Boolean(window.matchMedia?.("(pointer: coarse)").matches))
-  ));
+  const [nativeControlsVisible, setNativeControlsVisible] = useState(prefersNativeMobilePlayback);
   const callbacksRef = useRef({ onReady, onError });
   useImperativeHandle(forwardedRef, () => videoRef.current);
 
   useEffect(() => {
     // Touch / iOS need controls immediately; deferred reveal leaves a paused frame with no play affordance.
-    setNativeControlsVisible(
-      PREFER_NATIVE_HLS
-      || Boolean(window.matchMedia?.("(pointer: coarse)").matches),
-    );
+    setNativeControlsVisible(prefersNativeMobilePlayback());
   }, [controls, src]);
 
   useEffect(() => {
