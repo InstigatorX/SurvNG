@@ -30,6 +30,16 @@ Incidents can show one primary piece of evidence at a time (**Focus**) or a dens
 
 Snapshots often load a lighter preview first, then a sharper original when you zoom. That keeps browsing responsive on slower links.
 
+## Thumbnail object crop
+
+Under **Admin → Storage**, you can crop compact incident thumbnails to detected objects:
+
+- **Off** keeps the full frame (default)
+- **Auto crop** zooms thumbnails to the object union
+- **Manual crop button** shows a crop control on cards that support it
+
+**Object focus zoom** (1.0–5.5) tightens that crop. Detection-box overlays are a separate checkbox and do not need to be on for crop/zoom.
+
 ## Clean, AI, and tracks
 
 Depending on what SurvNG stored for the incident, you may switch between:

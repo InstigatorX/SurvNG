@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
-import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel } from "../incidentNavigation.mjs";
+import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
@@ -136,18 +136,22 @@ export function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
+export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusControls = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
   const boxCoordinateSize = incidentDetectionFrameSize(event);
   const trackCoordinateSize = incidentTrackingFrameSize(event);
   const coordinateSize = showTracking ? trackCoordinateSize : boxCoordinateSize;
   const progressiveImageKey = `${event?.representative_event_id || event?.id || "none"}:${event?.snapshot_path || "none"}:${event?.snapshot_url || "stored"}`;
+  const focusMode = normalizeIncidentThumbnailObjectFocus(
+    objectFocusMode ?? (allowObjectFocus ? "button" : "off"),
+  );
+  const focusZoom = normalizeIncidentThumbnailObjectFocusZoom(objectFocusZoom);
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(() => coordinateSize);
   const [loadedImageKey, setLoadedImageKey] = useState("");
   const [frameSize, setFrameSize] = useState(null);
-  const [objectFocused, setObjectFocused] = useState(false);
+  const [objectFocused, setObjectFocused] = useState(focusMode === "auto");
   const [progressiveState, setProgressiveState] = useState({ key: "", base: false, intermediate: false, full: false });
   const progressiveReady = progressiveState.key === progressiveImageKey ? progressiveState : { base: false, intermediate: false, full: false };
   const imageReady = loadedImageKey === progressiveImageKey;
@@ -173,12 +177,14 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
       scale,
     };
   }, [imageSize, renderingFrameSize?.height, renderingFrameSize?.width]);
-  const canFocus = allowObjectFocus && showAnnotations && boxes.length > 0 && renderedImage;
+  const canFocus = focusMode !== "off" && boxes.length > 0 && renderedImage;
+  const showFocusButton = canFocus && objectFocusControls;
+  const preferFocused = focusMode === "auto" || (focusMode === "button" && !objectFocusControls);
 
   useLayoutEffect(() => {
-    setObjectFocused(false);
+    setObjectFocused(preferFocused && boxes.length > 0);
     setImageSize(coordinateSize);
-  }, [progressiveImageKey]);
+  }, [progressiveImageKey, preferFocused, boxes.length]);
 
   useLayoutEffect(() => {
     const frame = frameRef.current;
@@ -256,30 +262,10 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
     })).filter((track) => track.width > 0 && track.height > 0);
   }, [frameSize, imageSize, renderedImage, trackCoordinateSize?.height, trackCoordinateSize?.width, tracks]);
 
-  const focusStyle = useMemo(() => {
-    if (!canFocus || !frameSize || !renderedBoxes.length) return null;
-    const minX = Math.max(0, Math.min(...renderedBoxes.map((box) => box.left)));
-    const minY = Math.max(0, Math.min(...renderedBoxes.map((box) => box.top)));
-    const maxX = Math.min(frameSize.width, Math.max(...renderedBoxes.map((box) => box.left + box.width)));
-    const maxY = Math.min(frameSize.height, Math.max(...renderedBoxes.map((box) => box.top + box.height)));
-    const boxWidth = Math.max(1, maxX - minX);
-    const boxHeight = Math.max(1, maxY - minY);
-    const padX = Math.max(frameSize.width * 0.04, boxWidth * 0.35);
-    const padY = Math.max(frameSize.height * 0.04, boxHeight * 0.35);
-    const cropX1 = Math.max(0, minX - padX);
-    const cropY1 = Math.max(0, minY - padY);
-    const cropX2 = Math.min(frameSize.width, maxX + padX);
-    const cropY2 = Math.min(frameSize.height, maxY + padY);
-    const cropWidth = Math.max(1, cropX2 - cropX1);
-    const cropHeight = Math.max(1, cropY2 - cropY1);
-    const centerX = cropX1 + cropWidth / 2;
-    const centerY = cropY1 + cropHeight / 2;
-    const scale = Math.min(5.5, Math.max(1, Math.min((frameSize.width * 0.82) / cropWidth, (frameSize.height * 0.82) / cropHeight)));
-    return {
-      transform: `translate3d(${frameSize.width / 2 - centerX * scale}px, ${frameSize.height / 2 - centerY * scale}px, 0) scale(${scale})`,
-      transformOrigin: "0 0",
-    };
-  }, [canFocus, frameSize, renderedBoxes]);
+  const focusStyle = useMemo(
+    () => (canFocus ? incidentObjectFocusStyle(frameSize, renderedBoxes, focusZoom) : null),
+    [canFocus, focusZoom, frameSize, renderedBoxes],
+  );
 
   const zoomLayerStyle = zoomLayout ? {
     inset: "auto",
@@ -372,7 +358,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
           </div>
         ) : null}
       </div>
-      {canFocus ? (
+      {showFocusButton ? (
         <button
           type="button"
           className={`snapshot-focus-button ${objectFocused ? "active" : ""}`}
@@ -512,7 +498,7 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
 }
 
 
-export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect, onOpenOverlay }) {
+export function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, onSelect, onOpenOverlay }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
@@ -521,7 +507,7 @@ export function IncidentListItem({ incident, cameraName, timeZone, selected, thu
   return (
     <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
       <button type="button" className="live-activity-select" onClick={() => onSelect(incident)} aria-label={`Open ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
-        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
+        <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusControls={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
         <span className="live-activity-copy">
           <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><span className="sr-only">{activityLabel}</span></span>
           <b>{cameraName}</b>

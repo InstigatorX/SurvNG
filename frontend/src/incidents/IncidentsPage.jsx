@@ -28,6 +28,8 @@ import { FaceReviewDialog } from "../people/FacesPage.jsx";
 export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
+  const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
+  const thumbnailObjectFocusZoom = appConfig?.incident_thumbnail_object_focus_zoom ?? 1;
   const [eventFilter, setEventFilter] = useState("object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
@@ -613,7 +615,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} onSelect={(selectedIncident) => toggleIncident(selectedIncident.id)} onOpenOverlay={openIncidentOverlay} />
+                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} onSelect={(selectedIncident) => toggleIncident(selectedIncident.id)} onOpenOverlay={openIncidentOverlay} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No other incidents."}</div> : null}
               </div>
@@ -636,7 +638,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                     <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
                   </>
                 ) : null}
-                {displayedIncident ? <IncidentCard key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`} incident={displayedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} onImageSize={setFocusedImageSize} /> : <div className="empty-state">No incidents match the current filters.</div>}
+                {displayedIncident ? <IncidentCard key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`} incident={displayedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} onImageSize={setFocusedImageSize} /> : <div className="empty-state">No incidents match the current filters.</div>}
               </div>
             </section>
 
@@ -706,6 +708,8 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 timeZone={timeZone}
                 expanded={false}
                 thumbnailAnnotations={thumbnailAnnotations}
+                thumbnailObjectFocus={thumbnailObjectFocus}
+                thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
                 onToggle={toggleIncident}
                 onSelect={openIncidentOverlay}
               />

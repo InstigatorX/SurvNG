@@ -779,6 +779,8 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
 export function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
+  const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
+  const thumbnailObjectFocusZoom = appConfig?.incident_thumbnail_object_focus_zoom ?? 1;
   const [eventFilter, setEventFilter] = useState("object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
@@ -1594,6 +1596,8 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
                 timeZone={timeZone}
                 selected={incident.id === focusedIncident?.id}
                 thumbnailAnnotations={thumbnailAnnotations}
+                thumbnailObjectFocus={thumbnailObjectFocus}
+                thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
                 onSelect={openIncidentOverlay}
                 onOpenOverlay={openIncidentOverlay}
               />
