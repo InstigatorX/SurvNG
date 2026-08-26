@@ -30,7 +30,7 @@ Passwords are stored as scrypt hashes. SurvNG never writes the password itself i
 
 ## Internet and nginx
 
-Sign-in must be on before the port is public. SurvNG trusts `X-Forwarded-Proto` and `X-Forwarded-For` only from the addresses in **Trusted reverse proxies** (default: this computer’s localhost).
+Sign-in must be on before the port is public. SurvNG trusts `X-Forwarded-Proto` and `X-Forwarded-For` only from the addresses in **Trusted reverse proxies** (default: this computer’s localhost). If nginx is on another server, list that server’s IP there, and do not bind SurvNG to loopback.
 
 Full nginx config, Docker networks, firewall, and the first-admin **setup token**: [Reverse proxy](reverse-proxy.md).
 

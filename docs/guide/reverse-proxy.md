@@ -52,19 +52,39 @@ That is correct when nginx runs **on the same computer** as SurvNG.
 | --- | --- |
 | nginx on the SurvNG host, `proxy_pass http://127.0.0.1:8088` | `127.0.0.1` and `::1` (default) |
 | Docker Compose, nginx container → SurvNG container | the Docker network, often `172.16.0.0/12` plus `127.0.0.1` |
-| Proxy on another machine | that proxy’s IP or CIDR only |
+| nginx on a **different server** | the nginx host’s IP as SurvNG sees it (or that host’s CIDR). Not `127.0.0.1`. |
 
 Do **not** set `*` unless SurvNG listens only on localhost and nothing else can reach port 8088. `*` means any client can fake HTTPS and client IPs.
 
 Save settings after you change the list. SurvNG applies it immediately (no restart).
 
-## 3. nginx example (HTTPS in front, SurvNG on localhost)
+## 3. nginx example (HTTPS in front)
 
 This assumes:
 
 - Public site: `https://survng.example.com/survng/`
-- SurvNG: `http://127.0.0.1:8088` with `base_path` `/survng` (the default)
+- SurvNG `base_path` `/survng` (the default)
 - Sign-in is already on
+
+### Same computer as SurvNG
+
+Use `proxy_pass http://127.0.0.1:8088;` and bind SurvNG to loopback (see [Firewall](#5-firewall)).
+
+### Different servers
+
+Do **not** bind SurvNG to `127.0.0.1`. nginx on the other host cannot reach that address. Keep SurvNG listening on the LAN (the packaged systemd unit’s `--host 0.0.0.0` is fine). Point nginx at the SurvNG host’s **private** IP, for example `http://192.168.1.20:8088`.
+
+On **Admin → Access**, set **Trusted reverse proxies** to the nginx server’s LAN IP (the address SurvNG sees on the TCP connection), then Save.
+
+On the SurvNG host, allow port `8088` **only from that nginx IP**. Do not publish `8088` to the internet.
+
+Use the same nginx `server` blocks as below, but change `proxy_pass` to the SurvNG LAN address:
+
+```nginx
+        proxy_pass http://192.168.1.20:8088;
+```
+
+Replace `192.168.1.20` with your SurvNG host. Leave the rest of the headers unchanged.
 
 ```nginx
 map $http_upgrade $connection_upgrade {
@@ -112,7 +132,7 @@ server {
 
 Notes:
 
-- **No trailing slash** on `proxy_pass http://127.0.0.1:8088`. nginx must forward `/survng/` to SurvNG. SurvNG strips `base_path` itself.
+- **No trailing slash** on `proxy_pass`. nginx must forward `/survng/` to SurvNG. SurvNG strips `base_path` itself. Use `127.0.0.1` only when nginx and SurvNG share a host.
 - `Upgrade` / `Connection` are required for live camera WebSockets.
 - `proxy_read_timeout 3600s` and `proxy_buffering off` keep live video from stalling.
 - HTTP on port 80 should **redirect to HTTPS**. SurvNG cannot do that redirect when it only sees localhost HTTP from nginx.
@@ -132,14 +152,26 @@ Browsers warn on a **self-signed** certificate until you trust it. For the publi
 
 ## 5. Firewall
 
-- Allow **443** (and 80 for the HTTPS redirect) to nginx.
-- Do **not** publish SurvNG’s own port (`8088` by default) to the internet. Bind it to `127.0.0.1` if nginx is local:
+- Allow **443** (and 80 for the HTTPS redirect) on the **nginx** host.
+- Do **not** publish SurvNG’s own port (`8088` by default) to the public internet.
+
+**nginx on the same computer as SurvNG:** bind SurvNG to loopback so nothing off-box can open `8088`:
 
 ```text
 python -m survng.app --host 127.0.0.1 --port 8088
 ```
 
-The packaged systemd unit listens on `0.0.0.0:8088` so cameras on the LAN can open the console. For internet use, change `--host 0.0.0.0` to `--host 127.0.0.1` and keep 443 on nginx. Reload systemd after editing the unit.
+The packaged systemd unit listens on `0.0.0.0:8088`. For a same-host proxy, change `--host 0.0.0.0` to `--host 127.0.0.1` and reload systemd.
+
+**nginx on a different server:** leave SurvNG on `0.0.0.0` (or the LAN interface). Loopback would hide the port from nginx. Restrict `8088` with a host firewall so only the nginx host can connect, for example:
+
+```text
+# SurvNG host — allow only the nginx box, then deny the rest
+ufw allow from 192.168.1.10 to any port 8088 proto tcp
+ufw deny 8088
+```
+
+Replace `192.168.1.10` with the nginx server’s LAN IP. Prefer a private network or VPN between the two hosts.
 
 ## 6. What SurvNG then enforces
 

@@ -286,8 +286,9 @@ would record the same cameras and consume duplicate ONVIF connections. See
 [docs/docker.md](docs/docker.md) before migrating an existing installation.
 
 SurvNG can be published on the internet when **browser sign-in is enabled** and
-a reverse proxy terminates HTTPS. Keep port `8088` on localhost (or a private
-network) and follow [docs/guide/reverse-proxy.md](docs/guide/reverse-proxy.md).
+a reverse proxy terminates HTTPS. Keep port `8088` off the public internet
+(loopback if nginx is local, or a firewalled LAN/VPN if nginx is on another
+host) and follow [docs/guide/reverse-proxy.md](docs/guide/reverse-proxy.md).
 Do not expose the raw SurvNG port. Cross-origin API calls are rejected and
 stored credentials are masked in API responses; those controls do not replace
 sign-in and a trusted proxy.
@@ -318,7 +319,7 @@ location /survng/ {
 }
 ```
 
-The `proxy_pass` URL intentionally has no trailing slash so nginx forwards `/survng`. SurvNG strips the configured prefix internally for HTTP, SSE, HLS, and WebSocket routes.
+The `proxy_pass` URL intentionally has no trailing slash so nginx forwards `/survng`. SurvNG strips the configured prefix internally for HTTP, SSE, HLS, and WebSocket routes. If nginx is on a different host, use SurvNG’s LAN IP instead of `127.0.0.1` and list that nginx host under **Trusted reverse proxies**.
 
 ### Progressive web app
 

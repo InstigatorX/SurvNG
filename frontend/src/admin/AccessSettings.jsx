@@ -298,7 +298,7 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig }) 
             spellCheck="false"
             placeholder={"127.0.0.1\n::1"}
           />
-          <small>Only these IPs or CIDRs may set HTTPS and client-IP headers. Keep 127.0.0.1 when nginx is on this computer. Docker networks often need 172.16.0.0/12. Save settings to apply. See Help → Reverse proxy.</small>
+          <small>Only these IPs or CIDRs may set HTTPS and client-IP headers. Use 127.0.0.1 when nginx is on this computer. When nginx is on another server, list that server’s IP (not 127.0.0.1) and do not bind SurvNG to loopback. Docker networks often need 172.16.0.0/12. Save settings to apply. See Help → Reverse proxy.</small>
         </label>
         <div className="api-token-list">
           {users.map((user) => (
