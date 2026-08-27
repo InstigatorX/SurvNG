@@ -39,7 +39,9 @@ incident details panel. SurvNG:
 - tags each result as Appearance or Visual (scores are not fused)
 
 Results are hypotheses, not proof of the same physical item. Timeline links
-open the matching camera and event time.
+open the matching camera and event time, and when multiple hits exist you can
+step **Previous / Next** through the Find similar trail on the Timeline
+investigation rail.
 
 Details and roadmap: [Forensic visual search](../forensic-visual-search.md).
 

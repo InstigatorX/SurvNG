@@ -59,10 +59,11 @@ incident that can resolve to a recording window.
 - Appearance hits rank first; visual hits fill remaining slots without score fusion
 - Text Smart Search remains the separate open-world entry point
 
-### Phase 6 — Timeline forensic walk
+### Phase 6 — Timeline forensic walk ✅
 
-- Multi-hit prev/next across cameras/time
-- Clip set export from selected hits
+- Find similar Timeline links carry `trail=` ordered event IDs
+- Session stores hit metadata for camera/time/mode
+- Selected-incident rail shows Find similar prev/next and seeks across cameras/days
 
 ### Phase 7 — Recording-frame anchor
 

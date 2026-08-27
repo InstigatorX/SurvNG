@@ -32,13 +32,15 @@ export function incidentRecordingContext(item) {
   };
 }
 
-export function recordingsHref(context) {
+export function recordingsHref(context, options = {}) {
   if (!context?.cameraId || !Number.isFinite(context?.epoch)) return appUrl(workspaceHref("timeline"));
   return appUrl(timelineWorkspaceHref({
     cameraId: context.cameraId,
     epoch: Math.round(context.epoch * 1000) / 1000,
     source: context.source,
     eventId: context.eventId,
+    trailEventIds: options.trailEventIds,
+    queryMode: options.queryMode,
   }));
 }
 

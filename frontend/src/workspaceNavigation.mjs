@@ -72,13 +72,37 @@ export function workspaceHref(workspaceId, params = {}) {
   return `${workspace.path}${search.size ? `?${search.toString()}` : ""}`;
 }
 
-export function timelineHref({ cameraId, epoch, source, date, eventId } = {}) {
+export function timelineHref({
+  cameraId,
+  epoch,
+  source,
+  date,
+  eventId,
+  trailEventIds,
+  queryMode,
+} = {}) {
   const params = {};
   if (cameraId) params.camera = cameraId;
   if (Number.isFinite(Number(epoch))) params.at = Number(epoch);
   if (source) params.source = source;
   if (date) params.date = date;
   if (Number.isInteger(Number(eventId)) && Number(eventId) > 0) params.event = Number(eventId);
+  const trail = Array.isArray(trailEventIds)
+    ? trailEventIds.filter((id) => Number.isInteger(Number(id)) && Number(id) > 0)
+    : [];
+  if (trail.length) {
+    const seen = new Set();
+    params.trail = trail
+      .map((id) => Number(id))
+      .filter((id) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+      .slice(0, 24)
+      .join(",");
+  }
+  if (queryMode === "appearance" || queryMode === "visual") params.query_mode = queryMode;
   return workspaceHref("timeline", params);
 }
 

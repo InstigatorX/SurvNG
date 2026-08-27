@@ -39,6 +39,13 @@ import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSee
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
+import {
+  readVisualSearchTrail,
+  serializeTrailEventIds,
+  trailHitForEvent,
+  trailPosition,
+  writeVisualSearchTrail,
+} from "../visualSearchTrail.mjs";
 import { appUrl, mediaUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { ALL_RECORDING_CAMERAS_ID, PREFER_NATIVE_HLS } from "../shared/constants.js";
 import { formatDateTime, formatTimeOnly, formatExportHandleTime, formatBytes, formatDuration } from "../shared/format.js";
@@ -737,11 +744,20 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [exportSubmitting, setExportSubmitting] = useState(false);
   const [gridPlaying, setGridPlaying] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState(initialView.eventId);
+  const [trailEventIds, setTrailEventIds] = useState(() => (
+    initialView.trailEventIds?.length
+      ? initialView.trailEventIds
+      : (readVisualSearchTrail(window.sessionStorage)?.eventIds || [])
+  ));
+  const [trailMeta, setTrailMeta] = useState(() => readVisualSearchTrail(window.sessionStorage));
+  const [trailNotice, setTrailNotice] = useState("");
   const [selectedIncidentIdentity, setSelectedIncidentIdentity] = useState(null);
   const [selectedIdentityRevision, setSelectedIdentityRevision] = useState(0);
   const [timelineInspectorTab, setTimelineInspectorTab] = useState(initialView.inspector);
   const [timelineInspectorOpen, setTimelineInspectorOpen] = useState(false);
-  const [investigationOpen, setInvestigationOpen] = useState(false);
+  const [investigationOpen, setInvestigationOpen] = useState(
+    () => Boolean(initialView.eventId || initialView.trailEventIds?.length),
+  );
   const [followPlayhead, setFollowPlayhead] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(initialView.speed);
   const [timelineViewportAnchor, setTimelineViewportAnchor] = useState(initialView.at);
@@ -830,10 +846,28 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const selectedEventSummary = nearbyEvents.find((event) => event.id === selectedEventId)
     || timelineEvents.find((event) => event.id === selectedEventId)
     || null;
-  const selectedIdentityEventId = timelineIdentityDetailEventId(selectedEventSummary);
-  const selectedEvent = selectedEventSummary && selectedIncidentIdentity?.eventId === selectedIdentityEventId
-    ? mergeTimelineIncidentIdentity(selectedEventSummary, selectedIncidentIdentity.detail)
-    : selectedEventSummary;
+  const trailHit = trailHitForEvent(trailMeta, selectedEventId);
+  const trailSyntheticEvent = !selectedEventSummary && trailHit?.event
+    ? {
+      id: trailHit.event.id,
+      camera_id: trailHit.event.camera_id,
+      created_at: trailHit.event.created_at,
+      incident_epoch: trailHit.event.incident_epoch
+        || (trailHit.event.created_at ? new Date(trailHit.event.created_at).getTime() / 1000 : null),
+      labels: trailHit.event.labels || (trailHit.query_mode === "appearance" ? ["Appearance match"] : ["Visual match"]),
+      has_objects: true,
+      snapshot_path: "",
+    }
+    : null;
+  const selectedEventBase = selectedEventSummary || trailSyntheticEvent;
+  const selectedIdentityEventId = timelineIdentityDetailEventId(selectedEventBase);
+  const selectedEvent = selectedEventBase && selectedIncidentIdentity?.eventId === selectedIdentityEventId
+    ? mergeTimelineIncidentIdentity(selectedEventBase, selectedIncidentIdentity.detail)
+    : selectedEventBase;
+  const trailNav = useMemo(
+    () => trailPosition(trailEventIds, selectedEventId),
+    [selectedEventId, trailEventIds],
+  );
 
   useAppEvents(({ type, data }) => {
     if (type !== "identity_update") return;
@@ -841,7 +875,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!Number.isInteger(eventId) || eventId <= 0) return;
     const invalidatedCacheIds = invalidateTimelineIdentityCache(selectedIncidentIdentityCacheRef.current, eventId);
     const selectedCacheInvalidated = invalidatedCacheIds.includes(selectedIdentityEventId);
-    if (selectedCacheInvalidated || timelineIncidentIncludesEvent(selectedEventSummary, eventId)) {
+    if (selectedCacheInvalidated || timelineIncidentIncludesEvent(selectedEventBase, eventId)) {
       setSelectedIncidentIdentity(null);
       setSelectedIdentityRevision((revision) => revision + 1);
     }
@@ -1515,13 +1549,15 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
     if (eventFilter !== "all") params.set("filter", eventFilter);
     if (selectedEventId) params.set("event", String(selectedEventId));
+    const trailValue = serializeTrailEventIds(trailEventIds);
+    if (trailValue) params.set("trail", trailValue);
     if (timelineInspectorTab !== "details") params.set("inspector", timelineInspectorTab);
     if (incidentRangeHours !== 1) params.set("window", String(incidentRangeHours));
     if (!timelineLanes.object) params.set("objects", "0");
     if (!timelineLanes.motion) params.set("motion", "0");
     if (playbackRate !== 1) params.set("speed", String(playbackRate));
     window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, selectedEventId, source, timelineInspectorTab, timelineLanes.motion, timelineLanes.object]);
+  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, selectedEventId, source, timelineInspectorTab, timelineLanes.motion, timelineLanes.object, trailEventIds]);
 
   useEffect(() => {
     const restoreView = () => {
@@ -1542,6 +1578,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       }
       setEventFilter(view.eventFilter);
       setSelectedEventId(view.eventId);
+      setTrailEventIds(view.trailEventIds || []);
+      if (view.eventId || view.trailEventIds?.length) setInvestigationOpen(true);
       setTimelineInspectorTab(view.inspector);
       setIncidentRangeHours(view.windowHours);
       setTimelineLanes(view.lanes);
@@ -1553,6 +1591,68 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   function checkpointTimelineView() {
     window.history.pushState(null, "", window.location.href);
+  }
+
+  async function selectTrailHit(eventId) {
+    const targetId = Number(eventId);
+    if (!Number.isInteger(targetId) || targetId <= 0) return;
+    setTrailNotice("");
+    let hit = trailHitForEvent(trailMeta, targetId);
+    let camera = String(hit?.event?.camera_id || "");
+    let epoch = Number(hit?.event?.incident_epoch);
+    if (!Number.isFinite(epoch) && hit?.event?.created_at) {
+      epoch = new Date(hit.event.created_at).getTime() / 1000;
+    }
+    if (!camera || !Number.isFinite(epoch)) {
+      try {
+        const response = await fetch(`/api/incidents/by-event/${encodeURIComponent(targetId)}`);
+        if (!response.ok) throw new Error("Trail event unavailable");
+        const detail = await response.json();
+        camera = String(detail.camera_id || "");
+        epoch = Number(detail.created_epoch);
+        if (!Number.isFinite(epoch) && detail.created_at) {
+          epoch = new Date(detail.created_at).getTime() / 1000;
+        }
+        const nextHit = {
+          query_mode: hit?.query_mode || "visual",
+          event: {
+            id: targetId,
+            camera_id: camera,
+            created_at: detail.created_at || "",
+            incident_epoch: Number.isFinite(epoch) ? epoch : null,
+            labels: Array.isArray(detail.labels) ? detail.labels : undefined,
+          },
+        };
+        hit = nextHit;
+        const nextMeta = writeVisualSearchTrail(window.sessionStorage, {
+          eventIds: trailEventIds,
+          hits: [...(trailMeta?.hits || []).filter((item) => Number(item.event.id) !== targetId), nextHit],
+          queryMode: trailMeta?.queryMode || null,
+        });
+        setTrailMeta(nextMeta);
+      } catch {
+        setTrailNotice("Could not open this Find similar hit.");
+        return;
+      }
+    }
+    if (!camera || !Number.isFinite(epoch)) {
+      setTrailNotice("Could not open this Find similar hit.");
+      return;
+    }
+    if (!cameras.some((item) => item.id === camera)) {
+      setTrailNotice("That hit’s camera is not available.");
+      return;
+    }
+    const nextDate = dateKeyForTimeZone(epoch * 1000, timeZone);
+    checkpointTimelineView();
+    setInvestigationOpen(true);
+    setSelectedEventId(targetId);
+    desiredEpochRef.current = epoch;
+    setPlayhead(epoch);
+    const sameScope = camera === cameraId && nextDate === date;
+    if (camera !== cameraId) setCameraId(camera);
+    if (nextDate !== date) setDate(nextDate);
+    if (sameScope) playAt(epoch, true);
   }
 
   function handleRecordingReady(_player, video) {
@@ -2027,7 +2127,33 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       <div id="timeline-investigation" className="recordings-v2-incidents" hidden={!investigationOpen}>
         <div className="recordings-v2-investigation">
           {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
-            <header>Selected incident</header>
+            <header>
+              <span>Selected incident</span>
+              {trailNav.count > 1 ? (
+                <div className="recordings-v2-trail-nav" role="group" aria-label="Find similar trail">
+                  <small>Find similar · {trailNav.index >= 0 ? trailNav.index + 1 : "—"} / {trailNav.count}</small>
+                  <button
+                    type="button"
+                    disabled={!trailNav.previousId}
+                    onClick={() => selectTrailHit(trailNav.previousId)}
+                    title="Previous Find similar hit"
+                    aria-label="Previous Find similar hit"
+                  >
+                    <ChevronLeft size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!trailNav.nextId}
+                    onClick={() => selectTrailHit(trailNav.nextId)}
+                    title="Next Find similar hit"
+                    aria-label="Next Find similar hit"
+                  >
+                    <ChevronRight size={15} />
+                  </button>
+                </div>
+              ) : null}
+            </header>
+            {trailNotice ? <p className="recordings-v2-trail-notice">{trailNotice}</p> : null}
             <a className="recordings-v2-selected-event-image" href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.representative_event_id || selectedEvent.id)}`)} aria-label={`Open selected incident at ${formatTimeOnly(selectedEvent.incident_epoch, timeZone)}`}>
               <Radar size={22} />
               {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 720, 95)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}

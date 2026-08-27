@@ -11711,6 +11711,56 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   background: color-mix(in srgb, var(--panel-soft) 78%, transparent);
 }
 
+.recordings-v2-selected-event > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.recordings-v2-trail-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 700;
+}
+
+.recordings-v2-trail-nav small {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.recordings-v2-trail-nav button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--control);
+  color: var(--ink);
+  padding: 0;
+}
+
+.recordings-v2-trail-nav button:disabled {
+  opacity: 0.45;
+}
+
+.recordings-v2-trail-notice {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .recordings-v2-selected-event>div {
   display: grid;
   gap: 2px;
