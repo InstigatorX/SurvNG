@@ -16,7 +16,7 @@ SurvNG watches your cameras, keeps continuous video history, and helps you find 
 3. [Live view](live.md) — what is happening right now
 4. [Incidents](incidents.md) — activity SurvNG kept for review
 5. [Timeline & exports](timeline.md) — scrub recorded video and save clips
-6. [Search](search.md) — find activity with filters or a short description
+6. [Search](search.md) — find activity with filters, a short description, or Find similar
 7. [People](people.md) — faces SurvNG has seen and people you name
 8. [Admin](admin.md) — configure cameras, detection, storage, and health
 

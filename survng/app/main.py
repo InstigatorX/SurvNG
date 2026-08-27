@@ -1160,6 +1160,7 @@ _semantic_route_bundle = create_semantic_router(
 app.include_router(_semantic_route_bundle.router)
 semantic_search_status = _semantic_route_bundle.handlers["semantic_search_status"]
 semantic_search = _semantic_route_bundle.handlers["semantic_search"]
+semantic_visual_search = _semantic_route_bundle.handlers["semantic_visual_search"]
 
 _system_route_bundle = create_system_router(
     SystemRouteDependencies(

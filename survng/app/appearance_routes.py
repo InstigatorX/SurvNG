@@ -357,6 +357,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         hours: float = 24.0,
         limit: int = 12,
         cross_camera_only: bool = True,
+        track_id: int | None = None,
     ) -> dict[str, Any]:
         bounded_hours = max(0.25, min(float(hours), 24.0 * 30.0))
         bounded_limit = max(1, min(int(limit), 100))
@@ -381,13 +382,17 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 end_at=(anchor_at + timedelta(hours=bounded_hours)).isoformat(),
                 cross_camera_only=bool(cross_camera_only),
                 limit=bounded_limit,
+                track_id=track_id,
             )
-            return {
+            response = {
                 "event_id": event_id,
                 "hours": bounded_hours,
                 "cross_camera_only": bool(cross_camera_only),
                 "matches": result,
             }
+            if track_id is not None:
+                response["track_id"] = int(track_id)
+            return response
 
         return with_manager(matches)
 

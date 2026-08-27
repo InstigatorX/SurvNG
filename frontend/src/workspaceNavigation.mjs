@@ -72,12 +72,13 @@ export function workspaceHref(workspaceId, params = {}) {
   return `${workspace.path}${search.size ? `?${search.toString()}` : ""}`;
 }
 
-export function timelineHref({ cameraId, epoch, source, date } = {}) {
+export function timelineHref({ cameraId, epoch, source, date, eventId } = {}) {
   const params = {};
   if (cameraId) params.camera = cameraId;
   if (Number.isFinite(Number(epoch))) params.at = Number(epoch);
   if (source) params.source = source;
   if (date) params.date = date;
+  if (Number.isInteger(Number(eventId)) && Number(eventId) > 0) params.event = Number(eventId);
   return workspaceHref("timeline", params);
 }
 

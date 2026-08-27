@@ -9,6 +9,7 @@ import {
   Images,
   ListTree,
   Play,
+  Search,
   Sparkles,
   X,
 } from "lucide-react";
@@ -16,7 +17,8 @@ import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePat
 import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
-import { appUrl, fetch } from "../shared/api.js";
+import { visualMatchLabel, visualSearchObjects, visualSearchRequest } from "../visualSearch.mjs";
+import { appUrl, fetch, incidentRecordingContext, recordingsHref } from "../shared/api.js";
 import { formatDateTime, formatTimeOnly, formatDuration } from "../shared/format.js";
 import { eventSnapshotDownloadUrl, eventClipUrl } from "../shared/mediaUrls.js";
 import { prefersNativeMobilePlayback, ShakaVideo } from "../shared/media.jsx";
@@ -164,7 +166,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   );
 }
 
-export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
@@ -476,6 +478,8 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
             showTracking={false}
             incidentEligibleOnly
             thumbnail={!desktopWorkspace || !expanded}
+            selectedObjectIndex={desktopWorkspace && expanded ? selectedObjectIndex : null}
+            onSelectObject={desktopWorkspace && expanded && onSelectObject ? onSelectObject : null}
             onImageSize={expanded && onImageSize ? (size) => onImageSize({
               ...size,
               eventId: Number(preview.representative_event_id || preview.id),
@@ -558,6 +562,122 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
         </div>
       ) : null}
     </article>
+  );
+}
+
+export function VisualSimilarIncidents({
+  anchorEventId,
+  objectIndex,
+  objectLabel,
+  cameraNameById,
+  timeZone,
+  onSelect,
+  loadingEventId,
+  selectedEventId,
+  onClear,
+}) {
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0
+      || !Number.isInteger(Number(objectIndex)) || Number(objectIndex) < 0) {
+      setResults([]);
+      setError("");
+      return undefined;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    fetch(appUrl("/api/semantic-search/visual"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify(visualSearchRequest({
+        eventId: anchorEventId,
+        objectIndex,
+        limit: 16,
+      })),
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.detail || "Visual search unavailable");
+        }
+        return payload;
+      })
+      .then((payload) => {
+        if (!cancelled) setResults(Array.isArray(payload.results) ? payload.results : []);
+      })
+      .catch((requestError) => {
+        if (!cancelled && requestError?.name !== "AbortError") {
+          setResults([]);
+          setError(requestError.message || "Visual search unavailable");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [anchorEventId, objectIndex]);
+
+  if (!Number.isInteger(Number(objectIndex)) || Number(objectIndex) < 0) return null;
+
+  return (
+    <section className="incident-related incident-visual-similar">
+      <div className="incident-related-head">
+        <div>
+          <h3>Find similar</h3>
+          <small>{objectLabel ? `Visually similar to ${objectLabel}` : "Visually similar incidents"}</small>
+        </div>
+        {onClear ? <button type="button" onClick={onClear}>Clear</button> : null}
+      </div>
+      {loading ? <p>Searching indexed appearances…</p> : null}
+      {error ? <p className="incident-visual-similar-error">{error}</p> : null}
+      {!loading && !error && !results.length ? <p>No visually similar incidents in the index yet.</p> : null}
+      {results.length ? (
+        <div className="incident-related-grid">
+          {results.map((result) => {
+            const event = result.event || {};
+            const eventId = Number(event.id);
+            const selected = eventId === Number(selectedEventId);
+            const pending = eventId === Number(loadingEventId);
+            const context = incidentRecordingContext(event);
+            const matchLabel = visualMatchLabel(result.match_strength);
+            return (
+              <div className={`incident-visual-similar-card${selected ? " selected" : ""}`} key={eventId}>
+                <button
+                  type="button"
+                  className={selected ? "selected" : ""}
+                  onClick={() => onSelect?.(event)}
+                  disabled={pending}
+                  aria-pressed={selected}
+                  title={`${matchLabel} · ${cameraNameById.get(event.camera_id) || event.camera_id}`}
+                >
+                  <img
+                    src={appUrl(relatedIncidentThumbnailPath(eventId))}
+                    alt={`${cameraNameById.get(event.camera_id) || event.camera_id} similar incident`}
+                    loading="lazy"
+                  />
+                  <strong>{cameraNameById.get(event.camera_id) || event.camera_id}</strong>
+                  <small>{pending ? "Loading…" : `${matchLabel} · ${formatDateTime(event.created_at, timeZone)}`}</small>
+                </button>
+                {context ? (
+                  <a className="incident-visual-similar-timeline" href={recordingsHref(context)}>
+                    <Play size={13} /> Timeline
+                  </a>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -713,7 +833,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, selectedObjectIndex = null, onSelectObject = null, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -740,7 +860,11 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
   }, [open]);
   if (!incident) return <aside id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`}><div className="empty-state">Select an incident.</div></aside>;
   const inspectedEvent = faceEvent || incident;
-  const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
+  const searchableObjects = visualSearchObjects(inspectedEvent);
+  const objects = searchableObjects.filter((object) => object.incident_eligible !== false);
+  const selectedSearchObject = Number.isInteger(Number(selectedObjectIndex))
+    ? searchableObjects[Number(selectedObjectIndex)]
+    : null;
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
   const faces = faceEvent?.faces || [];
@@ -760,7 +884,33 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
       <section className="incident-current-summary">
         <h3>Current incident</h3>
         <div className="incident-summary-objects">
-          {objects.length ? objects.map((object, index) => <div className="inspector-detection summary" key={`${object.label}-${index}`}><div><strong>{object.label}</strong><span>{Math.round(Number(object.confidence || 0) * 100)}%</span></div></div>) : <p>No eligible object detections.</p>}
+          {objects.length ? objects.map((object) => {
+            const objectIndex = searchableObjects.indexOf(object);
+            const selected = Number(selectedObjectIndex) === objectIndex;
+            return (
+              <div className={`inspector-detection summary${selected ? " selected" : ""}`} key={`${object.label}-${objectIndex}`}>
+                <div>
+                  <strong>{object.label}</strong>
+                  <span>{Math.round(Number(object.confidence || 0) * 100)}%</span>
+                </div>
+                {onSelectObject ? (
+                  <button
+                    type="button"
+                    className={selected ? "active" : ""}
+                    onClick={() => onSelectObject({
+                      objectIndex,
+                      trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
+                      label: object.label,
+                    })}
+                    title="Find visually similar incidents"
+                    aria-pressed={selected}
+                  >
+                    <Search size={13} /> Find similar
+                  </button>
+                ) : null}
+              </div>
+            );
+          }) : <p>No eligible object detections.</p>}
         </div>
         <dl>
           <div><dt>Trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
@@ -787,6 +937,17 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
           </button>
         )) : <p>No recognized faces.</p>}
       </section>
+      <VisualSimilarIncidents
+        anchorEventId={Number.isFinite(eventId) ? eventId : anchorEventId}
+        objectIndex={selectedObjectIndex}
+        objectLabel={selectedSearchObject?.label || ""}
+        cameraNameById={cameraNameById}
+        timeZone={timeZone}
+        onSelect={onRelatedSelect}
+        loadingEventId={relatedLoadingEventId}
+        selectedEventId={selectedRelatedEventId}
+        onClear={onSelectObject ? () => onSelectObject(null) : null}
+      />
       <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
       <CrossCameraTracePanel anchorEventId={anchorEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} loadingEventId={relatedLoadingEventId} />
       <details className="incident-technical-details">

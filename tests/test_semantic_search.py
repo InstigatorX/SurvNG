@@ -146,6 +146,22 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual(hits[1].bbox, (1, 2, 3, 4))
         self.assertGreater(hits[0].score, hits[1].score)
 
+    def test_search_filters_normalized_source_kinds(self) -> None:
+        evidence = [
+            SemanticEvidence(1, "gate", "now", "full_frame", "frame", "one.webp"),
+            SemanticEvidence(2, "gate", "now", "object_crop", "car:0", "two.webp", "car"),
+        ]
+        self.index.upsert(evidence, [[1, 0, 0], [1, 0, 0]], self.identity)
+
+        hits = self.index.search(
+            [1, 0, 0],
+            self.identity,
+            source_kinds=[" OBJECT_CROP ", "object_crop"],
+        )
+
+        self.assertEqual([hit.event_id for hit in hits], [2])
+        self.assertEqual(hits[0].source_kind, "object_crop")
+
     def test_generations_are_isolated(self) -> None:
         evidence = [SemanticEvidence(1, "gate", "now", "full_frame", "frame", "one.webp")]
         self.index.upsert(evidence, [[1, 0, 0]], self.identity)
@@ -262,6 +278,60 @@ class SemanticIndexTest(unittest.TestCase):
         })
         self.assertEqual(encoder.calls[1], [(60, 100, 3)])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 4, "event_count": 2})
+
+    def test_search_event_object_encodes_scaled_snapshot_crop(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        image_path = Path(self.temporary.name) / "snapshot.jpg"
+        cv2.imwrite(str(image_path), np.full((100, 200, 3), 127, dtype=np.uint8))
+        self.index.upsert(
+            [SemanticEvidence(
+                2,
+                "driveway",
+                "now",
+                "full_frame",
+                "frame",
+                "candidate.jpg",
+            )],
+            [[1, 0, 0]],
+            self.identity,
+        )
+
+        class FakeEncoder:
+            identity = self.identity
+
+            def encode_images(self, images):
+                self.calls = getattr(self, "calls", [])
+                self.calls.append([image.shape for image in images])
+                return np.asarray([[1, 0, 0]], dtype=np.float32)
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True),
+            self.index,
+            Path(self.temporary.name),
+            {},
+        )
+        encoder = FakeEncoder()
+        service.encoder = encoder
+        service._storage_dir = Path(self.temporary.name)
+
+        hits = service.search_event_object(
+            {
+                "id": 1,
+                "snapshot_path": "snapshot.jpg",
+                "objects": [{
+                    "label": "car",
+                    "box": [10, 10, 60, 40],
+                    "detection_frame_width": 100,
+                    "detection_frame_height": 50,
+                }],
+            },
+            0,
+            source_kinds=["full_frame"],
+        )
+
+        self.assertEqual(encoder.calls, [[(60, 100, 3)]])
+        self.assertEqual([hit.event_id for hit in hits], [2])
 
     def test_clone_image_generation_preserves_source_and_is_idempotent(self) -> None:
         target = SemanticModelIdentity("candidate", "model-new", "preprocess-new", 3)

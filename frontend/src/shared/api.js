@@ -24,7 +24,12 @@ export function incidentRecordingContext(item) {
   if (!item?.camera_id || !item?.created_at) return null;
   const epoch = new Date(item.created_at).getTime() / 1000;
   if (!Number.isFinite(epoch)) return null;
-  return { cameraId: item.camera_id, epoch };
+  const eventId = Number(item.representative_event_id || item.id || item.event_id);
+  return {
+    cameraId: item.camera_id,
+    epoch,
+    eventId: Number.isInteger(eventId) && eventId > 0 ? eventId : undefined,
+  };
 }
 
 export function recordingsHref(context) {
@@ -33,6 +38,7 @@ export function recordingsHref(context) {
     cameraId: context.cameraId,
     epoch: Math.round(context.epoch * 1000) / 1000,
     source: context.source,
+    eventId: context.eventId,
   }));
 }
 
