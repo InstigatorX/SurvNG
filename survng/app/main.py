@@ -573,6 +573,9 @@ def frontend_response(filename: str) -> HTMLResponse:
 class MemoryLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
+        if record.exc_info and record.exc_info[1] is not None:
+            error = record.exc_info[1]
+            message = f"{message}: {type(error).__name__}: {error}"
         LOG_LINES.append({
             "time": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
             "level": record.levelname,

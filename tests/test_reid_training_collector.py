@@ -6,6 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -18,6 +19,7 @@ from survng.app.reid_training import (
     ReidTrainingCollector,
     ReidTrainingStore,
 )
+from survng.app.reid_training.collector import REID_TRAINING_MAX_CROP_DIMENSION
 
 
 def _person_frame(color: tuple[int, int, int] = (40, 80, 120)) -> np.ndarray:
@@ -66,6 +68,102 @@ class ReidTrainingStoreTests(unittest.TestCase):
 
 
 class ReidTrainingCollectorTests(unittest.TestCase):
+    def test_downscales_full_resolution_crop_without_changing_aspect_ratio(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            collector = ReidTrainingCollector(
+                ReidTrainingStore(base / "db", base / "storage"),
+                DurableImageWriter(ImageStorageConfig(format="jpeg", quality=90)),
+                ObjectTrackingConfig(
+                    reid_training_collector_enabled=True,
+                    reid_training_min_crop_pixels=1000,
+                    reid_training_min_confidence=0.2,
+                    reid_training_min_quality=0.0,
+                ),
+            )
+            buffer = ReidTrainingBuffer()
+            frame = np.random.default_rng(1).integers(
+                0,
+                256,
+                size=(2160, 3840, 3),
+                dtype=np.uint8,
+            )
+            box = {"x1": 1200, "y1": 200, "x2": 2400, "y2": 2000}
+            collector.retain_from_frame(
+                buffer,
+                frame,
+                [{
+                    "label": "person",
+                    "confidence": 0.9,
+                    "box": box,
+                    "track_id": 1,
+                }],
+                [{"label": "person", "confidence": 0.9, "box": box}],
+                10.0,
+            )
+
+            retained = buffer.by_track[1][0].crop
+            self.assertEqual(max(retained.shape[:2]), REID_TRAINING_MAX_CROP_DIMENSION)
+            self.assertAlmostEqual(
+                retained.shape[1] / retained.shape[0],
+                1200 / 1800,
+                delta=0.01,
+            )
+            self.assertLess(retained.nbytes, 2160 * 3840 * 3)
+
+    def test_bounds_candidates_and_bytes_across_many_tracks(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = ObjectTrackingConfig(
+                reid_training_collector_enabled=True,
+                reid_training_max_samples_per_event=2,
+                reid_training_min_crop_pixels=1000,
+                reid_training_min_confidence=0.2,
+                reid_training_min_quality=0.0,
+            )
+            collector = ReidTrainingCollector(
+                ReidTrainingStore(base / "db", base / "storage"),
+                DurableImageWriter(ImageStorageConfig(format="jpeg", quality=90)),
+                config,
+            )
+            buffer = ReidTrainingBuffer()
+            frame = np.random.default_rng(2).integers(
+                0,
+                256,
+                size=(900, 900, 3),
+                dtype=np.uint8,
+            )
+            box = {"x1": 100, "y1": 100, "x2": 800, "y2": 800}
+            tracked = [
+                {
+                    "label": "person",
+                    "confidence": 0.9,
+                    "box": box,
+                    "track_id": track_id,
+                }
+                for track_id in range(40)
+            ]
+            detections = [{"label": "person", "confidence": 0.9, "box": box}]
+
+            collector.retain_from_frame(buffer, frame, tracked, detections, 10.0)
+
+            self.assertLessEqual(
+                buffer.candidate_count,
+                config.reid_training_max_samples_per_event * 4,
+            )
+            one_crop_bytes = next(iter(buffer.by_track.values()))[0].crop.nbytes
+            with patch(
+                "survng.app.reid_training.collector.REID_TRAINING_MAX_BUFFER_BYTES",
+                one_crop_bytes * 3,
+            ):
+                collector.retain_from_frame(buffer, frame, tracked, detections, 10.5)
+                self.assertLessEqual(buffer.retained_bytes, one_crop_bytes * 3)
+                self.assertLessEqual(buffer.candidate_count, 3)
+
     def test_selects_representative_crops_and_assigns_track_identity(self) -> None:
         import tempfile
 

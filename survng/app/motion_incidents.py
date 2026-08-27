@@ -16,7 +16,10 @@ from typing import Any, Callable, Protocol
 import numpy as np
 
 from .durable_payload import durable_json_copy
-from .event_store.jobs import DETECTION_JOB_MAXIMUM_AGE_SECONDS
+from .event_store.jobs import (
+    DETECTION_JOB_MAXIMUM_AGE_SECONDS,
+    detection_job_occurrence_equivalent,
+)
 from .motion_pipeline.decision_handler import MotionDecisionOutcome
 from .perf_samples import RollingLatencySamples
 from .security import redact_secret_text
@@ -25,23 +28,6 @@ from .security import redact_secret_text
 LOGGER = logging.getLogger(__name__)
 REFINEMENT_COMPLETION_RETRY_SECONDS = 2.0
 REFINEMENT_COMPLETION_MAXIMUM_ATTEMPTS = 2_147_483_647
-
-
-def _refinement_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
-    qualification = payload.get("qualification")
-    qualification = qualification if isinstance(qualification, dict) else {}
-    return {
-        "topic": str(payload.get("topic") or ""),
-        "event_at": str(payload.get("event_at") or ""),
-        "existing_event_id": payload.get("existing_event_id"),
-        "detection_intent_id": str(
-            qualification.get("detection_intent_id") or ""
-        ),
-        "require_eligible_object": bool(payload.get("require_eligible_object")),
-        "require_motion_correlation": bool(
-            payload.get("require_motion_correlation")
-        ),
-    }
 
 
 class MotionDecisionProcessor(Protocol):
@@ -233,9 +219,9 @@ class _MemoryDetectionJobStore:
                     raise RuntimeError(
                         "detection job identity collision with different occurrence"
                     )
-                if _refinement_occurrence(
-                    existing["payload"]
-                ) != _refinement_occurrence(payload):
+                if not detection_job_occurrence_equivalent(
+                    existing["payload"], payload
+                ):
                     raise RuntimeError(
                         "detection job identity collision with different occurrence"
                     )

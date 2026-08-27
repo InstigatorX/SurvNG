@@ -49,8 +49,8 @@ def create_reid_training_router(
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
         with manager_generation_lease(
             deps.manager_access,
-            deps.get_manager,
             deps.manager_lock,
+            deps.get_manager,
         ) as active_manager:
             return operation(active_manager)
 

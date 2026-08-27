@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Images, Link2, Unlink2, CircleHelp, Trash2, RefreshCw } from "lucide-react";
+import { appUrl, fetch } from "../shared/api.js";
 
 function SampleStrip({ samples, title }) {
   if (!samples?.length) return null;
@@ -9,7 +10,7 @@ function SampleStrip({ samples, title }) {
       <div className="reid-sample-strip-row">
         {samples.map((sample) => (
           <figure key={sample.sample_id}>
-            <img src={sample.crop_url} alt={sample.sample_id} loading="lazy" />
+            <img src={appUrl(sample.crop_url)} alt={sample.sample_id} loading="lazy" />
             <figcaption>{sample.camera_id} · {sample.selection_reason || "crop"}</figcaption>
           </figure>
         ))}

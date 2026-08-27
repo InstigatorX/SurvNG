@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import cv2
 import numpy as np
 
 from ..config import ObjectTrackingConfig
@@ -17,6 +18,14 @@ from ..visual_quality import image_quality
 from .store import ReidTrainingStore
 
 LOGGER = logging.getLogger(__name__)
+
+# Person ReID consumes 128x256 inputs.  Keep the archive aspect-ratio faithful,
+# but do not retain multi-megapixel camera crops while a tracking session is
+# active.  At 256x256x3, the maximum configured 500 output samples still fit
+# below the hard buffer budget with room for representative selection.
+REID_TRAINING_MAX_CROP_DIMENSION = 256
+REID_TRAINING_CANDIDATE_OVERFLOW_FACTOR = 4
+REID_TRAINING_MAX_BUFFER_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -39,8 +48,51 @@ class ReidTrainingBuffer:
 
     by_track: dict[int, list[_Candidate]] = field(default_factory=dict)
 
+    @property
+    def candidate_count(self) -> int:
+        return sum(len(candidates) for candidates in self.by_track.values())
+
+    @property
+    def retained_bytes(self) -> int:
+        return sum(
+            int(candidate.crop.nbytes)
+            + (
+                int(candidate.embedding.nbytes)
+                if candidate.embedding is not None
+                else 0
+            )
+            for candidates in self.by_track.values()
+            for candidate in candidates
+        )
+
     def clear(self) -> None:
         self.by_track.clear()
+
+
+def _bounded_crop(crop: np.ndarray) -> np.ndarray:
+    """Return an owned, aspect-ratio-preserving crop with bounded dimensions."""
+    height, width = crop.shape[:2]
+    longest_side = max(height, width)
+    if longest_side <= REID_TRAINING_MAX_CROP_DIMENSION:
+        return np.ascontiguousarray(crop.copy())
+    scale = REID_TRAINING_MAX_CROP_DIMENSION / float(longest_side)
+    target_width = max(1, int(round(width * scale)))
+    target_height = max(1, int(round(height * scale)))
+    return np.ascontiguousarray(
+        cv2.resize(
+            crop,
+            (target_width, target_height),
+            interpolation=cv2.INTER_AREA,
+        )
+    )
+
+
+def _candidate_utility(candidate: _Candidate) -> float:
+    return (
+        candidate.confidence * 0.55
+        + candidate.quality * 0.25
+        + min(1.0, candidate.area / 20000.0) * 0.20
+    )
 
 
 class ReidTrainingCollector:
@@ -119,26 +171,71 @@ class ReidTrainingCollector:
                     confidence=confidence,
                     quality=quality,
                     area=area,
-                    crop=np.ascontiguousarray(crop.copy()),
+                    crop=_bounded_crop(crop),
                     embedding=None if embedding is None else embedding.copy(),
                     model_kind=model_kind,
                     model_fingerprint=model_fingerprint,
                 )
             )
-            overflow = self.config.reid_training_max_samples_per_track * 4
+            overflow = (
+                self.config.reid_training_max_samples_per_track
+                * REID_TRAINING_CANDIDATE_OVERFLOW_FACTOR
+            )
             if len(pool) > overflow:
                 # Drop the weakest mid-track samples first.
                 ranked = sorted(
                     enumerate(pool),
                     key=lambda pair: (
-                        pair[1].confidence * 0.55
-                        + pair[1].quality * 0.25
-                        + min(1.0, pair[1].area / 20000.0) * 0.20,
+                        _candidate_utility(pair[1]),
                         -abs(pair[0] - len(pool) / 2.0),
                     ),
                 )
                 drop_index = ranked[0][0]
                 del pool[drop_index]
+            self._enforce_buffer_bounds(buffer)
+
+    def _enforce_buffer_bounds(self, buffer: ReidTrainingBuffer) -> None:
+        candidate_limit = (
+            self.config.reid_training_max_samples_per_event
+            * REID_TRAINING_CANDIDATE_OVERFLOW_FACTOR
+        )
+        while (
+            buffer.candidate_count > candidate_limit
+            or buffer.retained_bytes > REID_TRAINING_MAX_BUFFER_BYTES
+        ):
+            populated = [
+                (track_id, candidates)
+                for track_id, candidates in buffer.by_track.items()
+                if candidates
+            ]
+            if not populated:
+                return
+            # Prefer pruning over-represented tracks.  Within an equally sized
+            # pool, discard the weakest candidate so sparse tracks retain a
+            # chance to contribute a representative crop at flush time.
+            largest_pool = max(
+                len(candidates) for _track_id, candidates in populated
+            )
+            track_id, candidates = min(
+                (
+                    (track_id, candidates)
+                    for track_id, candidates in populated
+                    if len(candidates) == largest_pool
+                ),
+                key=lambda item: min(
+                    _candidate_utility(candidate) for candidate in item[1]
+                ),
+            )
+            drop_index = min(
+                range(len(candidates)),
+                key=lambda index: (
+                    _candidate_utility(candidates[index]),
+                    -abs(index - len(candidates) / 2.0),
+                ),
+            )
+            del candidates[drop_index]
+            if not candidates:
+                del buffer.by_track[track_id]
 
     def flush(
         self,
