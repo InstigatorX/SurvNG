@@ -116,7 +116,7 @@ class EventSnapshotPathTest(unittest.TestCase):
             self.assertEqual(
                 portable_media_path(
                     storage,
-                    "/mnt/frigate/SurvNG/motion_samples/gate/audit.jpg",
+                    "/media1/motion_samples/gate/audit.jpg",
                 ),
                 "motion_samples/gate/audit.jpg",
             )

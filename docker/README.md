@@ -188,7 +188,7 @@ SURVNG_GID=0
 SURVNG_CONFIG_DIR=/root/SurvNG/docker-data/config
 SURVNG_DATA_DIR=/root/SurvNG/runtime
 SURVNG_MODELS_DIR=/root/SurvNG/docker-data/models
-SURVNG_MEDIA_DIR=/mnt/frigate/SurvNG
+SURVNG_MEDIA_DIR=/mnt/media1/SurvNG
 
 SURVNG_VIDEO_GID=44
 SURVNG_RENDER_GID=993

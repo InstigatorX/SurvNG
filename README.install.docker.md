@@ -161,7 +161,7 @@ services:
       - /srv/survng-b:/media-b
 ```
 
-Then set those container paths under **Admin → General → Storage**. Enable
+Then set those container paths under **Admin → Storage & Retention**. Enable
 **Require mount** for NFS/SMB. Details: [docs/storage.md](docs/storage.md).
 
 `.env` holds paths and numeric IDs only. Camera, MQTT, and AI secrets stay in
@@ -229,7 +229,7 @@ Edit `/var/lib/survng/config/go2rtc.yaml`, then set each camera `stream_url` /
 `live_stream_url` to `rtsp://127.0.0.1:8554/<stream_name>`. Set
 `SURVNG_GO2RTC=0` in `.env` only when an external go2rtc already restreams.
 
-API bearer tokens (optional) are under **Admin → General → API**. The health
+API bearer tokens (optional) are under **Admin → API & MQTT**. The health
 endpoint stays unauthenticated. Do not turn tokens on until the browser and
 WebSockets will send `Authorization: Bearer …`.
 

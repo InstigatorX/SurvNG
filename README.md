@@ -1,90 +1,77 @@
 # SurvNG
 
-Local-first surveillance app for RTSP/RTMP/ONVIF cameras with recording, camera motion-event ingestion, OpenVINO object detection, and a browser GUI.
+Local-first video surveillance for RTSP/ONVIF cameras. SurvNG records video,
+turns meaningful motion into reviewable incidents, and provides a browser
+workspace for live monitoring, playback, search, and administration.
 
-See the [SurvNG guide](docs/guide/index.md).
-When the app is running, the same guide is available at
-`/help` (for example `http://127.0.0.1:8088/survng/help`), also linked from
-**Help** in the navigation.
+The in-product guide is available through **Help**, or at `/help` on a running
+server.
 
-Continuous-recording quotas, age limits, free-space watermarks, and protected
-incident media are described in [Multi-disk media storage](docs/storage.md) and
-[Storage retention](docs/storage-retention.md).
-Configuration saves and their runtime restart boundaries are described in
-[Configuration application boundaries](docs/configuration-application.md).
-For the optional container installation, persistent-volume layout, migration,
-and Intel GPU/QSV support, see the [Docker README](docker/README.md). Generic
-deployment and upgrade guidance is in [Docker installation](docs/docker.md).
-Local visual-language search setup is documented in [Smart Search model packages](docs/semantic-search.md).
-Importing original incident images and model-generated boxes into an external
-annotation workflow is documented in the [Training samples API](docs/training-api.md).
-The production Hybrid object tracker, optional FastTrack comparison engine, and
-evidence-based selection process are covered in [Object tracking](README.tracking.md).
+## What SurvNG does
 
-SurvNG is licensed under the [MIT License](LICENSE). Third-party notices for
-bundled and notable dependencies are in [NOTICE](NOTICE) and
-[THIRD_PARTY.md](THIRD_PARTY.md).
+- Connects to RTSP, RTMP, HTTP, and file streams; supports ONVIF camera events.
+- Records continuous video with FFmpeg and manages retention across storage
+  locations.
+- Uses OpenVINO-compatible object detection, motion qualification, zones, and
+  optional object tracking to create incidents.
+- Provides live view, incident review, timeline playback, exports, search,
+  people/face recognition, MQTT, Home Assistant, and a browser-based admin
+  workspace.
 
-For the end-to-end ingest, motion qualification, inference, incident, recording,
-and playback architecture, see [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Keep that
-document synchronized with changes to any video-processing stage.
+## Documentation
 
-## What SurvNG 1.0 Does
+- [User guide](docs/guide/index.md) — start here for everyday use.
+- [Getting started](docs/guide/getting-started.md) — open SurvNG, add a camera,
+  and confirm recording.
+- [Admin](docs/guide/admin.md), [Cameras](docs/guide/cameras.md), [Motion &
+  detection](docs/guide/motion-detection.md), and [Storage](docs/guide/storage.md).
+- [Integrations](docs/guide/integrations.md) and the [HTTP API](docs/guide/api.md)
+  — Home Assistant, MQTT, API tokens, scopes, and examples.
+- [Access](docs/guide/access.md) and [Reverse proxy](docs/guide/reverse-proxy.md)
+  — sign-in, HTTPS, trusted proxies, and internet exposure.
+- [AI assistant](docs/guide/assistant.md), [People](docs/guide/people.md), and
+  [Timeline & exports](docs/guide/timeline.md).
 
-- Connects to RTSP, RTMP, HTTP, or file streams through OpenCV/FFmpeg.
-- Records streams to segmented MP4 files with FFmpeg.
-- Listens for ONVIF pull-point events when the camera supports them, with explicit camera-triggered or adaptive visual-triggered operation.
-- Runs an OpenVINO detection pass on the latest frame when motion is reported.
-- Serves a React bento-style GUI for live streams, event history, recordings, and camera controls.
-- Provides an optional read-only AI assistant for health checks, configuration explanations, incident investigation, and structured incident search.
+Technical references: [video pipeline](VIDEO_PIPELINE.md), [motion triggers and
+validation](docs/adaptive-motion.md), [incident evidence data
+path](docs/incident-evidence-data-path.md), [configuration application
+boundaries](docs/configuration-application.md), and [Docker deployment](docs/docker.md).
 
-## AI analysis and assistant
+## Installation
 
-SurvNG reuses one configured AI provider, API key, and optional base URL for
-Motion Audit image analysis and the global assistant. Under **Admin → Object
-Detection → AI analysis & assistant**, two model roles can be configured:
+Installation, upgrades, Docker deployment, native systemd setup, and GPU host
+guidance are maintained in [README.install](README.install). Choose either the
+[Docker guide](README.install.docker.md) or the [native systemd
+guide](README.install.systemd.md); do not run both against the same cameras.
 
-- **Everyday AI model** is the existing Motion Audit image-analysis model.
-  It also handles assistant routing, incident searches, system status, and
-  straightforward factual questions.
-- **Detailed analysis model** is the optional second model for incident diagnosis, ambiguous
-  timelines, comparisons, and tuning advice. Leave it blank to use the fast
-  model.
+## Deployment and security
 
-The assistant is the sparkle button at the lower-right of every screen. Normal
-chat is read-only: it can query bounded, typed SurvNG tools, but cannot run
-commands, restart services, delete media, or send notifications. Evidence
-sent to the provider is bounded and strips credentials, stream URLs, web URLs,
-and filesystem paths. Responses link back to the camera or incident used as
-evidence. Assistant conversation history expires from browser storage after
-24 hours of inactivity. Configuration saves for these model fields use the
-existing hot AI configuration path and do not restart camera workers.
+For internet-facing use, enable browser sign-in and terminate HTTPS at a trusted
+reverse proxy. Keep SurvNG's raw port off the public internet; use loopback,
+LAN/VPN firewalling, or the reverse-proxy topology in the [reverse-proxy
+guide](docs/guide/reverse-proxy.md).
 
-When incident evidence has a retained snapshot, the assistant response includes
-the actual incident image in its source card. Images are served through SurvNG's
-existing authenticated event-image endpoint rather than embedded in conversation
-storage or returned as provider-hosted URLs. System-health and configuration
-answers do not attach unrelated camera images.
+## Support bundle
 
-When an incident is selected, asking the assistant to **visually analyze this
-incident** sends its representative retained image and bounded incident
-telemetry through the same configured multimodal AI transport. The deeper model
-is used when configured. The review distinguishes likely misses,
-misclassifications, false positives, and uncertain single-frame evidence while
-keeping detector and tracking assessments separate.
+For a remote support case, use **Admin → Diagnostics → Download support bundle**.
+The redacted JSON bundle contains the safe system context needed for diagnosis;
+see [Access](docs/guide/access.md#support-bundle) for the handoff workflow.
 
-Visual reviews may propose only the existing allowlisted, bounded,
-camera-scoped motion settings. SurvNG calculates the displayed before/after
-values itself; the model does not. Applying requires **Allow confirmed changes**
-to be enabled plus an explicit confirmation in the drawer. A configuration
-fingerprint rejects stale proposals if motion settings changed after analysis.
-Each apply request also carries a one-hour server-issued proof binding it to the
-exact reviewed incident, camera, settings, values, and explanation; edited or
-replayed recommendations are rejected. Active AI analysis prevents a camera
-manager reload from tearing down resources that the review is still using.
-No object thresholds, zones, tracking settings, models, trigger topology, or
-global settings can be changed through this incident-review path.
+## Development
 
+<<<<<<< HEAD
+Python 3.12+, Node.js 20+, and FFmpeg are required for local development. Run
+the focused tests for the area you change; the frontend production build is:
+
+```bash
+npm --prefix frontend run build
+```
+
+## License
+
+SurvNG is licensed under the [MIT License](LICENSE). Third-party notices are in
+[NOTICE](NOTICE) and [THIRD_PARTY.md](THIRD_PARTY.md).
+=======
 Under **Admin → Camera Intelligence**, a manual per-camera review looks across
 up to 100 records from the last 24 hours, 3 days, or 7 days. It balances likely
 misses, visual backup triggers, filtered motion, motion-only incidents, and
@@ -127,166 +114,14 @@ ONVIF includes event handling in its network interface specifications, and many 
 
 If ONVIF motion events are missing or unreliable, select **EMA only** so Enhanced Motion Analysis becomes the sole automatic trigger.
 
-## Requirements
+## Installation
 
-- Python 3.12+
-- Node.js 20+ for building the React UI
-- FFmpeg available on `PATH`
-- A camera with RTSP/RTMP URL, or an ONVIF-capable camera
-- Optional: OpenVINO-readable model files, such as `.onnx` or `.xml` + `.bin`
+Installation, upgrades, Docker deployment, systemd setup, and GPU host guidance
+are maintained in [README.install](README.install). Choose either the
+[Docker guide](README.install.docker.md) or the [native systemd
+guide](README.install.systemd.md); do not run both against the same cameras.
 
-## Install
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-npm --prefix frontend install
-npm --prefix frontend run build
-```
-
-The React frontend in `frontend/` is the default interface. Its production build is emitted into `survng/static/`, which FastAPI serves for `/` and `/recordings`.
-
-Native installs can pull product updates from Git under **Admin → General →
-Check for Updates / Update**, or by running the upgrade steps in
-[README.install.systemd.md](README.install.systemd.md). Docker upgrades pull a
-published image or rebuild from a checkout; see
-[README.install.docker.md](README.install.docker.md).
-
-Full host install (pasteable): [README.install](README.install).
-
-### Intel GPU runtime upgrade
-
-OpenVINO's Intel GPU plug-in depends on the host OpenCL runtime and Intel
-Graphics Compiler (IGC). Ubuntu 24.04's standard repository may provide an
-older compute stack than the installed OpenVINO release. The following upgrade
-uses Intel's Ubuntu graphics PPA for a coordinated compute and QSV/media stack.
-See Intel's [Ubuntu graphics package guide](https://dgpu-docs.intel.com/installation-guides/installing-packages-from-the-intel-ppa.html)
-for the upstream repository procedure.
-
-These instructions are written for the SurvNG Ubuntu 24.04 host using a
-Proxmox kernel. Keep the kernel's existing `i915` driver. Do **not** install
-`intel-i915-dkms` or replace the Proxmox kernel as part of this procedure.
-
-Capture the current package and repository state:
-
-```bash
-sudo -i
-cd /root/SurvNG
-
-stamp=$(date +%Y%m%d-%H%M%S)
-backup="/root/intel-gpu-backup-$stamp"
-mkdir -p "$backup"
-dpkg-query -W > "$backup/packages.txt"
-apt-mark showmanual > "$backup/manual-packages.txt"
-cp -a /etc/apt/sources.list /etc/apt/sources.list.d "$backup/"
-clinfo > "$backup/clinfo.txt"
-vainfo --display drm --device /dev/dri/renderD128 > "$backup/vainfo.txt" 2>&1
-```
-
-Add Intel's repository and inspect the new candidates:
-
-```bash
-apt-get update
-apt-get install -y software-properties-common
-add-apt-repository -y ppa:kobuk-team/intel-graphics
-apt-get update
-
-apt-cache policy intel-opencl-icd libigc2 libze-intel-gpu1 libze1 \
-  libigdgmm12 intel-media-va-driver-non-free libmfx-gen1.2 libvpl2
-```
-
-Simulate the coordinated userspace upgrade before changing the host:
-
-```bash
-apt-get --simulate install \
-  intel-opencl-icd libze-intel-gpu1 libze1 clinfo \
-  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 libvpl-tools vainfo \
-  | tee "$backup/apt-simulation.txt"
-
-grep -E '^(Inst|Remv)|linux-image|pve|proxmox|i915-dkms' \
-  "$backup/apt-simulation.txt"
-```
-
-Stop if the simulation proposes removing Proxmox packages or installing
-`intel-i915-dkms`. Otherwise, install the userspace packages together:
-
-```bash
-systemctl stop survng.service
-apt-get install -y \
-  intel-opencl-icd libze-intel-gpu1 libze1 clinfo \
-  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 libvpl-tools vainfo
-
-cd /root/SurvNG
-if [ -d .cache/openvino ]; then
-  mv .cache/openvino ".cache/openvino-before-intel-$stamp"
-fi
-mkdir -p .cache/openvino
-reboot
-```
-
-After reconnecting, verify OpenCL, VA-API/QSV, OpenVINO, and clean service
-shutdown. The first model load recompiles the OpenVINO cache and is expected to
-take longer than subsequent starts.
-
-```bash
-cd /root/SurvNG
-clinfo -l
-vainfo --display drm --device /dev/dri/renderD128
-/etc/frigate/custom-ffmpeg/bin/ffmpeg -hide_banner -hwaccels
-systemctl status survng.service --no-pager
-curl -s http://127.0.0.1:8088/api/system/status | .venv/bin/python -m json.tool
-
-systemctl restart survng.service
-sleep 15
-journalctl -u survng.service --since "5 minutes ago" --no-pager \
-  | grep -E 'shutdown complete|SEGV|core-dump|left-over|SIGKILL'
-```
-
-The detector status should report `loaded_device: GPU`, `openvino_loaded: true`,
-and an empty `warmup_error`. To roll back the PPA packages:
-
-```bash
-sudo -i
-systemctl stop survng.service
-apt-get install -y ppa-purge
-ppa-purge ppa:kobuk-team/intel-graphics
-cd /root/SurvNG
-rollback_stamp=$(date +%Y%m%d-%H%M%S)
-mv .cache/openvino ".cache/openvino-failed-$rollback_stamp"
-mkdir -p .cache/openvino
-reboot
-```
-
-## Run
-
-```bash
-python -m survng.app --reload --host 0.0.0.0 --port 8088
-```
-
-`python -m survng.app` reads TLS settings from config and attaches certificate files when HTTPS is enabled. Direct `uvicorn survng.app.main:app` still works for HTTP-only development.
-
-Open http://127.0.0.1:8088/survng/ on this machine, or use the server's LAN address from another device, for example `http://192.168.82.12:8088/survng/`.
-
-### Optional Docker installation
-
-Docker is an alternative deployment path; the native virtualenv/systemd path
-remains supported. Pasteable host setup (published GHCR image, dedicated user,
-Compose) is in [README.install.docker.md](README.install.docker.md). Native
-systemd setup is in [README.install.systemd.md](README.install.systemd.md).
-
-```bash
-cp .env.example .env
-docker compose build
-docker compose up -d
-docker compose ps
-```
-
-On first start, a private camera-free config is created under
-`docker-data/config/config.json`. Open `http://SERVER:8088/survng/` and configure
-SurvNG normally. Do not start the container alongside the systemd service: both
-would record the same cameras and consume duplicate ONVIF connections. See
-[docs/docker.md](docs/docker.md) before migrating an existing installation.
+## Deployment and security
 
 SurvNG can be published on the internet when **browser sign-in is enabled** and
 a reverse proxy terminates HTTPS. Keep port `8088` off the public internet
@@ -592,3 +427,4 @@ CHECK_GROWTH=1 CAMERA=front-door SOURCE=main SOAK_SECONDS=30 SCRUBS=8 \
 ```
 
 Real Safari validation must run on a Mac because Linux Chromium does not provide Safari's HEVC pipeline. Open the same camera/day in Safari, play through several segment boundaries, scrub to widely separated times, and confirm playback resumes without a black frame. Use an H.265 camera such as Upper Garage to exercise `hvc1` playback.
+>>>>>>> 5b6c9916baf2f8651fbb2d53fa59b91678ae5a92

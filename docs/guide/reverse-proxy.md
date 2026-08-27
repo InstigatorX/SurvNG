@@ -8,7 +8,7 @@ Do this in order. Skipping sign-in leaves the console open to anyone who can rea
 
 On the LAN, before you open a public port:
 
-1. Open **Admin → Access**.
+1. Open **Admin → Users & Access**.
 2. Create an **Admin** user (or enable sign-in and create one when SurvNG asks).
 3. Enable **Require sign-in for the browser console**.
 4. Set **Session length** if you want something other than 14 days.
@@ -37,7 +37,7 @@ nginx (or Caddy, Traefik, Docker) talks to SurvNG on HTTP. It must send:
 - `X-Forwarded-Proto: https` so cookies are marked **Secure** and SurvNG sends **HSTS**
 - `X-Forwarded-For` with the real client IP (login lockout and the setup-token check)
 
-SurvNG **ignores those headers** unless the connecting peer is in **Trusted reverse proxies** on **Admin → Access**.
+SurvNG **ignores those headers** unless the connecting peer is in **Trusted reverse proxies** on **Admin → Users & Access**.
 
 Default:
 
@@ -74,7 +74,7 @@ Use `proxy_pass http://127.0.0.1:8088;` and bind SurvNG to loopback (see [Firewa
 
 Do **not** bind SurvNG to `127.0.0.1`. nginx on the other host cannot reach that address. Keep SurvNG listening on the LAN (the packaged systemd unit’s `--host 0.0.0.0` is fine). Point nginx at the SurvNG host’s **private** IP, for example `http://192.168.1.20:8088`.
 
-On **Admin → Access**, set **Trusted reverse proxies** to the nginx server’s LAN IP (the address SurvNG sees on the TCP connection), then Save.
+On **Admin → Users & Access**, set **Trusted reverse proxies** to the nginx server’s LAN IP (the address SurvNG sees on the TCP connection), then Save.
 
 On the SurvNG host, allow port `8088` **only from that nginx IP**. Do not publish `8088` to the internet.
 
@@ -139,13 +139,13 @@ Notes:
 - HTTP on port 80 should **redirect to HTTPS**. SurvNG cannot do that redirect when it only sees localhost HTTP from nginx.
 - You can also set HSTS in nginx (shown above). SurvNG adds HSTS on responses it believes are HTTPS, which requires a trusted `X-Forwarded-Proto`.
 
-If you serve SurvNG at the site root instead of `/survng/`, set **Web Base Path** to empty in Admin → General, Save, then use `location /` with the same `proxy_pass` and headers.
+If you serve SurvNG at the site root instead of `/survng/`, set **Web Base Path** to empty in Admin → Server Preferences, Save, then use `location /` with the same `proxy_pass` and headers.
 
 ## 4. Built-in HTTPS (no nginx)
 
 On a home LAN you can skip nginx:
 
-1. **Admin → Access → HTTPS**: hostname, generate or upload a certificate, enable HTTPS, restart.
+1. **Admin → Users & Access → HTTPS certificates**: hostname, generate or upload a certificate, enable HTTPS, restart.
 2. Start SurvNG with `python -m survng.app` (or the systemd/Docker command), not plain `uvicorn ...:app`.
 3. Open `https://your-host:port/survng/`.
 

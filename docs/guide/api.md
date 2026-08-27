@@ -16,7 +16,7 @@ Browser users and API tokens are optional and off by default.
 
 #### Browser sessions
 
-Enable sign-in under **Admin → Access**. The UI then uses an HTTP-only session cookie after `POST /api/auth/login`.
+Enable sign-in under **Admin → Users & Access**. The UI then uses an HTTP-only session cookie after `POST /api/auth/login`.
 
 | Role | Typical use |
 | --- | --- |

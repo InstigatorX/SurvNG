@@ -21,7 +21,7 @@ You should land on **Live**. The left side lists the main workspaces: Live, Inci
 
 If the host already requires sign-in, use the account an administrator created for you.
 
-To lock a new install, open **Admin → Access**, enable sign-in, Save settings, and create the administrator if prompted. Details: [Access](access.md).
+To lock a new install, open **Admin → Users & Access**, enable sign-in, Save settings, and create the administrator if prompted. Details: [Access](access.md).
 
 If this host will be reachable from the internet, turn sign-in on **before** opening a public port, and put nginx (or another proxy) in front. Step-by-step: [Reverse proxy](reverse-proxy.md).
 

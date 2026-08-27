@@ -264,8 +264,8 @@ http://NEW-SERVER-IP:8088/survng/
 
 Restrict port 8088 to LAN/VPN or an authenticated reverse proxy.
 
-Configure cameras under **Admin**. Optional API tokens: **Admin → General →
-API**. The health endpoint stays unauthenticated.
+Configure cameras under **Admin**. Optional API tokens are under **Admin → API
+& MQTT**. The health endpoint stays unauthenticated.
 
 For a remote support case, use **Admin → Diagnostics → Download support
 bundle**. It creates a redacted JSON report suitable for sharing; see the
@@ -328,7 +328,7 @@ ONVIF, MQTT, and each media location online and writable.
 
 ## 12. Upgrade
 
-In-app **Admin → General → Check for Updates / Update** fast-forwards Git,
+In-app **Admin → Server Preferences → Check for Updates / Update** fast-forwards Git,
 reinstalls Python deps, rebuilds the frontend when `npm` is on `PATH`, and
 restarts `survng.service`. The checkout must be clean and fast-forwardable.
 `SURVNG_REPO_ROOT` is already set in the unit.

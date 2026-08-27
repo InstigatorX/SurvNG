@@ -15,7 +15,7 @@ Home Assistant and other automations still use **API tokens** under [Integration
 
 ## Turn on sign-in
 
-1. Open **Admin → Access**.
+1. Open **Admin → Users & Access**.
 2. Enable **Require sign-in for the browser console**.
 3. **Save settings**.
 4. If no users exist yet, SurvNG asks you to **create the administrator**. Otherwise, sign in with an existing account.
@@ -23,6 +23,11 @@ Home Assistant and other automations still use **API tokens** under [Integration
 You can also add Admin and Viewer accounts on the Access page before enabling sign-in. User create, role, password, and delete still apply immediately; requiring sign-in and session length wait for Save.
 
 The next visit shows the sign-in screen. Sessions stay on the device as an HTTP-only cookie for the number of days set under **Session length** (default 14). Changing that length and saving applies to the next sign-in.
+
+Administrators can open the **Sessions** tab to review active browser sessions,
+including their user, IP address, sign-in time, recent activity, and expiry.
+End a session there to sign that browser out on its next request. Password
+changes and deleting a user also revoke that user's sessions.
 
 To go back to an open LAN console, turn off **Require sign-in** and Save, then demote or delete accounts. Deleting the last administrator also turns sign-in off. While sign-in is required, the last administrator cannot be changed to Viewer.
 
@@ -46,6 +51,13 @@ SurvNG can serve the UI over TLS without a reverse proxy.
 A self-signed certificate will warn in the browser until you trust it. That is expected on a home LAN.
 
 Start SurvNG with `python -m survng.app` (or the packaged systemd/Docker command) so TLS settings are applied. Plain `uvicorn survng.app.main:app` does not attach the certificate files.
+
+## Support bundle
+
+For a remote troubleshooting case, an administrator can open **Admin →
+Diagnostics** and download a redacted support bundle. It contains safe runtime,
+configuration, health, diagnostic, and log context but excludes media,
+credentials, stream URLs, cookies, private keys, and filesystem paths.
 
 ## Related
 

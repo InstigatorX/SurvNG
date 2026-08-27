@@ -32,7 +32,7 @@ Snapshots often load a lighter preview first, then a sharper original when you z
 
 ## Thumbnail object focus
 
-Under **Admin → Storage**, you can crop compact incident thumbnails to detected objects:
+Under **Admin → Storage & Retention**, you can crop compact incident thumbnails to detected objects:
 
 - **Off** keeps the full frame (default)
 - **Auto** crops thumbnails to the object union

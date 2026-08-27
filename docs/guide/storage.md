@@ -15,7 +15,7 @@ SurvNG can keep continuous video, incident pictures, short clips, and exports. S
 
 ## How retention works
 
-Under **Admin → Storage** you set limits such as:
+Under **Admin → Storage & Retention** you set limits such as:
 
 - How many days of main vs live recordings to keep
 - How long snapshots stay
@@ -36,7 +36,7 @@ New incident pictures default to WebP. You can switch format/quality under Stora
 
 ## Maintenance
 
-**Admin → Maintenance** can run storage cleanup or repair index/media links after disk problems. Prefer planned maintenance windows for large cleanups.
+**Admin → Storage Maintenance** can run storage cleanup or repair index/media links after disk problems. Prefer planned maintenance windows for large cleanups.
 
 ## Example starter policy
 

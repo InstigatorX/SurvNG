@@ -1321,15 +1321,15 @@ class EventStoreTest(unittest.TestCase):
                 connection.execute(
                     "update events set snapshot_path = ?, recording_path = ? where id = ?",
                     (
-                        "/mnt/frigate/SurvNG/snapshots/gate/event.jpg",
-                        "/mnt/frigate/SurvNG/recordings/gate/segment.mp4",
+                        "/media1/snapshots/gate/event.jpg",
+                        "/media1/recordings/gate/segment.mp4",
                         int(event["id"]),
                     ),
                 )
                 connection.execute(
                     "update motion_audits set snapshot_path = ? where id = ?",
                     (
-                        "/mnt/frigate/SurvNG/motion_samples/gate/audit.jpg",
+                        "/media1/motion_samples/gate/audit.jpg",
                         int(motion["id"]),
                     ),
                 )

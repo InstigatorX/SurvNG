@@ -4,7 +4,7 @@ SurvNG can notify and be controlled by other systems on your network. The two co
 
 ## MQTT and Home Assistant
 
-Enable MQTT under **Admin → Integrations**.
+Enable MQTT under **Admin → API & MQTT**.
 
 SurvNG publishes topics such as:
 
@@ -41,7 +41,7 @@ Scopes:
 | `camera:control` | Camera power, recording, and detection toggles |
 | `admin` | Configuration changes and other writes (includes the other scopes) |
 
-Create a token in **Admin → Server → API**, or with:
+Create a token in **Admin → API & MQTT**, or with:
 
 ```bash
 .venv/bin/python scripts/create-api-token.py \
@@ -58,7 +58,7 @@ Send it as:
 Authorization: Bearer YOUR_TOKEN
 ```
 
-Important: browser users (Admin → Access) and API tokens can both be enabled. The UI uses a session cookie; automations keep using `Authorization: Bearer`.
+Important: browser users (Admin → Users & Access) and API tokens can both be enabled. The UI uses a session cookie; automations keep using `Authorization: Bearer`.
 
 ## Stream sources for Home Assistant
 
