@@ -67,6 +67,17 @@ assert.deepEqual(mergeTimelineIncidentIdentity(timelineSummary, {
   identities: [{ name: "Ada", status: "confirmed" }],
   primary_identity: { name: "Ada", status: "confirmed" },
 });
+assert.equal(
+  mergeTimelineIncidentIdentity({ id: 42, incident_epoch: 10 }, { identities: [] }).snapshot_path,
+  "available",
+);
+assert.equal(
+  mergeTimelineIncidentIdentity(
+    { id: 42, incident_epoch: 10 },
+    { events: [{ id: 42, snapshot_path: "available" }] },
+  ).snapshot_path,
+  "available",
+);
 assert.deepEqual(timelineViewport(0, 24 * 3600, 12 * 3600, 2), { startEpoch: 11 * 3600, endEpoch: 13 * 3600 });
 assert.deepEqual(timelineViewport(0, 24 * 3600, 15 * 60, 2), { startEpoch: 0, endEpoch: 2 * 3600 });
 assert.deepEqual(timelineViewport(0, 24 * 3600, 23.75 * 3600, 2), { startEpoch: 22 * 3600, endEpoch: 24 * 3600 });

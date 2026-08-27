@@ -37,6 +37,7 @@ const written = writeVisualSearchTrail(storage, {
 assert.equal(written.eventIds.length, 2);
 const read = readVisualSearchTrail(storage);
 assert.equal(trailHitForEvent(read, 84)?.query_mode, "visual");
+assert.equal(trailHitForEvent(read, 12)?.event?.snapshot_path, "available");
 
 assert.equal(
   timelineHref({

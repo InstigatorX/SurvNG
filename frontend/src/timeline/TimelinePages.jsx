@@ -843,8 +843,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     event.incident_epoch >= timelineView.startEpoch
     && event.incident_epoch <= timelineView.endEpoch
   )), [filteredEvents, timelineView.endEpoch, timelineView.startEpoch]);
-  const selectedEventSummary = nearbyEvents.find((event) => event.id === selectedEventId)
-    || timelineEvents.find((event) => event.id === selectedEventId)
+  const selectedEventSummary = nearbyEvents.find((event) => Number(event.id) === Number(selectedEventId))
+    || timelineEvents.find((event) => Number(event.id) === Number(selectedEventId))
     || null;
   const trailHit = trailHitForEvent(trailMeta, selectedEventId);
   const trailSyntheticEvent = !selectedEventSummary && trailHit?.event
@@ -856,7 +856,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         || (trailHit.event.created_at ? new Date(trailHit.event.created_at).getTime() / 1000 : null),
       labels: trailHit.event.labels || (trailHit.query_mode === "appearance" ? ["Appearance match"] : ["Visual match"]),
       has_objects: true,
-      snapshot_path: "",
+      // Truthy so the selected-incident panel can request /api/events/{id}/thumbnail.jpg
+      // before the day event list (or nearby rail) has loaded this hit.
+      snapshot_path: trailHit.event.snapshot_path || "available",
     }
     : null;
   const selectedEventBase = selectedEventSummary || trailSyntheticEvent;
@@ -934,7 +936,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     ? Math.max(0, ...(selectedEvent.objects || []).map((object) => Number(object.confidence) || 0), Number(selectedEvent.confidence) || 0)
     : 0;
   const displayedTimelineEvents = useMemo(() => {
-    if (!selectedEvent || nearbyEvents.some((event) => event.id === selectedEvent.id)) return nearbyEvents;
+    if (!selectedEvent || nearbyEvents.some((event) => Number(event.id) === Number(selectedEvent.id))) return nearbyEvents;
     if (
       selectedEvent.incident_epoch < timelineView.startEpoch
       || selectedEvent.incident_epoch > timelineView.endEpoch
@@ -1621,6 +1623,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             created_at: detail.created_at || "",
             incident_epoch: Number.isFinite(epoch) ? epoch : null,
             labels: Array.isArray(detail.labels) ? detail.labels : undefined,
+            snapshot_path: detail.snapshot_path || "available",
           },
         };
         hit = nextHit;
@@ -2156,7 +2159,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             {trailNotice ? <p className="recordings-v2-trail-notice">{trailNotice}</p> : null}
             <a className="recordings-v2-selected-event-image" href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.representative_event_id || selectedEvent.id)}`)} aria-label={`Open selected incident at ${formatTimeOnly(selectedEvent.incident_epoch, timeZone)}`}>
               <Radar size={22} />
-              {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 720, 95)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
+              {selectedEvent.snapshot_path || Number(selectedEvent.representative_event_id || selectedEvent.id) > 0 ? (
+                <img src={eventThumbnailUrl(selectedEvent, 720, 95)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} />
+              ) : null}
               {selectedEventDuration > 0 ? <time>{formatDuration(selectedEventDuration)}</time> : null}
             </a>
             <div>
@@ -2174,9 +2179,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 <button
                   key={event.id}
                   type="button"
-                  className={`${event.has_objects ? "object" : "motion"}${selectedEvent?.id === event.id ? " selected" : ""}`}
+                  className={`${event.has_objects ? "object" : "motion"}${Number(selectedEvent?.id) === Number(event.id) ? " selected" : ""}`}
                   onClick={() => { checkpointTimelineView(); setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
-                  aria-pressed={selectedEvent?.id === event.id}
+                  aria-pressed={Number(selectedEvent?.id) === Number(event.id)}
                   aria-label={`${event.labels?.length ? event.labels.join(", ") : "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
                   title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion only"}`}
                 >
