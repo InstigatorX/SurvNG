@@ -255,8 +255,18 @@ def _admit_semantic_rescues(
         activity_role = str(detected.get("activity_role") or "indeterminate")
         zone_allowed = detected.get("spatial_zone_eligible") is True
         confidence_allowed = bool(detected.get("confidence_eligible") is True)
+        qualifying_observations = max(
+            0,
+            int(detected.get("temporal_incident_observations") or 0),
+        )
+        required_observations = max(
+            1,
+            int(detected.get("temporal_required_observations") or 1),
+        )
+        confirmations_allowed = qualifying_observations >= required_observations
         eligible = bool(
             confidence_allowed
+            and confirmations_allowed
             and id(detected) in admitted_ids
             and zone_allowed
             and activity_role != "scene_context"
@@ -284,6 +294,8 @@ def _admit_semantic_rescues(
             rejection = (
                 "below_confidence_threshold"
                 if not confidence_allowed
+                else "insufficient_qualifying_confirmations"
+                if not confirmations_allowed
                 else "stationary_scene_context"
                 if activity_role == "scene_context"
                 else "outside_incident_zone"

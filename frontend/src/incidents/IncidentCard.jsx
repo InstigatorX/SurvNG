@@ -760,7 +760,23 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
       <section className="incident-current-summary">
         <h3>Current incident</h3>
         <div className="incident-summary-objects">
-          {objects.length ? objects.map((object, index) => <div className="inspector-detection summary" key={`${object.label}-${index}`}><div><strong>{object.label}</strong><span>{Math.round(Number(object.confidence || 0) * 100)}%</span></div></div>) : <p>No eligible object detections.</p>}
+          {objects.length ? objects.map((object, index) => {
+            const qualifyingObservations = Number(object.temporal_incident_observations);
+            const requiredObservations = Number(object.temporal_required_observations);
+            const peakConfidence = Number(object.temporal_peak_confidence);
+            const hasConfirmationSummary = Number.isFinite(qualifyingObservations)
+              && Number.isFinite(requiredObservations)
+              && requiredObservations > 0;
+            return (
+              <div className="inspector-detection summary" key={`${object.label}-${index}`}>
+                <div>
+                  <strong>{object.label}</strong>
+                  <span>{Math.round(Number(object.confidence || 0) * 100)}% cover</span>
+                </div>
+                {hasConfirmationSummary ? <small>{qualifyingObservations}/{requiredObservations} qualifying detection{requiredObservations === 1 ? "" : "s"}{Number.isFinite(peakConfidence) ? ` · peak ${Math.round(peakConfidence * 100)}%` : ""}</small> : null}
+              </div>
+            );
+          }) : <p>No eligible object detections.</p>}
         </div>
         <dl>
           <div><dt>Trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
