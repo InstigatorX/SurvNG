@@ -3,12 +3,27 @@ function sameEventId(left, right) {
   return String(left) === String(right);
 }
 
-export function incidentSelectionHref(currentHref, eventId) {
+export function incidentSelectionHref(currentHref, eventId, basePath = "") {
   const numericId = Number(eventId);
-  if (!Number.isInteger(numericId) || numericId <= 0) return String(currentHref || "");
-  const url = new URL(String(currentHref || "http://localhost/incidents"), "http://localhost");
+  const current = String(currentHref || "");
+  if (!Number.isInteger(numericId) || numericId <= 0) return current;
+  const fallbackBase = "http://localhost";
+  let url;
+  try {
+    url = new URL(current || `${fallbackBase}/incidents`, fallbackBase);
+  } catch {
+    return current;
+  }
   url.searchParams.set("event_ids", String(numericId));
-  return url.href;
+  const normalizedBase = String(basePath || "").replace(/\/+$/, "");
+  // Prefer an app-root-relative URL so embedded reverse proxies / HA ingress
+  // do not treat replaceState as a document navigation to an absolute origin URL.
+  const path = url.pathname.startsWith(normalizedBase + "/") || url.pathname === normalizedBase
+    ? url.pathname
+    : `${normalizedBase}${url.pathname.startsWith("/") ? url.pathname : `/${url.pathname}`}`;
+  const search = url.search || "";
+  const hash = url.hash || "";
+  return `${path}${search}${hash}`;
 }
 
 export function incidentDetectionFrameSize(event) {

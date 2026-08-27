@@ -916,7 +916,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, selectedObjectIndex = null, onSelectObject = null, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, selectedObjectIndex = null, onSelectObject = null, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -943,17 +943,23 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
   }, [open]);
   if (!incident) return <aside id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`}><div className="empty-state">Select an incident.</div></aside>;
   const inspectedEvent = faceEvent || incident;
-  const searchableObjects = visualSearchObjects(inspectedEvent);
+  const findSimilarSourceEvent = searchEvent || inspectedEvent;
+  const searchableObjects = visualSearchObjects(findSimilarSourceEvent);
   const objects = searchableObjects.filter((object) => object.incident_eligible !== false);
   const selectedSearchObject = Number.isInteger(Number(selectedObjectIndex))
     ? searchableObjects[Number(selectedObjectIndex)]
     : null;
-  const selectedTrackId = resolveObjectTrackId(selectedSearchObject, inspectedEvent);
+  const selectedTrackId = resolveObjectTrackId(selectedSearchObject, findSimilarSourceEvent);
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
   const faces = faceEvent?.faces || [];
   const zones = incidentZones(inspectedEvent);
   const eventId = Number(inspectedEvent.representative_event_id || inspectedEvent.id);
+  const findSimilarAnchorId = Number(
+    anchorEventId
+    || findSimilarSourceEvent?.representative_event_id
+    || findSimilarSourceEvent?.id,
+  );
   const before = Number(appConfig?.event_clip_before_seconds ?? 5);
   const after = Number(appConfig?.event_clip_after_seconds ?? 5);
   const window = incidentClipWindow(incident, before, after);
@@ -1022,11 +1028,11 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
         )) : <p>No recognized faces.</p>}
       </section>
       <VisualSimilarIncidents
-        anchorEventId={Number.isFinite(eventId) ? eventId : anchorEventId}
+        anchorEventId={Number.isInteger(findSimilarAnchorId) && findSimilarAnchorId > 0 ? findSimilarAnchorId : null}
         objectIndex={selectedObjectIndex}
         objectLabel={selectedSearchObject?.label || ""}
         trackId={selectedTrackId}
-        event={inspectedEvent}
+        event={findSimilarSourceEvent}
         cameraNameById={cameraNameById}
         timeZone={timeZone}
         onSelect={onRelatedSelect}
