@@ -28,6 +28,7 @@ import {
   visualSearchObjects,
   visualSearchRequest,
 } from "../visualSearch.mjs";
+import { writeVisualSearchTrail } from "../visualSearchTrail.mjs";
 import { appUrl, fetch, incidentRecordingContext, recordingsHref } from "../shared/api.js";
 import { formatDateTime, formatTimeOnly, formatDuration } from "../shared/format.js";
 import { eventSnapshotDownloadUrl, eventClipUrl } from "../shared/mediaUrls.js";
@@ -765,7 +766,18 @@ export function VisualSimilarIncidents({
                   </small>
                 </button>
                 {context ? (
-                  <a className="incident-visual-similar-timeline" href={recordingsHref(context)}>
+                  <a
+                    className="incident-visual-similar-timeline"
+                    href={recordingsHref(context, {
+                      trailEventIds: results.map((item) => Number(item?.event?.id)).filter((id) => Number.isInteger(id) && id > 0),
+                    })}
+                    onClick={() => {
+                      writeVisualSearchTrail(window.sessionStorage, {
+                        eventIds: results.map((item) => Number(item?.event?.id)),
+                        hits: results,
+                      });
+                    }}
+                  >
                     <Play size={13} /> Timeline
                   </a>
                 ) : null}

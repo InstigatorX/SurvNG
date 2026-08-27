@@ -181,6 +181,12 @@ export function parseTimelineView(search, today = "") {
   const date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) && (!today || rawDate <= today) ? rawDate : today;
   const at = Number(params.get("at"));
   const rawEvent = params.get("event");
+  const trailEventIds = String(params.get("trail") || "")
+    .split(",")
+    .map((value) => Number(value))
+    .filter((value, index, all) => Number.isInteger(value) && value > 0 && all.indexOf(value) === index)
+    .slice(0, 24);
+  const queryMode = params.get("query_mode");
   return {
     cameraId: params.get("camera") || "all",
     date,
@@ -188,6 +194,8 @@ export function parseTimelineView(search, today = "") {
     at: Number.isFinite(at) && at > 0 ? at : null,
     eventFilter: ["all", "object", "motion", "people", "vehicles"].includes(params.get("filter")) ? params.get("filter") : "all",
     eventId: rawEvent && Number.isFinite(Number(rawEvent)) ? Number(rawEvent) : rawEvent || null,
+    trailEventIds,
+    trailQueryMode: queryMode === "appearance" || queryMode === "visual" ? queryMode : null,
     inspector: ["details", "ai", "related"].includes(params.get("inspector")) ? params.get("inspector") : "details",
     windowHours: [1, 2, 4, 8, 12, 24].includes(Number(params.get("window"))) ? Number(params.get("window")) : 1,
     lanes: { object: params.get("objects") !== "0", motion: params.get("motion") !== "0" },
