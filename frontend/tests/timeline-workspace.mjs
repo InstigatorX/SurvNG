@@ -135,7 +135,10 @@ const stylesSource = [
 ].join("\n");
 const recordingsSource = appSource.slice(appSource.indexOf("function RecordingsPage"), appSource.indexOf("function exportStatusLabel"));
 assert.match(recordingsSource, /recordings-v2-forensic-context/);
-assert.match(recordingsSource, /showForensicPanel/);
+assert.match(recordingsSource, /forensicNav\.label/);
+assert.match(recordingsSource, /stepForensicNav/);
+assert.match(recordingsSource, /exitForensicMode/);
+assert.match(recordingsSource, /recordings-v2-forensic-exit/);
 assert.doesNotMatch(recordingsSource, /recordings-event-inspector/);
 assert.match(recordingsSource, /heroMuted/);
 assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);
