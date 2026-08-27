@@ -2261,7 +2261,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               Play recording
             </button>
           ) : null}
-          {!isAllCameras && Number.isFinite(playhead) && hasPlaybackMedia && !playbackError ? (
+          {!isAllCameras && Number.isFinite(playhead) && hasPlaybackMedia && !playbackError && !Number.isFinite(frameSearchEpoch) ? (
             <div className="recording-grid-controls recording-hero-controls">
               <button type="button" onClick={() => skipPlayback(-10)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
               <button type="button" className="primary" onClick={toggleHeroPlayback}>
@@ -2272,12 +2272,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               <time>{formatDateTime(playhead, timeZone)}</time>
               <button
                 type="button"
-                className={Number.isFinite(frameSearchEpoch) ? "active" : ""}
                 disabled={!semanticReady}
-                onClick={Number.isFinite(frameSearchEpoch) ? closeFrameSearch : beginFrameSearch}
+                onClick={beginFrameSearch}
                 title={semanticReady ? "Freeze this frame and select an area" : "Smart Search is not ready"}
               >
-                <Search size={15} />{Number.isFinite(frameSearchEpoch) ? "Select area" : "Find similar"}
+                <Search size={15} />Find similar
               </button>
               <small className="recording-frame-search-status">{semanticStatusLabel}</small>
             </div>
@@ -2448,10 +2447,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                   const item = result.event || {};
                   const context = incidentRecordingContext(item);
                   const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
-                  return <article key={item.id}>
-                    <img src={mediaUrl(result.snapshot_url)} alt="" loading="lazy" decoding="async" />
-                    <div><strong>{cameraName}</strong><time>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</time><span>{visualMatchLabel(result.match_strength)}</span></div>
-                    <nav><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context, { trailEventIds: frameSearchTrailIds, queryMode: "visual" })} onClick={() => writeVisualSearchTrail(window.sessionStorage, { eventIds: frameSearchTrailIds, hits: frameSearchResults, queryMode: "visual" })}><Play size={13} />Timeline</a></nav>
+                  const observedAt = formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone);
+                  const matchLabel = visualMatchLabel(result.match_strength);
+                  return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}>
+                    <div className="recording-frame-search-thumb">
+                      <img src={mediaUrl(result.snapshot_url)} alt="" loading="lazy" decoding="async" />
+                      <time className="recording-frame-search-hud">{observedAt}</time>
+                    </div>
+                    <nav aria-label={`Actions for ${cameraName} result`}>
+                      <a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a>
+                      <a href={recordingsHref(context, { trailEventIds: frameSearchTrailIds, queryMode: "visual" })} onClick={() => writeVisualSearchTrail(window.sessionStorage, { eventIds: frameSearchTrailIds, hits: frameSearchResults, queryMode: "visual" })}><Play size={13} />Timeline</a>
+                    </nav>
                   </article>;
                 })}
               </div>
