@@ -116,6 +116,14 @@ export function mergeTimelineIncidentIdentity(summary, detail) {
   for (const key of ["identities", "primary_identity", "faces"]) {
     if (Object.hasOwn(detail, key)) merged[key] = detail[key];
   }
+  if (!merged.snapshot_path) {
+    const eventId = Number(summary.representative_event_id || summary.id);
+    const matchedEvent = (Array.isArray(detail.events) ? detail.events : [])
+      .find((event) => Number(event?.id) === eventId);
+    const snapshotPath = matchedEvent?.snapshot_path || detail.snapshot_path;
+    if (snapshotPath) merged.snapshot_path = snapshotPath;
+    else if (Number.isInteger(eventId) && eventId > 0) merged.snapshot_path = "available";
+  }
   return merged;
 }
 
