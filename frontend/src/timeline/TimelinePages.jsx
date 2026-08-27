@@ -1969,6 +1969,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setFrameSearchError("");
   }
 
+  function exitForensicMode() {
+    closeFrameSearch();
+    setTrailNotice("");
+    setSelectedEventId(null);
+    setInvestigationOpen(true);
+  }
+
   function frameSearchPoint(event, bounds) {
     return {
       x: Math.max(0, Math.min(1, (event.clientX - bounds.pageLeft) / bounds.width)),
@@ -2561,7 +2568,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           {showForensicPanel && forensicContext ? (
             <aside className="recordings-v2-forensic-context" aria-label="Forensic context">
               <header>
-                <span>Forensic</span>
+                <div className="recordings-v2-forensic-title">
+                  <span>Forensic</span>
+                  <button
+                    type="button"
+                    className="recordings-v2-forensic-exit"
+                    onClick={exitForensicMode}
+                    aria-label="Exit forensic mode"
+                  >
+                    Exit
+                  </button>
+                </div>
                 <div className="recordings-v2-trail-nav" role="group" aria-label="Find similar context">
                   <small>{forensicNav.label}</small>
                   <button

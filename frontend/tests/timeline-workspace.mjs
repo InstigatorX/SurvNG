@@ -137,7 +137,8 @@ const recordingsSource = appSource.slice(appSource.indexOf("function RecordingsP
 assert.match(recordingsSource, /recordings-v2-forensic-context/);
 assert.match(recordingsSource, /forensicNav\.label/);
 assert.match(recordingsSource, /stepForensicNav/);
-assert.doesNotMatch(recordingsSource, /onClick=\{closeFrameSearch\}>Nearby/);
+assert.match(recordingsSource, /exitForensicMode/);
+assert.match(recordingsSource, /recordings-v2-forensic-exit/);
 assert.doesNotMatch(recordingsSource, /recordings-event-inspector/);
 assert.match(recordingsSource, /heroMuted/);
 assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);
