@@ -810,10 +810,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     frameSearchRequestRef.current = null;
   }, []);
 
-  useEffect(() => {
-    if (videoRef.current) videoRef.current.muted = heroMuted;
-  }, [heroMuted, manifestUrl, nativeSegmentUrl]);
-
   const isAllCameras = false;
   const activeCameraId = resolveTimelineHeroCameraId(cameras, cameraId);
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
@@ -847,6 +843,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     ? `${recordingMobileWindowUrl(activeCameraId, nativeSegment.start_epoch, source)}&reload=${nativeSegmentRetryToken}`
     : "";
   const hasPlaybackMedia = Boolean(manifestUrl || nativeSegmentUrl);
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.muted = heroMuted;
+  }, [heroMuted, manifestUrl, nativeSegmentUrl]);
+
   const semanticReady = Boolean(
     semanticStatus?.enabled && semanticStatus?.state === "ready"
   );
