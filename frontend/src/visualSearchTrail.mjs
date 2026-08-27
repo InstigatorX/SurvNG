@@ -48,6 +48,7 @@ export function normalizeTrailHit(value) {
   const epoch = Number.isFinite(Number(event.incident_epoch))
     ? Number(event.incident_epoch)
     : (createdAt ? new Date(createdAt).getTime() / 1000 : NaN);
+  const snapshotPath = String(event.snapshot_path || value?.snapshot_path || "").trim();
   return {
     query_mode: value?.query_mode === "appearance" ? "appearance" : "visual",
     event: {
@@ -57,6 +58,7 @@ export function normalizeTrailHit(value) {
       incident_epoch: Number.isFinite(epoch) ? epoch : null,
       kind: event.kind,
       labels: Array.isArray(event.labels) ? event.labels : undefined,
+      snapshot_path: snapshotPath || "available",
     },
   };
 }
