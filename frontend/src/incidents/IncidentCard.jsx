@@ -971,12 +971,19 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
           {objects.length ? objects.map((object) => {
             const objectIndex = searchableObjects.indexOf(object);
             const selected = Number(selectedObjectIndex) === objectIndex;
+            const qualifyingObservations = Number(object.temporal_incident_observations);
+            const requiredObservations = Number(object.temporal_required_observations);
+            const peakConfidence = Number(object.temporal_peak_confidence);
+            const hasConfirmationSummary = Number.isFinite(qualifyingObservations)
+              && Number.isFinite(requiredObservations)
+              && requiredObservations > 0;
             return (
               <div className={`inspector-detection summary${selected ? " selected" : ""}`} key={`${object.label}-${objectIndex}`}>
                 <div>
                   <strong>{object.label}</strong>
-                  <span>{Math.round(Number(object.confidence || 0) * 100)}%</span>
+                  <span>{Math.round(Number(object.confidence || 0) * 100)}% cover</span>
                 </div>
+                {hasConfirmationSummary ? <small>{qualifyingObservations}/{requiredObservations} qualifying detection{requiredObservations === 1 ? "" : "s"}{Number.isFinite(peakConfidence) ? ` · peak ${Math.round(peakConfidence * 100)}%` : ""}</small> : null}
                 {onSelectObject ? (
                   <button
                     type="button"

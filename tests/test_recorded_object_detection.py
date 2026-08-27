@@ -155,6 +155,25 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertFalse(car["incident_eligible"])
         self.assertEqual(car["temporal_incident_observations"], 1)
 
+    def test_one_high_confidence_detection_cannot_confirm_a_two_frame_event(self) -> None:
+        observations = []
+        for offset, confidence in ((-0.5, 0.895), (0.0, 0.3649), (0.5, 0.36)):
+            candidate = detected("person", confidence, (2, 2, 20, 19))
+            candidate.update({
+                "confidence_threshold": 0.72,
+                "confidence_eligible": confidence >= 0.72,
+                "temporal_candidate_eligible": confidence >= 0.25,
+                "temporal_candidate_threshold": 0.25,
+                "spatial_zone_eligible": True,
+            })
+            observations.append(sample(offset, [candidate]))
+
+        _selected, objects = _temporal_consensus(observations, minimum_confirmations=2)
+
+        self.assertFalse(objects[0]["temporal_consensus"])
+        self.assertFalse(objects[0]["incident_eligible"])
+        self.assertEqual(objects[0]["temporal_incident_observations"], 1)
+
     def test_incompatible_labels_do_not_share_temporal_identity(self) -> None:
         _selected, objects = _temporal_consensus(
             [

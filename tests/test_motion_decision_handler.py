@@ -852,6 +852,49 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertFalse(outcome.object_detected)
         self.assertEqual(outcome.detected_objects, ())
 
+    def test_semantic_rescue_cannot_override_missing_qualifying_confirmation(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="front-door",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "person",
+                    "confidence": 0.9,
+                    "confidence_eligible": True,
+                    "incident_eligible": False,
+                    "spatial_zone_eligible": True,
+                    "semantic_tier": "rescue_candidate",
+                    "temporal_rescue_candidate": True,
+                    "temporal_incident_observations": 1,
+                    "temporal_required_observations": 2,
+                    "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 70},
+                    "temporal_track_observations": 3,
+                    "temporal_center_displacement_ratio": 0.025,
+                    "temporal_center_path_ratio": 0.03,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+            spatial_alignment={"reliable": False, "mode": "untrusted"},
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.1, 0.1, 0.3, 0.3]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertIsNone(outcome.event_id)
+        self.assertFalse(outcome.object_detected)
+        self.assertEqual(outcome.rejection_reason, "no_eligible_object")
+
     def test_low_confidence_stable_appearance_is_not_rescued_when_alignment_is_untrusted(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((2560, 1920, 3), dtype=np.uint8)
