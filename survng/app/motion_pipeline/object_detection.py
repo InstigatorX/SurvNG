@@ -363,6 +363,21 @@ def _meets_configured_confidence_floor(detected: dict[str, Any]) -> bool:
     return math.isfinite(confidence) and math.isfinite(required) and confidence >= required
 
 
+def _is_confirming_detection(detected: dict[str, Any]) -> bool:
+    """Return whether one observation can satisfy a frame confirmation.
+
+    The lower temporal candidate threshold only associates weak detections into
+    a track.  Each configured confirmation must independently meet the normal
+    class confidence floor; otherwise one strong frame plus weak candidates
+    could create an incident.
+    """
+    return bool(
+        detected.get("label")
+        and not detected.get("auxiliary_detection")
+        and _meets_configured_confidence_floor(detected)
+    )
+
+
 def _semantic_rescue_threshold(detected: dict[str, Any]) -> float:
     candidate = float(detected.get("temporal_candidate_threshold") or 0.0)
     standard = float(detected.get("confidence_threshold") or 1.0)
@@ -530,10 +545,11 @@ def _refinement_stage_complete(
         id(track)
         for track in evidence
         if len(track.winning_observations) >= required_by_track[id(track)]
-        and any(
-            _eligible_detection(item) and _meets_configured_confidence_floor(item)
+        and sum(
+            _is_confirming_detection(item)
             for item in track.winning_observations
-        )
+        ) >= required_by_track[id(track)]
+        and any(_eligible_detection(item) for item in track.winning_observations)
     }
     if not normally_confirmed_ids:
         return False
@@ -632,10 +648,11 @@ def _temporal_consensus(
         id(track)
         for track in evidence
         if len(track.winning_observations) >= required_by_track[id(track)]
-        and any(
-            _eligible_detection(item) and _meets_configured_confidence_floor(item)
+        and sum(
+            _is_confirming_detection(item)
             for item in track.winning_observations
-        )
+        ) >= required_by_track[id(track)]
+        and any(_eligible_detection(item) for item in track.winning_observations)
     }
     rescue_threshold_by_track = {
         id(track): min(
