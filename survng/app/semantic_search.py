@@ -1716,10 +1716,16 @@ class SemanticSearchService(DisabledSemanticSearch):
         )
 
     def status(self) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            state = self._state
+            backfill_active = bool(
+                self._backfill_thread and self._backfill_thread.is_alive()
+            )
         identity = self.encoder.identity if self.encoder else None
         retry_in_seconds = max(0.0, self._next_retry_at - time.monotonic())
         return {
-            "enabled": True, "state": self._state,
+            "enabled": True, "state": state,
+            "backfill_active": backfill_active,
             "implementation": self.config.implementation,
             "device": self._active_device,
             "configured_device": self.config.device,

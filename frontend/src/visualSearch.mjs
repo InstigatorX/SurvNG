@@ -38,6 +38,68 @@ export function visualSearchRequest({
   };
 }
 
+function clampFraction(value) {
+  return Math.max(0, Math.min(1, Number(value) || 0));
+}
+
+export function normalizeVisualFrameCrop(crop, minimumSize = 0) {
+  const x = clampFraction(crop?.x);
+  const y = clampFraction(crop?.y);
+  const width = Math.min(clampFraction(crop?.width), 1 - x);
+  const height = Math.min(clampFraction(crop?.height), 1 - y);
+  const minimum = Math.max(0, Number(minimumSize) || 0);
+  if (width <= minimum || height <= minimum) return null;
+  return { x, y, width, height };
+}
+
+export function visualFrameCropFromPoints(start, end, minimumSize = 0.005) {
+  const startX = clampFraction(start?.x);
+  const startY = clampFraction(start?.y);
+  const endX = clampFraction(end?.x);
+  const endY = clampFraction(end?.y);
+  return normalizeVisualFrameCrop({
+    x: Math.min(startX, endX),
+    y: Math.min(startY, endY),
+    width: Math.abs(endX - startX),
+    height: Math.abs(endY - startY),
+  }, minimumSize);
+}
+
+export function visualFrameSearchRequest({
+  cameraId,
+  epoch,
+  source = "main",
+  crop,
+  cameraFilter = "all",
+  objectFilter = "all",
+  startAt = "",
+  endAt = "",
+  limit = 50,
+  minimumScore = -1,
+  sourceKinds = [],
+  excludeEventId = null,
+}) {
+  const normalizedCrop = normalizeVisualFrameCrop(crop);
+  if (!normalizedCrop) throw new TypeError("A non-empty frame crop is required");
+  const request = {
+    camera_id: String(cameraId || ""),
+    epoch: Number(epoch),
+    source: source === "live" ? "live" : "main",
+    ...normalizedCrop,
+    camera_ids: cameraFilter && cameraFilter !== "all" ? [cameraFilter] : [],
+    object_labels: objectFilter && objectFilter !== "all" ? [objectFilter] : [],
+    start_at: String(startAt || ""),
+    end_at: String(endAt || ""),
+    limit: Math.max(1, Math.min(100, Number(limit) || 50)),
+    minimum_score: Math.max(-1, Math.min(1, Number(minimumScore) || 0)),
+    source_kinds: Array.isArray(sourceKinds) ? sourceKinds.slice(0, 10) : [],
+  };
+  if (Number.isInteger(Number(excludeEventId)) && Number(excludeEventId) > 0) {
+    request.exclude_event_id = Number(excludeEventId);
+  }
+  return request;
+}
+
 export function visualMatchLabel(matchStrength) {
   return ({
     strong_match: "Strong match",

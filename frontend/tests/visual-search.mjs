@@ -7,6 +7,9 @@ import {
   isValidObjectIndex,
   mergeHybridFindSimilarResults,
   resolveObjectTrackId,
+  normalizeVisualFrameCrop,
+  visualFrameCropFromPoints,
+  visualFrameSearchRequest,
   visualMatchLabel,
   visualSearchRequest,
 } from "../src/visualSearch.mjs";
@@ -38,6 +41,44 @@ assert.deepEqual(visualSearchRequest({
   limit: 50,
   source_kinds: ["object_crop"],
   exclude_anchor: true,
+});
+
+assert.deepEqual(
+  visualFrameCropFromPoints({ x: 0.8, y: 0.7 }, { x: 0.2, y: 0.1 }),
+  { x: 0.2, y: 0.1, width: 0.6000000000000001, height: 0.6 },
+);
+assert.deepEqual(
+  normalizeVisualFrameCrop({ x: 0.9, y: 0.8, width: 0.4, height: 0.5 }),
+  { x: 0.9, y: 0.8, width: 0.09999999999999998, height: 0.19999999999999996 },
+);
+assert.equal(
+  visualFrameCropFromPoints({ x: 0.1, y: 0.1 }, { x: 0.101, y: 0.102 }),
+  null,
+);
+assert.deepEqual(visualFrameSearchRequest({
+  cameraId: "gate",
+  epoch: 123.456,
+  source: "live",
+  crop: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 },
+  cameraFilter: "yard",
+  sourceKinds: ["object_crop"],
+  excludeEventId: 42,
+}), {
+  camera_id: "gate",
+  epoch: 123.456,
+  source: "live",
+  x: 0.1,
+  y: 0.2,
+  width: 0.3,
+  height: 0.4,
+  camera_ids: ["yard"],
+  object_labels: [],
+  start_at: "",
+  end_at: "",
+  limit: 50,
+  minimum_score: -1,
+  source_kinds: ["object_crop"],
+  exclude_event_id: 42,
 });
 
 assert.equal(visualMatchLabel("strong_match"), "Strong match");

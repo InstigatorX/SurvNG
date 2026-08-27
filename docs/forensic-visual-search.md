@@ -13,6 +13,7 @@ and APIs must keep that distinction explicit (`visual_similarity`,
 | --- | --- | --- |
 | Text description | MobileCLIP text → image/crop index | Open-world cues (`red backpack`) |
 | Click object crop | MobileCLIP image → image/crop index | Arbitrary detected classes |
+| Draw on timeline frame | MobileCLIP image → image/crop index | Objects between incident snapshots |
 | Click person/vehicle | Appearance/ReID index (optional CLIP broaden) | Instance continuity |
 
 Indexes today cover **incident snapshots and object crops**, not every frame of
@@ -65,14 +66,15 @@ incident that can resolve to a recording window.
 - Session stores hit metadata for camera/time/mode
 - Selected-incident rail shows Find similar prev/next and seeks across cameras/days
 
-### Phase 7 — Recording-frame anchor
+### Phase 7 + 8 — Recording-frame anchor and practical hardening ✅
 
-- Select/draw on a timeline frame; encode crop through the same visual path
+- Freeze an exact frame at the Timeline playhead and draw a normalized crop
+- Preview the selected crop before searching the existing MobileCLIP visual index
+- Gate the tool on semantic-search readiness and report indexed incidents /
+  active historical indexing without a synthetic progress percentage
+- Return the normal hydrated visual results and Find similar timeline trail
 
-### Phase 8 — Hardening
-
-- Crop thumbnails, ranking weights, backfill status, eval harness for image queries
-- Measure SQLite scan limits before introducing ANN
+The evaluation harness, custom ranking weights, and ANN remain out of scope.
 
 ### Phase 9 — Stretch
 
@@ -103,6 +105,33 @@ incident that can resolve to a recording window.
 
 `object_index` is the index into snapshot-visible labeled detections (same
 ordering as semantic indexing / `semantic_event_objects`).
+
+### Recording-frame visual search
+
+`POST /api/semantic-search/visual-frame`
+
+```json
+{
+  "camera_id": "front-door",
+  "epoch": 1787846400.125,
+  "source": "main",
+  "x": 0.2,
+  "y": 0.15,
+  "width": 0.35,
+  "height": 0.6,
+  "camera_ids": [],
+  "object_labels": [],
+  "start_at": "",
+  "end_at": "",
+  "limit": 50,
+  "minimum_score": -1.0,
+  "source_kinds": []
+}
+```
+
+Crop coordinates are fractions of the exact 1280-pixel-wide preview image.
+The recording must cover `epoch`. The response uses `query_mode: "visual"` and
+the same hydrated result shape as object-crop visual search.
 
 ### Appearance (track-aware)
 
@@ -136,7 +165,7 @@ Phase 9 dense frame indexing is committed.
 | MVP | 0–3 | Click any detected object → similar incidents |
 | Forensic | 4–5 | Person/vehicle appearance trail + visual broaden |
 | Timeline | 6 | Multi-hit timeline walk |
-| Full | +7–8 | Scrub-to-search + production hardening |
+| Full | +7–8 | Scrub-to-search + practical readiness and crop UX |
 | Research | 9 | Archive-wide dense search |
 
 ## Related

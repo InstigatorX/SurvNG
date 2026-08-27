@@ -114,10 +114,15 @@ export function recordingGridUpdatesUrl(startEpoch, endEpoch, afterEpoch, source
   return appUrl(`/api/recordings/grid/updates?${params.toString()}`);
 }
 
-export function recordingPreviewUrl(cameraId, epoch, source) {
+export function recordingPreviewUrl(cameraId, epoch, source, options = {}) {
   const params = new URLSearchParams({
     epoch: epoch.toFixed(3),
     source,
   });
+  const width = Number(options.width);
+  if (Number.isFinite(width)) {
+    params.set("width", String(Math.max(320, Math.min(1920, Math.round(width)))));
+  }
+  if (options.exact) params.set("exact", "true");
   return appUrl(`/api/cameras/${cameraId}/recordings/preview.jpg?${params.toString()}`);
 }
