@@ -65,6 +65,7 @@ def _dependencies(manager):
         recording_day_rows=lambda *_args, **_kwargs: [],
         recording_preview_path=lambda *_args, **_kwargs: Path("preview.jpg"),
         recording_preview_timestamp=lambda _path: (None, "requested_offset"),
+        recording_segment_path=lambda *_args, **_kwargs: Path("segment.mp4"),
         recording_day_fmp4_paths=lambda *_args, **_kwargs: (
             Path("init.mp4"), Path("media.m4s")
         ),

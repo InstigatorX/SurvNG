@@ -940,7 +940,13 @@ class AssistantApiTest(unittest.TestCase):
             events=SimpleNamespace(between_compact=lambda *_args: [{"id": 43}]),
         )
         with (
-            patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
+            patch.object(
+                main.INCIDENT_QUERIES,
+                "resolve_event",
+                side_effect=lambda _manager, event_id: (
+                    anchor if event_id == 42 else match if event_id == 43 else None
+                ),
+            ),
             patch(
                 "survng.app.cross_camera_trace._incident_rows", return_value=[match]
             ),
