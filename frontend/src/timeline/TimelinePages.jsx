@@ -2466,7 +2466,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                   return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}>
                     <div className="recording-frame-search-thumb">
                       <img src={mediaUrl(result.snapshot_url)} alt="" loading="lazy" decoding="async" />
-                      <time className="recording-frame-search-hud">{observedAt}</time>
+                      <time className="recording-frame-search-hud">{formatTimeOnly(new Date(item.created_at).getTime() / 1000, timeZone)}</time>
                     </div>
                     <nav aria-label={`Actions for ${cameraName} result`}>
                       <a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a>
