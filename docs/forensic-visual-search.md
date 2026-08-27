@@ -47,15 +47,17 @@ incident that can resolve to a recording window.
 - Results panel on Incidents (and Search when useful)
 - Match strength, camera/time, incident + timeline links with `event=`
 
-### Phase 4 — Object-anchored appearance
+### Phase 4 — Object-anchored appearance ✅
 
 - Appearance matches accept `track_id`
-- Person/vehicle selection prefers ReID, falls back or augments with CLIP
+- Person/vehicle selection prefers ReID, then broadens with CLIP visual search
+- Track id resolved from the object or a unique matching stored track
 
-### Phase 5 — Hybrid funnel
+### Phase 5 — Hybrid funnel ✅ (Find similar)
 
-- One investigation panel for text and visual anchors
-- Tag `query_mode` / relation; do not merge ReID and CLIP into one score early
+- One Find similar panel tags each hit with `query_mode`: `appearance` or `visual`
+- Appearance hits rank first; visual hits fill remaining slots without score fusion
+- Text Smart Search remains the separate open-world entry point
 
 ### Phase 6 — Timeline forensic walk
 
@@ -131,7 +133,8 @@ Phase 9 dense frame indexing is committed.
 | Cut | Phases | Value |
 | --- | --- | --- |
 | MVP | 0–3 | Click any detected object → similar incidents |
-| Forensic | +4–6 | Person/vehicle trail + timeline walk |
+| Forensic | 4–5 | Person/vehicle appearance trail + visual broaden |
+| Timeline | 6 | Multi-hit timeline walk |
 | Full | +7–8 | Scrub-to-search + production hardening |
 | Research | 9 | Archive-wide dense search |
 
