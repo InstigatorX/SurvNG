@@ -13,7 +13,7 @@ import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentDetailQuery, incidentSelectionHref, incidentThumbnailPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
-import { incidentRecordingContext, fetch } from "../shared/api.js";
+import { APP_BASE_PATH, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
 import { formatDateTime } from "../shared/format.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
@@ -66,6 +66,13 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const [focusedFaceEventId, setFocusedFaceEventId] = useState(null);
   const [linkedIncidentDetail, setLinkedIncidentDetail] = useState(null);
   const [linkedIncidentEventId, setLinkedIncidentEventId] = useState(null);
+  const [linkedIncidentError, setLinkedIncidentError] = useState("");
+  const [linkedIncidentLoading, setLinkedIncidentLoading] = useState(() => (
+    Boolean(typeof window !== "undefined" && new URLSearchParams(window.location.search).get("event_ids"))
+  ));
+  const linkedIncidentBootRef = useRef(
+    typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("event_ids") : null,
+  );
   const [selectedFace, setSelectedFace] = useState(null);
   const [facePeople, setFacePeople] = useState([]);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
@@ -122,9 +129,14 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const visibleIncidents = semanticIncidentActive
     ? incidentResultSource.slice(incidentPage * incidentsPerPage, (incidentPage + 1) * incidentsPerPage)
     : incidentResultSource;
-  const explicitlyFocusedSummary = visibleIncidents.find((incident) => incident.id === expandedIncidentId)
-    || (linkedIncidentDetail?.id === expandedIncidentId ? linkedIncidentDetail : null);
-  const focusedSummary = mobileView ? explicitlyFocusedSummary : explicitlyFocusedSummary || visibleIncidents[0] || null;
+  const sameIncidentId = (left, right) => left != null && right != null && String(left) === String(right);
+  const explicitlyFocusedSummary = visibleIncidents.find((incident) => sameIncidentId(incident.id, expandedIncidentId))
+    || (sameIncidentId(linkedIncidentDetail?.id, expandedIncidentId) ? linkedIncidentDetail : null);
+  // While a deep-linked event_ids bootstrap is in flight, avoid auto-focusing the first
+  // gallery row (that clobbers the deep link URL and can leave a blank investigation).
+  const focusedSummary = mobileView
+    ? explicitlyFocusedSummary
+    : (explicitlyFocusedSummary || (linkedIncidentBootRef.current ? null : visibleIncidents[0]) || null);
   const focusedDetailQuery = incidentDetailQuery(focusedSummary);
   const focusedIncident = focusedSummary ? incidentDetails[focusedDetailQuery] || focusedSummary : null;
   const focusedEvent = (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
@@ -133,9 +145,19 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const relatedAnchorEvent = incidentTrackingSource(focusedEvent, focusedIncident) || focusedEvent;
   const relatedAnchorEventId = Number(relatedAnchorEvent?.representative_event_id || relatedAnchorEvent?.id) || null;
   const displayedIncident = relatedPreviewIncident || focusedIncident;
-  const displayedEvent = (displayedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
-    || (displayedIncident?.events || []).find((event) => Number(event.id) === Number(displayedIncident?.representative_event_id))
-    || displayedIncident;
+  const displayedEvent = relatedPreviewIncident
+    ? (
+      (relatedPreviewIncident.events || []).find((event) => Number(event.id) === Number(relatedPreviewEventId))
+      || (relatedPreviewIncident.events || []).find((event) => Number(event.id) === Number(relatedPreviewIncident.representative_event_id))
+      || relatedPreviewIncident
+    )
+    : (
+      (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
+      || (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedIncident.representative_event_id))
+      || focusedIncident
+    );
+  const findSimilarEvent = focusedEvent;
+  const findSimilarEventId = relatedAnchorEventId;
   const focusedSnapshotEvent = displayedEvent;
   const focusedSnapshotEventId = Number(focusedSnapshotEvent?.representative_event_id || focusedSnapshotEvent?.id);
   const focusedLoadedImageSize = Number(focusedImageSize?.eventId) === focusedSnapshotEventId ? focusedImageSize : null;
@@ -163,22 +185,40 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   }, [eventFilter, focusedEvent?.id, focusedEvent?.representative_event_id, focusedIncident?.camera_id, incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter, onAssistantContextChange]);
 
   useEffect(() => {
-    if (mobileView || !focusedEvent) return;
+    if (mobileView || !focusedEvent || relatedPreviewIncident || linkedIncidentBootRef.current) return;
     const eventId = Number(focusedEvent.representative_event_id || focusedEvent.id);
-    const nextHref = incidentSelectionHref(window.location.href, eventId);
-    if (nextHref && nextHref !== window.location.href) window.history.replaceState(window.history.state, "", nextHref);
-  }, [focusedEvent?.id, focusedEvent?.representative_event_id, mobileView]);
+    if (!Number.isInteger(eventId) || eventId <= 0) return;
+    const nextHref = incidentSelectionHref(
+      `${window.location.pathname}${window.location.search}${window.location.hash}`,
+      eventId,
+      APP_BASE_PATH,
+    );
+    const currentHref = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextHref && nextHref !== currentHref) {
+      window.history.replaceState(window.history.state, "", nextHref);
+    }
+  }, [focusedEvent?.id, focusedEvent?.representative_event_id, mobileView, relatedPreviewIncident]);
 
   useEffect(() => {
-    const eventIds = new URLSearchParams(window.location.search).get("event_ids");
-    if (!eventIds) return;
+    const eventIds = linkedIncidentBootRef.current
+      || new URLSearchParams(window.location.search).get("event_ids");
+    if (!eventIds) {
+      setLinkedIncidentLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setLinkedIncidentLoading(true);
+    setLinkedIncidentError("");
     const query = new URLSearchParams({ event_ids: eventIds, gap_seconds: "45" });
     fetch(`/api/incidents/detail?${query}`)
       .then((response) => response.ok ? response.json() : Promise.reject(new Error("Linked incident unavailable")))
       .then((detail) => {
+        if (cancelled) return;
         const requestedEventId = Number(String(eventIds).split(",")[0]);
         if (mobileView) {
           setSelectedEvent(detail);
+          linkedIncidentBootRef.current = null;
+          setLinkedIncidentLoading(false);
           return;
         }
         setLinkedIncidentDetail(detail);
@@ -188,8 +228,17 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
         const linkedEpoch = new Date(detail.start_at || detail.created_at || 0).getTime();
         if (Number.isFinite(linkedEpoch) && linkedEpoch > 0) setIncidentDay(dateKeyForTimeZone(linkedEpoch, timeZone));
         setEventFilter(linkedIncidentEventFilter(detail));
+        linkedIncidentBootRef.current = null;
+        setLinkedIncidentLoading(false);
+        setLinkedIncidentError("");
       })
-      .catch(() => { });
+      .catch(() => {
+        if (cancelled) return;
+        linkedIncidentBootRef.current = null;
+        setLinkedIncidentLoading(false);
+        setLinkedIncidentError("Linked incident unavailable.");
+      });
+    return () => { cancelled = true; };
   }, [mobileView, timeZone]);
 
   useEffect(() => {
@@ -438,7 +487,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   useEffect(() => {
     setFocusedFaceEventId(
-      linkedIncidentDetail?.id === focusedIncident?.id ? linkedIncidentEventId : null,
+      sameIncidentId(linkedIncidentDetail?.id, focusedIncident?.id) ? linkedIncidentEventId : null,
     );
     setDesktopAnalysisStats(null);
     relatedPreviewRequestRef.current += 1;
@@ -473,8 +522,8 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   useEffect(() => {
     if (expandedIncidentId
-      && linkedIncidentDetail?.id !== expandedIncidentId
-      && !visibleIncidents.some((incident) => incident.id === expandedIncidentId)) {
+      && !sameIncidentId(linkedIncidentDetail?.id, expandedIncidentId)
+      && !visibleIncidents.some((incident) => sameIncidentId(incident.id, expandedIncidentId))) {
       setExpandedIncidentId(null);
     }
   }, [expandedIncidentId, linkedIncidentDetail?.id, visibleIncidents]);
@@ -492,18 +541,21 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   function toggleIncident(incidentId) {
     if (mobileView) {
-      const incident = visibleIncidents.find((candidate) => candidate.id === incidentId);
+      const incident = visibleIncidents.find((candidate) => sameIncidentId(candidate.id, incidentId));
       if (incident) openIncidentOverlay(incident);
       return;
     }
-    if (incidentId !== linkedIncidentDetail?.id) {
+    if (!sameIncidentId(incidentId, linkedIncidentDetail?.id)) {
       setLinkedIncidentDetail(null);
       setLinkedIncidentEventId(null);
+      setLinkedIncidentError("");
     }
     setExpandedIncidentId(incidentId);
   }
 
-  const focusedIndex = focusedIncident ? visibleIncidents.findIndex((incident) => incident.id === focusedIncident.id) : -1;
+  const focusedIndex = focusedIncident
+    ? visibleIncidents.findIndex((incident) => sameIncidentId(incident.id, focusedIncident.id))
+    : -1;
 
   function moveFocus(direction) {
     if (!visibleIncidents.length) return;
@@ -529,7 +581,8 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
       if (request !== relatedPreviewRequestRef.current) return;
       setRelatedPreviewIncident(detail);
       setRelatedPreviewEventId(eventId);
-      setFocusedFaceEventId(eventId);
+      // Keep focusedFaceEventId on the anchor incident so URL sync / Find similar
+      // do not jump to the related hit or remount into a blank investigation.
       setDesktopAnalysisMode("clean");
       setDesktopAnalysisStats(null);
     } catch {
@@ -544,7 +597,6 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     setRelatedPreviewIncident(null);
     setRelatedPreviewEventId(null);
     setRelatedPreviewLoadingEventId(null);
-    setFocusedFaceEventId(Number(focusedIncident?.representative_event_id || focusedIncident?.id) || null);
     setDesktopAnalysisMode("clean");
     setDesktopAnalysisStats(null);
   }
@@ -619,7 +671,15 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
                   <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} onSelect={(selectedIncident) => toggleIncident(selectedIncident.id)} onOpenOverlay={openIncidentOverlay} />
                 )) : null}
-                {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No other incidents."}</div> : null}
+                {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
+                  <div className="empty-state">
+                    {linkedIncidentLoading
+                      ? "Opening linked incident…"
+                      : linkedIncidentError
+                        ? linkedIncidentError
+                        : (semanticIncidentActive ? "No semantic matches for the selected filters." : "No other incidents.")}
+                  </div>
+                ) : null}
               </div>
               <div className={`incident-pager ${displayedIncidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={displayedIncidentTotal <= incidentsPerPage}>
                 <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
@@ -640,12 +700,40 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                     <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
                   </>
                 ) : null}
-                {displayedIncident ? <IncidentCard key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`} incident={displayedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} selectedObjectIndex={selectedVisualObject?.objectIndex ?? null} onSelectObject={(selection) => { setSelectedVisualObject(selection); if (selection) setTabletInspectorOpen(true); }} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} onImageSize={setFocusedImageSize} /> : <div className="empty-state">No incidents match the current filters.</div>}
+                {displayedIncident ? (
+                  <IncidentCard
+                    key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`}
+                    incident={displayedIncident}
+                    timeZone={timeZone}
+                    expanded
+                    thumbnailAnnotations={thumbnailAnnotations}
+                    thumbnailObjectFocus={thumbnailObjectFocus}
+                    thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
+                    desktopWorkspace
+                    analysisMode={desktopAnalysisMode}
+                    replayRequest={desktopReplayRequest}
+                    selectedObjectIndex={relatedPreviewIncident ? null : (selectedVisualObject?.objectIndex ?? null)}
+                    onSelectObject={relatedPreviewIncident ? null : ((selection) => {
+                      setSelectedVisualObject(selection);
+                      if (selection) setTabletInspectorOpen(true);
+                    })}
+                    onAnalysisStats={setDesktopAnalysisStats}
+                    onToggle={toggleIncident}
+                    onPreviewChange={relatedPreviewIncident ? undefined : setFocusedFaceEventId}
+                    onImageSize={setFocusedImageSize}
+                  />
+                ) : (
+                  <div className="empty-state">
+                    {linkedIncidentLoading
+                      ? "Opening linked incident…"
+                      : (linkedIncidentError || "No incidents match the current filters.")}
+                  </div>
+                )}
               </div>
             </section>
 
             {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
-            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} selectedObjectIndex={selectedVisualObject?.objectIndex ?? null} onSelectObject={setSelectedVisualObject} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} onAskAssistant={onAskAssistant} />
+            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} searchEvent={findSimilarEvent} anchorEventId={findSimilarEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} selectedObjectIndex={selectedVisualObject?.objectIndex ?? null} onSelectObject={setSelectedVisualObject} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} onAskAssistant={onAskAssistant} />
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
