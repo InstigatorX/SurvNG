@@ -6057,6 +6057,29 @@ button.motion-defaults-action:hover {
   gap: 8px;
 }
 
+.product-update-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 11px;
+  font-weight: 760;
+  color: var(--muted);
+}
+
+.product-update-branch select {
+  min-width: 9rem;
+  max-width: 14rem;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 650;
+}
+
 .preference-action-buttons button.danger {
   color: var(--danger);
 }

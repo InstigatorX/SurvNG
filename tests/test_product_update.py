@@ -112,7 +112,7 @@ def test_product_update_status_route_returns_service_payload() -> None:
     )(refresh_remote=True)
 
     assert result["deployment_mode"] == "native_git"
-    product_update.status.assert_called_once_with(refresh_remote=True)
+    product_update.status.assert_called_once_with(refresh_remote=True, branch=None)
 
 
 def test_product_update_start_route_reports_conflict() -> None:
@@ -128,6 +128,21 @@ def test_product_update_start_route_reports_conflict() -> None:
 
     assert raised.value.status_code == 409
     assert raised.value.detail == "No product update is available"
+
+
+def test_product_update_start_route_passes_branch() -> None:
+    product_update = Mock()
+    product_update.start.return_value = {"status": "running", "target_branch": "develop"}
+    from survng.app.operations_routes import ProductUpdateRequest
+
+    result = _endpoint(
+        _router(product_update=product_update),
+        "/api/system/update",
+        "POST",
+    )(ProductUpdateRequest(branch="develop"))
+
+    assert result["status"] == "running"
+    product_update.start.assert_called_once_with(branch="develop")
 
 
 def test_resolve_repo_root_finds_survng_checkout(tmp_path: Path) -> None:
@@ -176,7 +191,94 @@ def test_product_update_status_reports_behind_commits(tmp_path: Path) -> None:
     assert status["deployment_mode"] == "native_git"
     assert status["behind_count"] == 1
     assert status["can_update"] is True
+    assert status["target_branch"] == "main"
+    assert "main" in status["branches"]
     assert status["commits_behind"][0]["subject"] == "next change"
+
+
+def test_product_update_status_supports_selected_branch(tmp_path: Path) -> None:
+    repo = _init_survng_repo(tmp_path)
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "clone", "--bare", str(repo), str(bare))
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "origin")
+
+    work = tmp_path / "publisher"
+    _git(tmp_path, "clone", str(bare), str(work))
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "Test")
+    _git(work, "checkout", "-b", "develop")
+    (work / "survng" / "develop.txt").write_text("develop\n", encoding="utf-8")
+    _git(work, "add", "survng/develop.txt")
+    _git(work, "commit", "-m", "develop change")
+    _git(work, "push", "origin", "develop")
+
+    service = ProductUpdateService(repo_root=repo)
+    status = service.status(refresh_remote=True, branch="develop")
+
+    assert status["branch"] == "main"
+    assert status["target_branch"] == "develop"
+    assert status["needs_checkout"] is True
+    assert status["can_update"] is True
+    assert "develop" in status["branches"]
+    assert status["behind_count"] == 1
+    assert status["commits_behind"][0]["subject"] == "develop change"
+    assert "develop" in status["message"]
+
+
+def test_product_update_start_checks_out_selected_branch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _init_survng_repo(tmp_path)
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "clone", "--bare", str(repo), str(bare))
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "origin")
+
+    work = tmp_path / "publisher"
+    _git(tmp_path, "clone", str(bare), str(work))
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "Test")
+    _git(work, "checkout", "-b", "develop")
+    (work / "survng" / "develop.txt").write_text("develop\n", encoding="utf-8")
+    _git(work, "add", "survng/develop.txt")
+    _git(work, "commit", "-m", "develop change")
+    _git(work, "push", "origin", "develop")
+
+    restart = Mock(return_value={"ok": True, "status": "restart_scheduled", "instance_id": "abc"})
+    service = ProductUpdateService(repo_root=repo, request_server_restart=restart)
+    real_run = subprocess.run
+    real_which = shutil.which
+
+    def fake_run(command, **kwargs):
+        cmd = [str(part) for part in command]
+        if len(cmd) >= 4 and cmd[1:4] == ["-m", "pip", "install"]:
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        if Path(cmd[0]).name == "npm":
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("survng.app.product_update.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "survng.app.product_update.shutil.which",
+        lambda name: None if name == "npm" else real_which(name),
+    )
+    monkeypatch.setattr("survng.app.product_update.time.sleep", lambda _seconds: None)
+
+    started = service.start(branch="develop")
+    assert started["status"] == "running"
+
+    for _ in range(200):
+        status = service.status(refresh_remote=False, branch="develop")
+        if status["status"] in {"restarting", "complete", "failed"}:
+            break
+        threading.Event().wait(0.05)
+    status = service.status(refresh_remote=False, branch="develop")
+    assert status["status"] == "restarting", status
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "develop"
+    assert (repo / "survng" / "develop.txt").read_text(encoding="utf-8") == "develop\n"
+    restart.assert_called_once_with()
 
 
 def test_product_update_start_fast_forwards_and_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

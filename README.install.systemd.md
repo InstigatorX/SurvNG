@@ -328,10 +328,10 @@ ONVIF, MQTT, and each media location online and writable.
 
 ## 12. Upgrade
 
-In-app **Admin → Server Preferences → Check for Updates / Update** fast-forwards Git,
-reinstalls Python deps, rebuilds the frontend when `npm` is on `PATH`, and
-restarts `survng.service`. The checkout must be clean and fast-forwardable.
-`SURVNG_REPO_ROOT` is already set in the unit.
+In-app **Admin → Server Preferences → Check for Updates / Update** fast-forwards Git
+(optionally after selecting a remote branch), reinstalls Python deps, rebuilds the
+frontend when `npm` is on `PATH`, and restarts `survng.service`. The checkout must
+be clean and fast-forwardable. `SURVNG_REPO_ROOT` is already set in the unit.
 
 `scripts/update-from-git.sh` runs `systemctl restart` as the current user. For
 this dedicated account, use the manual block (git/pip/npm as `survng`, restart
