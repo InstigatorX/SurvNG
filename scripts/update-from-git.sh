@@ -18,7 +18,7 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   exit 1
 fi
 
-git fetch --prune "$REMOTE"
+git fetch --prune "$REMOTE" "+refs/heads/*:refs/remotes/$REMOTE/*"
 
 if [[ -z "$BRANCH" ]]; then
   BRANCH="$(git rev-parse --abbrev-ref HEAD)"

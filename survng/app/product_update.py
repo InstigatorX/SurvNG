@@ -218,6 +218,44 @@ def _list_remote_branches(repo_root: Path, *, remote: str = DEFAULT_REMOTE) -> l
     return branches
 
 
+def _list_remote_branches_ls(repo_root: Path, *, remote: str = DEFAULT_REMOTE) -> list[str]:
+    """List heads advertised by the remote (works for --single-branch clones)."""
+    completed = _run_git(
+        repo_root,
+        ["ls-remote", "--heads", remote],
+        timeout=FETCH_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return []
+    branches: list[str] = []
+    seen: set[str] = set()
+    prefix = "refs/heads/"
+    for line in completed.stdout.splitlines():
+        _sha, _, ref = line.partition("\t")
+        ref = (ref or line.partition(" ")[2]).strip()
+        if not ref.startswith(prefix):
+            continue
+        name = ref[len(prefix) :]
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        branches.append(name)
+    return branches
+
+
+def _merge_branch_names(*groups: Sequence[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for name in group:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            merged.append(name)
+    return merged
+
+
 def _local_branch_exists(repo_root: Path, branch: str) -> bool:
     return (
         _run_git(
@@ -335,7 +373,14 @@ class ProductUpdateService:
             )
             if refresh_remote:
                 self._fetch(repo_root)
-            branches = _list_remote_branches(repo_root)
+            local_branches = _list_remote_branches(repo_root)
+            if refresh_remote:
+                branches = _merge_branch_names(
+                    local_branches,
+                    _list_remote_branches_ls(repo_root),
+                )
+            else:
+                branches = local_branches
             payload["branches"] = branches
 
             default_target = (
@@ -352,13 +397,23 @@ class ProductUpdateService:
             payload["target_branch"] = target_branch
 
             if requested_branch and requested_branch not in branches:
-                payload["needs_checkout"] = current_branch != requested_branch
-                payload["message"] = (
-                    f"Remote branch {DEFAULT_REMOTE}/{requested_branch} was not "
-                    "found. Fetch updates first or choose another branch."
-                )
-                payload["can_update"] = False
-                return payload
+                # Single-branch clones may lack the tracking ref until fetch.
+                if not refresh_remote:
+                    self._fetch(repo_root, branch=requested_branch)
+                    local_branches = _list_remote_branches(repo_root)
+                    branches = _merge_branch_names(
+                        local_branches,
+                        _list_remote_branches_ls(repo_root),
+                    )
+                    payload["branches"] = branches
+                if requested_branch not in branches:
+                    payload["needs_checkout"] = current_branch != requested_branch
+                    payload["message"] = (
+                        f"Remote branch {DEFAULT_REMOTE}/{requested_branch} was not "
+                        "found. Fetch updates first or choose another branch."
+                    )
+                    payload["can_update"] = False
+                    return payload
 
             upstream = f"{DEFAULT_REMOTE}/{target_branch}"
             upstream_exists = (
@@ -370,6 +425,17 @@ class ProductUpdateService:
                 ).returncode
                 == 0
             )
+            if not upstream_exists:
+                self._fetch(repo_root, branch=target_branch)
+                upstream_exists = (
+                    _run_git(
+                        repo_root,
+                        ["rev-parse", "--verify", upstream],
+                        timeout=30.0,
+                        check=False,
+                    ).returncode
+                    == 0
+                )
             if not upstream_exists:
                 payload["needs_checkout"] = current_branch != target_branch
                 payload["message"] = (
@@ -455,9 +521,15 @@ class ProductUpdateService:
                         f"on {upstream}. Fast-forward updates are blocked."
                     )
             elif on_target_tip:
-                payload["message"] = (
-                    f"SurvNG is up to date with {upstream}."
-                )
+                if len(branches) <= 1:
+                    payload["message"] = (
+                        f"SurvNG is up to date with {upstream}. "
+                        "Check for Updates to load other remote branches."
+                    )
+                else:
+                    payload["message"] = (
+                        f"SurvNG is up to date with {upstream}."
+                    )
             elif current_branch != target_branch and behind_count == 0:
                 payload["message"] = (
                     f"Switch to {target_branch} at {upstream_sha[:12]} "
@@ -545,10 +617,16 @@ class ProductUpdateService:
             return path
         return None
 
-    def _fetch(self, repo_root: Path) -> None:
+    def _fetch(self, repo_root: Path, *, branch: str | None = None) -> None:
+        # Explicit refspec so --single-branch clones still learn other release
+        # lines (v1.1, v1.2, main, …) when checking for updates.
+        if branch:
+            refspec = f"+refs/heads/{branch}:refs/remotes/{DEFAULT_REMOTE}/{branch}"
+        else:
+            refspec = f"+refs/heads/*:refs/remotes/{DEFAULT_REMOTE}/*"
         _run_git(
             repo_root,
-            ["fetch", "--prune", DEFAULT_REMOTE],
+            ["fetch", "--prune", DEFAULT_REMOTE, refspec],
             timeout=FETCH_TIMEOUT_SECONDS,
         )
 
