@@ -1035,12 +1035,24 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   useEffect(() => {
     if (!Number.isFinite(frameSearchEpoch)) return undefined;
+    const surface = frameSearchSurfaceRef.current;
+    const image = frameSearchImageRef.current;
+    if (!surface) return undefined;
     const updateBounds = () => setFrameSearchImageBounds(
       containedImageBounds(frameSearchSurfaceRef.current, frameSearchImageRef.current)
     );
+    updateBounds();
     window.addEventListener("resize", updateBounds);
-    return () => window.removeEventListener("resize", updateBounds);
-  }, [frameSearchEpoch]);
+    const resizeObserver = typeof ResizeObserver === "function"
+      ? new ResizeObserver(updateBounds)
+      : null;
+    resizeObserver?.observe(surface);
+    if (image) resizeObserver?.observe(image);
+    return () => {
+      window.removeEventListener("resize", updateBounds);
+      resizeObserver?.disconnect();
+    };
+  }, [frameSearchEpoch, frameSearchImageReady]);
 
   useVisiblePolling(async (signal) => {
     try {

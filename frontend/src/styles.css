@@ -10820,10 +10820,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   pointer-events: none;
 }
 
-.recordings-v2-player.selected-camera-stage video {
-  right: auto;
-  width: calc(100% - var(--timeline-companion-width, 0%));
-}
+/* Hero viewport geometry is owned by timeline.css (.recording-hero-media). */
 
 .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions[data-camera-count="1"]) {
   --timeline-companion-width: 36%;
@@ -11032,8 +11029,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) .recording-hero-controls {
-  right: calc(var(--timeline-companion-width) + 8px);
-  bottom: calc(86px + 8px);
+  right: calc(var(--timeline-companion-width, 0px) + 8px);
 }
 
 .recording-grid-controls button,
