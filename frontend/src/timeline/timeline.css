@@ -1030,28 +1030,34 @@
 
 .recording-frame-search-results>div {
   display: flex;
+  align-items: stretch;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   gap: 9px;
   overflow-x: auto;
-  padding: 9px 12px;
+  padding: 8px 12px;
 }
 
 .recording-frame-search-results article {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
-  flex: 0 0 168px;
-  width: 168px;
+  flex: 0 0 auto;
+  align-self: stretch;
+  height: 100%;
+  width: auto;
+  min-width: 168px;
   min-height: 0;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 3px;
   background: var(--panel-soft);
+  aspect-ratio: 16 / 12.5;
 }
 
 .recording-frame-search-thumb {
   position: relative;
   min-height: 0;
-  aspect-ratio: 16 / 11;
   overflow: hidden;
   background: var(--canvas);
 }
@@ -1086,8 +1092,9 @@
 
 .recording-frame-search-results article nav {
   display: flex;
+  flex: 0 0 auto;
   gap: 4px;
-  padding: 6px;
+  padding: 5px;
 }
 
 .recording-frame-search-results article nav a {
