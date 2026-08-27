@@ -9,11 +9,12 @@ from unittest.mock import Mock
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
+from pydantic import ValidationError
 
 from survng.app.semantic_routes import (
     SemanticRouteDependencies,
+    SemanticVisualFrameSearchRequest,
     create_semantic_router,
     normalized_crop_bounds,
 )
@@ -71,9 +72,9 @@ class SemanticVisualFrameRouteTests(TestCase):
             manager_lock=threading.RLock(),
             recording_preview_path=self.preview,
         )
-        app = FastAPI()
-        app.include_router(create_semantic_router(dependencies).router)
-        self.client = TestClient(app)
+        self.handler = create_semantic_router(dependencies).handlers[
+            "semantic_visual_frame_search"
+        ]
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -92,20 +93,19 @@ class SemanticVisualFrameRouteTests(TestCase):
         )
 
     def test_visual_frame_request_rejects_crop_outside_preview(self) -> None:
-        response = self.client.post("/api/semantic-search/visual-frame", json={
-            "camera_id": "gate",
-            "epoch": 105.0,
-            "x": 0.8,
-            "y": 0.1,
-            "width": 0.3,
-            "height": 0.5,
-        })
-
-        self.assertEqual(response.status_code, 422)
+        with self.assertRaises(ValidationError):
+            SemanticVisualFrameSearchRequest.model_validate({
+                "camera_id": "gate",
+                "epoch": 105.0,
+                "x": 0.8,
+                "y": 0.1,
+                "width": 0.3,
+                "height": 0.5,
+            })
         self.assertEqual(self.preview.call_count, 0)
 
     def test_visual_frame_search_crops_exact_preview_and_hydrates_hits(self) -> None:
-        response = self.client.post("/api/semantic-search/visual-frame", json={
+        payload = self.handler(SemanticVisualFrameSearchRequest.model_validate({
             "camera_id": "gate",
             "epoch": 105.25,
             "source": "main",
@@ -116,10 +116,8 @@ class SemanticVisualFrameRouteTests(TestCase):
             "camera_ids": ["yard"],
             "source_kinds": ["object_crop"],
             "exclude_event_id": 8,
-        })
+        }))
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
         self.assertEqual(payload["query_mode"], "visual")
         self.assertEqual(payload["crop"], {
             "x": 0.5,
@@ -151,14 +149,15 @@ class SemanticVisualFrameRouteTests(TestCase):
             detail="preview capacity is busy",
         )
 
-        response = self.client.post("/api/semantic-search/visual-frame", json={
-            "camera_id": "gate",
-            "epoch": 105.0,
-            "x": 0,
-            "y": 0,
-            "width": 1,
-            "height": 1,
-        })
+        with self.assertRaises(HTTPException) as raised:
+            self.handler(SemanticVisualFrameSearchRequest.model_validate({
+                "camera_id": "gate",
+                "epoch": 105.0,
+                "x": 0,
+                "y": 0,
+                "width": 1,
+                "height": 1,
+            }))
 
-        self.assertEqual(response.status_code, 429)
-        self.assertEqual(response.json()["detail"], "preview capacity is busy")
+        self.assertEqual(raised.exception.status_code, 429)
+        self.assertEqual(raised.exception.detail, "preview capacity is busy")
