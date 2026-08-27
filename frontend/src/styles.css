@@ -1761,8 +1761,32 @@ p {
   color: var(--accent);
 }
 
-.incident-visual-similar-error {
-  color: var(--danger);
+.incident-visual-similar-card small {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.incident-visual-mode {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.incident-visual-mode.appearance {
+  background: color-mix(in srgb, var(--accent-2) 18%, transparent);
+  color: var(--accent-2);
+}
+
+.incident-visual-mode.visual {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
 }
 
 .incident-visual-similar-card {

@@ -32,10 +32,14 @@ match poorly because the search compares appearance, not intent.
 ### Find similar (object crop)
 
 On an expanded incident, select a detection box or use **Find similar** in the
-incident details panel. SurvNG encodes that object crop and ranks other indexed
-incidents by visual similarity. Results are hypotheses (`Visually similar`),
-not proof of the same physical item. Timeline links open the matching camera
-and event time.
+incident details panel. SurvNG:
+
+- uses **appearance / ReID** first for person and vehicle tracks when available
+- broadens with **visual crop similarity** (Smart Search image index)
+- tags each result as Appearance or Visual (scores are not fused)
+
+Results are hypotheses, not proof of the same physical item. Timeline links
+open the matching camera and event time.
 
 Details and roadmap: [Forensic visual search](../forensic-visual-search.md).
 

@@ -17,7 +17,16 @@ import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePat
 import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
-import { visualMatchLabel, visualSearchObjects, visualSearchRequest } from "../visualSearch.mjs";
+import {
+  appearanceCapableLabel,
+  appearanceMatchesPath,
+  hybridFindSimilarSubtitle,
+  hybridMatchLabel,
+  mergeHybridFindSimilarResults,
+  resolveObjectTrackId,
+  visualSearchObjects,
+  visualSearchRequest,
+} from "../visualSearch.mjs";
 import { appUrl, fetch, incidentRecordingContext, recordingsHref } from "../shared/api.js";
 import { formatDateTime, formatTimeOnly, formatDuration } from "../shared/format.js";
 import { eventSnapshotDownloadUrl, eventClipUrl } from "../shared/mediaUrls.js";
@@ -569,6 +578,8 @@ export function VisualSimilarIncidents({
   anchorEventId,
   objectIndex,
   objectLabel,
+  trackId = null,
+  event = null,
   cameraNameById,
   timeZone,
   onSelect,
@@ -579,52 +590,115 @@ export function VisualSimilarIncidents({
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [usedAppearance, setUsedAppearance] = useState(false);
+  const [usedVisual, setUsedVisual] = useState(false);
+  const resolvedTrackId = Number.isInteger(Number(trackId)) && Number(trackId) > 0
+    ? Number(trackId)
+    : resolveObjectTrackId({ label: objectLabel, track_id: trackId }, event);
+  const preferAppearance = appearanceCapableLabel(objectLabel);
 
   useEffect(() => {
     if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0
       || !Number.isInteger(Number(objectIndex)) || Number(objectIndex) < 0) {
       setResults([]);
       setError("");
+      setUsedAppearance(false);
+      setUsedVisual(false);
       return undefined;
     }
     const controller = new AbortController();
     let cancelled = false;
     setLoading(true);
     setError("");
-    fetch(appUrl("/api/semantic-search/visual"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify(visualSearchRequest({
-        eventId: anchorEventId,
-        objectIndex,
+    setUsedAppearance(false);
+    setUsedVisual(false);
+
+    async function load() {
+      const appearancePromise = preferAppearance
+        ? fetch(appUrl(appearanceMatchesPath(anchorEventId, {
+          hours: 24,
+          limit: 12,
+          trackId: resolvedTrackId,
+          crossCameraOnly: false,
+        })), { signal: controller.signal })
+          .then(async (response) => {
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              throw new Error(payload.detail || "Appearance search unavailable");
+            }
+            return Array.isArray(payload.matches) ? payload.matches : [];
+          })
+          .catch((requestError) => {
+            if (requestError?.name === "AbortError") throw requestError;
+            return { error: requestError.message || "Appearance search unavailable", matches: [] };
+          })
+        : Promise.resolve({ skipped: true, matches: [] });
+
+      const visualPromise = fetch(appUrl("/api/semantic-search/visual"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify(visualSearchRequest({
+          eventId: anchorEventId,
+          objectIndex,
+          limit: 16,
+        })),
+      })
+        .then(async (response) => {
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(payload.detail || "Visual search unavailable");
+          }
+          return Array.isArray(payload.results) ? payload.results : [];
+        })
+        .catch((requestError) => {
+          if (requestError?.name === "AbortError") throw requestError;
+          return { error: requestError.message || "Visual search unavailable", results: [] };
+        });
+
+      const [appearanceOutcome, visualOutcome] = await Promise.all([appearancePromise, visualPromise]);
+      if (cancelled) return;
+
+      const appearanceMatches = Array.isArray(appearanceOutcome)
+        ? appearanceOutcome
+        : (appearanceOutcome.matches || []);
+      const visualResults = Array.isArray(visualOutcome)
+        ? visualOutcome
+        : (visualOutcome.results || []);
+      const appearanceError = appearanceOutcome?.error || "";
+      const visualError = visualOutcome?.error || "";
+      const appearanceOk = preferAppearance && !appearanceOutcome?.skipped && !appearanceError;
+      const visualOk = !visualError;
+      const merged = mergeHybridFindSimilarResults({
+        appearanceMatches: appearanceOk ? appearanceMatches : [],
+        visualResults: visualOk ? visualResults : [],
         limit: 16,
-      })),
-    })
-      .then(async (response) => {
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload.detail || "Visual search unavailable");
-        }
-        return payload;
-      })
-      .then((payload) => {
-        if (!cancelled) setResults(Array.isArray(payload.results) ? payload.results : []);
-      })
-      .catch((requestError) => {
-        if (!cancelled && requestError?.name !== "AbortError") {
-          setResults([]);
-          setError(requestError.message || "Visual search unavailable");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
       });
+      setUsedAppearance(appearanceOk && appearanceMatches.some((match) => match?.visually_similar));
+      setUsedVisual(visualOk && visualResults.length > 0);
+      setResults(merged);
+      if (!merged.length) {
+        const messages = [appearanceError, visualError].filter(Boolean);
+        setError(messages[0] || "");
+      } else {
+        setError("");
+      }
+    }
+
+    load().catch((requestError) => {
+      if (!cancelled && requestError?.name !== "AbortError") {
+        setResults([]);
+        setError(requestError.message || "Find similar unavailable");
+      }
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+
     return () => {
       cancelled = true;
       controller.abort();
     };
-  }, [anchorEventId, objectIndex]);
+  }, [anchorEventId, objectIndex, objectLabel, preferAppearance, resolvedTrackId]);
 
   if (!Number.isInteger(Number(objectIndex)) || Number(objectIndex) < 0) return null;
 
@@ -633,39 +707,48 @@ export function VisualSimilarIncidents({
       <div className="incident-related-head">
         <div>
           <h3>Find similar</h3>
-          <small>{objectLabel ? `Visually similar to ${objectLabel}` : "Visually similar incidents"}</small>
+          <small>{hybridFindSimilarSubtitle({
+            objectLabel,
+            usedAppearance,
+            usedVisual,
+            trackId: resolvedTrackId,
+          })}</small>
         </div>
         {onClear ? <button type="button" onClick={onClear}>Clear</button> : null}
       </div>
-      {loading ? <p>Searching indexed appearances…</p> : null}
+      {loading ? <p>Searching appearance and visual indexes…</p> : null}
       {error ? <p className="incident-visual-similar-error">{error}</p> : null}
-      {!loading && !error && !results.length ? <p>No visually similar incidents in the index yet.</p> : null}
+      {!loading && !error && !results.length ? <p>No similar incidents in the indexes yet.</p> : null}
       {results.length ? (
         <div className="incident-related-grid">
           {results.map((result) => {
-            const event = result.event || {};
-            const eventId = Number(event.id);
+            const eventRow = result.event || {};
+            const eventId = Number(eventRow.id);
             const selected = eventId === Number(selectedEventId);
             const pending = eventId === Number(loadingEventId);
-            const context = incidentRecordingContext(event);
-            const matchLabel = visualMatchLabel(result.match_strength);
+            const context = incidentRecordingContext(eventRow);
+            const matchLabel = hybridMatchLabel(result);
+            const modeLabel = result.query_mode === "appearance" ? "Appearance" : "Visual";
             return (
-              <div className={`incident-visual-similar-card${selected ? " selected" : ""}`} key={eventId}>
+              <div className={`incident-visual-similar-card${selected ? " selected" : ""}`} key={`${result.query_mode}-${eventId}`}>
                 <button
                   type="button"
                   className={selected ? "selected" : ""}
-                  onClick={() => onSelect?.(event)}
+                  onClick={() => onSelect?.(eventRow)}
                   disabled={pending}
                   aria-pressed={selected}
-                  title={`${matchLabel} · ${cameraNameById.get(event.camera_id) || event.camera_id}`}
+                  title={`${modeLabel}: ${matchLabel} · ${cameraNameById.get(eventRow.camera_id) || eventRow.camera_id}`}
                 >
                   <img
                     src={appUrl(relatedIncidentThumbnailPath(eventId))}
-                    alt={`${cameraNameById.get(event.camera_id) || event.camera_id} similar incident`}
+                    alt={`${cameraNameById.get(eventRow.camera_id) || eventRow.camera_id} similar incident`}
                     loading="lazy"
                   />
-                  <strong>{cameraNameById.get(event.camera_id) || event.camera_id}</strong>
-                  <small>{pending ? "Loading…" : `${matchLabel} · ${formatDateTime(event.created_at, timeZone)}`}</small>
+                  <strong>{cameraNameById.get(eventRow.camera_id) || eventRow.camera_id}</strong>
+                  <small>
+                    <span className={`incident-visual-mode ${result.query_mode || "visual"}`}>{modeLabel}</span>
+                    {pending ? "Loading…" : `${matchLabel} · ${formatDateTime(eventRow.created_at, timeZone)}`}
+                  </small>
                 </button>
                 {context ? (
                   <a className="incident-visual-similar-timeline" href={recordingsHref(context)}>
@@ -865,6 +948,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
   const selectedSearchObject = Number.isInteger(Number(selectedObjectIndex))
     ? searchableObjects[Number(selectedObjectIndex)]
     : null;
+  const selectedTrackId = resolveObjectTrackId(selectedSearchObject, inspectedEvent);
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
   const faces = faceEvent?.faces || [];
@@ -941,6 +1025,8 @@ export function IncidentInspector({ open = false, incident, faceEvent, anchorEve
         anchorEventId={Number.isFinite(eventId) ? eventId : anchorEventId}
         objectIndex={selectedObjectIndex}
         objectLabel={selectedSearchObject?.label || ""}
+        trackId={selectedTrackId}
+        event={inspectedEvent}
         cameraNameById={cameraNameById}
         timeZone={timeZone}
         onSelect={onRelatedSelect}
