@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
-import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
+import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
@@ -163,31 +163,28 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   const renderingFrameSize = zoomLayout
     ? { width: zoomLayout.width, height: zoomLayout.height }
     : frameSize;
-  const renderedImage = useMemo(() => {
-    if (!imageSize?.width || !imageSize?.height || !renderingFrameSize?.width || !renderingFrameSize?.height) return null;
-    const scale = Math.min(renderingFrameSize.width / imageSize.width, renderingFrameSize.height / imageSize.height);
-    const width = imageSize.width * scale;
-    const height = imageSize.height * scale;
-    return {
-      x: (renderingFrameSize.width - width) / 2,
-      y: (renderingFrameSize.height - height) / 2,
-      width,
-      height,
-      scale,
-    };
-  }, [imageSize, renderingFrameSize?.height, renderingFrameSize?.width]);
   const hasFocusableObjects = focusMode !== "off" && boxes.length > 0;
   const preferFocused = focusMode === "auto" || (focusMode === "button" && !objectFocusControls);
   const useServerObjectCrop = Boolean(thumbnail && hasFocusableObjects && (objectFocused || preferFocused));
+  const renderedImage = useMemo(() => {
+    // The server has already framed focused snapshots. Keep the whole crop
+    // visible (especially in tall Mosaic cells) and map overlays to it.
+    return incidentImageRenderRect(
+      renderingFrameSize,
+      imageSize,
+      "contain",
+    );
+  }, [imageSize, renderingFrameSize?.height, renderingFrameSize?.width]);
   const canFocus = hasFocusableObjects && (useServerObjectCrop || renderedImage);
   const showFocusButton = canFocus && objectFocusControls;
   // Crop from the full snapshot on the server, then encode near display size.
   const focusThumbnailWidth = Math.max(320, Math.min(1280, Math.ceil((frameSize?.width || 160) * devicePixelRatio)));
   const focusThumbnailQuality = 90;
-  const focusAspect = objectFocusAspect?.width > 0 && objectFocusAspect?.height > 0 ? objectFocusAspect : null;
+  const focusAspect = incidentObjectFocusAspect(objectFocusAspect, useServerObjectCrop);
   const thumbnailSrc = useServerObjectCrop
     ? eventThumbnailUrl(event, focusThumbnailWidth, focusThumbnailQuality, {
       objectFocus: true,
+      incidentEligibleOnly,
       zoom: focusZoom,
       aspectWidth: focusAspect?.width,
       aspectHeight: focusAspect?.height,

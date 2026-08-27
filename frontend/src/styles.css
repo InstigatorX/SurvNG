@@ -3197,7 +3197,9 @@ button.live-overlay-backdrop:active {
 }
 
 .incident-preview .snapshot-frame.object-focus-crop img {
-  object-fit: cover;
+  /* The server crop already frames the qualifying objects. Cover would crop
+     them out again in the tall first cell of a three-event Mosaic. */
+  object-fit: contain;
 }
 
 .incident-focus .incident-preview {

@@ -45,7 +45,12 @@ def _jpeg_thumbnail(frame: np.ndarray, width: int, quality: int) -> bytes:
     return encoded.tobytes()
 
 
-def _event_object_boxes(event: dict[str, Any], frame_width: int, frame_height: int) -> list[tuple[int, int, int, int]]:
+def _event_object_boxes(
+    event: dict[str, Any],
+    frame_width: int,
+    frame_height: int,
+    incident_eligible_only: bool = False,
+) -> list[tuple[int, int, int, int]]:
     """Return incident-eligible object boxes mapped into snapshot pixel space."""
     try:
         objects = json.loads(str(event.get("objects_json") or "[]"))
@@ -57,7 +62,9 @@ def _event_object_boxes(event: dict[str, Any], frame_width: int, frame_height: i
     for item in objects:
         if not isinstance(item, dict):
             continue
-        if item.get("incident_eligible") is False or item.get("snapshot_visible") is False:
+        if incident_eligible_only and item.get("incident_eligible") is False:
+            continue
+        if item.get("snapshot_visible") is False:
             continue
         if not str(item.get("label") or "").strip():
             continue
@@ -188,9 +195,10 @@ def _object_focus_thumbnail_frame(
     zoom: float = 1.0,
     aspect_width: float = 0.0,
     aspect_height: float = 0.0,
+    incident_eligible_only: bool = False,
 ) -> np.ndarray:
     frame_height, frame_width = frame.shape[:2]
-    boxes = _event_object_boxes(event, frame_width, frame_height)
+    boxes = _event_object_boxes(event, frame_width, frame_height, incident_eligible_only)
     crop = object_focus_crop_rect(
         frame_width, frame_height, boxes, zoom, aspect_width, aspect_height,
     )
@@ -294,6 +302,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         width: int = 640,
         quality: int = 82,
         object_focus: bool = False,
+        incident_eligible_only: bool = False,
         zoom: float = 1.0,
         aspect_w: float = 0.0,
         aspect_h: float = 0.0,
@@ -325,7 +334,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             identity = (
                 f"{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:"
                 f"{safe_width}:{safe_quality}:{int(focus_enabled)}:{focus_zoom:.3f}:"
-                f"{focus_aspect_w:.3f}:{focus_aspect_h:.3f}"
+                f"{focus_aspect_w:.3f}:{focus_aspect_h:.3f}:{int(incident_eligible_only)}"
             )
 
             def build() -> bytes:
@@ -337,6 +346,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 if focus_enabled:
                     frame = _object_focus_thumbnail_frame(
                         frame, event, focus_zoom, focus_aspect_w, focus_aspect_h,
+                        incident_eligible_only,
                     )
                 return _jpeg_thumbnail(frame, safe_width, safe_quality)
 

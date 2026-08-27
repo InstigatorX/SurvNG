@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectFocusThumbnailWidth, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailObjectFocusEnabled, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectFocusThumbnailWidth, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailObjectFocusEnabled, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -77,6 +77,15 @@ assert.equal(normalizeIncidentThumbnailObjectFocusZoom(2.5), 2.5);
 assert.equal(normalizeIncidentThumbnailObjectFocusZoom(0.5), 0.5);
 assert.equal(normalizeIncidentThumbnailObjectFocusZoom(0.2), 0.25);
 assert.equal(normalizeIncidentThumbnailObjectFocusZoom(9), 5.5);
+assert.deepEqual(incidentObjectFocusAspect(null, true), { width: 16, height: 9 });
+assert.equal(incidentObjectFocusAspect(null, false), null);
+assert.deepEqual(incidentObjectFocusAspect({ width: 16, height: 10 }, true), { width: 16, height: 10 });
+{
+  const contain = incidentImageRenderRect({ width: 674, height: 456 }, { width: 2251, height: 1266 }, "contain");
+  assert.ok(contain);
+  assert.ok(contain.y > 0);
+  assert.equal(contain.width, 674);
+}
 assert.equal(incidentObjectFocusThumbnailWidth(140, 2, 1), 1280);
 assert.equal(incidentObjectFocusThumbnailWidth(180, 2, 2), 1920);
 assert.equal(incidentObjectFocusThumbnailWidth(220, 3, 3), 2560);

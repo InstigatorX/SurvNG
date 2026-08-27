@@ -431,7 +431,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
                   onClick={(clickEvent) => { clickEvent.stopPropagation(); selectMosaicEvent(event); }}
                   aria-label={`Focus event at ${formatTimeOnly(event.created_at || incident.created_at, timeZone)}`}
                 >
-                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations showTracking={false}>
+                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations showTracking={false} incidentEligibleOnly>
                     <IncidentSourceDot trigger={eventTrigger} className="incident-mosaic-source" />
                     <div className="incident-mosaic-hud">
                       <time>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</time>
@@ -453,7 +453,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
           <div className={`incident-evidence incident-evidence-${evidenceItems.length}`} role="group" aria-label="Incident evidence frames">
             {evidenceItems.map((item) => (
               <button type="button" className="incident-evidence-tile" key={item.key} onClick={(event) => { event.stopPropagation(); selectEvidenceItem(item); }} aria-label={`Focus ${item.label.toLowerCase()} frame`}>
-                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations={item.kind === "snapshot"} showTracking={false}>
+                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations={item.kind === "snapshot"} showTracking={false} incidentEligibleOnly={item.kind === "snapshot"}>
                   <div className="incident-evidence-hud">
                     <strong>{item.label}</strong>
                     <time>{formatTimeOnly(item.event.created_at, timeZone)}</time>

@@ -1249,6 +1249,20 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertGreater(loose_area, fitted_area)
         self.assertGreater(fitted_area, tight_area)
 
+    def test_object_focus_can_exclude_non_qualifying_boxes(self) -> None:
+        from survng.app.appearance_routes import _event_object_boxes
+
+        event = {
+            "objects_json": json.dumps([
+                {"label": "car", "incident_eligible": True, "box": {"x1": 10, "y1": 10, "x2": 30, "y2": 30}},
+                {"label": "robot_lawnmower", "incident_eligible": False, "box": {"x1": 60, "y1": 60, "x2": 80, "y2": 80}},
+            ]),
+        }
+        self.assertEqual(
+            _event_object_boxes(event, 100, 100, incident_eligible_only=True),
+            [(10, 10, 30, 30)],
+        )
+
     def test_object_focus_crop_rect_biases_vertical_padding(self) -> None:
         from survng.app.appearance_routes import object_focus_crop_rect
 

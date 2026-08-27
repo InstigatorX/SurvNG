@@ -241,6 +241,40 @@ export function normalizeIncidentThumbnailObjectFocusZoom(zoom) {
   return Math.min(5.5, Math.max(0.25, value));
 }
 
+export function incidentObjectFocusAspect(aspect, serverCrop = false) {
+  const width = Number(aspect?.width);
+  const height = Number(aspect?.height);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return { width, height };
+  }
+  // The thumbnail endpoint applies this same default when object_focus is
+  // enabled without aspect parameters. Keep the client crop plane identical.
+  return serverCrop ? { width: 16, height: 9 } : null;
+}
+
+export function incidentImageRenderRect(frameSize, imageSize, fit = "contain") {
+  const frameWidth = Number(frameSize?.width);
+  const frameHeight = Number(frameSize?.height);
+  const imageWidth = Number(imageSize?.width);
+  const imageHeight = Number(imageSize?.height);
+  if (![frameWidth, frameHeight, imageWidth, imageHeight].every(Number.isFinite)
+    || frameWidth <= 0 || frameHeight <= 0 || imageWidth <= 0 || imageHeight <= 0) {
+    return null;
+  }
+  const scale = fit === "cover"
+    ? Math.max(frameWidth / imageWidth, frameHeight / imageHeight)
+    : Math.min(frameWidth / imageWidth, frameHeight / imageHeight);
+  const width = imageWidth * scale;
+  const height = imageHeight * scale;
+  return {
+    x: (frameWidth - width) / 2,
+    y: (frameHeight - height) / 2,
+    width,
+    height,
+    scale,
+  };
+}
+
 export function incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, zoom = 1, aspectWidth = 0, aspectHeight = 0) {
   const width = Math.max(0, Number(sourceWidth) || 0);
   const height = Math.max(0, Number(sourceHeight) || 0);
