@@ -226,6 +226,35 @@ def test_product_update_status_supports_selected_branch(tmp_path: Path) -> None:
     assert "develop" in status["message"]
 
 
+def test_product_update_discovers_branches_from_single_branch_clone(tmp_path: Path) -> None:
+    repo = _init_survng_repo(tmp_path)
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "clone", "--bare", str(repo), str(bare))
+
+    work = tmp_path / "publisher"
+    _git(tmp_path, "clone", str(bare), str(work))
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "Test")
+    _git(work, "checkout", "-b", "v1.2")
+    (work / "survng" / "v12.txt").write_text("v1.2\n", encoding="utf-8")
+    _git(work, "add", "survng/v12.txt")
+    _git(work, "commit", "-m", "v1.2 change")
+    _git(work, "push", "origin", "v1.2")
+
+    single = tmp_path / "single"
+    _git(tmp_path, "clone", "--branch", "main", "--single-branch", str(bare), str(single))
+    assert "v1.2" not in _git(single, "branch", "-r")
+
+    service = ProductUpdateService(repo_root=single)
+    status = service.status(refresh_remote=True, branch="v1.2")
+
+    assert "v1.2" in status["branches"]
+    assert status["target_branch"] == "v1.2"
+    assert status["needs_checkout"] is True
+    assert status["can_update"] is True
+    assert status["behind_count"] >= 1
+
+
 def test_product_update_start_checks_out_selected_branch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

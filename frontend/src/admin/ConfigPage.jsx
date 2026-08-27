@@ -4101,17 +4101,18 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                   onChange={(event) => {
                     const next = event.target.value;
                     setProductUpdateBranch(next);
-                    void loadProductUpdate(false, next);
+                    // Refresh so --single-branch checkouts fetch the selected tip.
+                    void loadProductUpdate(true, next);
                   }}
-                  disabled={productUpdateBusy || ["running", "restarting"].includes(productUpdate?.status) || !(productUpdate?.branches || []).length}
+                  disabled={productUpdateBusy || ["running", "restarting"].includes(productUpdate?.status)}
                   title="Git branch used for Check for Updates / Update"
                 >
                   {(productUpdate?.branches || []).length
-                    ? (productUpdate.branches.includes(productUpdateBranch) || !productUpdateBranch
-                      ? productUpdate.branches
-                      : [productUpdateBranch, ...productUpdate.branches]
-                    ).map((name) => <option key={name} value={name}>{name}</option>)
-                    : <option value={productUpdateBranch || productUpdate?.branch || ""}>{productUpdateBranch || productUpdate?.branch || "Loading…"}</option>}
+                    ? Array.from(new Set([
+                      ...(productUpdateBranch && !productUpdate.branches.includes(productUpdateBranch) ? [productUpdateBranch] : []),
+                      ...productUpdate.branches,
+                    ])).map((name) => <option key={name} value={name}>{name}</option>)
+                    : <option value={productUpdateBranch || productUpdate?.branch || ""}>{productUpdateBranch || productUpdate?.branch || "Check for Updates…"}</option>}
                 </select>
               </label>
               <button
