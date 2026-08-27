@@ -87,6 +87,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const [relatedPreviewEventId, setRelatedPreviewEventId] = useState(null);
   const [relatedPreviewLoadingEventId, setRelatedPreviewLoadingEventId] = useState(null);
   const [selectedVisualObject, setSelectedVisualObject] = useState(null);
+  const [findSimilarObject, setFindSimilarObject] = useState(null);
   const [tabletInspectorOpen, setTabletInspectorOpen] = useState(false);
   const tabletInspectorToggleRef = useRef(null);
   const relatedPreviewRequestRef = useRef(0);
@@ -495,6 +496,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     setRelatedPreviewEventId(null);
     setRelatedPreviewLoadingEventId(null);
     setSelectedVisualObject(null);
+    setFindSimilarObject(null);
     setTabletInspectorOpen(false);
   }, [focusedIncident?.id, linkedIncidentDetail?.id, linkedIncidentEventId]);
 
@@ -691,7 +693,6 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
             <section className="incident-investigation">
               <div className="incident-desktop-focus">
                 <div className="incident-focus-actions">
-                  {relatedPreviewIncident ? <button type="button" onClick={returnToSelectedIncident}>Return to selected incident</button> : null}
                   <button ref={tabletInspectorToggleRef} type="button" className="incident-inspector-toggle" onClick={() => setTabletInspectorOpen((open) => !open)} aria-expanded={tabletInspectorOpen} aria-controls="incident-inspector" disabled={!displayedIncident}>Details</button>
                 </div>
                 {focusedIncident ? (
@@ -712,11 +713,17 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                     desktopWorkspace
                     analysisMode={desktopAnalysisMode}
                     replayRequest={desktopReplayRequest}
-                    selectedObjectIndex={relatedPreviewIncident ? null : (selectedVisualObject?.objectIndex ?? null)}
+                    selectedObjectIndex={relatedPreviewIncident ? null : (selectedVisualObject?.objectIndex ?? findSimilarObject?.objectIndex ?? null)}
                     onSelectObject={relatedPreviewIncident ? null : ((selection) => {
                       setSelectedVisualObject(selection);
-                      if (selection) setTabletInspectorOpen(true);
+                      if (!selection) {
+                        setFindSimilarObject(null);
+                        return;
+                      }
+                      setFindSimilarObject(selection);
+                      setTabletInspectorOpen(true);
                     })}
+                    onReturnToSelected={relatedPreviewIncident ? returnToSelectedIncident : null}
                     onAnalysisStats={setDesktopAnalysisStats}
                     onToggle={toggleIncident}
                     onPreviewChange={relatedPreviewIncident ? undefined : setFocusedFaceEventId}
@@ -733,7 +740,37 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
             </section>
 
             {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
-            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} searchEvent={findSimilarEvent} anchorEventId={findSimilarEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} selectedObjectIndex={selectedVisualObject?.objectIndex ?? null} onSelectObject={setSelectedVisualObject} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} onAskAssistant={onAskAssistant} />
+            <IncidentInspector
+              open={tabletInspectorOpen}
+              incident={displayedIncident}
+              faceEvent={displayedEvent}
+              searchEvent={findSimilarEvent}
+              anchorEventId={findSimilarEventId}
+              selectedRelatedEventId={relatedPreviewEventId}
+              relatedLoadingEventId={relatedPreviewLoadingEventId}
+              cameraNameById={cameraNameById}
+              appConfig={appConfig}
+              timeZone={timeZone}
+              imageSize={focusedLoadedImageSize}
+              analysisMode={desktopAnalysisMode}
+              analysisStats={desktopAnalysisStats}
+              selectedObjectIndex={selectedVisualObject?.objectIndex ?? null}
+              findSimilarObjectIndex={findSimilarObject?.objectIndex ?? null}
+              onSelectObject={setSelectedVisualObject}
+              onFindSimilar={(selection) => {
+                setFindSimilarObject(selection);
+                if (selection) {
+                  setSelectedVisualObject(selection);
+                  setTabletInspectorOpen(true);
+                }
+              }}
+              onAnalysisModeChange={selectDesktopAnalysisMode}
+              onFaceOpen={openFaceReview}
+              onRelatedSelect={selectRelatedIncident}
+              onRelatedReturn={returnToSelectedIncident}
+              onClose={() => closeTabletInspector()}
+              onAskAssistant={onAskAssistant}
+            />
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}

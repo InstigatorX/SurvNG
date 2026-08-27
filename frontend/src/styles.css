@@ -972,11 +972,22 @@ p {
   aspect-ratio: auto;
 }
 
-.incident-workspace-view-toggle {
+.incident-workspace-chrome {
   position: absolute;
   top: 8px;
   right: 8px;
   z-index: 14;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.incident-workspace-view-toggle {
+  position: relative;
+  top: auto;
+  right: auto;
+  z-index: auto;
   display: flex;
   gap: 3px;
   border: 1px solid rgba(255, 255, 255, .2);
@@ -986,6 +997,25 @@ p {
   padding: 3px;
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
+}
+
+.incident-return-selected {
+  min-height: 30px;
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 8px;
+  background: rgba(3, 10, 12, .78);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .28);
+  color: rgba(255, 255, 255, .9);
+  font-size: 10px;
+  font-weight: 550;
+  padding: 4px 10px;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.incident-return-selected:hover {
+  background: rgba(45, 212, 191, .18);
+  color: #ccfbf1;
 }
 
 .incident-workspace-view-toggle button {
