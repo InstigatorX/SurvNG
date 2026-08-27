@@ -176,6 +176,98 @@ def _parse_commits(log_text: str) -> list[dict[str, str]]:
     return commits
 
 
+def _parse_left_right_counts(counts: str) -> tuple[int, int]:
+    ahead_text, _, behind_text = counts.partition("\t")
+    if not behind_text:
+        ahead_text, _, behind_text = counts.partition(" ")
+    return int(ahead_text or "0"), int(behind_text or "0")
+
+
+def _normalize_branch_name(branch: str | None) -> str | None:
+    if branch is None:
+        return None
+    value = branch.strip()
+    if not value or value in {".", ".."}:
+        return None
+    if value.startswith("-") or "\\" in value or "\x00" in value:
+        return None
+    if any(part == ".." for part in value.split("/")):
+        return None
+    if not all(ch.isalnum() or ch in "._/-" for ch in value):
+        return None
+    return value
+
+
+def _list_remote_branches(repo_root: Path, *, remote: str = DEFAULT_REMOTE) -> list[str]:
+    refs = _git_output(
+        repo_root,
+        [
+            "for-each-ref",
+            "--format=%(refname:strip=3)",
+            f"refs/remotes/{remote}/",
+        ],
+    )
+    branches: list[str] = []
+    seen: set[str] = set()
+    for line in refs.splitlines():
+        name = line.strip()
+        if not name or name == "HEAD" or name in seen:
+            continue
+        seen.add(name)
+        branches.append(name)
+    return branches
+
+
+def _list_remote_branches_ls(repo_root: Path, *, remote: str = DEFAULT_REMOTE) -> list[str]:
+    """List heads advertised by the remote (works for --single-branch clones)."""
+    completed = _run_git(
+        repo_root,
+        ["ls-remote", "--heads", remote],
+        timeout=FETCH_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return []
+    branches: list[str] = []
+    seen: set[str] = set()
+    prefix = "refs/heads/"
+    for line in completed.stdout.splitlines():
+        _sha, _, ref = line.partition("\t")
+        ref = (ref or line.partition(" ")[2]).strip()
+        if not ref.startswith(prefix):
+            continue
+        name = ref[len(prefix) :]
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        branches.append(name)
+    return branches
+
+
+def _merge_branch_names(*groups: Sequence[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for name in group:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            merged.append(name)
+    return merged
+
+
+def _local_branch_exists(repo_root: Path, branch: str) -> bool:
+    return (
+        _run_git(
+            repo_root,
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            timeout=15.0,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 class ProductUpdateService:
     """Inspect and apply fast-forward product updates from the configured remote."""
 
@@ -193,7 +285,12 @@ class ProductUpdateService:
         self._state: dict[str, Any] = {"status": "idle"}
         self._thread: threading.Thread | None = None
 
-    def status(self, *, refresh_remote: bool = False) -> dict[str, Any]:
+    def status(
+        self,
+        *,
+        refresh_remote: bool = False,
+        branch: str | None = None,
+    ) -> dict[str, Any]:
         """Return local version identity and optional remote-ahead summary."""
         with self._lock:
             job = copy.deepcopy(self._state)
@@ -201,6 +298,7 @@ class ProductUpdateService:
         mode = _deployment_mode(repo_root)
         baked = _baked_version()
         helper = self._update_helper_path()
+        requested_branch = _normalize_branch_name(branch)
 
         payload: dict[str, Any] = {
             "deployment_mode": mode,
@@ -209,6 +307,9 @@ class ProductUpdateService:
             "repo_root": str(repo_root) if repo_root else None,
             "remote": DEFAULT_REMOTE,
             "branch": None,
+            "target_branch": requested_branch,
+            "branches": [],
+            "needs_checkout": False,
             "current_sha": baked.get("sha") or None,
             "current_short_sha": baked.get("short_sha") or None,
             "upstream_sha": None,
@@ -251,7 +352,7 @@ class ProductUpdateService:
             return payload
 
         try:
-            branch = _git_output(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
+            current_branch = _git_output(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
             current_sha = _git_output(repo_root, ["rev-parse", "HEAD"])
             dirty = bool(
                 _run_git(
@@ -263,7 +364,7 @@ class ProductUpdateService:
             )
             payload.update(
                 {
-                    "branch": branch,
+                    "branch": current_branch,
                     "current_sha": current_sha,
                     "current_short_sha": current_sha[:12],
                     "dirty": dirty,
@@ -272,9 +373,49 @@ class ProductUpdateService:
             )
             if refresh_remote:
                 self._fetch(repo_root)
-            upstream = f"{DEFAULT_REMOTE}/{branch if branch != 'HEAD' else DEFAULT_BRANCH}"
-            if branch == "HEAD":
-                upstream = f"{DEFAULT_REMOTE}/{DEFAULT_BRANCH}"
+            local_branches = _list_remote_branches(repo_root)
+            if refresh_remote:
+                branches = _merge_branch_names(
+                    local_branches,
+                    _list_remote_branches_ls(repo_root),
+                )
+            else:
+                branches = local_branches
+            payload["branches"] = branches
+
+            default_target = (
+                current_branch
+                if current_branch != "HEAD"
+                else DEFAULT_BRANCH
+            )
+            target_branch = requested_branch or default_target
+            if requested_branch is None and target_branch not in branches and branches:
+                if DEFAULT_BRANCH in branches:
+                    target_branch = DEFAULT_BRANCH
+                else:
+                    target_branch = branches[0]
+            payload["target_branch"] = target_branch
+
+            if requested_branch and requested_branch not in branches:
+                # Single-branch clones may lack the tracking ref until fetch.
+                if not refresh_remote:
+                    self._fetch(repo_root, branch=requested_branch)
+                    local_branches = _list_remote_branches(repo_root)
+                    branches = _merge_branch_names(
+                        local_branches,
+                        _list_remote_branches_ls(repo_root),
+                    )
+                    payload["branches"] = branches
+                if requested_branch not in branches:
+                    payload["needs_checkout"] = current_branch != requested_branch
+                    payload["message"] = (
+                        f"Remote branch {DEFAULT_REMOTE}/{requested_branch} was not "
+                        "found. Fetch updates first or choose another branch."
+                    )
+                    payload["can_update"] = False
+                    return payload
+
+            upstream = f"{DEFAULT_REMOTE}/{target_branch}"
             upstream_exists = (
                 _run_git(
                     repo_root,
@@ -285,6 +426,18 @@ class ProductUpdateService:
                 == 0
             )
             if not upstream_exists:
+                self._fetch(repo_root, branch=target_branch)
+                upstream_exists = (
+                    _run_git(
+                        repo_root,
+                        ["rev-parse", "--verify", upstream],
+                        timeout=30.0,
+                        check=False,
+                    ).returncode
+                    == 0
+                )
+            if not upstream_exists:
+                payload["needs_checkout"] = current_branch != target_branch
                 payload["message"] = (
                     f"Remote branch {upstream} was not found. Fetch updates first."
                 )
@@ -292,15 +445,30 @@ class ProductUpdateService:
                 return payload
 
             upstream_sha = _git_output(repo_root, ["rev-parse", upstream])
-            counts = _git_output(
-                repo_root,
-                ["rev-list", "--left-right", "--count", f"HEAD...{upstream}"],
-            )
-            ahead_text, _, behind_text = counts.partition("\t")
-            if not behind_text:
-                ahead_text, _, behind_text = counts.partition(" ")
-            ahead_count = int(ahead_text or "0")
-            behind_count = int(behind_text or "0")
+            if current_branch == target_branch:
+                local_ref = "HEAD"
+            elif _local_branch_exists(repo_root, target_branch):
+                local_ref = target_branch
+            else:
+                local_ref = None
+
+            if local_ref is None:
+                # New local tracking branch will be created from upstream; local
+                # divergence cannot exist yet. Report how far HEAD is from the tip
+                # for the Update(N) preview.
+                ahead_count = 0
+                counts = _git_output(
+                    repo_root,
+                    ["rev-list", "--left-right", "--count", f"HEAD...{upstream}"],
+                )
+                _, behind_count = _parse_left_right_counts(counts)
+            else:
+                counts = _git_output(
+                    repo_root,
+                    ["rev-list", "--left-right", "--count", f"{local_ref}...{upstream}"],
+                )
+                ahead_count, behind_count = _parse_left_right_counts(counts)
+
             commit_log = _git_output(
                 repo_root,
                 [
@@ -310,6 +478,9 @@ class ProductUpdateService:
                     f"HEAD..{upstream}",
                 ],
             )
+            on_target_tip = (
+                current_branch == target_branch and current_sha == upstream_sha
+            )
             payload.update(
                 {
                     "upstream_sha": upstream_sha,
@@ -317,12 +488,14 @@ class ProductUpdateService:
                     "ahead_count": ahead_count,
                     "behind_count": behind_count,
                     "commits_behind": _parse_commits(commit_log),
+                    "needs_checkout": current_branch != target_branch,
                 }
             )
             if payload["update_method"] is None and mode == "native_git":
                 payload["update_method"] = "native_git"
+            needs_change = not on_target_tip
             can_update = (
-                behind_count > 0
+                needs_change
                 and ahead_count == 0
                 and not dirty
                 and payload["status"] not in {"running", "restarting"}
@@ -337,12 +510,44 @@ class ProductUpdateService:
                     "before updating."
                 )
             elif ahead_count > 0:
+                if current_branch == target_branch:
+                    payload["message"] = (
+                        "This checkout has local commits that are not on the "
+                        "remote. Fast-forward updates are blocked."
+                    )
+                else:
+                    payload["message"] = (
+                        f"Local branch {target_branch} has commits that are not "
+                        f"on {upstream}. Fast-forward updates are blocked."
+                    )
+            elif on_target_tip:
+                if len(branches) <= 1:
+                    payload["message"] = (
+                        f"SurvNG is up to date with {upstream}. "
+                        "Check for Updates to load other remote branches."
+                    )
+                else:
+                    payload["message"] = (
+                        f"SurvNG is up to date with {upstream}."
+                    )
+            elif current_branch != target_branch and behind_count == 0:
                 payload["message"] = (
-                    "This checkout has local commits that are not on the "
-                    "remote. Fast-forward updates are blocked."
+                    f"Switch to {target_branch} at {upstream_sha[:12]} "
+                    f"(already matches {upstream})."
                 )
-            elif behind_count == 0:
-                payload["message"] = "SurvNG is up to date with the remote branch."
+            elif current_branch != target_branch:
+                if payload["update_method"] in {"native_git", "host_helper"}:
+                    payload["message"] = (
+                        f"Switch to {target_branch} and apply {behind_count} commit"
+                        f"{'' if behind_count == 1 else 's'} from {upstream}."
+                    )
+                else:
+                    payload["message"] = (
+                        f"{behind_count} commit"
+                        f"{'' if behind_count == 1 else 's'} available from {upstream}. "
+                        "Run scripts/update-from-git.sh on the host checkout, or set "
+                        "SURVNG_UPDATE_HELPER to a host-mounted updater."
+                    )
             elif payload["update_method"] in {"native_git", "host_helper"}:
                 payload["message"] = (
                     f"{behind_count} commit"
@@ -363,7 +568,7 @@ class ProductUpdateService:
             payload["can_update"] = False
         return payload
 
-    def start(self) -> dict[str, Any]:
+    def start(self, *, branch: str | None = None) -> dict[str, Any]:
         """Start one update job. Returns the live job status payload."""
         with self._lock:
             if self._state.get("status") in {"running", "restarting"}:
@@ -374,7 +579,7 @@ class ProductUpdateService:
                     "SurvNG cannot update while storage work is active: "
                     f"{', '.join(active)}"
                 )
-            snapshot = self.status(refresh_remote=True)
+            snapshot = self.status(refresh_remote=True, branch=branch)
             if not snapshot.get("can_update"):
                 raise RuntimeError(
                     str(snapshot.get("message") or "No product update is available")
@@ -385,6 +590,7 @@ class ProductUpdateService:
                 "phase": "Starting",
                 "current_sha": snapshot.get("current_sha"),
                 "target_sha": snapshot.get("upstream_sha"),
+                "target_branch": snapshot.get("target_branch"),
                 "behind_count": snapshot.get("behind_count"),
                 "update_method": snapshot.get("update_method"),
                 "log": [],
@@ -401,8 +607,7 @@ class ProductUpdateService:
                 self._thread = None
                 self._state = {"status": "idle"}
                 raise
-        return self.status()
-
+        return self.status(branch=snapshot.get("target_branch"))
     def _update_helper_path(self) -> Path | None:
         raw = os.environ.get("SURVNG_UPDATE_HELPER", "").strip()
         if not raw:
@@ -412,10 +617,16 @@ class ProductUpdateService:
             return path
         return None
 
-    def _fetch(self, repo_root: Path) -> None:
+    def _fetch(self, repo_root: Path, *, branch: str | None = None) -> None:
+        # Explicit refspec so --single-branch clones still learn other release
+        # lines (v1.1, v1.2, main, …) when checking for updates.
+        if branch:
+            refspec = f"+refs/heads/{branch}:refs/remotes/{DEFAULT_REMOTE}/{branch}"
+        else:
+            refspec = f"+refs/heads/*:refs/remotes/{DEFAULT_REMOTE}/*"
         _run_git(
             repo_root,
-            ["fetch", "--prune", DEFAULT_REMOTE],
+            ["fetch", "--prune", DEFAULT_REMOTE, refspec],
             timeout=FETCH_TIMEOUT_SECONDS,
         )
 
@@ -459,13 +670,19 @@ class ProductUpdateService:
         helper = self._update_helper_path()
         if helper is None:
             raise RuntimeError("SURVNG_UPDATE_HELPER is not an executable file")
+        with self._lock:
+            target_branch = self._state.get("target_branch")
         self._append_log(f"Running host helper {helper}")
+        env = os.environ.copy()
+        if target_branch:
+            env["SURVNG_UPDATE_BRANCH"] = str(target_branch)
         completed = subprocess.run(
             [str(helper)],
             check=False,
             capture_output=True,
             text=True,
             timeout=HELPER_TIMEOUT_SECONDS,
+            env=env,
         )
         if completed.stdout.strip():
             self._append_log(completed.stdout.strip().splitlines()[-1][:240])
@@ -480,13 +697,34 @@ class ProductUpdateService:
                 "phase": "Host helper finished",
             }
 
+    def _checkout_target_branch(self, repo_root: Path, branch: str) -> None:
+        current = _git_output(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
+        if current == branch:
+            return
+        upstream = f"{DEFAULT_REMOTE}/{branch}"
+        self._append_log(f"Checking out {branch}")
+        if _local_branch_exists(repo_root, branch):
+            _run_git(repo_root, ["switch", branch], timeout=60.0)
+            return
+        _run_git(
+            repo_root,
+            ["switch", "--create", branch, "--track", upstream],
+            timeout=60.0,
+        )
+
     def _run_native_git(self) -> None:
         repo_root = self._configured_root or resolve_repo_root()
         if repo_root is None:
             raise RuntimeError("SurvNG git checkout was not found")
-        branch = _git_output(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
-        if branch == "HEAD":
-            branch = DEFAULT_BRANCH
+        with self._lock:
+            requested = self._state.get("target_branch")
+        branch = _normalize_branch_name(
+            str(requested) if requested is not None else None
+        )
+        if not branch:
+            branch = _git_output(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
+            if branch == "HEAD":
+                branch = DEFAULT_BRANCH
         upstream = f"{DEFAULT_REMOTE}/{branch}"
 
         self._append_log("Fetching remote commits")
@@ -501,26 +739,43 @@ class ProductUpdateService:
         if dirty:
             raise RuntimeError("Tracked local changes appeared before pull")
 
+        upstream_exists = (
+            _run_git(
+                repo_root,
+                ["rev-parse", "--verify", upstream],
+                timeout=30.0,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if not upstream_exists:
+            raise RuntimeError(f"Remote branch {upstream} was not found after fetch")
+
+        self._checkout_target_branch(repo_root, branch)
+
         counts = _git_output(
             repo_root,
             ["rev-list", "--left-right", "--count", f"HEAD...{upstream}"],
         )
-        ahead_text, _, behind_text = counts.partition("\t")
-        if not behind_text:
-            ahead_text, _, behind_text = counts.partition(" ")
-        if int(ahead_text or "0") > 0:
+        ahead_count, behind_count = _parse_left_right_counts(counts)
+        if ahead_count > 0:
             raise RuntimeError("Local commits prevent a fast-forward update")
-        if int(behind_text or "0") <= 0:
-            raise RuntimeError("No remote commits are available to apply")
-
-        self._append_log(f"Fast-forwarding to {upstream}")
-        _run_git(
-            repo_root,
-            ["pull", "--ff-only", DEFAULT_REMOTE, branch],
-            timeout=PULL_TIMEOUT_SECONDS,
-        )
-        new_sha = _git_output(repo_root, ["rev-parse", "HEAD"])
-        self._append_log(f"Now at {new_sha[:12]}")
+        current_sha = _git_output(repo_root, ["rev-parse", "HEAD"])
+        upstream_sha = _git_output(repo_root, ["rev-parse", upstream])
+        if behind_count <= 0 and current_sha == upstream_sha:
+            self._append_log(f"Already on {branch} at {current_sha[:12]}")
+            new_sha = current_sha
+        else:
+            if behind_count <= 0:
+                raise RuntimeError("No remote commits are available to apply")
+            self._append_log(f"Fast-forwarding to {upstream}")
+            _run_git(
+                repo_root,
+                ["pull", "--ff-only", DEFAULT_REMOTE, branch],
+                timeout=PULL_TIMEOUT_SECONDS,
+            )
+            new_sha = _git_output(repo_root, ["rev-parse", "HEAD"])
+            self._append_log(f"Now at {new_sha[:12]}")
 
         self._append_log("Installing Python dependencies")
         pip = subprocess.run(

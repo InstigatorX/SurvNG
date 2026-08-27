@@ -18,7 +18,7 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   exit 1
 fi
 
-git fetch --prune "$REMOTE"
+git fetch --prune "$REMOTE" "+refs/heads/*:refs/remotes/$REMOTE/*"
 
 if [[ -z "$BRANCH" ]]; then
   BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -31,6 +31,17 @@ UPSTREAM="$REMOTE/$BRANCH"
 if ! git rev-parse --verify "$UPSTREAM" >/dev/null 2>&1; then
   echo "Remote branch $UPSTREAM was not found after fetch." >&2
   exit 1
+fi
+
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$CURRENT_BRANCH" != "$BRANCH" ]]; then
+  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    echo "Checking out $BRANCH"
+    git switch "$BRANCH"
+  else
+    echo "Creating local branch $BRANCH from $UPSTREAM"
+    git switch --create "$BRANCH" --track "$UPSTREAM"
+  fi
 fi
 
 COUNTS="$(git rev-list --left-right --count "HEAD...$UPSTREAM")"
