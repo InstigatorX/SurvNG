@@ -194,13 +194,27 @@
   right: 10px;
 }
 
-.incident-workspace-view-toggle {
+.incident-workspace-chrome {
   top: 9px;
   right: 9px;
+  gap: 6px;
+}
+
+.incident-workspace-view-toggle {
+  top: auto;
+  right: auto;
   gap: 0;
   border-radius: 3px;
   box-shadow: none;
   padding: 2px;
+}
+
+.incident-return-selected {
+  min-height: 30px;
+  border-radius: 3px;
+  box-shadow: none;
+  font-size: 10px;
+  font-weight: 550;
 }
 
 .incident-workspace-view-toggle button {

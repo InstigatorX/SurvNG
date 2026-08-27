@@ -175,7 +175,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   );
 }
 
-export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
@@ -522,11 +522,20 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
         {expanded && activeWorkspaceView === "focus" && !inlineVideoActive && snapshotZoom.scale <= 1 ? (
           <button type="button" className="incident-preview-media-action media-surface-action" onClick={openPreview} aria-label="Play selected event video" />
         ) : null}
-        {canShowMosaic || canShowEvidence ? (
-          <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout" onClick={(event) => event.stopPropagation()}>
-            <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button>
-            {canShowMosaic ? <button type="button" className={activeWorkspaceView === "mosaic" ? "active" : ""} onClick={() => selectWorkspaceView("mosaic")} aria-pressed={activeWorkspaceView === "mosaic"} title="Show all incident events"><Grid2X2 size={14} /><span>Mosaic</span></button> : null}
-            {canShowEvidence ? <button type="button" className={activeWorkspaceView === "evidence" ? "active" : ""} onClick={() => selectWorkspaceView("evidence")} aria-pressed={activeWorkspaceView === "evidence"} title="Compare trigger, detection, selected, and tracking frames"><Images size={14} /><span>Evidence</span></button> : null}
+        {canShowMosaic || canShowEvidence || onReturnToSelected ? (
+          <div className="incident-workspace-chrome" onClick={(event) => event.stopPropagation()}>
+            {canShowMosaic || canShowEvidence ? (
+              <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout">
+                <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button>
+                {canShowMosaic ? <button type="button" className={activeWorkspaceView === "mosaic" ? "active" : ""} onClick={() => selectWorkspaceView("mosaic")} aria-pressed={activeWorkspaceView === "mosaic"} title="Show all incident events"><Grid2X2 size={14} /><span>Mosaic</span></button> : null}
+                {canShowEvidence ? <button type="button" className={activeWorkspaceView === "evidence" ? "active" : ""} onClick={() => selectWorkspaceView("evidence")} aria-pressed={activeWorkspaceView === "evidence"} title="Compare trigger, detection, selected, and tracking frames"><Images size={14} /><span>Evidence</span></button> : null}
+              </div>
+            ) : null}
+            {onReturnToSelected ? (
+              <button type="button" className="incident-return-selected" onClick={onReturnToSelected}>
+                Return to selected incident
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -575,6 +584,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
 }
 
 export function VisualSimilarIncidents({
+  active = true,
   anchorEventId,
   objectIndex,
   objectLabel,
@@ -596,14 +606,17 @@ export function VisualSimilarIncidents({
     ? Number(trackId)
     : resolveObjectTrackId({ label: objectLabel, track_id: trackId }, event);
   const preferAppearance = appearanceCapableLabel(objectLabel);
+  const searchActive = Boolean(active)
+    && Number.isInteger(Number(anchorEventId)) && Number(anchorEventId) > 0
+    && Number.isInteger(Number(objectIndex)) && Number(objectIndex) >= 0;
 
   useEffect(() => {
-    if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0
-      || !Number.isInteger(Number(objectIndex)) || Number(objectIndex) < 0) {
+    if (!searchActive) {
       setResults([]);
       setError("");
       setUsedAppearance(false);
       setUsedVisual(false);
+      setLoading(false);
       return undefined;
     }
     const controller = new AbortController();
@@ -698,9 +711,9 @@ export function VisualSimilarIncidents({
       cancelled = true;
       controller.abort();
     };
-  }, [anchorEventId, objectIndex, objectLabel, preferAppearance, resolvedTrackId]);
+  }, [searchActive, anchorEventId, objectIndex, objectLabel, preferAppearance, resolvedTrackId]);
 
-  if (!Number.isInteger(Number(objectIndex)) || Number(objectIndex) < 0) return null;
+  if (!searchActive) return null;
 
   return (
     <section className="incident-related incident-visual-similar">
@@ -764,13 +777,23 @@ export function VisualSimilarIncidents({
   );
 }
 
-export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEventId, cameraNameById, timeZone, onSelect, onReturn }) {
+export function RelatedAppearanceIncidents({
+  active = true,
+  anchorEventId,
+  selectedEventId,
+  loadingEventId,
+  cameraNameById,
+  timeZone,
+  onSelect,
+  onReturn,
+}) {
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
+    if (!active || !Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
       setMatches([]);
+      setLoading(false);
       return undefined;
     }
     const controller = new AbortController();
@@ -795,9 +818,9 @@ export function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loa
       cancelled = true;
       controller.abort();
     };
-  }, [anchorEventId]);
+  }, [active, anchorEventId]);
 
-  if (!loading && !matches.length) return null;
+  if (!active || (!loading && !matches.length)) return null;
 
   return (
     <section className="incident-related">
@@ -916,7 +939,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, selectedObjectIndex = null, onSelectObject = null, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -946,9 +969,10 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const findSimilarSourceEvent = searchEvent || inspectedEvent;
   const searchableObjects = visualSearchObjects(findSimilarSourceEvent);
   const objects = searchableObjects.filter((object) => object.incident_eligible !== false);
-  const selectedSearchObject = Number.isInteger(Number(selectedObjectIndex))
-    ? searchableObjects[Number(selectedObjectIndex)]
-    : null;
+  const findSimilarActive = Number.isInteger(Number(findSimilarObjectIndex)) && Number(findSimilarObjectIndex) >= 0;
+  const selectedSearchObject = findSimilarActive
+    ? searchableObjects[Number(findSimilarObjectIndex)]
+    : (Number.isInteger(Number(selectedObjectIndex)) ? searchableObjects[Number(selectedObjectIndex)] : null);
   const selectedTrackId = resolveObjectTrackId(selectedSearchObject, findSimilarSourceEvent);
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
@@ -966,6 +990,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   // open-focus effect (requestAnimationFrame) when Find similar / Details opens.
   const clipWindow = incidentClipWindow(incident, before, after);
   const clipUrl = Number.isFinite(eventId) ? eventClipUrl(eventId, clipWindow.before, clipWindow.after) : "";
+  const startFindSimilar = onFindSimilar || onSelectObject;
 
   return (
     <aside ref={inspectorRef} id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`} role={open ? "dialog" : undefined} aria-modal={open ? "true" : undefined} aria-labelledby={open ? "incident-inspector-title" : undefined}>
@@ -979,6 +1004,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
           {objects.length ? objects.map((object) => {
             const objectIndex = searchableObjects.indexOf(object);
             const selected = Number(selectedObjectIndex) === objectIndex;
+            const searching = Number(findSimilarObjectIndex) === objectIndex;
             const qualifyingObservations = Number(object.temporal_incident_observations);
             const requiredObservations = Number(object.temporal_required_observations);
             const peakConfidence = Number(object.temporal_peak_confidence);
@@ -986,23 +1012,23 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
               && Number.isFinite(requiredObservations)
               && requiredObservations > 0;
             return (
-              <div className={`inspector-detection summary${selected ? " selected" : ""}`} key={`${object.label}-${objectIndex}`}>
+              <div className={`inspector-detection summary${selected || searching ? " selected" : ""}`} key={`${object.label}-${objectIndex}`}>
                 <div>
                   <strong>{object.label}</strong>
                   <span>{Math.round(Number(object.confidence || 0) * 100)}% cover</span>
                 </div>
                 {hasConfirmationSummary ? <small>{qualifyingObservations}/{requiredObservations} qualifying detection{requiredObservations === 1 ? "" : "s"}{Number.isFinite(peakConfidence) ? ` · peak ${Math.round(peakConfidence * 100)}%` : ""}</small> : null}
-                {onSelectObject ? (
+                {startFindSimilar ? (
                   <button
                     type="button"
-                    className={selected ? "active" : ""}
-                    onClick={() => onSelectObject({
+                    className={searching ? "active" : ""}
+                    onClick={() => startFindSimilar({
                       objectIndex,
                       trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
                       label: object.label,
                     })}
                     title="Find visually similar incidents"
-                    aria-pressed={selected}
+                    aria-pressed={searching}
                   >
                     <Search size={13} /> Find similar
                   </button>
@@ -1037,8 +1063,9 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         )) : <p>No recognized faces.</p>}
       </section>
       <VisualSimilarIncidents
+        active={findSimilarActive}
         anchorEventId={Number.isInteger(findSimilarAnchorId) && findSimilarAnchorId > 0 ? findSimilarAnchorId : null}
-        objectIndex={selectedObjectIndex}
+        objectIndex={findSimilarObjectIndex}
         objectLabel={selectedSearchObject?.label || ""}
         trackId={selectedTrackId}
         event={findSimilarSourceEvent}
@@ -1047,10 +1074,10 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         onSelect={onRelatedSelect}
         loadingEventId={relatedLoadingEventId}
         selectedEventId={selectedRelatedEventId}
-        onClear={onSelectObject ? () => onSelectObject(null) : null}
+        onClear={onFindSimilar ? () => onFindSimilar(null) : (onSelectObject ? () => onSelectObject(null) : null)}
       />
-      <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
-      <CrossCameraTracePanel anchorEventId={anchorEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} loadingEventId={relatedLoadingEventId} />
+      <RelatedAppearanceIncidents active={open} anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
+      <CrossCameraTracePanel anchorEventId={open ? anchorEventId : null} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} loadingEventId={relatedLoadingEventId} />
       <details className="incident-technical-details">
         <summary>Technical details</summary>
         <div className="incident-technical-body">
