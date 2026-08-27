@@ -715,9 +715,14 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                     replayRequest={desktopReplayRequest}
                     selectedObjectIndex={relatedPreviewIncident ? null : (selectedVisualObject?.objectIndex ?? findSimilarObject?.objectIndex ?? null)}
                     onSelectObject={relatedPreviewIncident ? null : ((selection) => {
-                      // Highlight only — do not open Details or start Find similar.
                       setSelectedVisualObject(selection);
-                      if (!selection) setFindSimilarObject(null);
+                      if (!selection) {
+                        setFindSimilarObject(null);
+                        return;
+                      }
+                      // Main-viewer object click is an explicit Find similar action.
+                      setFindSimilarObject(selection);
+                      setTabletInspectorOpen(true);
                     })}
                     onReturnToSelected={relatedPreviewIncident ? returnToSelectedIncident : null}
                     onAnalysisStats={setDesktopAnalysisStats}
