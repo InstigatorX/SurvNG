@@ -962,8 +962,10 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   );
   const before = Number(appConfig?.event_clip_before_seconds ?? 5);
   const after = Number(appConfig?.event_clip_after_seconds ?? 5);
-  const window = incidentClipWindow(incident, before, after);
-  const clipUrl = Number.isFinite(eventId) ? eventClipUrl(eventId, window.before, window.after) : "";
+  // Do not name this `window` — it shadows the DOM global and crashes the
+  // open-focus effect (requestAnimationFrame) when Find similar / Details opens.
+  const clipWindow = incidentClipWindow(incident, before, after);
+  const clipUrl = Number.isFinite(eventId) ? eventClipUrl(eventId, clipWindow.before, clipWindow.after) : "";
 
   return (
     <aside ref={inspectorRef} id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`} role={open ? "dialog" : undefined} aria-modal={open ? "true" : undefined} aria-labelledby={open ? "incident-inspector-title" : undefined}>
