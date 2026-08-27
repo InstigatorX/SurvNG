@@ -142,6 +142,10 @@ class SemanticVisualFrameRouteTests(TestCase):
         })
         self.assertEqual(payload["results"][0]["event"]["id"], 9)
         self.assertEqual(
+            payload["results"][0]["thumbnail_url"],
+            "/survng/api/events/9/thumbnail.jpg?width=320&quality=82&focus_bbox=1,2,3,4&aspect_w=16&aspect_h=11",
+        )
+        self.assertEqual(
             payload["results"][0]["snapshot_url"],
             "/survng/api/events/9/snapshot.jpg",
         )

@@ -189,6 +189,49 @@ def object_focus_crop_rect(
     return (x1, y1, x2, y2)
 
 
+def _bbox_focus_thumbnail_frame(
+    frame: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    aspect_width: float = 16.0,
+    aspect_height: float = 11.0,
+) -> np.ndarray:
+    frame_height, frame_width = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, min(frame_width, int(x1)))
+    y1 = max(0, min(frame_height, int(y1)))
+    x2 = max(0, min(frame_width, int(x2)))
+    y2 = max(0, min(frame_height, int(y2)))
+    if x2 <= x1 or y2 <= y1:
+        return frame
+    crop = object_focus_crop_rect(
+        frame_width,
+        frame_height,
+        [(x1, y1, x2, y2)],
+        1.0,
+        aspect_width,
+        aspect_height,
+    )
+    if crop is None:
+        return frame
+    cx1, cy1, cx2, cy2 = crop
+    focused = frame[cy1:cy2, cx1:cx2]
+    return focused if focused.size else frame
+
+
+def _parse_focus_bbox(raw: str) -> tuple[int, int, int, int] | None:
+    if not raw:
+        return None
+    parts = [part.strip() for part in str(raw).split(",")]
+    if len(parts) != 4:
+        return None
+    try:
+        coordinates = tuple(int(round(float(part))) for part in parts)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    x1, y1, x2, y2 = coordinates
+    return coordinates if x2 > x1 and y2 > y1 else None
+
+
 def _object_focus_thumbnail_frame(
     frame: np.ndarray,
     event: dict[str, Any],
@@ -306,11 +349,13 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         zoom: float = 1.0,
         aspect_w: float = 0.0,
         aspect_h: float = 0.0,
+        focus_bbox: str = "",
     ) -> FileResponse:
         safe_width = max(160, min(int(width), 2560))
         safe_quality = max(50, min(int(quality), 95))
         focus_enabled = bool(object_focus)
         focus_zoom = _clamp_object_focus_zoom(zoom)
+        parsed_focus_bbox = _parse_focus_bbox(focus_bbox)
         try:
             raw_aspect_w = float(aspect_w)
             raw_aspect_h = float(aspect_h)
@@ -328,6 +373,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         focus_aspect_h = max(0.0, raw_aspect_h)
         if focus_enabled and (focus_aspect_w <= 0 or focus_aspect_h <= 0):
             focus_aspect_w, focus_aspect_h = 16.0, 9.0
+        if parsed_focus_bbox is not None and (focus_aspect_w <= 0 or focus_aspect_h <= 0):
+            focus_aspect_w, focus_aspect_h = 16.0, 11.0
 
         def response(active_manager: AppManager) -> FileResponse:
             event = active_manager.events.get(event_id)
@@ -347,7 +394,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             identity = (
                 f"{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:"
                 f"{safe_width}:{safe_quality}:{int(focus_enabled)}:{focus_zoom:.3f}:"
-                f"{focus_aspect_w:.3f}:{focus_aspect_h:.3f}:{int(incident_eligible_only)}"
+                f"{focus_aspect_w:.3f}:{focus_aspect_h:.3f}:{int(incident_eligible_only)}:"
+                f"{focus_bbox}"
             )
 
             def build() -> bytes:
@@ -356,7 +404,14 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                     raise HTTPException(
                         status_code=404, detail="snapshot is unavailable"
                     )
-                if focus_enabled:
+                if parsed_focus_bbox is not None:
+                    frame = _bbox_focus_thumbnail_frame(
+                        frame,
+                        parsed_focus_bbox,
+                        focus_aspect_w,
+                        focus_aspect_h,
+                    )
+                elif focus_enabled:
                     frame = _object_focus_thumbnail_frame(
                         frame, event, focus_zoom, focus_aspect_w, focus_aspect_h,
                         incident_eligible_only,

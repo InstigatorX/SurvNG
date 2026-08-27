@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import {
   appearanceCapableLabel,
   appearanceMatchesPath,
+  drawContainedCropPreview,
   hybridFindSimilarSubtitle,
   hybridMatchLabel,
   isValidObjectIndex,
   mergeHybridFindSimilarResults,
-  resolveObjectTrackId,
   normalizeVisualFrameCrop,
+  resolveObjectTrackId,
+  semanticResultThumbnailUrl,
   visualFrameCropFromPoints,
   visualFrameSearchRequest,
   visualMatchLabel,
@@ -164,5 +166,37 @@ assert.match(
   }),
   /Appearance trail for person #2/,
 );
+
+assert.equal(
+  semanticResultThumbnailUrl({ thumbnail_url: "/api/events/9/thumbnail.jpg?width=320" }),
+  "/api/events/9/thumbnail.jpg?width=320",
+);
+assert.match(
+  semanticResultThumbnailUrl({
+    event: { id: 12 },
+    evidence: { bbox: [10, 20, 110, 90] },
+  }, 240, 80),
+  /^\/api\/events\/12\/thumbnail\.jpg\?.*focus_bbox=10%2C20%2C110%2C90/,
+);
+assert.match(
+  semanticResultThumbnailUrl({ event: { id: 7 } }),
+  /^\/api\/events\/7\/thumbnail\.jpg\?.*object_focus=true/,
+);
+
+const previewState = { cleared: false, drawArgs: null };
+const previewCanvas = {
+  width: 176,
+  height: 121,
+  getContext() {
+    return {
+      clearRect() { previewState.cleared = true; },
+      drawImage(...args) { previewState.drawArgs = args; },
+    };
+  },
+};
+const previewImage = { naturalWidth: 1920, naturalHeight: 1080 };
+drawContainedCropPreview(previewCanvas, previewImage, { x: 0.25, y: 0.25, width: 0.5, height: 0.5 });
+assert.equal(previewState.cleared, true);
+assert.deepEqual(previewState.drawArgs?.slice(0, 5), [previewImage, 480, 270, 960, 540]);
 
 console.log("visual search helper tests passed");

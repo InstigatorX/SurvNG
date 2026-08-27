@@ -185,6 +185,17 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
             event = event_rows.get(event_id)
             if event is None:
                 continue
+            thumbnail_url = f"{base_path}/api/events/{event_id}/thumbnail.jpg?width=320&quality=82&object_focus=true&aspect_w=16&aspect_h=11"
+            bbox = hit.bbox
+            if bbox and len(bbox) == 4:
+                try:
+                    bbox_values = ",".join(str(int(round(float(value)))) for value in bbox)
+                    thumbnail_url = (
+                        f"{base_path}/api/events/{event_id}/thumbnail.jpg"
+                        f"?width=320&quality=82&focus_bbox={bbox_values}&aspect_w=16&aspect_h=11"
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    pass
             results.append({
                 "score": round(hit.score, 6),
                 "rank_score": round(
@@ -201,6 +212,7 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
                 },
                 "event": event,
                 "snapshot_url": f"{base_path}/api/events/{event_id}/snapshot.jpg",
+                "thumbnail_url": thumbnail_url,
             })
         return results
 

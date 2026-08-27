@@ -100,6 +100,58 @@ export function visualFrameSearchRequest({
   return request;
 }
 
+export function drawContainedCropPreview(canvas, image, crop) {
+  if (!canvas || !image || !crop || !image.naturalWidth || !image.naturalHeight) return;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const sourceX = Math.floor(crop.x * image.naturalWidth);
+  const sourceY = Math.floor(crop.y * image.naturalHeight);
+  const sourceWidth = Math.max(1, Math.ceil(crop.width * image.naturalWidth));
+  const sourceHeight = Math.max(1, Math.ceil(crop.height * image.naturalHeight));
+  const scale = Math.min(canvas.width / sourceWidth, canvas.height / sourceHeight);
+  const drawWidth = Math.max(1, Math.floor(sourceWidth * scale));
+  const drawHeight = Math.max(1, Math.floor(sourceHeight * scale));
+  const offsetX = Math.floor((canvas.width - drawWidth) / 2);
+  const offsetY = Math.floor((canvas.height - drawHeight) / 2);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    sourceWidth,
+    sourceHeight,
+    offsetX,
+    offsetY,
+    drawWidth,
+    drawHeight,
+  );
+}
+
+export function semanticResultThumbnailUrl(result, width = 240, quality = 72) {
+  if (result?.thumbnail_url) return result.thumbnail_url;
+  const eventId = Number(result?.event?.id);
+  if (!Number.isInteger(eventId) || eventId <= 0) return "";
+  const bbox = result?.evidence?.bbox;
+  if (Array.isArray(bbox) && bbox.length === 4) {
+    const params = new URLSearchParams({
+      width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 240)))),
+      quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 72)))),
+      focus_bbox: bbox.map((value) => String(Math.round(Number(value)))).join(","),
+      aspect_w: "16",
+      aspect_h: "11",
+    });
+    return `/api/events/${eventId}/thumbnail.jpg?${params.toString()}`;
+  }
+  const params = new URLSearchParams({
+    width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 240)))),
+    quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 72)))),
+    object_focus: "true",
+    aspect_w: "16",
+    aspect_h: "11",
+  });
+  return `/api/events/${eventId}/thumbnail.jpg?${params.toString()}`;
+}
+
 export function visualMatchLabel(matchStrength) {
   return ({
     strong_match: "Strong match",

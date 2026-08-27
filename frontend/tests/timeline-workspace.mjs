@@ -134,7 +134,10 @@ const stylesSource = [
   readFileSync(new URL("../src/shell/mobile.css", import.meta.url), "utf8"),
 ].join("\n");
 const recordingsSource = appSource.slice(appSource.indexOf("function RecordingsPage"), appSource.indexOf("function exportStatusLabel"));
-assert.match(recordingsSource, /const timelineInspectorTriggerRef = useRef\(null\)/);
+assert.match(recordingsSource, /recordings-v2-forensic-context/);
+assert.match(recordingsSource, /showForensicPanel/);
+assert.doesNotMatch(recordingsSource, /recordings-event-inspector/);
+assert.match(recordingsSource, /heroMuted/);
 assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);
 assert.match(appSource, /timeline-camera-picker/);
 assert.match(recordingsSource, /<TimelineCameraPicker/);
