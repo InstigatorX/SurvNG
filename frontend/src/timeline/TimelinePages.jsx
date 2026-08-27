@@ -2143,7 +2143,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             playing={gridPlaying}
             onSelect={(selectedCameraId) => { checkpointTimelineView(); setCameraId(selectedCameraId); }}
           /> : null}
-          {!isAllCameras && nativeSegmentUrl ? (
+          {!isAllCameras ? <div className="recording-hero-media">
+          {nativeSegmentUrl ? (
             <video
               ref={videoRef}
               src={nativeSegmentUrl}
@@ -2172,7 +2173,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
             />
           ) : null}
-          {!isAllCameras && manifestUrl ? (
+          {!nativeSegmentUrl && manifestUrl ? (
             <ShakaVideo
               ref={videoRef}
               src={manifestUrl}
@@ -2202,7 +2203,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
             />
           ) : null}
-          {!isAllCameras && Number.isFinite(frameSearchEpoch) ? (
+          {Number.isFinite(frameSearchEpoch) ? (
             <div className="recording-frame-search-overlay">
               <div
                 ref={frameSearchSurfaceRef}
@@ -2250,6 +2251,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               </div>
             </div>
           ) : null}
+          </div> : null}
           {!isAllCameras && Number.isFinite(playhead) ? <RecordingCompanionStrip cameras={cameras} routes={cameraTransitionRoutes} activeCameraId={activeCameraId} source={source} epoch={playhead} onSelect={(camera) => { checkpointTimelineView(); setCameraId(camera); }} /> : null}
           {loading ? <div className="recordings-v2-message"><Film size={28} />Loading recordings</div> : null}
           {!loading && !timeline.length ? <div className="recordings-v2-message"><Film size={28} />No recordings on this day</div> : null}
