@@ -11,6 +11,9 @@ const livePage = readFileSync(join(directory, "../src/live/LivePage.jsx"), "utf8
 
 assert.match(incidentCard, /export function IncidentCard\(/);
 assert.match(incidentCard, /export function IncidentInspector\(/);
+assert.match(incidentCard, /const clipWindow = incidentClipWindow\(/);
+assert.doesNotMatch(incidentCard, /const window = incidentClipWindow\(/);
+assert.match(incidentCard, /window\.requestAnimationFrame\(/);
 assert.match(incidentCard, /export function IncidentClipLayer\(/);
 assert.match(incidentCard, /export function RelatedAppearanceIncidents\(/);
 assert.match(incidentCard, /export function CrossCameraTracePanel\(/);
