@@ -1623,7 +1623,6 @@ class MotionAnalysisService:
                 if followup:
                     self.state.increment_stat("active_followup_queue_rejected", 1)
                 return
-            self._consume_route_watch(result)
             self.state.increment_stat(
                 "active_followup_triggers" if followup else "visual_backup_triggers",
                 1,

@@ -73,6 +73,60 @@ from .telemetry_migration import migrate_legacy_runtime_telemetry
 LOGGER = logging.getLogger("uvicorn.error")
 
 
+def _route_provenance_from_event(
+    event: object,
+) -> tuple[tuple[str, ...], str, int]:
+    """Return persisted route ancestry and its original incident identity."""
+    if not isinstance(event, dict):
+        return (), "", 0
+    try:
+        objects = json.loads(str(event.get("objects_json") or "[]"))
+    except (TypeError, ValueError):
+        return (), "", 0
+    if not isinstance(objects, list):
+        return (), "", 0
+    for item in objects:
+        if not isinstance(item, dict):
+            continue
+        qualification = item.get("motion_qualification")
+        if not isinstance(qualification, dict):
+            continue
+        features = qualification.get("features")
+        if not isinstance(features, dict):
+            continue
+        watch = features.get("route_detection_watch")
+        if not isinstance(watch, dict):
+            continue
+        path = watch.get("route_path")
+        if not isinstance(path, (list, tuple)):
+            continue
+        normalized = tuple(
+            value
+            for value in (str(camera_id).strip() for camera_id in path)
+            if value
+        )
+        if normalized:
+            origin_camera_id = str(
+                watch.get("origin_camera_id")
+                or watch.get("source_camera_id")
+                or ""
+            ).strip()
+            try:
+                origin_event_id = int(
+                    watch.get("origin_event_id")
+                    or watch.get("source_event_id")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                origin_event_id = 0
+            return normalized, origin_camera_id, origin_event_id
+    return (), "", 0
+
+
+def _route_path_from_event(event: object) -> tuple[str, ...]:
+    return _route_provenance_from_event(event)[0]
+
+
 class ManagerShutdownIncompleteError(RuntimeError):
     """Camera-owned work remains active, so shared services must stay alive."""
 
@@ -457,14 +511,45 @@ class AppManager:
                 event_at = datetime.fromisoformat(
                     str(event.get("created_at") or "")
                 ).timestamp()
+                route_path, origin_camera_id, origin_event_id = (
+                    _route_provenance_from_event(event)
+                )
+                observe_kwargs = {
+                    "camera_id": str(event.get("camera_id") or ""),
+                    "event_id": int(event.get("id") or 0),
+                    "event_at": event_at,
+                    "objects": eligible,
+                }
+                if route_path:
+                    observe_kwargs["route_path"] = route_path
+                if origin_camera_id and origin_event_id > 0:
+                    observe_kwargs["origin_camera_id"] = origin_camera_id
+                    observe_kwargs["origin_event_id"] = origin_event_id
                 created = self.detection_watch.observe_incident(
-                    camera_id=str(event.get("camera_id") or ""),
-                    event_id=int(event.get("id") or 0),
-                    event_at=event_at,
-                    objects=eligible,
+                    **observe_kwargs,
                 )
                 for watch in created:
-                    if self.events.route_watch_consumed(
+                    route_target_admitted = getattr(
+                        self.events,
+                        "route_target_admitted",
+                        None,
+                    )
+                    already_admitted = (
+                        route_target_admitted(
+                            watch.origin_camera_id,
+                            watch.origin_event_id,
+                            watch.target_camera_id,
+                        )
+                        if callable(route_target_admitted)
+                        else False
+                    )
+                    if already_admitted is True:
+                        self.detection_watch.consume_origin(
+                            watch.target_camera_id,
+                            watch.origin_camera_id,
+                            watch.origin_event_id,
+                        )
+                    elif self.events.route_watch_consumed(
                         watch.target_camera_id,
                         watch.source_event_id,
                     ):
@@ -484,6 +569,24 @@ class AppManager:
     ) -> bool:
         self.events.mark_route_watch_consumed(target_camera_id, source_event_id)
         return self.detection_watch.consume(target_camera_id, source_event_id)
+
+    def _route_target_admitted(
+        self,
+        target_camera_id: str,
+        origin_camera_id: str,
+        origin_event_id: int,
+    ) -> bool:
+        consumed = self.detection_watch.consume_origin(
+            target_camera_id,
+            origin_camera_id,
+            origin_event_id,
+        )
+        for watch in consumed:
+            self.events.mark_route_watch_consumed(
+                watch.target_camera_id,
+                watch.source_event_id,
+            )
+        return bool(consumed)
 
     def _replay_restored_detection_watches(self) -> None:
         """Join restored route windows with durable EMA after workers exist."""
@@ -616,6 +719,7 @@ class AppManager:
                 media_storage=self.media_storage,
                 route_detection_watch=self.detection_watch.match,
                 consume_route_detection_watch=self._consume_detection_watch,
+                route_target_admitted=self._route_target_admitted,
                 record_ema_route_candidate=self.ema_route_candidates.submit,
                 load_ema_route_candidates=self.ema_route_candidates.between,
             )
@@ -1435,11 +1539,23 @@ class AppManager:
                     observed_at = datetime.fromisoformat(
                         str(payload.get("timestamp") or "")
                     ).timestamp()
+                    event = self.events.get(int(event_id))
+                    route_path, origin_camera_id, origin_event_id = (
+                        _route_provenance_from_event(event)
+                    )
+                    observe_kwargs = {
+                        "camera_id": camera_id,
+                        "event_id": int(event_id),
+                        "event_at": observed_at,
+                        "objects": route_objects,
+                    }
+                    if route_path:
+                        observe_kwargs["route_path"] = route_path
+                    if origin_camera_id and origin_event_id > 0:
+                        observe_kwargs["origin_camera_id"] = origin_camera_id
+                        observe_kwargs["origin_event_id"] = origin_event_id
                     opened_watches = self.detection_watch.observe_incident(
-                        camera_id=camera_id,
-                        event_id=int(event_id),
-                        event_at=observed_at,
-                        objects=route_objects,
+                        **observe_kwargs,
                     )
                     for watch in opened_watches:
                         target = self.workers.get(watch.target_camera_id)

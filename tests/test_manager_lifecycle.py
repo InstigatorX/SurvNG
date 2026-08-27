@@ -169,6 +169,110 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         assert manager.detection_watch.match("back-left", now.timestamp()) is None
 
+    def test_restart_does_not_replay_durably_admitted_origin_target(self) -> None:
+        now = datetime.now(timezone.utc)
+        manager = object.__new__(AppManager)
+        manager.config = AppConfig(
+            cameras=[
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main"),
+                CameraConfig(
+                    id="back-left",
+                    name="Back Left",
+                    stream_url="rtsp://back-left/main",
+                ),
+            ],
+            detector={"tracking": {"camera_transition_routes": [{
+                "from_camera": "gate",
+                "to_camera": "back-left",
+                "max_seconds": 30,
+            }]}},
+        )
+        manager.detection_watch = RouteDetectionWatch(
+            manager.config.detector.tracking.camera_transition_routes
+        )
+        manager._restored_detection_watches = []
+        manager.events = Mock()
+        manager.events.route_target_admitted.return_value = True
+        manager.events.route_watch_consumed.return_value = False
+        manager.events.between.return_value = [{
+            "id": 88,
+            "camera_id": "gate",
+            "created_at": (now - timedelta(seconds=5)).isoformat(),
+            "objects_json": json.dumps([{
+                "label": "car",
+                "incident_eligible": True,
+            }]),
+        }]
+
+        manager._restore_detection_watches()
+
+        assert manager.detection_watch.match("back-left", now.timestamp()) is None
+        manager.events.route_target_admitted.assert_called_once_with(
+            "gate", 88, "back-left"
+        )
+
+    def test_restart_preserves_route_lineage_and_does_not_reopen_ancestor(self) -> None:
+        now = datetime.now(timezone.utc)
+        manager = object.__new__(AppManager)
+        manager.config = AppConfig(
+            cameras=[
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main"),
+                CameraConfig(
+                    id="lower-garage",
+                    name="Lower Garage",
+                    stream_url="rtsp://lower/main",
+                ),
+                CameraConfig(
+                    id="upper-garage",
+                    name="Upper Garage",
+                    stream_url="rtsp://upper/main",
+                ),
+            ],
+            detector={"tracking": {"camera_transition_routes": [
+                {
+                    "from_camera": "gate",
+                    "to_camera": "lower-garage",
+                    "bidirectional": True,
+                },
+                {
+                    "from_camera": "lower-garage",
+                    "to_camera": "upper-garage",
+                    "bidirectional": True,
+                },
+                {
+                    "from_camera": "gate",
+                    "to_camera": "upper-garage",
+                    "bidirectional": True,
+                },
+            ]}},
+        )
+        manager.detection_watch = RouteDetectionWatch(
+            manager.config.detector.tracking.camera_transition_routes
+        )
+        manager._restored_detection_watches = []
+        manager.events = Mock()
+        manager.events.route_watch_consumed.return_value = False
+        manager.events.between.return_value = [{
+            "id": 90,
+            "camera_id": "upper-garage",
+            "created_at": (now - timedelta(seconds=5)).isoformat(),
+            "objects_json": json.dumps([{
+                "label": "car",
+                "incident_eligible": True,
+            }, {
+                "status": "motion_qualification",
+                "motion_qualification": {"features": {
+                    "route_detection_watch": {
+                        "route_path": ["gate", "lower-garage", "upper-garage"],
+                    },
+                }},
+            }]),
+        }]
+
+        manager._restore_detection_watches()
+
+        assert manager.detection_watch.status(now.timestamp())["active"] == 0
+
     def test_startup_replays_restored_watch_into_target_worker(self) -> None:
         manager = object.__new__(AppManager)
         watch = SimpleNamespace(

@@ -76,6 +76,7 @@ class CameraWorker:
         media_storage: MediaStorageRegistry | None = None,
         route_detection_watch: Callable[[str, float], Any | None] | None = None,
         consume_route_detection_watch: Callable[[str, int], bool] | None = None,
+        route_target_admitted: Callable[[str, str, int], object] | None = None,
         record_ema_route_candidate: (
             Callable[[str, float, dict[str, Any]], object] | None
         ) = None,
@@ -183,6 +184,7 @@ class CameraWorker:
                 ),
             ),
             spatial_alignment=self._motion_spatial_alignment(camera),
+            route_admission_callback=route_target_admitted,
         )
         self.motion_incidents = MotionIncidentService(
             camera_id=camera.id,

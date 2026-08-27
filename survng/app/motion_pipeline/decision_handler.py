@@ -32,6 +32,27 @@ LOGGER = logging.getLogger(__name__)
 MOTION_REGION_MARGIN_RATIO = 0.035
 
 
+def _route_origin(
+    qualification: dict[str, Any],
+) -> tuple[str, int] | None:
+    features = qualification.get("features")
+    if not isinstance(features, dict):
+        return None
+    watch = features.get("route_detection_watch")
+    if not isinstance(watch, dict):
+        return None
+    camera_id = str(
+        watch.get("origin_camera_id") or watch.get("source_camera_id") or ""
+    ).strip()
+    try:
+        event_id = int(
+            watch.get("origin_event_id") or watch.get("source_event_id") or 0
+        )
+    except (TypeError, ValueError):
+        return None
+    return (camera_id, event_id) if camera_id and event_id > 0 else None
+
+
 def _intersects_motion_region(
     box: tuple[float, float, float, float],
     regions: list[object],
@@ -328,6 +349,8 @@ class MotionEventStore(Protocol):
         objects_json: str = "[]",
         created_at: str | None = None,
         detection_intent_id: str | None = None,
+        route_origin_camera_id: str | None = None,
+        route_origin_event_id: int | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -408,6 +431,7 @@ class MotionDecisionHandler:
         face_candidate_sink: FaceCandidateSink | None = None,
         spatial_alignment: dict[str, Any] | None = None,
         refinement_cover_promoter: RefinementCoverPromoter | None = None,
+        route_admission_callback: Callable[[str, str, int], object] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.events = events
@@ -421,6 +445,7 @@ class MotionDecisionHandler:
         self.face_candidate_sink = face_candidate_sink
         self.spatial_alignment = dict(spatial_alignment or {"reliable": True})
         self.refinement_cover_promoter = refinement_cover_promoter
+        self.route_admission_callback = route_admission_callback
 
     def activity_status(self) -> dict[str, Any]:
         if self.activity_attributor is None:
@@ -784,6 +809,8 @@ class MotionDecisionHandler:
         ]
         if bool(getattr(provider_result, "refinement_pending", False)):
             stored_objects.append({"status": "face_evidence_pending"})
+        route_origin = _route_origin(qualification)
+        route_admission_duplicate = False
         if existing_event_id is None:
             event = self.events.add_event(
                 camera_id=self.camera_id,
@@ -797,9 +824,18 @@ class MotionDecisionHandler:
                 detection_intent_id=(
                     str(qualification.get("detection_intent_id") or "") or None
                 ),
+                route_origin_camera_id=(
+                    route_origin[0] if route_origin is not None else None
+                ),
+                route_origin_event_id=(
+                    route_origin[1] if route_origin is not None else None
+                ),
             )
             event_id = int(event["id"])
             event_created = bool(event.get("created", True))
+            route_admission_duplicate = bool(
+                route_origin is not None and not event_created
+            )
         else:
             event_id = int(existing_event_id)
             event_created = False
@@ -808,6 +844,37 @@ class MotionDecisionHandler:
                 snapshot_path=snapshot_path,
                 recording_path=recording_path,
                 objects_json=self.object_serializer(stored_objects),
+            )
+        if route_origin is not None and self.route_admission_callback is not None:
+            try:
+                self.route_admission_callback(
+                    self.camera_id,
+                    route_origin[0],
+                    route_origin[1],
+                )
+            except Exception:
+                # The durable event-store admission is authoritative. Runtime
+                # watch cleanup can be recovered after restart and must never
+                # turn a completed security decision into a retry.
+                LOGGER.exception(
+                    "route target cleanup failed for %s origin=%s/%d",
+                    self.camera_id,
+                    route_origin[0],
+                    route_origin[1],
+                )
+        if route_admission_duplicate:
+            return MotionDecisionOutcome(
+                # The canonical event belongs to the winning decision. Do not
+                # make this alternate job link its episode/audit/tracker to it.
+                event_id=None,
+                snapshot_path="",
+                object_detected=False,
+                detected_objects=(),
+                rejection_reason="route_target_already_admitted",
+                motion_correlation=correlation,
+                refinement_pending=False,
+                processing_timing=processing_timing,
+                object_activity=activity_summary,
             )
         self._persist_face_candidates(
             event_id,
@@ -976,6 +1043,7 @@ class MotionDecisionHandlerFactory:
         event_callback: MotionEventCallback | None = None,
         activity_attributor: ObjectActivityAttributor | None = None,
         spatial_alignment: dict[str, Any] | None = None,
+        route_admission_callback: Callable[[str, str, int], object] | None = None,
     ) -> MotionDecisionHandler:
         return MotionDecisionHandler(
             camera_id=camera_id,
@@ -989,6 +1057,7 @@ class MotionDecisionHandlerFactory:
             activity_attributor=activity_attributor,
             face_candidate_sink=self.face_candidate_sink,
             spatial_alignment=spatial_alignment,
+            route_admission_callback=route_admission_callback,
             refinement_cover_promoter=getattr(
                 self.events,
                 "promote_refinement_cover",

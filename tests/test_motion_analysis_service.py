@@ -1038,7 +1038,9 @@ def test_route_watch_accelerates_below_score_ema_verification() -> None:
     assert features["security_verification_reason"] == "route_watch"
     assert features["route_detection_watch"]["source_event_id"] == 44
     assert features["security_verification_bypass_limits"] is True
-    consume.assert_called_once_with("gate", 44)
+    # Trigger admission is not proof of an eligible incident. The watch stays
+    # available until the decision handler durably admits a target event.
+    consume.assert_not_called()
     onvif_observer.assert_not_called()
 
 
@@ -1149,6 +1151,8 @@ def test_confirmed_route_chain_replays_reported_multi_camera_vehicle_trace() -> 
         "back-right": (1048.0, 0.5545),
     }
     services: dict[str, MotionAnalysisService] = {}
+    route_paths: dict[str, tuple[str, ...]] = {}
+    route_origins: dict[str, tuple[str, int]] = {}
     for camera_id, (captured_at, score) in observations.items():
         service = _service(_hooks(), camera_id=camera_id)
         service.recent_accepted_results.append((
@@ -1169,12 +1173,21 @@ def test_confirmed_route_chain_replays_reported_multi_camera_vehicle_trace() -> 
         services[camera_id] = service
 
     def confirm(camera_id: str, event_id: int, event_at: float) -> None:
+        origin_camera_id, origin_event_id = route_origins.get(camera_id, ("", 0))
         for watch in watches.observe_incident(
             camera_id=camera_id,
             event_id=event_id,
             event_at=event_at,
             objects=[{"label": "car", "incident_eligible": True}],
+            route_path=route_paths.get(camera_id, ()),
+            origin_camera_id=origin_camera_id,
+            origin_event_id=origin_event_id,
         ):
+            route_paths[watch.target_camera_id] = watch.route_path
+            route_origins[watch.target_camera_id] = (
+                watch.origin_camera_id,
+                watch.origin_event_id,
+            )
             assert services[watch.target_camera_id].consider_route_watch(watch)
 
     confirm("lower-garage", 44720, 1000.0)
@@ -1187,6 +1200,9 @@ def test_confirmed_route_chain_replays_reported_multi_camera_vehicle_trace() -> 
         assert trigger.prequalified.features["security_verification_reason"] == "route_watch"
         assert trigger.prequalified.features["security_verification_bypass_limits"] is True
         assert trigger.event_at.timestamp() == observations[camera_id][0]
+        watch_details = trigger.prequalified.features["route_detection_watch"]
+        assert watch_details["origin_camera_id"] == "lower-garage"
+        assert watch_details["origin_event_id"] == 44720
 
 
 def test_route_verification_wins_when_ordinary_conditioner_also_qualifies() -> None:
@@ -1261,7 +1277,7 @@ def test_route_watch_gets_distinct_durable_intent_during_existing_episode(
     assert routed.detection_intent_id == "route:gate:lower-garage:44720"
     assert routed.detection_intent_id != original.detection_intent_id
     assert routed.event_at.timestamp() == 120.0
-    consume.assert_called_once_with("gate", 44720)
+    consume.assert_not_called()
 
 
 def test_degraded_onvif_accelerates_below_score_ema_verification() -> None:

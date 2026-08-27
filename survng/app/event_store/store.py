@@ -261,12 +261,18 @@ class EventStore(
         objects_json: str = "[]",
         created_at: str | None = None,
         detection_intent_id: str | None = None,
+        route_origin_camera_id: str | None = None,
+        route_origin_event_id: int | None = None,
     ) -> dict[str, Any]:
         if created_at is None:
             created_at = datetime.now(timezone.utc).isoformat()
         snapshot_path = portable_media_path(self.storage_dir, snapshot_path)
         snapshot_size_bytes = self._snapshot_file_size(snapshot_path)
         recording_path = portable_media_path(self.storage_dir, recording_path)
+        route_origin_camera = str(route_origin_camera_id or "").strip()
+        route_origin_event = int(route_origin_event_id or 0)
+        route_admission = bool(route_origin_camera and route_origin_event > 0)
+        discarded_snapshot_path = ""
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -313,6 +319,40 @@ class EventStore(
                 event_id = int(row["id"])
             else:
                 raise RuntimeError("event insert failed")
+            route_admission_created = False
+            if route_admission:
+                admission = conn.execute(
+                    "insert or ignore into route_incident_admissions "
+                    "(origin_camera_id, origin_event_id, target_camera_id, "
+                    "event_id, admitted_at) values (?, ?, ?, ?, ?)",
+                    (
+                        route_origin_camera,
+                        route_origin_event,
+                        camera_id,
+                        event_id,
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+                route_admission_created = bool(admission.rowcount)
+                if not route_admission_created:
+                    admitted = conn.execute(
+                        "select event_id from route_incident_admissions "
+                        "where origin_camera_id = ? and origin_event_id = ? "
+                        "and target_camera_id = ?",
+                        (route_origin_camera, route_origin_event, camera_id),
+                    ).fetchone()
+                    if admitted is None:
+                        raise RuntimeError(
+                            "route target admission conflict was not recoverable"
+                        )
+                    admitted_event_id = int(admitted["event_id"])
+                    if created and admitted_event_id != int(event_id):
+                        conn.execute("delete from events where id = ?", (event_id,))
+                        discarded_snapshot_path = snapshot_path
+                    event_id = admitted_event_id
+                    created = False
+        if discarded_snapshot_path:
+            self._delete_snapshot_if_unreferenced(discarded_snapshot_path)
         return {
             "id": event_id,
             "camera_id": camera_id,
@@ -326,7 +366,28 @@ class EventStore(
             "created_at": created_at,
             "detection_intent_id": detection_intent_id,
             "created": created,
+            "route_admission_created": route_admission_created,
         }
+
+    def route_target_admitted(
+        self,
+        origin_camera_id: str,
+        origin_event_id: int,
+        target_camera_id: str,
+    ) -> bool:
+        """Whether an origin occurrence already produced this target incident."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "select 1 from route_incident_admissions "
+                "where origin_camera_id = ? and origin_event_id = ? "
+                "and target_camera_id = ?",
+                (
+                    str(origin_camera_id),
+                    int(origin_event_id),
+                    str(target_camera_id),
+                ),
+            ).fetchone()
+        return row is not None
 
     def telemetry_activity(
         self,

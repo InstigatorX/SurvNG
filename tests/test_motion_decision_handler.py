@@ -28,6 +28,91 @@ class RecordingEventStore:
 
 
 class MotionDecisionHandlerTest(unittest.TestCase):
+    def test_route_duplicate_does_not_publish_or_start_downstream_side_effects(self) -> None:
+        events = Mock()
+        events.add_event.return_value = {"id": 42, "created": False}
+        published: list[tuple[str, dict]] = []
+        face_sink = Mock()
+        admitted = Mock()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="upper-garage",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{"label": "car", "confidence": 0.9, "incident_eligible": True}],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _at: "alternate.webp",
+            object_serializer=json.dumps,
+            event_callback=lambda kind, payload: published.append((kind, payload)),
+            face_candidate_sink=face_sink,
+            route_admission_callback=admitted,
+        )
+        qualification = {"features": {"route_detection_watch": {
+            "source_camera_id": "lower-garage",
+            "source_event_id": 99,
+            "origin_camera_id": "gate",
+            "origin_event_id": 10,
+        }}}
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 27, 21, 13, tzinfo=timezone.utc),
+            qualification,
+            require_eligible_object=True,
+        )
+
+        self.assertIsNone(outcome.event_id)
+        self.assertFalse(outcome.object_detected)
+        self.assertEqual(outcome.rejection_reason, "route_target_already_admitted")
+        add_kwargs = events.add_event.call_args.kwargs
+        self.assertEqual(add_kwargs["route_origin_camera_id"], "gate")
+        self.assertEqual(add_kwargs["route_origin_event_id"], 10)
+        admitted.assert_called_once_with("upper-garage", "gate", 10)
+        face_sink.assert_not_called()
+        self.assertEqual(published, [])
+
+    def test_winning_route_event_can_still_receive_refined_evidence(self) -> None:
+        events = Mock()
+        published: list[tuple[str, dict]] = []
+        admitted = Mock()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="upper-garage",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{"label": "car", "confidence": 0.94, "incident_eligible": True}],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _at: "refined.webp",
+            object_serializer=json.dumps,
+            event_callback=lambda kind, payload: published.append((kind, payload)),
+            route_admission_callback=admitted,
+        )
+        qualification = {"features": {"route_detection_watch": {
+            "origin_camera_id": "gate",
+            "origin_event_id": 10,
+        }}}
+
+        outcome = handler.refine(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 27, 21, 13, tzinfo=timezone.utc),
+            qualification,
+            existing_event_id=42,
+            require_eligible_object=True,
+        )
+
+        self.assertTrue(outcome.object_detected)
+        self.assertEqual(outcome.event_id, 42)
+        events.add_event.assert_not_called()
+        events.refine_event_evidence.assert_called_once()
+        admitted.assert_called_once_with("upper-garage", "gate", 10)
+        self.assertEqual([kind for kind, _payload in published], ["object"])
+
     def test_failed_refinement_preserves_existing_provisional_evidence(self) -> None:
         events = Mock()
         snapshot_writer = Mock()

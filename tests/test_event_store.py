@@ -376,6 +376,101 @@ class EventStoreTest(unittest.TestCase):
             self.assertFalse(recreated.route_watch_consumed("back-left", 44720))
             self.assertTrue(recreated.route_watch_consumed("back-right", 44721))
 
+    def test_route_target_admission_is_durable_and_returns_canonical_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            first = store.add_event(
+                camera_id="upper-garage",
+                kind="motion",
+                detection_intent_id="route-direct",
+                route_origin_camera_id="gate",
+                route_origin_event_id=44720,
+            )
+            duplicate = store.add_event(
+                camera_id="upper-garage",
+                kind="motion",
+                detection_intent_id="route-via-lower",
+                route_origin_camera_id="gate",
+                route_origin_event_id=44720,
+            )
+
+            self.assertTrue(first["created"])
+            self.assertFalse(duplicate["created"])
+            self.assertEqual(duplicate["id"], first["id"])
+            with store._connect() as connection:
+                count = connection.execute(
+                    "select count(*) from events where camera_id = ?",
+                    ("upper-garage",),
+                ).fetchone()[0]
+            self.assertEqual(count, 1)
+
+            recreated = EventStore(root)
+            self.assertTrue(recreated.route_target_admitted(
+                "gate", 44720, "upper-garage"
+            ))
+
+    def test_route_target_admission_is_atomic_across_store_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stores = (EventStore(root), EventStore(root))
+            barrier = threading.Barrier(2)
+            outcomes: list[dict] = []
+
+            def admit(index: int) -> None:
+                barrier.wait()
+                outcomes.append(stores[index].add_event(
+                    camera_id="upper-garage",
+                    kind="motion",
+                    detection_intent_id=f"alternate-{index}",
+                    route_origin_camera_id="gate",
+                    route_origin_event_id=44720,
+                ))
+
+            threads = [threading.Thread(target=admit, args=(index,)) for index in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5.0)
+
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(len(outcomes), 2)
+            self.assertEqual(sum(bool(item["created"]) for item in outcomes), 1)
+            self.assertEqual(len({int(item["id"]) for item in outcomes}), 1)
+            with stores[0]._connect() as connection:
+                count = connection.execute(
+                    "select count(*) from events where camera_id = ?",
+                    ("upper-garage",),
+                ).fetchone()[0]
+            self.assertEqual(count, 1)
+
+    def test_duplicate_route_admission_removes_unreferenced_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            store.add_event(
+                camera_id="upper-garage",
+                kind="motion",
+                detection_intent_id="route-direct",
+                route_origin_camera_id="gate",
+                route_origin_event_id=44720,
+            )
+            snapshot = root / "snapshots" / "upper-garage" / "alternate.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"alternate")
+
+            duplicate = store.add_event(
+                camera_id="upper-garage",
+                kind="motion",
+                snapshot_path=str(snapshot),
+                detection_intent_id="route-via-lower",
+                route_origin_camera_id="gate",
+                route_origin_event_id=44720,
+            )
+
+            self.assertFalse(duplicate["created"])
+            self.assertFalse(snapshot.exists())
+
     def test_detection_job_lease_owner_prevents_stale_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

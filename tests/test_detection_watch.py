@@ -112,6 +112,76 @@ def test_route_watch_is_consumed_once_and_reports_lifecycle_counters() -> None:
     assert status["active"] == 0
 
 
+def test_route_lineage_allows_forward_chain_but_blocks_bidirectional_cycle() -> None:
+    watches = RouteDetectionWatch([
+        CameraTransitionRoute(
+            from_camera="gate",
+            to_camera="lower-garage",
+            bidirectional=True,
+        ),
+        CameraTransitionRoute(
+            from_camera="lower-garage",
+            to_camera="upper-garage",
+            bidirectional=True,
+        ),
+        CameraTransitionRoute(
+            from_camera="gate",
+            to_camera="upper-garage",
+            bidirectional=True,
+        ),
+    ])
+
+    first = watches.observe_incident(
+        camera_id="gate", event_id=1, event_at=100.0, objects=_objects()
+    )
+    lower = next(watch for watch in first if watch.target_camera_id == "lower-garage")
+    second = watches.observe_incident(
+        camera_id="lower-garage",
+        event_id=2,
+        event_at=101.0,
+        objects=_objects(),
+        route_path=lower.route_path,
+    )
+    assert [watch.target_camera_id for watch in second] == ["upper-garage"]
+    upper = second[0]
+    assert watches.observe_incident(
+        camera_id="upper-garage",
+        event_id=3,
+        event_at=102.0,
+        objects=_objects(),
+        route_path=upper.route_path,
+    ) == ()
+    assert watches.status(102.0)["lineage_blocked"] == 3
+
+
+def test_origin_consumption_removes_all_alternate_paths_to_one_target() -> None:
+    watches = RouteDetectionWatch([
+        CameraTransitionRoute(from_camera="gate", to_camera="upper-garage"),
+        CameraTransitionRoute(from_camera="lower-garage", to_camera="upper-garage"),
+    ])
+    direct = watches.observe_incident(
+        camera_id="gate", event_id=10, event_at=100.0, objects=_objects()
+    )[0]
+    lower_to_upper = watches.observe_incident(
+        camera_id="lower-garage",
+        event_id=11,
+        event_at=101.0,
+        objects=_objects(),
+        route_path=("gate", "lower-garage"),
+        origin_camera_id="gate",
+        origin_event_id=10,
+    )[0]
+
+    assert direct.origin_camera_id == "gate"
+    assert direct.origin_event_id == 10
+    assert lower_to_upper.origin_camera_id == "gate"
+    consumed = watches.consume_origin("upper-garage", "gate", 10)
+
+    assert {watch.source_event_id for watch in consumed} == {10, 11}
+    assert watches.match("upper-garage", 102.0) is None
+    assert watches.status(102.0)["consumed"] == 2
+
+
 def test_active_watch_overflow_is_visible_in_status() -> None:
     watches = RouteDetectionWatch([
         CameraTransitionRoute(from_camera="gate", to_camera="back-left")

@@ -286,6 +286,23 @@ class EventStoreJobsMixin:
                 "on events(detection_intent_id) where detection_intent_id is not null"
             )
             conn.execute(
+                """
+                create table if not exists route_incident_admissions (
+                    origin_camera_id text not null,
+                    origin_event_id integer not null,
+                    target_camera_id text not null,
+                    event_id integer not null unique,
+                    admitted_at text not null,
+                    primary key(origin_camera_id, origin_event_id, target_camera_id),
+                    foreign key(event_id) references events(id) on delete cascade
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_route_incident_admissions_event "
+                "on route_incident_admissions(event_id)"
+            )
+            conn.execute(
                 "create index if not exists idx_events_created_at on events(created_at desc)"
             )
             conn.execute(
