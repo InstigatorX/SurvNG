@@ -385,7 +385,8 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
               ))}
             </svg>
             {renderedBoxes.map((box, index) => {
-              const selected = Number(selectedObjectIndex) === Number(box.objectIndex);
+              const selected = selectedObjectIndex != null && selectedObjectIndex !== ""
+                && Number(selectedObjectIndex) === Number(box.objectIndex);
               const label = `${box.label}${box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}`;
               if (onSelectObject) {
                 return (
@@ -403,8 +404,8 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
                       });
                     }}
                     aria-pressed={selected}
-                    title={`Find similar: ${box.label}`}
-                    aria-label={`Select ${box.label} for visual search`}
+                    title={`Select ${box.label}`}
+                    aria-label={`Select ${box.label}`}
                   >
                     <strong>{label}</strong>
                   </button>

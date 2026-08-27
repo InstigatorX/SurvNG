@@ -1,5 +1,12 @@
 const DEFAULT_VEHICLE_REID_LABELS = ["car", "truck", "bus", "motorcycle"];
 
+/** True only for an explicit object index. `Number(null) === 0`, so null must not count. */
+export function isValidObjectIndex(value) {
+  if (value == null || value === "") return false;
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric >= 0;
+}
+
 export function visualSearchObjects(event) {
   return (Array.isArray(event?.objects) ? event.objects : [])
     .filter((object) => object && typeof object === "object"

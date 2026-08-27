@@ -715,13 +715,9 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                     replayRequest={desktopReplayRequest}
                     selectedObjectIndex={relatedPreviewIncident ? null : (selectedVisualObject?.objectIndex ?? findSimilarObject?.objectIndex ?? null)}
                     onSelectObject={relatedPreviewIncident ? null : ((selection) => {
+                      // Highlight only — do not open Details or start Find similar.
                       setSelectedVisualObject(selection);
-                      if (!selection) {
-                        setFindSimilarObject(null);
-                        return;
-                      }
-                      setFindSimilarObject(selection);
-                      setTabletInspectorOpen(true);
+                      if (!selection) setFindSimilarObject(null);
                     })}
                     onReturnToSelected={relatedPreviewIncident ? returnToSelectedIncident : null}
                     onAnalysisStats={setDesktopAnalysisStats}
@@ -758,6 +754,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
               findSimilarObjectIndex={findSimilarObject?.objectIndex ?? null}
               onSelectObject={setSelectedVisualObject}
               onFindSimilar={(selection) => {
+                // Find similar runs only from an explicit Find similar control.
                 setFindSimilarObject(selection);
                 if (selection) {
                   setSelectedVisualObject(selection);
