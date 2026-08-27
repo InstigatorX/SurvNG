@@ -39,7 +39,7 @@ import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
-import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
 import {
   clearVisualSearchTrail,
@@ -901,11 +901,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     .filter((event) => Number.isFinite(event.incident_epoch))
     .sort((left, right) => left.incident_epoch - right.incident_epoch), [events]);
 
-  const nearbyEvents = useMemo(() => filteredEvents.filter((event) => (
+  const viewportEvents = useMemo(() => filteredEvents.filter((event) => (
     event.incident_epoch >= timelineView.startEpoch
     && event.incident_epoch <= timelineView.endEpoch
   )), [filteredEvents, timelineView.endEpoch, timelineView.startEpoch]);
-  const selectedEventSummary = nearbyEvents.find((event) => Number(event.id) === Number(selectedEventId))
+  const nearbyEvents = useMemo(() => {
+    const anchor = Number.isFinite(playhead) ? playhead : viewportAnchor;
+    const radius = timelineNearbyRadiusSeconds(incidentRangeHours);
+    const limit = incidentRangeHours >= 24 ? 24 : 16;
+    return timelineEvidenceWindow(filteredEvents, anchor, limit, radius);
+  }, [filteredEvents, incidentRangeHours, playhead, viewportAnchor]);
+  const selectedEventSummary = viewportEvents.find((event) => Number(event.id) === Number(selectedEventId))
     || timelineEvents.find((event) => Number(event.id) === Number(selectedEventId))
     || null;
   const trailHit = trailHitForEvent(trailMeta, selectedEventId);
@@ -1063,13 +1069,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     ? Math.max(0, ...(selectedEvent.objects || []).map((object) => Number(object.confidence) || 0), Number(selectedEvent.confidence) || 0)
     : 0;
   const displayedTimelineEvents = useMemo(() => {
-    if (!selectedEvent || nearbyEvents.some((event) => Number(event.id) === Number(selectedEvent.id))) return nearbyEvents;
+    if (!selectedEvent || viewportEvents.some((event) => Number(event.id) === Number(selectedEvent.id))) return viewportEvents;
     if (
       selectedEvent.incident_epoch < timelineView.startEpoch
       || selectedEvent.incident_epoch > timelineView.endEpoch
-    ) return nearbyEvents;
-    return [...nearbyEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
-  }, [nearbyEvents, selectedEvent, timelineView.endEpoch, timelineView.startEpoch]);
+    ) return viewportEvents;
+    return [...viewportEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
+  }, [selectedEvent, timelineView.endEpoch, timelineView.startEpoch, viewportEvents]);
 
   useVisiblePolling(async (signal) => {
     const response = await fetch("/api/semantic-search/status", { signal });
@@ -2643,7 +2649,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             </section>
           ) : (
             <section className="recordings-related-events recordings-related-events-full" aria-label="Nearby evidence">
-              <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} in view</span></header>
+              <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} nearby</span></header>
               <div className="recordings-v2-events">
                 {nearbyEvents.length ? nearbyEvents.map((event) => (
                   <button
