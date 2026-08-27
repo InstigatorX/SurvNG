@@ -662,6 +662,19 @@ class SemanticIndexTest(unittest.TestCase):
 
         self.assertEqual(backfill.call_count, 2)
 
+    def test_status_reports_live_backfill_thread(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        backfill = Mock()
+        backfill.is_alive.return_value = True
+        service._backfill_thread = backfill
+
+        self.assertTrue(service.status()["backfill_active"])
+        backfill.is_alive.assert_called_once_with()
+
     def test_missing_retained_snapshot_is_counted_without_faulting_service(self) -> None:
         from survng.app.config import SemanticSearchConfig
 

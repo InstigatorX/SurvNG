@@ -32,11 +32,13 @@ match poorly because the search compares appearance, not intent.
 ### Find similar (object crop)
 
 On an expanded incident, select a detection box or use **Find similar** in the
-incident details panel. SurvNG:
+incident details panel. On the **Timeline**, pause or scrub to a frame, choose
+**Find similar**, and drag around any visible subject. SurvNG:
 
 - uses **appearance / ReID** first for person and vehicle tracks when available
 - broadens with **visual crop similarity** (Smart Search image index)
 - tags each result as Appearance or Visual (scores are not fused)
+- shows a crop preview before a timeline-frame search
 
 Results are hypotheses, not proof of the same physical item. Timeline links
 open the matching camera and event time, and when multiple hits exist you can
@@ -51,7 +53,8 @@ Details and roadmap: [Forensic visual search](../forensic-visual-search.md).
 2. Enable Smart Search under **Admin → Detection**.
 3. Allow SurvNG time to index existing incident pictures.
 4. Open **Search**, type a description, and review the ranked results — or
-   click an object on an incident and choose **Find similar**.
+   click an object on an incident or select an area on a Timeline frame and
+   choose **Find similar**.
 
 Details for model packages: [Smart Search model packages](../semantic-search.md).
 
@@ -62,12 +65,13 @@ Details for model packages: [Smart Search model packages](../semantic-search.md)
   package may be missing.
 - Smart Search finds object incidents with pictures; it is not a full-text
   search of filenames.
-- Find similar searches the same incident index, not every frame of continuous
-  recordings.
+- Timeline frame crops query the same incident index; continuous recording
+  frames are not indexed individually.
 
 ## Related
 
 - [Incidents](incidents.md)
 - [Admin](admin.md)
-- [HTTP API](api.md) (`POST /api/semantic-search`, `POST /api/semantic-search/visual`)
+- [HTTP API](api.md) (`POST /api/semantic-search`,
+  `POST /api/semantic-search/visual`, `POST /api/semantic-search/visual-frame`)
 - [Forensic visual search](../forensic-visual-search.md)

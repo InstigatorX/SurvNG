@@ -1154,6 +1154,13 @@ _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(
         get_manager=get_manager,
         manager_lock=MANAGER_RELOAD_LOCK,
+        recording_preview_path=lambda active_manager, *args, **kwargs: (
+            _recording_media_runtime._recording_preview_path(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
         manager_access=MANAGER_ACCESS,
     )
 )
@@ -1161,6 +1168,9 @@ app.include_router(_semantic_route_bundle.router)
 semantic_search_status = _semantic_route_bundle.handlers["semantic_search_status"]
 semantic_search = _semantic_route_bundle.handlers["semantic_search"]
 semantic_visual_search = _semantic_route_bundle.handlers["semantic_visual_search"]
+semantic_visual_frame_search = _semantic_route_bundle.handlers[
+    "semantic_visual_frame_search"
+]
 
 _system_route_bundle = create_system_router(
     SystemRouteDependencies(

@@ -46,6 +46,11 @@ import {
   trailPosition,
   writeVisualSearchTrail,
 } from "../visualSearchTrail.mjs";
+import {
+  visualFrameCropFromPoints,
+  visualFrameSearchRequest,
+  visualMatchLabel,
+} from "../visualSearch.mjs";
 import { appUrl, mediaUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { ALL_RECORDING_CAMERAS_ID, PREFER_NATIVE_HLS } from "../shared/constants.js";
 import { formatDateTime, formatTimeOnly, formatExportHandleTime, formatBytes, formatDuration } from "../shared/format.js";
@@ -85,6 +90,27 @@ export function recordingEvidenceTypeLabel(type) {
   if (type === "motion") return "motion-only";
   if (type === "object") return "object";
   return "total";
+}
+
+function containedImageBounds(surface, image) {
+  if (!surface || !image?.naturalWidth || !image?.naturalHeight) return null;
+  const surfaceRect = surface.getBoundingClientRect();
+  const imageAspect = image.naturalWidth / image.naturalHeight;
+  const surfaceAspect = surfaceRect.width / Math.max(1, surfaceRect.height);
+  const width = surfaceAspect > imageAspect
+    ? surfaceRect.height * imageAspect
+    : surfaceRect.width;
+  const height = surfaceAspect > imageAspect
+    ? surfaceRect.height
+    : surfaceRect.width / imageAspect;
+  return {
+    left: (surfaceRect.width - width) / 2,
+    top: (surfaceRect.height - height) / 2,
+    width,
+    height,
+    pageLeft: surfaceRect.left + (surfaceRect.width - width) / 2,
+    pageTop: surfaceRect.top + (surfaceRect.height - height) / 2,
+  };
 }
 
 export function recordingPlaybackTimeline(rows) {
@@ -709,6 +735,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const recordingUpdatesInFlightRef = useRef(false);
   const gridUpdatesInFlightRef = useRef(false);
   const selectedIncidentIdentityCacheRef = useRef(new Map());
+  const frameSearchSurfaceRef = useRef(null);
+  const frameSearchImageRef = useRef(null);
+  const frameSearchDragRef = useRef(null);
+  const frameSearchCropPreviewRef = useRef(null);
   const [cameras, setCameras] = useState([]);
   const [cameraTransitionRoutes, setCameraTransitionRoutes] = useState([]);
   const [cameraId, setCameraId] = useState(initialView.cameraId);
@@ -761,6 +791,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [followPlayhead, setFollowPlayhead] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(initialView.speed);
   const [timelineViewportAnchor, setTimelineViewportAnchor] = useState(initialView.at);
+  const [semanticStatus, setSemanticStatus] = useState(null);
+  const [frameSearchEpoch, setFrameSearchEpoch] = useState(null);
+  const [frameSearchCrop, setFrameSearchCrop] = useState(null);
+  const [frameSearchImageBounds, setFrameSearchImageBounds] = useState(null);
+  const [frameSearchImageReady, setFrameSearchImageReady] = useState(false);
+  const [frameSearchResults, setFrameSearchResults] = useState([]);
+  const [frameSearchLoading, setFrameSearchLoading] = useState(false);
+  const [frameSearchError, setFrameSearchError] = useState("");
 
   useEffect(() => {
     if (!timelineInspectorOpen) return undefined;
@@ -806,6 +844,28 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     ? `${recordingMobileWindowUrl(activeCameraId, nativeSegment.start_epoch, source)}&reload=${nativeSegmentRetryToken}`
     : "";
   const hasPlaybackMedia = Boolean(manifestUrl || nativeSegmentUrl);
+  const semanticReady = Boolean(
+    semanticStatus?.enabled && semanticStatus?.state === "ready"
+  );
+  const semanticIndexedCount = Math.max(0, Number(semanticStatus?.event_count) || 0);
+  const semanticStatusLabel = semanticStatus?.backfill_active
+    ? `${semanticIndexedCount} indexed · Indexing…`
+    : semanticReady
+      ? `${semanticIndexedCount} indexed`
+      : semanticStatus == null
+        ? "Checking search…"
+        : semanticStatus.enabled
+          ? "Search unavailable"
+          : "Smart Search off";
+  const frameSearchPreviewUrl = activeCameraId && Number.isFinite(frameSearchEpoch)
+    ? recordingPreviewUrl(activeCameraId, frameSearchEpoch, source, {
+      width: 1280,
+      exact: true,
+    })
+    : "";
+  const frameSearchTrailIds = frameSearchResults
+    .map((result) => Number(result?.event?.id))
+    .filter((eventId) => Number.isInteger(eventId) && eventId > 0);
   const manifestStartTime = useMemo(() => {
     if (!playbackTimeline.length) return null;
     const retainedEpoch = desiredEpochRef.current;
@@ -945,6 +1005,44 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }, [nearbyEvents, selectedEvent, timelineView.endEpoch, timelineView.startEpoch]);
 
   useVisiblePolling(async (signal) => {
+    const response = await fetch("/api/semantic-search/status", { signal });
+    if (!response.ok) throw new Error(`Semantic search status failed (${response.status})`);
+    setSemanticStatus(await response.json());
+  }, 15_000);
+
+  useEffect(() => {
+    const image = frameSearchImageRef.current;
+    const canvas = frameSearchCropPreviewRef.current;
+    if (!image || !canvas || !frameSearchCrop || !image.naturalWidth || !image.naturalHeight) return;
+    const context = canvas.getContext("2d");
+    const sourceX = Math.floor(frameSearchCrop.x * image.naturalWidth);
+    const sourceY = Math.floor(frameSearchCrop.y * image.naturalHeight);
+    const sourceWidth = Math.max(1, Math.ceil(frameSearchCrop.width * image.naturalWidth));
+    const sourceHeight = Math.max(1, Math.ceil(frameSearchCrop.height * image.naturalHeight));
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(
+      image,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    );
+  }, [frameSearchCrop, frameSearchImageReady]);
+
+  useEffect(() => {
+    if (!Number.isFinite(frameSearchEpoch)) return undefined;
+    const updateBounds = () => setFrameSearchImageBounds(
+      containedImageBounds(frameSearchSurfaceRef.current, frameSearchImageRef.current)
+    );
+    window.addEventListener("resize", updateBounds);
+    return () => window.removeEventListener("resize", updateBounds);
+  }, [frameSearchEpoch]);
+
+  useVisiblePolling(async (signal) => {
     try {
       const next = await fetchExportJob(exportJob?.id, fetch, { signal, maxAgeMs: 750 });
       if (next) {
@@ -963,6 +1061,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setExportLabel("");
     selectedIncidentIdentityCacheRef.current.clear();
     setSelectedIncidentIdentity(null);
+    setFrameSearchEpoch(null);
+    setFrameSearchCrop(null);
+    setFrameSearchResults([]);
+    setFrameSearchError("");
   }, [activeCameraId, date, source]);
 
   useEffect(() => {
@@ -1724,6 +1826,114 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     requestRecordingPlay(video);
   }
 
+  function beginFrameSearch() {
+    if (!semanticReady || !activeCameraId || !Number.isFinite(playhead)) return;
+    autoplayRef.current = false;
+    setHeroPlaying(false);
+    videoRef.current?.pause();
+    setFrameSearchEpoch(playhead);
+    setFrameSearchCrop(null);
+    setFrameSearchImageBounds(null);
+    setFrameSearchImageReady(false);
+    setFrameSearchError("");
+  }
+
+  function closeFrameSearch() {
+    frameSearchDragRef.current = null;
+    setFrameSearchEpoch(null);
+    setFrameSearchCrop(null);
+    setFrameSearchImageBounds(null);
+    setFrameSearchImageReady(false);
+    setFrameSearchError("");
+  }
+
+  function frameSearchPoint(event, bounds) {
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - bounds.pageLeft) / bounds.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - bounds.pageTop) / bounds.height)),
+    };
+  }
+
+  function startFrameSearchCrop(event) {
+    if (!frameSearchImageReady) return;
+    const bounds = containedImageBounds(
+      frameSearchSurfaceRef.current,
+      frameSearchImageRef.current,
+    );
+    if (!bounds) return;
+    const point = frameSearchPoint(event, bounds);
+    frameSearchDragRef.current = point;
+    setFrameSearchImageBounds(bounds);
+    setFrameSearchCrop(null);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveFrameSearchCrop(event) {
+    if (!frameSearchDragRef.current) return;
+    const bounds = containedImageBounds(
+      frameSearchSurfaceRef.current,
+      frameSearchImageRef.current,
+    );
+    if (!bounds) return;
+    setFrameSearchImageBounds(bounds);
+    setFrameSearchCrop(
+      visualFrameCropFromPoints(
+        frameSearchDragRef.current,
+        frameSearchPoint(event, bounds),
+      ),
+    );
+  }
+
+  function finishFrameSearchCrop(event) {
+    if (!frameSearchDragRef.current) return;
+    moveFrameSearchCrop(event);
+    frameSearchDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  async function submitFrameSearch() {
+    if (!frameSearchCrop || frameSearchLoading || !semanticReady) return;
+    setFrameSearchLoading(true);
+    setFrameSearchError("");
+    try {
+      const response = await fetch("/api/semantic-search/visual-frame", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(visualFrameSearchRequest({
+          cameraId: activeCameraId,
+          epoch: frameSearchEpoch,
+          source,
+          crop: frameSearchCrop,
+          limit: 24,
+        })),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || `Frame search failed (${response.status})`);
+      }
+      const results = Array.isArray(payload.results) ? payload.results : [];
+      const eventIds = results
+        .map((result) => Number(result?.event?.id))
+        .filter((eventId) => Number.isInteger(eventId) && eventId > 0);
+      const nextTrail = writeVisualSearchTrail(window.sessionStorage, {
+        eventIds,
+        hits: results,
+        queryMode: "visual",
+      });
+      setFrameSearchResults(results);
+      setTrailEventIds(nextTrail.eventIds);
+      setTrailMeta(nextTrail);
+      setInvestigationOpen(true);
+      if (!results.length) setFrameSearchError("No similar indexed incidents found.");
+    } catch (error) {
+      setFrameSearchError(error.message || "Unable to search this frame.");
+    } finally {
+      setFrameSearchLoading(false);
+    }
+  }
+
   function skipPlayback(seconds, playing = autoplayRef.current || heroPlaying) {
     const video = videoRef.current;
     let currentEpoch = Number.isFinite(playhead) ? playhead : desiredEpochRef.current;
@@ -1992,6 +2202,54 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
             />
           ) : null}
+          {!isAllCameras && Number.isFinite(frameSearchEpoch) ? (
+            <div className="recording-frame-search-overlay">
+              <div
+                ref={frameSearchSurfaceRef}
+                className={`recording-frame-search-surface${frameSearchImageReady ? " ready" : ""}`}
+                onPointerDown={startFrameSearchCrop}
+                onPointerMove={moveFrameSearchCrop}
+                onPointerUp={finishFrameSearchCrop}
+                onPointerCancel={finishFrameSearchCrop}
+              >
+                <img
+                  ref={frameSearchImageRef}
+                  src={frameSearchPreviewUrl}
+                  alt={`Frozen recording frame at ${formatDateTime(frameSearchEpoch, timeZone)}`}
+                  draggable="false"
+                  onLoad={() => {
+                    setFrameSearchImageReady(true);
+                    window.requestAnimationFrame(() => setFrameSearchImageBounds(
+                      containedImageBounds(frameSearchSurfaceRef.current, frameSearchImageRef.current)
+                    ));
+                  }}
+                  onError={() => setFrameSearchError("Could not load the exact recording frame.")}
+                />
+                {frameSearchCrop && frameSearchImageBounds ? (
+                  <i
+                    className="recording-frame-search-selection"
+                    style={{
+                      left: frameSearchImageBounds.left + frameSearchCrop.x * frameSearchImageBounds.width,
+                      top: frameSearchImageBounds.top + frameSearchCrop.y * frameSearchImageBounds.height,
+                      width: frameSearchCrop.width * frameSearchImageBounds.width,
+                      height: frameSearchCrop.height * frameSearchImageBounds.height,
+                    }}
+                  />
+                ) : null}
+                {!frameSearchImageReady && !frameSearchError ? <span>Loading exact frame…</span> : null}
+              </div>
+              <div className="recording-frame-search-panel">
+                <header><div><Search size={15} /><strong>Select area</strong></div><button type="button" onClick={closeFrameSearch} aria-label="Close frame search"><X size={15} /></button></header>
+                <small>Drag around the person, vehicle, or object to match.</small>
+                {frameSearchCrop ? <canvas ref={frameSearchCropPreviewRef} width="180" height="96" aria-label="Selected crop preview" /> : null}
+                {frameSearchError ? <p>{frameSearchError}</p> : null}
+                <footer>
+                  <span>{semanticStatusLabel}</span>
+                  <button type="button" className="primary" disabled={!frameSearchCrop || frameSearchLoading || !semanticReady} onClick={submitFrameSearch}>{frameSearchLoading ? "Searching…" : "Find similar"}</button>
+                </footer>
+              </div>
+            </div>
+          ) : null}
           {!isAllCameras && Number.isFinite(playhead) ? <RecordingCompanionStrip cameras={cameras} routes={cameraTransitionRoutes} activeCameraId={activeCameraId} source={source} epoch={playhead} onSelect={(camera) => { checkpointTimelineView(); setCameraId(camera); }} /> : null}
           {loading ? <div className="recordings-v2-message"><Film size={28} />Loading recordings</div> : null}
           {!loading && !timeline.length ? <div className="recordings-v2-message"><Film size={28} />No recordings on this day</div> : null}
@@ -2012,6 +2270,16 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               </button>
               <button type="button" onClick={() => skipPlayback(10)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
               <time>{formatDateTime(playhead, timeZone)}</time>
+              <button
+                type="button"
+                className={Number.isFinite(frameSearchEpoch) ? "active" : ""}
+                disabled={!semanticReady}
+                onClick={Number.isFinite(frameSearchEpoch) ? closeFrameSearch : beginFrameSearch}
+                title={semanticReady ? "Freeze this frame and select an area" : "Smart Search is not ready"}
+              >
+                <Search size={15} />{Number.isFinite(frameSearchEpoch) ? "Select area" : "Find similar"}
+              </button>
+              <small className="recording-frame-search-status">{semanticStatusLabel}</small>
             </div>
           ) : null}
           {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls">
@@ -2172,31 +2440,49 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               {selectedEventConfidence > 0 ? <span>Confidence {Math.round(selectedEventConfidence * 100)}%</span> : null}
             </div>
           </aside> : <aside className="recordings-v2-selected-event empty"><span>Select an event on the timeline to investigate</span></aside>}
-          <section className="recordings-related-events" aria-label="Nearby evidence">
-            <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} in view</span><button ref={timelineInspectorTriggerRef} type="button" className="recordings-inspector-toggle" onClick={() => setTimelineInspectorOpen(true)}>Details</button></header>
-            <div className="recordings-v2-events">
-              {nearbyEvents.length ? nearbyEvents.map((event) => (
-                <button
-                  key={event.id}
-                  type="button"
-                  className={`${event.has_objects ? "object" : "motion"}${Number(selectedEvent?.id) === Number(event.id) ? " selected" : ""}`}
-                  onClick={() => { checkpointTimelineView(); setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
-                  aria-pressed={Number(selectedEvent?.id) === Number(event.id)}
-                  aria-label={`${event.labels?.length ? event.labels.join(", ") : "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
-                  title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion only"}`}
-                >
-                  <span className="recordings-v2-event-image">
-                    <Radar size={20} />
-                    {event.snapshot_path ? <img src={eventThumbnailUrl(event, 240, 72)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
-                  </span>
-                  <span className="recordings-v2-event-caption">
-                    <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
-                    <b>{isAllCameras ? `${cameras.find((camera) => camera.id === event.camera_id)?.name || event.camera_id} · ` : ""}{event.labels?.length ? event.labels.join(", ") : "Motion only"}</b>
-                  </span>
-                </button>
-              )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter === "all" ? "events" : `${eventFilter} incidents`} {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
-            </div>
-          </section>
+          {frameSearchResults.length ? (
+            <section className="recordings-related-events recording-frame-search-results" aria-label="Find similar results">
+              <header><strong>Find similar</strong><span>{frameSearchResults.length} matches</span><button type="button" onClick={() => setFrameSearchResults([])}>Nearby</button></header>
+              <div>
+                {frameSearchResults.map((result) => {
+                  const item = result.event || {};
+                  const context = incidentRecordingContext(item);
+                  const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
+                  return <article key={item.id}>
+                    <img src={mediaUrl(result.snapshot_url)} alt="" loading="lazy" decoding="async" />
+                    <div><strong>{cameraName}</strong><time>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</time><span>{visualMatchLabel(result.match_strength)}</span></div>
+                    <nav><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context, { trailEventIds: frameSearchTrailIds, queryMode: "visual" })} onClick={() => writeVisualSearchTrail(window.sessionStorage, { eventIds: frameSearchTrailIds, hits: frameSearchResults, queryMode: "visual" })}><Play size={13} />Timeline</a></nav>
+                  </article>;
+                })}
+              </div>
+            </section>
+          ) : (
+            <section className="recordings-related-events" aria-label="Nearby evidence">
+              <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} in view</span><button ref={timelineInspectorTriggerRef} type="button" className="recordings-inspector-toggle" onClick={() => setTimelineInspectorOpen(true)}>Details</button></header>
+              <div className="recordings-v2-events">
+                {nearbyEvents.length ? nearbyEvents.map((event) => (
+                  <button
+                    key={event.id}
+                    type="button"
+                    className={`${event.has_objects ? "object" : "motion"}${Number(selectedEvent?.id) === Number(event.id) ? " selected" : ""}`}
+                    onClick={() => { checkpointTimelineView(); setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
+                    aria-pressed={Number(selectedEvent?.id) === Number(event.id)}
+                    aria-label={`${event.labels?.length ? event.labels.join(", ") : "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
+                    title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion only"}`}
+                  >
+                    <span className="recordings-v2-event-image">
+                      <Radar size={20} />
+                      {event.snapshot_path ? <img src={eventThumbnailUrl(event, 240, 72)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
+                    </span>
+                    <span className="recordings-v2-event-caption">
+                      <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
+                      <b>{isAllCameras ? `${cameras.find((camera) => camera.id === event.camera_id)?.name || event.camera_id} · ` : ""}{event.labels?.length ? event.labels.join(", ") : "Motion only"}</b>
+                    </span>
+                  </button>
+                )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter === "all" ? "events" : `${eventFilter} incidents`} {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
+              </div>
+            </section>
+          )}
           <aside className={`recordings-event-inspector${timelineInspectorOpen ? " open" : ""}`} aria-label="Event inspector">
             <div className="recordings-event-inspector-tabs" role="tablist" aria-label="Incident information">
               {[["details", "Details"], ["ai", "AI"], ["related", "Nearby"]].map(([id, label], index, tabs) => <button
