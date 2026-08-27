@@ -416,6 +416,15 @@
     object-fit: contain !important;
   }
 
+  .recordings-v2-player.selected-camera-stage .recording-hero-media {
+    width: 100% !important;
+    height: calc(100% - 86px) !important;
+  }
+
+  .recordings-v2-player.selected-camera-stage:not(:has(.recording-selected-companions)) .recording-hero-media {
+    height: 100% !important;
+  }
+
   .recordings-v2-player.selected-camera-stage:not(:has(.recording-selected-companions)) video {
     height: 100% !important;
   }
