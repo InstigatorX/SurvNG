@@ -1730,6 +1730,67 @@ p {
   gap: 5px;
 }
 
+.inspector-detection.summary {
+  display: grid;
+  gap: 6px;
+}
+
+.inspector-detection.summary.selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--control));
+}
+
+.inspector-detection.summary > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 7px;
+}
+
+.inspector-detection.summary > button.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.incident-visual-similar-error {
+  color: var(--danger);
+}
+
+.incident-visual-similar-card {
+  display: grid;
+  gap: 4px;
+}
+
+.incident-visual-similar-card.selected {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+  border-radius: 8px;
+}
+
+.incident-visual-similar-timeline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--control);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 6px;
+  text-decoration: none;
+}
+
 .inspector-detection.summary code {
   display: none;
 }
@@ -3321,6 +3382,32 @@ button.live-overlay-backdrop:active {
   inset: 0;
   z-index: 3;
   pointer-events: none;
+}
+
+.object-box-layer.interactive {
+  pointer-events: none;
+}
+
+.object-box-layer.interactive .object-box.selectable {
+  pointer-events: auto;
+  cursor: pointer;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.object-box-layer.interactive .object-box.selectable.selected,
+.object-box.selected {
+  border-color: #0f766e;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(15, 118, 110, 0.45);
+}
+
+.object-box-layer.interactive .object-box.selectable.selected strong,
+.object-box.selected strong {
+  background: #0f766e;
+  color: #ecfeff;
 }
 
 .object-mask-layer {

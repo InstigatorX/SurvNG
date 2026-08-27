@@ -118,11 +118,21 @@ export function incidentZones(incident) {
 }
 
 
+export function visualSearchObjects(event) {
+  return eventObjects(event).filter((object) => (
+    object?.label
+    && String(object.label).trim()
+    && object.snapshot_visible !== false
+  ));
+}
+
 export function objectBoxes(event, incidentEligibleOnly = false) {
-  return eventObjects(event)
-    .map((object) => ({ object, box: object?.box }))
-    .filter(({ object, box }) => object?.label && object.snapshot_visible !== false && (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
-    .map(({ object, box }) => ({
+  return visualSearchObjects(event)
+    .map((object, objectIndex) => ({ object, objectIndex, box: object?.box }))
+    .filter(({ object, box }) => (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
+    .map(({ object, objectIndex, box }) => ({
+      objectIndex,
+      trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
       label: object.label,
       confidence: object.confidence,
       maskPolygon: Array.isArray(object.mask_polygon)
@@ -136,7 +146,7 @@ export function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
+export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
   const boxCoordinateSize = incidentDetectionFrameSize(event);
@@ -368,21 +378,48 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
           ) : <img className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? thumbnailSrc : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey)} />
         ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {imageReady && showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
-          <div className="object-box-layer" aria-hidden="true">
+          <div className={`object-box-layer${onSelectObject ? " interactive" : ""}`} aria-hidden={onSelectObject ? undefined : "true"}>
             <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
               {renderedBoxes.filter((box) => box.maskPoints).map((box, index) => (
                 <polygon key={`mask-${box.label}-${index}`} points={box.maskPoints} />
               ))}
             </svg>
-            {renderedBoxes.map((box, index) => (
-              <span
-                className="object-box"
-                key={`${box.label}-${index}-${box.x1}-${box.y1}`}
-                style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
-              >
-                <strong>{box.label}{box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}</strong>
-              </span>
-            ))}
+            {renderedBoxes.map((box, index) => {
+              const selected = Number(selectedObjectIndex) === Number(box.objectIndex);
+              const label = `${box.label}${box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}`;
+              if (onSelectObject) {
+                return (
+                  <button
+                    type="button"
+                    className={`object-box selectable${selected ? " selected" : ""}`}
+                    key={`${box.label}-${box.objectIndex}-${box.x1}-${box.y1}`}
+                    style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
+                    onClick={(clickEvent) => {
+                      clickEvent.stopPropagation();
+                      onSelectObject({
+                        objectIndex: box.objectIndex,
+                        trackId: box.trackId,
+                        label: box.label,
+                      });
+                    }}
+                    aria-pressed={selected}
+                    title={`Find similar: ${box.label}`}
+                    aria-label={`Select ${box.label} for visual search`}
+                  >
+                    <strong>{label}</strong>
+                  </button>
+                );
+              }
+              return (
+                <span
+                  className="object-box"
+                  key={`${box.label}-${index}-${box.x1}-${box.y1}`}
+                  style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
+                >
+                  <strong>{label}</strong>
+                </span>
+              );
+            })}
           </div>
         ) : null}
         {imageReady && showTracking && renderedTracks.length ? (

@@ -233,6 +233,7 @@ Field names must match your running build’s OpenAPI schema — use `/docs` if 
 | --- | --- | --- |
 | GET | `/api/semantic-search/status` | Index and model status |
 | POST | `/api/semantic-search` | Search by text description |
+| POST | `/api/semantic-search/visual` | Search by object crop from an event |
 
 ### Example
 
@@ -242,7 +243,14 @@ curl -s -X POST http://127.0.0.1:8088/api/semantic-search \
   -d '{"query":"person in a red jacket","limit":20}' | python -m json.tool
 ```
 
+```bash
+curl -s -X POST http://127.0.0.1:8088/api/semantic-search/visual \
+  -H 'Content-Type: application/json' \
+  -d '{"event_id":123,"object_index":0,"limit":20}' | python -m json.tool
+```
+
 Setup: [Smart Search model packages](../semantic-search.md).
+Roadmap: [Forensic visual search](../forensic-visual-search.md).
 
 ---
 

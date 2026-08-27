@@ -114,6 +114,49 @@ class AppearanceIndexTest(unittest.TestCase):
         self.assertEqual(status["vectors"], 3)
         self.assertEqual(status["events"], 3)
 
+    def test_track_id_filters_to_selected_anchor_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            anchor = store.add_event("gate", "motion")
+            first_match = store.add_event("foyer", "motion")
+            second_match = store.add_event("driveway", "motion")
+            index = AppearanceIndex(store.db_path)
+            common = {
+                "label": "person",
+                "model_kind": "person",
+                "model_fingerprint": "person-v1",
+                "match_threshold": 0.8,
+            }
+            index.replace_event(int(anchor["id"]), "gate", [
+                {
+                    **common,
+                    "track_id": 1,
+                    "embedding": np.asarray([1.0, 0.0]),
+                },
+                {
+                    **common,
+                    "track_id": 2,
+                    "embedding": np.asarray([0.0, 1.0]),
+                },
+            ])
+            index.replace_event(int(first_match["id"]), "foyer", [{
+                **common,
+                "track_id": 10,
+                "embedding": np.asarray([1.0, 0.0]),
+            }])
+            index.replace_event(int(second_match["id"]), "driveway", [{
+                **common,
+                "track_id": 20,
+                "embedding": np.asarray([0.0, 1.0]),
+            }])
+
+            matches = index.matches(int(anchor["id"]), track_id=2)
+            missing = index.matches(int(anchor["id"]), track_id=99)
+
+        self.assertEqual(matches[0]["event_id"], second_match["id"])
+        self.assertTrue(all(item["anchor_track_id"] == 2 for item in matches))
+        self.assertEqual(missing, [])
+
     def test_invalid_replacement_does_not_erase_a_valid_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

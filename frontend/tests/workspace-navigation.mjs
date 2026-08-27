@@ -55,6 +55,10 @@ assert.equal(
   timelineHref({ cameraId: "front-door", epoch: 123.5, source: "main" }),
   "/timeline?camera=front-door&at=123.5&source=main",
 );
+assert.equal(
+  timelineHref({ cameraId: "gate", epoch: 50, eventId: 42 }),
+  "/timeline?camera=gate&at=50&event=42",
+);
 assert.equal(timelineHref({ epoch: Number.NaN }), "/timeline");
 
 assert.deepEqual(DESKTOP_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "exports", "search", "people"]);

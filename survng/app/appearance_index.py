@@ -206,6 +206,7 @@ class AppearanceIndex:
         end_at: str | None = None,
         cross_camera_only: bool = True,
         limit: int = 12,
+        track_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return strongest compatible incident matches; embeddings never leave this class."""
         bounded_limit = max(1, min(int(limit), 100))
@@ -214,6 +215,11 @@ class AppearanceIndex:
                 "select * from appearance_embeddings where event_id = ?",
                 (int(event_id),),
             ).fetchall()
+            if track_id is not None:
+                anchors = [
+                    row for row in anchors
+                    if int(row["track_id"]) == int(track_id)
+                ]
             if not anchors:
                 return []
             clauses = ["candidate.event_id != ?"]

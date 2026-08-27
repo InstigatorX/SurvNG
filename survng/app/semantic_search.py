@@ -390,6 +390,7 @@ class SemanticIndex:
         query_plan: SemanticQueryPlan | None = None,
         camera_ids: Sequence[str] = (),
         object_labels: Sequence[str] = (),
+        source_kinds: Sequence[str] = (),
         start_at: str = "",
         end_at: str = "",
         limit: int = 100,
@@ -413,6 +414,17 @@ class SemanticIndex:
             normalized_labels = sorted({str(value).strip().lower() for value in object_labels if str(value).strip()})
             clauses.append(f"object_label in ({','.join('?' for _ in normalized_labels)})")
             parameters.extend(normalized_labels)
+        if source_kinds:
+            normalized_source_kinds = sorted({
+                str(value).strip().lower()
+                for value in source_kinds
+                if str(value).strip()
+            })
+            if normalized_source_kinds:
+                clauses.append(
+                    f"source_kind in ({','.join('?' for _ in normalized_source_kinds)})"
+                )
+                parameters.extend(normalized_source_kinds)
         if start_at:
             clauses.append("captured_at >= ?")
             parameters.append(str(start_at))
@@ -755,6 +767,21 @@ class DisabledSemanticSearch:
         return False
 
     def search_text(self, query: str, **filters: Any) -> list[SemanticSearchHit]:
+        raise RuntimeError("semantic search is disabled")
+
+    def search_image(
+        self,
+        image: np.ndarray,
+        **filters: Any,
+    ) -> list[SemanticSearchHit]:
+        raise RuntimeError("semantic search is disabled")
+
+    def search_event_object(
+        self,
+        event: dict[str, Any],
+        object_index: int,
+        **filters: Any,
+    ) -> list[SemanticSearchHit]:
         raise RuntimeError("semantic search is disabled")
 
 
@@ -1591,6 +1618,83 @@ class SemanticSearchService(DisabledSemanticSearch):
     def _index_event(self, event: dict[str, Any]) -> int:
         """Backward-compatible internal alias for existing integrations."""
         return self.index_event(event)
+
+    def _object_crop_from_event(
+        self,
+        event: dict[str, Any],
+        object_index: int,
+    ) -> np.ndarray:
+        objects = semantic_event_objects(event)
+        try:
+            item = objects[int(object_index)]
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ValueError("semantic object index is out of range") from exc
+        if int(object_index) < 0:
+            raise ValueError("semantic object index is out of range")
+        coordinates = semantic_object_bbox(item)
+        if coordinates is None:
+            raise ValueError("selected semantic object has no valid crop")
+        try:
+            path = event_snapshot_path(
+                self._storage_dir,
+                event,
+                self._media_storage,
+            )
+        except FileNotFoundError as exc:
+            raise ValueError("event snapshot is unavailable") from exc
+        frame = cv2.imread(str(path))
+        if frame is None:
+            raise ValueError("event snapshot is unavailable")
+        height, width = frame.shape[:2]
+        source_width = positive_dimension(item.get("detection_frame_width"), width)
+        source_height = positive_dimension(item.get("detection_frame_height"), height)
+        x1, y1, x2, y2 = (
+            int(round(coordinates[0] * width / source_width)),
+            int(round(coordinates[1] * height / source_height)),
+            int(round(coordinates[2] * width / source_width)),
+            int(round(coordinates[3] * height / source_height)),
+        )
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(width, x2), min(height, y2)
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError("selected semantic object crop is empty")
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            raise ValueError("selected semantic object crop is empty")
+        return crop
+
+    def search_image(
+        self,
+        image: np.ndarray,
+        **filters: Any,
+    ) -> list[SemanticSearchHit]:
+        if self.encoder is None:
+            raise RuntimeError(self._error or "semantic search is unavailable")
+        if not isinstance(image, np.ndarray) or image.size == 0:
+            raise ValueError("semantic search image cannot be empty")
+        plan = SemanticQueryPlan("visual", {"full": "visual"})
+        with self._encoder_lock:
+            if self.encoder is None:
+                raise RuntimeError(self._error or "semantic search is unavailable")
+            embedding = self.encoder.encode_images([image])
+            identity = self.encoder.identity
+        return self.index.search(
+            embedding,
+            identity,
+            query_plan=plan,
+            **filters,
+        )
+
+    def search_event_object(
+        self,
+        event: dict[str, Any],
+        object_index: int,
+        **filters: Any,
+    ) -> list[SemanticSearchHit]:
+        return self.search_image(
+            self._object_crop_from_event(event, object_index),
+            **filters,
+        )
 
     def search_text(self, query: str, **filters: Any) -> list[SemanticSearchHit]:
         if self.encoder is None:
