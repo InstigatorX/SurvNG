@@ -41,6 +41,12 @@ from .types import (
     TrackingUpdate,
 )
 
+try:
+    from ..reid_training import ReidTrainingBuffer, ReidTrainingCollector
+except ImportError:  # pragma: no cover - package always present in-tree
+    ReidTrainingBuffer = None  # type: ignore[misc, assignment]
+    ReidTrainingCollector = None  # type: ignore[misc, assignment]
+
 LOGGER = logging.getLogger("survng.app.object_tracking")
 TRACKING_STOP_TIMEOUT_SECONDS = 18.0
 TRACKING_CATCHUP_SETTLE_SECONDS = 5.0
@@ -128,6 +134,7 @@ class ObjectTrackingSession:
         tracker_registry: ObjectTrackerRegistry | None = None,
         appearance_encoder: AppearanceEncoder | None = None,
         appearance_indexer: AppearanceIndexWriter | None = None,
+        training_crop_collector: Any | None = None,
         catchup_frame_provider: CatchupFrameProvider | None = None,
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
@@ -143,6 +150,7 @@ class ObjectTrackingSession:
         self.tracker_registry = tracker_registry or build_builtin_object_tracker_registry()
         self.appearance_encoder = appearance_encoder
         self.appearance_indexer = appearance_indexer
+        self.training_crop_collector = training_crop_collector
         self.catchup_frame_provider = catchup_frame_provider
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
@@ -167,6 +175,9 @@ class ObjectTrackingSession:
         self._reid_attempt_base_by_reason: dict[str, int] = {}
         self._frame_width = 0
         self._frame_height = 0
+        self._training_crop_buffer = (
+            ReidTrainingBuffer() if ReidTrainingBuffer is not None else None
+        )
         self._catchup_frames_processed = 0
         self._coverage_gap_count = 0
         self._maximum_coverage_gap_seconds = 0.0
@@ -206,6 +217,8 @@ class ObjectTrackingSession:
             "last_reid_error": "",
             "appearance_vectors_indexed": 0,
             "appearance_index_error": "",
+            "reid_training_crops_stored": 0,
+            "reid_training_crops_error": "",
             "capacity_requests": 0,
             "capacity_waits": 0,
             "capacity_timeouts": 0,
@@ -796,11 +809,15 @@ class ObjectTrackingSession:
             self._cover_baseline = None
             self._cover_candidate = None
             self._cover_promotion = None
+            if self._training_crop_buffer is not None:
+                self._training_crop_buffer.clear()
             self._set_status(
                 cover_promoted=False,
                 cover_promotion_attempted=False,
                 cover_promotion_result="",
                 cover_verification_inference_ms=0.0,
+                reid_training_crops_stored=0,
+                reid_training_crops_error="",
             )
             tracker = self.tracker_registry.create(
                 self.config.implementation,
@@ -832,6 +849,13 @@ class ObjectTrackingSession:
             for detected in initial_objects:
                 detected["_tracking_first_seen_at"] = seed_epoch
             initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
+            if initial_frame is not None:
+                self._retain_training_crops(
+                    initial_frame,
+                    initial_tracked,
+                    initial_objects,
+                    captured_at,
+                )
             primary_track_ids = {
                 int(item["track_id"])
                 for item in initial_tracked
@@ -929,6 +953,7 @@ class ObjectTrackingSession:
                     self._frame_height,
                 )
                 tracked = tracker.update(objects, sample_epoch)
+                self._retain_training_crops(frame, tracked, objects, sample_epoch)
                 latest_tracked_objects = tracked
                 summaries = tracker.summaries(sample_epoch)
                 next_track_states = {
@@ -1389,6 +1414,7 @@ class ObjectTrackingSession:
             raise RuntimeError(f"tracking event {event_id} no longer exists")
         if state in {"complete", "interrupted"}:
             self._index_track_appearances(event_id, tracker)
+            self._flush_training_crops(event_id, tracks)
         self._set_status(
             enabled=True,
             active=state == "active",
@@ -1477,6 +1503,74 @@ class ObjectTrackingSession:
         self._set_status(
             appearance_vectors_indexed=int(indexed),
             appearance_index_error="",
+        )
+
+    def _retain_training_crops(
+        self,
+        frame: np.ndarray,
+        tracked: list[dict[str, Any]],
+        detections: list[dict[str, Any]],
+        captured_at: float,
+    ) -> None:
+        collector = self.training_crop_collector
+        buffer = self._training_crop_buffer
+        if collector is None or buffer is None or not getattr(collector, "enabled", False):
+            return
+        try:
+            collector.retain_from_frame(
+                buffer,
+                frame,
+                tracked,
+                detections,
+                captured_at,
+            )
+        except Exception:
+            LOGGER.exception(
+                "ReID training crop retention failed for %s",
+                self.camera.id,
+            )
+
+    def _flush_training_crops(
+        self,
+        event_id: int,
+        tracks: list[dict[str, Any]],
+    ) -> None:
+        collector = self.training_crop_collector
+        buffer = self._training_crop_buffer
+        if collector is None or buffer is None:
+            return
+        identity_method = None
+        if self.appearance_encoder is not None:
+            identity_method = getattr(
+                self.appearance_encoder,
+                "model_identity_for_label",
+                None,
+            )
+        try:
+            stored = int(
+                collector.flush(
+                    buffer,
+                    event_id=event_id,
+                    camera_id=self.camera.id,
+                    tracks=tracks,
+                    model_identity_for_label=identity_method,
+                )
+                or 0
+            )
+        except Exception as exc:
+            error = redact_secret_text(exc)[:240]
+            self._set_status(reid_training_crops_error=error)
+            LOGGER.exception(
+                "failed to store ReID training crops for %s event %d",
+                self.camera.id,
+                event_id,
+            )
+            if buffer is not None:
+                buffer.clear()
+            return
+        self._set_status(
+            reid_training_crops_stored=stored,
+            reid_training_crops_error="",
         )
 
     def _persist_failure(
@@ -1666,6 +1760,7 @@ class ObjectTrackingSessionFactory:
         tracker_registry: ObjectTrackerRegistry | None = None,
         appearance_encoder: AppearanceEncoder | None = None,
         appearance_indexer: AppearanceIndexWriter | None = None,
+        training_crop_collector: Any | None = None,
         cover_promoter: TrackingCoverPromoter | None = None,
     ) -> None:
         self.config = config
@@ -1676,6 +1771,7 @@ class ObjectTrackingSessionFactory:
         self.tracker_registry = tracker_registry or build_builtin_object_tracker_registry()
         self.appearance_encoder = appearance_encoder
         self.appearance_indexer = appearance_indexer
+        self.training_crop_collector = training_crop_collector
         self.cover_promoter = cover_promoter
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
@@ -1699,6 +1795,7 @@ class ObjectTrackingSessionFactory:
             tracker_registry=self.tracker_registry,
             appearance_encoder=self.appearance_encoder,
             appearance_indexer=self.appearance_indexer,
+            training_crop_collector=self.training_crop_collector,
             catchup_frame_provider=catchup_frame_provider,
             cover_frame_provider=cover_frame_provider,
             snapshot_writer=snapshot_writer,
