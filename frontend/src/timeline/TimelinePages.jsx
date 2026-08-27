@@ -39,7 +39,7 @@ import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
-import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
 import {
   clearVisualSearchTrail,
@@ -800,6 +800,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [frameSearchImageReady, setFrameSearchImageReady] = useState(false);
   const [frameSearchResults, setFrameSearchResults] = useState([]);
   const [frameSearchQueryImageUrl, setFrameSearchQueryImageUrl] = useState("");
+  const [frameSearchQueryEpoch, setFrameSearchQueryEpoch] = useState(null);
   const [frameSearchLoading, setFrameSearchLoading] = useState(false);
   const [frameSearchError, setFrameSearchError] = useState("");
 
@@ -901,11 +902,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     .filter((event) => Number.isFinite(event.incident_epoch))
     .sort((left, right) => left.incident_epoch - right.incident_epoch), [events]);
 
-  const nearbyEvents = useMemo(() => filteredEvents.filter((event) => (
+  const viewportEvents = useMemo(() => filteredEvents.filter((event) => (
     event.incident_epoch >= timelineView.startEpoch
     && event.incident_epoch <= timelineView.endEpoch
   )), [filteredEvents, timelineView.endEpoch, timelineView.startEpoch]);
-  const selectedEventSummary = nearbyEvents.find((event) => Number(event.id) === Number(selectedEventId))
+  const nearbyEvents = useMemo(() => {
+    const anchor = Number.isFinite(playhead) ? playhead : viewportAnchor;
+    const radius = timelineNearbyRadiusSeconds(incidentRangeHours);
+    const limit = incidentRangeHours >= 24 ? 24 : 16;
+    return timelineEvidenceWindow(filteredEvents, anchor, limit, radius);
+  }, [filteredEvents, incidentRangeHours, playhead, viewportAnchor]);
+  const selectedEventSummary = viewportEvents.find((event) => Number(event.id) === Number(selectedEventId))
     || timelineEvents.find((event) => Number(event.id) === Number(selectedEventId))
     || null;
   const trailHit = trailHitForEvent(trailMeta, selectedEventId);
@@ -931,71 +938,35 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const forensicNav = useMemo(() => {
     const count = frameSearchResults.length;
     if (!count) {
-      return { label: "1 / 1", previous: null, next: null, slot: "query" };
+      return { label: "1 / 1", previous: null, next: null };
     }
-    if (!selectedEventId) {
-      return {
-        label: "1 / 1",
-        previous: null,
-        next: frameSearchResults[0] || null,
-        slot: "query",
-      };
-    }
-    const index = frameSearchResults.findIndex(
-      (result) => Number(result?.event?.id) === Number(selectedEventId),
-    );
+    const index = Number.isInteger(Number(selectedEventId))
+      ? frameSearchResults.findIndex((result) => Number(result?.event?.id) === Number(selectedEventId))
+      : -1;
     if (index < 0) {
       return {
         label: "1 / 1",
         previous: null,
         next: frameSearchResults[0] || null,
-        slot: "query",
       };
     }
     return {
       label: `${index + 1} / ${count}`,
       previous: index > 0 ? frameSearchResults[index - 1] : null,
       next: index < count - 1 ? frameSearchResults[index + 1] : null,
-      slot: "result",
-      queryPrevious: index === 0,
+      deselectOnPrevious: index === 0,
     };
   }, [frameSearchResults, selectedEventId]);
-  const selectedFindSimilarResult = useMemo(
-    () => frameSearchResults.find((result) => Number(result?.event?.id) === Number(selectedEventId)) || null,
-    [frameSearchResults, selectedEventId],
-  );
   const forensicContext = useMemo(() => {
-    if (!frameSearchResults.length) return null;
-    if (selectedFindSimilarResult) {
-      const item = selectedFindSimilarResult.event || {};
-      const epoch = Number.isFinite(Number(item.incident_epoch))
-        ? Number(item.incident_epoch)
-        : (item.created_at ? new Date(item.created_at).getTime() / 1000 : null);
-      return {
-        imageUrl: mediaUrl(semanticResultThumbnailUrl(selectedFindSimilarResult, 720, 90)),
-        timeLabel: Number.isFinite(epoch) ? formatDateTime(epoch, timeZone) : "--",
-        objectLabel: selectedFindSimilarResult.evidence?.object_label
-          || item.labels?.[0]
-          || "Match",
-        kind: item.has_objects !== false ? "object" : "motion",
-      };
-    }
-    if (frameSearchQueryImageUrl) {
-      return {
-        imageUrl: frameSearchQueryImageUrl,
-        timeLabel: Number.isFinite(frameSearchEpoch) ? formatDateTime(frameSearchEpoch, timeZone) : "--",
-        objectLabel: "Query crop",
-        kind: "object",
-      };
-    }
-    return null;
-  }, [
-    frameSearchResults.length,
-    selectedFindSimilarResult,
-    frameSearchQueryImageUrl,
-    frameSearchEpoch,
-    timeZone,
-  ]);
+    if (!frameSearchResults.length || !frameSearchQueryImageUrl) return null;
+    return {
+      imageUrl: frameSearchQueryImageUrl,
+      timeLabel: Number.isFinite(frameSearchQueryEpoch)
+        ? formatDateTime(frameSearchQueryEpoch, timeZone)
+        : "--",
+      kind: "object",
+    };
+  }, [frameSearchResults.length, frameSearchQueryImageUrl, frameSearchQueryEpoch, timeZone]);
   const showForensicPanel = frameSearchResults.length > 0;
 
   useAppEvents(({ type, data }) => {
@@ -1063,13 +1034,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     ? Math.max(0, ...(selectedEvent.objects || []).map((object) => Number(object.confidence) || 0), Number(selectedEvent.confidence) || 0)
     : 0;
   const displayedTimelineEvents = useMemo(() => {
-    if (!selectedEvent || nearbyEvents.some((event) => Number(event.id) === Number(selectedEvent.id))) return nearbyEvents;
+    if (!selectedEvent || viewportEvents.some((event) => Number(event.id) === Number(selectedEvent.id))) return viewportEvents;
     if (
       selectedEvent.incident_epoch < timelineView.startEpoch
       || selectedEvent.incident_epoch > timelineView.endEpoch
-    ) return nearbyEvents;
-    return [...nearbyEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
-  }, [nearbyEvents, selectedEvent, timelineView.endEpoch, timelineView.startEpoch]);
+    ) return viewportEvents;
+    return [...viewportEvents, selectedEvent].sort((left, right) => left.incident_epoch - right.incident_epoch);
+  }, [selectedEvent, timelineView.endEpoch, timelineView.startEpoch, viewportEvents]);
 
   useVisiblePolling(async (signal) => {
     const response = await fetch("/api/semantic-search/status", { signal });
@@ -1858,7 +1829,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   function stepForensicNav(direction) {
     if (direction < 0) {
-      if (forensicNav.slot === "result" && forensicNav.queryPrevious) {
+      if (forensicNav.deselectOnPrevious) {
         setSelectedEventId(null);
         return;
       }
@@ -1943,6 +1914,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setTrailMeta(null);
     clearVisualSearchTrail(window.sessionStorage);
     setFrameSearchQueryImageUrl("");
+    setFrameSearchQueryEpoch(null);
     autoplayRef.current = false;
     setHeroPlaying(false);
     videoRef.current?.pause();
@@ -1963,6 +1935,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setFrameSearchImageReady(false);
     setFrameSearchResults([]);
     setFrameSearchQueryImageUrl("");
+    setFrameSearchQueryEpoch(null);
     setTrailEventIds([]);
     setTrailMeta(null);
     clearVisualSearchTrail(window.sessionStorage);
@@ -2066,6 +2039,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           setFrameSearchQueryImageUrl("");
         }
       }
+      setFrameSearchQueryEpoch(frameSearchEpoch);
       setFrameSearchResults(results);
       setTrailEventIds(nextTrail.eventIds);
       setTrailMeta(nextTrail);
@@ -2584,7 +2558,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                   <small>{forensicNav.label}</small>
                   <button
                     type="button"
-                    disabled={!(forensicNav.slot === "result" && (forensicNav.queryPrevious || forensicNav.previous))}
+                    disabled={!(forensicNav.previous || forensicNav.deselectOnPrevious)}
                     onClick={() => stepForensicNav(-1)}
                     aria-label="Previous Find similar context"
                   ><ChevronLeft size={15} /></button>
@@ -2643,7 +2617,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             </section>
           ) : (
             <section className="recordings-related-events recordings-related-events-full" aria-label="Nearby evidence">
-              <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} in view</span></header>
+              <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} nearby</span></header>
               <div className="recordings-v2-events">
                 {nearbyEvents.length ? nearbyEvents.map((event) => (
                   <button

@@ -68,11 +68,23 @@ export function timelineEventMatchesFilter(event, filter) {
   return true;
 }
 
-export function timelineEvidenceWindow(events, playhead, limit = 12) {
+export function timelineNearbyRadiusSeconds(windowHours) {
+  const hours = Number(windowHours);
+  if (!Number.isFinite(hours) || hours >= 24) return null;
+  if (hours <= 1) return 30 * 60;
+  return (hours / 2) * 3600;
+}
+
+export function timelineEvidenceWindow(events, playhead, limit = 12, radiusSeconds = null) {
   const available = (Array.isArray(events) ? events : []).filter((event) => Number.isFinite(event?.incident_epoch));
   if (!available.length) return [];
   const target = Number.isFinite(playhead) ? playhead : available[0].incident_epoch;
-  return [...available]
+  const radius = Number(radiusSeconds);
+  const bounded = Number.isFinite(radius) && radius > 0
+    ? available.filter((event) => Math.abs(event.incident_epoch - target) <= radius)
+    : available;
+  const pool = bounded.length ? bounded : available;
+  return [...pool]
     .sort((left, right) => Math.abs(left.incident_epoch - target) - Math.abs(right.incident_epoch - target))
     .slice(0, Math.max(1, limit))
     .sort((left, right) => left.incident_epoch - right.incident_epoch);

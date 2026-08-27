@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -45,6 +45,18 @@ assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["car"] }, 
 assert.equal(timelineEventMatchesFilter({ has_objects: false, labels: [] }, "motion"), true);
 const evidence = [0, 10, 20, 30].map((incident_epoch) => ({ incident_epoch }));
 assert.deepEqual(timelineEvidenceWindow(evidence, 18, 2).map((event) => event.incident_epoch), [10, 20]);
+assert.deepEqual(
+  timelineEvidenceWindow(
+    [{ incident_epoch: 0 }, { incident_epoch: 100 }, { incident_epoch: 200 }],
+    100,
+    12,
+    30,
+  ).map((event) => event.incident_epoch),
+  [100],
+);
+assert.equal(timelineNearbyRadiusSeconds(1), 30 * 60);
+assert.equal(timelineNearbyRadiusSeconds(4), 2 * 3600);
+assert.equal(timelineNearbyRadiusSeconds(24), null);
 assert.equal(timelineIdentityDetailEventId({ id: "incident:4", representative_event_id: 41 }), 41);
 assert.equal(timelineIdentityDetailEventId({ id: "incident:4", events: [{ id: 42 }] }), 42);
 assert.equal(timelineIdentityDetailEventId({ id: "not-an-event" }), null);
@@ -138,7 +150,9 @@ assert.match(recordingsSource, /recordings-v2-forensic-context/);
 assert.match(recordingsSource, /forensicNav\.label/);
 assert.match(recordingsSource, /stepForensicNav/);
 assert.match(recordingsSource, /exitForensicMode/);
-assert.match(recordingsSource, /recordings-v2-forensic-exit/);
+assert.match(recordingsSource, /timelineEvidenceWindow/);
+assert.match(recordingsSource, /frameSearchQueryEpoch/);
+assert.doesNotMatch(recordingsSource, /selectedFindSimilarResult/);
 assert.doesNotMatch(recordingsSource, /recordings-event-inspector/);
 assert.match(recordingsSource, /heroMuted/);
 assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);
