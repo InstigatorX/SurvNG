@@ -4,11 +4,21 @@ import {
   appearanceMatchesPath,
   hybridFindSimilarSubtitle,
   hybridMatchLabel,
+  isValidObjectIndex,
   mergeHybridFindSimilarResults,
   resolveObjectTrackId,
   visualMatchLabel,
   visualSearchRequest,
 } from "../src/visualSearch.mjs";
+
+assert.equal(isValidObjectIndex(null), false);
+assert.equal(isValidObjectIndex(undefined), false);
+assert.equal(isValidObjectIndex(""), false);
+assert.equal(isValidObjectIndex(0), true);
+assert.equal(isValidObjectIndex("0"), true);
+assert.equal(isValidObjectIndex(1), true);
+assert.equal(isValidObjectIndex(-1), false);
+assert.equal(isValidObjectIndex(1.5), false);
 
 assert.deepEqual(visualSearchRequest({
   eventId: 42,

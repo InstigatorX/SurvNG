@@ -17,6 +17,11 @@ assert.match(incidentCard, /window\.requestAnimationFrame\(/);
 assert.match(incidentCard, /incident-workspace-chrome/);
 assert.match(incidentCard, /active=\{findSimilarActive\}/);
 assert.match(incidentCard, /RelatedAppearanceIncidents active=\{open\}/);
+assert.match(incidentCard, /isValidObjectIndex\(findSimilarObjectIndex\)/);
+assert.doesNotMatch(
+  incidentCard,
+  /findSimilarActive = Number\.isInteger\(Number\(findSimilarObjectIndex\)\) && Number\(findSimilarObjectIndex\) >= 0/,
+);
 assert.match(incidentCard, /export function IncidentClipLayer\(/);
 assert.match(incidentCard, /export function RelatedAppearanceIncidents\(/);
 assert.match(incidentCard, /export function CrossCameraTracePanel\(/);

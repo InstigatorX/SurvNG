@@ -22,6 +22,7 @@ import {
   appearanceMatchesPath,
   hybridFindSimilarSubtitle,
   hybridMatchLabel,
+  isValidObjectIndex,
   mergeHybridFindSimilarResults,
   resolveObjectTrackId,
   visualSearchObjects,
@@ -608,7 +609,7 @@ export function VisualSimilarIncidents({
   const preferAppearance = appearanceCapableLabel(objectLabel);
   const searchActive = Boolean(active)
     && Number.isInteger(Number(anchorEventId)) && Number(anchorEventId) > 0
-    && Number.isInteger(Number(objectIndex)) && Number(objectIndex) >= 0;
+    && isValidObjectIndex(objectIndex);
 
   useEffect(() => {
     if (!searchActive) {
@@ -969,10 +970,10 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const findSimilarSourceEvent = searchEvent || inspectedEvent;
   const searchableObjects = visualSearchObjects(findSimilarSourceEvent);
   const objects = searchableObjects.filter((object) => object.incident_eligible !== false);
-  const findSimilarActive = Number.isInteger(Number(findSimilarObjectIndex)) && Number(findSimilarObjectIndex) >= 0;
+  const findSimilarActive = isValidObjectIndex(findSimilarObjectIndex);
   const selectedSearchObject = findSimilarActive
     ? searchableObjects[Number(findSimilarObjectIndex)]
-    : (Number.isInteger(Number(selectedObjectIndex)) ? searchableObjects[Number(selectedObjectIndex)] : null);
+    : (isValidObjectIndex(selectedObjectIndex) ? searchableObjects[Number(selectedObjectIndex)] : null);
   const selectedTrackId = resolveObjectTrackId(selectedSearchObject, findSimilarSourceEvent);
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
@@ -1003,8 +1004,8 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         <div className="incident-summary-objects">
           {objects.length ? objects.map((object) => {
             const objectIndex = searchableObjects.indexOf(object);
-            const selected = Number(selectedObjectIndex) === objectIndex;
-            const searching = Number(findSimilarObjectIndex) === objectIndex;
+            const selected = isValidObjectIndex(selectedObjectIndex) && Number(selectedObjectIndex) === objectIndex;
+            const searching = isValidObjectIndex(findSimilarObjectIndex) && Number(findSimilarObjectIndex) === objectIndex;
             const qualifyingObservations = Number(object.temporal_incident_observations);
             const requiredObservations = Number(object.temporal_required_observations);
             const peakConfidence = Number(object.temporal_peak_confidence);
