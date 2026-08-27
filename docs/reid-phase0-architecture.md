@@ -13,7 +13,10 @@ Started on `v1.2` (environment-adaptation MVP):
 - Isolated store: `survng/app/reid_training/` → `reid-training.sqlite3` + `storage/reid_training/`
 - Config-gated collector on tracking complete (`reid_training_collector_enabled`, default off)
 - Same-track samples share an anonymous `person_NNNNNN` identity (`assignment_source=track`)
-- No named-person review UI yet; no training/export yet
+- Review APIs + Admin **ReID Training** workspace (`/admin?section=reid`):
+  - hard cross-camera pairs from appearance matches joined to training crops
+  - actions: same / different / unknown / reject
+- No dataset export / train / OpenVINO promote yet
 
 Enable in detector tracking config:
 

@@ -15,6 +15,8 @@ from typing import Any
 
 import numpy as np
 
+from ..incident_utils import stored_media_path
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -81,6 +83,26 @@ class ReidTrainingStore:
                 """
             )
             connection.execute(
+                """
+                create table if not exists reid_pair_reviews (
+                    id integer primary key autoincrement,
+                    left_event_id integer not null,
+                    left_track_id integer not null,
+                    right_event_id integer not null,
+                    right_track_id integer not null,
+                    left_sample_id text not null default '',
+                    right_sample_id text not null default '',
+                    decision text not null,
+                    similarity real,
+                    created_at text not null,
+                    unique(
+                        left_event_id, left_track_id,
+                        right_event_id, right_track_id
+                    )
+                )
+                """
+            )
+            connection.execute(
                 "create index if not exists idx_reid_samples_event "
                 "on reid_samples(event_id, track_id)"
             )
@@ -92,6 +114,47 @@ class ReidTrainingStore:
                 "create index if not exists idx_reid_samples_person "
                 "on reid_samples(assigned_person_id)"
             )
+            connection.execute(
+                "create index if not exists idx_reid_samples_review "
+                "on reid_samples(review_status, created_at desc)"
+            )
+
+    @staticmethod
+    def _row_to_sample(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            box = json.loads(row["bounding_box_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            box = {}
+        return {
+            "id": int(row["id"]),
+            "sample_id": str(row["sample_id"]),
+            "event_id": int(row["event_id"]),
+            "camera_id": str(row["camera_id"]),
+            "track_id": int(row["track_id"]),
+            "captured_at": str(row["captured_at"]),
+            "bounding_box": box if isinstance(box, dict) else {},
+            "detection_confidence": float(row["detection_confidence"] or 0.0),
+            "crop_path": str(row["crop_path"]),
+            "crop_url": f"/api/reid-training/samples/{row['sample_id']}/crop.jpg",
+            "embedding_size": int(row["embedding_size"] or 0),
+            "model_kind": str(row["model_kind"] or ""),
+            "model_fingerprint": str(row["model_fingerprint"] or ""),
+            "assigned_person_id": (
+                int(row["assigned_person_id"])
+                if row["assigned_person_id"] is not None
+                else None
+            ),
+            "assignment_source": str(row["assignment_source"] or ""),
+            "assignment_confidence": (
+                float(row["assignment_confidence"])
+                if row["assignment_confidence"] is not None
+                else None
+            ),
+            "review_status": str(row["review_status"] or ""),
+            "selection_reason": str(row["selection_reason"] or ""),
+            "quality_score": float(row["quality_score"] or 0.0),
+            "created_at": str(row["created_at"] or ""),
+        }
 
     def create_identity(self, *, display_name: str = "") -> int:
         created_at = _utc_now()
@@ -156,6 +219,254 @@ class ReidTrainingStore:
                 return None
             return int(cursor.lastrowid)
 
+    def get_sample(self, sample_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "select * from reid_samples where sample_id = ?",
+                (str(sample_id),),
+            ).fetchone()
+        return None if row is None else self._row_to_sample(row)
+
+    def list_samples(
+        self,
+        *,
+        limit: int = 50,
+        event_id: int | None = None,
+        camera_id: str | None = None,
+        review_status: str | None = None,
+        person_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 500))
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if event_id is not None:
+            clauses.append("event_id = ?")
+            parameters.append(int(event_id))
+        if camera_id:
+            clauses.append("camera_id = ?")
+            parameters.append(str(camera_id))
+        if review_status:
+            clauses.append("review_status = ?")
+            parameters.append(str(review_status))
+        if person_id is not None:
+            clauses.append("assigned_person_id = ?")
+            parameters.append(int(person_id))
+        where = f"where {' and '.join(clauses)}" if clauses else ""
+        parameters.append(bounded)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                select * from reid_samples
+                {where}
+                order by created_at desc, id desc
+                limit ?
+                """,
+                parameters,
+            ).fetchall()
+        return [self._row_to_sample(row) for row in rows]
+
+    def samples_for_track(
+        self,
+        event_id: int,
+        track_id: int,
+        *,
+        exclude_rejected: bool = True,
+    ) -> list[dict[str, Any]]:
+        clauses = ["event_id = ?", "track_id = ?"]
+        parameters: list[Any] = [int(event_id), int(track_id)]
+        if exclude_rejected:
+            clauses.append("review_status != 'rejected'")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                select * from reid_samples
+                where {' and '.join(clauses)}
+                order by captured_at asc, id asc
+                """,
+                parameters,
+            ).fetchall()
+        return [self._row_to_sample(row) for row in rows]
+
+    def recent_event_ids(self, *, limit: int = 100) -> list[int]:
+        bounded = max(1, min(int(limit), 500))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                select event_id
+                from reid_samples
+                where review_status != 'rejected'
+                group by event_id
+                order by max(created_at) desc
+                limit ?
+                """,
+                (bounded,),
+            ).fetchall()
+        return [int(row["event_id"]) for row in rows]
+
+    def resolve_crop_path(self, sample_id: str) -> Path:
+        sample = self.get_sample(sample_id)
+        if sample is None:
+            raise FileNotFoundError("ReID training sample is unavailable")
+        return stored_media_path(self.storage_dir, sample["crop_path"])
+
+    def pair_reviewed(
+        self,
+        left_event_id: int,
+        left_track_id: int,
+        right_event_id: int,
+        right_track_id: int,
+    ) -> bool:
+        left = (int(left_event_id), int(left_track_id))
+        right = (int(right_event_id), int(right_track_id))
+        if left > right:
+            left, right = right, left
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                select 1 from reid_pair_reviews
+                where left_event_id = ? and left_track_id = ?
+                  and right_event_id = ? and right_track_id = ?
+                """,
+                (*left, *right),
+            ).fetchone()
+        return row is not None
+
+    def record_pair_review(
+        self,
+        *,
+        left_event_id: int,
+        left_track_id: int,
+        right_event_id: int,
+        right_track_id: int,
+        decision: str,
+        similarity: float | None = None,
+        left_sample_id: str = "",
+        right_sample_id: str = "",
+    ) -> None:
+        left = (int(left_event_id), int(left_track_id), str(left_sample_id or ""))
+        right = (int(right_event_id), int(right_track_id), str(right_sample_id or ""))
+        if left[:2] > right[:2]:
+            left, right = right, left
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                insert into reid_pair_reviews (
+                    left_event_id, left_track_id, right_event_id, right_track_id,
+                    left_sample_id, right_sample_id, decision, similarity, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(left_event_id, left_track_id, right_event_id, right_track_id)
+                do update set
+                    decision=excluded.decision,
+                    similarity=excluded.similarity,
+                    left_sample_id=excluded.left_sample_id,
+                    right_sample_id=excluded.right_sample_id,
+                    created_at=excluded.created_at
+                """,
+                (
+                    left[0],
+                    left[1],
+                    right[0],
+                    right[1],
+                    left[2],
+                    right[2],
+                    str(decision),
+                    None if similarity is None else float(similarity),
+                    _utc_now(),
+                ),
+            )
+
+    def merge_track_identities(
+        self,
+        *,
+        keep_person_id: int,
+        absorb_person_id: int,
+    ) -> int:
+        if int(keep_person_id) == int(absorb_person_id):
+            return 0
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                update reid_samples
+                set assigned_person_id = ?,
+                    assignment_source = 'manual',
+                    assignment_confidence = 1.0,
+                    review_status = case
+                        when review_status = 'rejected' then review_status
+                        else 'confirmed'
+                    end
+                where assigned_person_id = ?
+                """,
+                (int(keep_person_id), int(absorb_person_id)),
+            )
+            return int(cursor.rowcount or 0)
+
+    def assign_track_identity(
+        self,
+        event_id: int,
+        track_id: int,
+        person_id: int,
+        *,
+        source: str = "manual",
+        review_status: str = "confirmed",
+    ) -> int:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                update reid_samples
+                set assigned_person_id = ?,
+                    assignment_source = ?,
+                    assignment_confidence = 1.0,
+                    review_status = ?
+                where event_id = ? and track_id = ?
+                  and review_status != 'rejected'
+                """,
+                (
+                    int(person_id),
+                    str(source),
+                    str(review_status),
+                    int(event_id),
+                    int(track_id),
+                ),
+            )
+            return int(cursor.rowcount or 0)
+
+    def set_sample_review_status(
+        self,
+        sample_id: str,
+        review_status: str,
+        *,
+        assignment_source: str | None = None,
+    ) -> bool:
+        assignments = ["review_status = ?"]
+        parameters: list[Any] = [str(review_status)]
+        if assignment_source is not None:
+            assignments.append("assignment_source = ?")
+            parameters.append(str(assignment_source))
+        parameters.append(str(sample_id))
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                update reid_samples
+                set {', '.join(assignments)}
+                where sample_id = ?
+                """,
+                parameters,
+            )
+            return int(cursor.rowcount or 0) > 0
+
+    def reject_track(self, event_id: int, track_id: int) -> int:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                update reid_samples
+                set review_status = 'rejected',
+                    assignment_source = 'manual'
+                where event_id = ? and track_id = ?
+                """,
+                (int(event_id), int(track_id)),
+            )
+            return int(cursor.rowcount or 0)
+
     def count_samples(self, *, event_id: int | None = None) -> int:
         with self._lock, self._connect() as connection:
             if event_id is None:
@@ -180,10 +491,18 @@ class ReidTrainingStore:
             newest = connection.execute(
                 "select max(created_at) as newest_at from reid_samples"
             ).fetchone()
+            pending_pairs = connection.execute(
+                "select count(*) as count from reid_pair_reviews"
+            ).fetchone()
+            auto_samples = connection.execute(
+                "select count(*) as count from reid_samples where review_status = 'auto'"
+            ).fetchone()
         return {
             "database_path": str(self.db_path),
             "crops_root": str(self.crops_root),
             "samples": int(samples["count"] if samples else 0),
             "identities": int(identities["count"] if identities else 0),
+            "auto_samples": int(auto_samples["count"] if auto_samples else 0),
+            "pair_reviews": int(pending_pairs["count"] if pending_pairs else 0),
             "newest_at": str(newest["newest_at"] or "") if newest else "",
         }

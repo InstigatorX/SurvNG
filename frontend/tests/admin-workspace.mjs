@@ -16,6 +16,7 @@ assert.equal(normalizeTelemetrySection("cameras"), "health");
 assert.equal(adminWorkspaceId("telemetry"), "telemetry");
 assert.equal(adminWorkspaceId("invalid"), "general");
 assert.equal(readAdminWorkspace("?section=audit&audit_id=12", "logs"), "audit");
+assert.equal(readAdminWorkspace("?section=reid", "general"), "reid");
 assert.equal(readAdminWorkspace("", "logs"), "logs");
 assert.equal(adminWorkspaceSearch("general", "?audit_id=12"), "");
 assert.equal(adminWorkspaceSearch("general", "", { subsection: "storage" }), "?section=general&subsection=storage");

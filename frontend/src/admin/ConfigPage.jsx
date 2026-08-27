@@ -66,6 +66,7 @@ import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraM
 import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
+import ReidTrainingPanel from "./ReidTrainingPanel.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
   home: LayoutDashboard,
@@ -81,6 +82,7 @@ export const ADMIN_DESTINATION_ICONS = {
   audit: Activity,
   logs: ListTree,
   tuneup: Sparkles,
+  reid: ScanFace,
   diagnostics: Wrench,
   maintenance: HardDrive,
   advisor: Sparkles,
@@ -2355,6 +2357,8 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           </section>
         ) : settingsTab === "calibration" ? (
           <CalibrationLab key={`calibration-${calibrationViewNonce}`} cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
+        ) : settingsTab === "reid" ? (
+          <ReidTrainingPanel />
         ) : settingsTab === "telemetry" ? (
           <>
             <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
