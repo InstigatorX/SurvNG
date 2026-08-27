@@ -46,7 +46,6 @@ import {
   readVisualSearchTrail,
   serializeTrailEventIds,
   trailHitForEvent,
-  trailPosition,
   writeVisualSearchTrail,
 } from "../visualSearchTrail.mjs";
 import {
@@ -54,7 +53,6 @@ import {
   semanticResultThumbnailUrl,
   visualFrameCropFromPoints,
   visualFrameSearchRequest,
-  visualMatchLabel,
 } from "../visualSearch.mjs";
 import { appUrl, mediaUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { ALL_RECORDING_CAMERAS_ID, PREFER_NATIVE_HLS } from "../shared/constants.js";
@@ -930,10 +928,38 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const selectedEvent = selectedEventBase && selectedIncidentIdentity?.eventId === selectedIdentityEventId
     ? mergeTimelineIncidentIdentity(selectedEventBase, selectedIncidentIdentity.detail)
     : selectedEventBase;
-  const trailNav = useMemo(
-    () => trailPosition(trailEventIds, selectedEventId),
-    [selectedEventId, trailEventIds],
-  );
+  const forensicNav = useMemo(() => {
+    const count = frameSearchResults.length;
+    if (!count) {
+      return { label: "1 / 1", previous: null, next: null, slot: "query" };
+    }
+    if (!selectedEventId) {
+      return {
+        label: "1 / 1",
+        previous: null,
+        next: frameSearchResults[0] || null,
+        slot: "query",
+      };
+    }
+    const index = frameSearchResults.findIndex(
+      (result) => Number(result?.event?.id) === Number(selectedEventId),
+    );
+    if (index < 0) {
+      return {
+        label: "1 / 1",
+        previous: null,
+        next: frameSearchResults[0] || null,
+        slot: "query",
+      };
+    }
+    return {
+      label: `${index + 1} / ${count}`,
+      previous: index > 0 ? frameSearchResults[index - 1] : null,
+      next: index < count - 1 ? frameSearchResults[index + 1] : null,
+      slot: "result",
+      queryPrevious: index === 0,
+    };
+  }, [frameSearchResults, selectedEventId]);
   const selectedFindSimilarResult = useMemo(
     () => frameSearchResults.find((result) => Number(result?.event?.id) === Number(selectedEventId)) || null,
     [frameSearchResults, selectedEventId],
@@ -947,7 +973,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         : (item.created_at ? new Date(item.created_at).getTime() / 1000 : null);
       return {
         imageUrl: mediaUrl(semanticResultThumbnailUrl(selectedFindSimilarResult, 720, 90)),
-        timeLabel: Number.isFinite(epoch) ? formatTimeOnly(epoch, timeZone) : "--",
+        timeLabel: Number.isFinite(epoch) ? formatDateTime(epoch, timeZone) : "--",
         objectLabel: selectedFindSimilarResult.evidence?.object_label
           || item.labels?.[0]
           || "Match",
@@ -957,7 +983,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (frameSearchQueryImageUrl) {
       return {
         imageUrl: frameSearchQueryImageUrl,
-        timeLabel: Number.isFinite(frameSearchEpoch) ? formatTimeOnly(frameSearchEpoch, timeZone) : "--",
+        timeLabel: Number.isFinite(frameSearchEpoch) ? formatDateTime(frameSearchEpoch, timeZone) : "--",
         objectLabel: "Query crop",
         kind: "object",
       };
@@ -1100,7 +1126,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setSelectedIncidentIdentity(null);
     setFrameSearchEpoch(null);
     setFrameSearchCrop(null);
-    setFrameSearchResults([]);
     setFrameSearchError("");
   }, [activeCameraId, date, source]);
 
@@ -1831,6 +1856,18 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (sameScope) playAt(epoch, true);
   }
 
+  function stepForensicNav(direction) {
+    if (direction < 0) {
+      if (forensicNav.slot === "result" && forensicNav.queryPrevious) {
+        setSelectedEventId(null);
+        return;
+      }
+      if (forensicNav.previous) openFindSimilarResult(forensicNav.previous);
+      return;
+    }
+    if (forensicNav.next) openFindSimilarResult(forensicNav.next);
+  }
+
   function handleRecordingReady(_player, video) {
     video.playbackRate = normalizedTimelinePlaybackRate(playbackRate);
     if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
@@ -1931,6 +1968,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     clearVisualSearchTrail(window.sessionStorage);
     setFrameSearchLoading(false);
     setFrameSearchError("");
+  }
+
+  function exitForensicMode() {
+    closeFrameSearch();
+    setTrailNotice("");
+    setSelectedEventId(null);
+    setInvestigationOpen(true);
   }
 
   function frameSearchPoint(event, bounds) {
@@ -2525,50 +2569,75 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           {showForensicPanel && forensicContext ? (
             <aside className="recordings-v2-forensic-context" aria-label="Forensic context">
               <header>
-                <span>Forensic</span>
-                {trailNav.count > 1 ? (
-                  <div className="recordings-v2-trail-nav" role="group" aria-label="Find similar trail">
-                    <small>{trailNav.index >= 0 ? trailNav.index + 1 : "—"} / {trailNav.count}</small>
-                    <button type="button" disabled={!trailNav.previousId} onClick={() => selectTrailHit(trailNav.previousId)} aria-label="Previous Find similar hit"><ChevronLeft size={15} /></button>
-                    <button type="button" disabled={!trailNav.nextId} onClick={() => selectTrailHit(trailNav.nextId)} aria-label="Next Find similar hit"><ChevronRight size={15} /></button>
-                  </div>
-                ) : null}
+                <div className="recordings-v2-forensic-title">
+                  <span>Forensic</span>
+                  <button
+                    type="button"
+                    className="recordings-v2-forensic-exit"
+                    onClick={exitForensicMode}
+                    aria-label="Exit forensic mode"
+                  >
+                    Exit
+                  </button>
+                </div>
+                <div className="recordings-v2-trail-nav" role="group" aria-label="Find similar context">
+                  <small>{forensicNav.label}</small>
+                  <button
+                    type="button"
+                    disabled={!(forensicNav.slot === "result" && (forensicNav.queryPrevious || forensicNav.previous))}
+                    onClick={() => stepForensicNav(-1)}
+                    aria-label="Previous Find similar context"
+                  ><ChevronLeft size={15} /></button>
+                  <button
+                    type="button"
+                    disabled={!forensicNav.next}
+                    onClick={() => stepForensicNav(1)}
+                    aria-label="Next Find similar context"
+                  ><ChevronRight size={15} /></button>
+                </div>
               </header>
               {trailNotice ? <p className="recordings-v2-trail-notice">{trailNotice}</p> : null}
               <div className={`recordings-v2-forensic-image ${forensicContext.kind}`}>
                 <img src={forensicContext.imageUrl} alt="" loading="lazy" decoding="async" />
                 <span className="recordings-v2-forensic-hud">
                   <time>{forensicContext.timeLabel}</time>
-                  <b>{forensicContext.objectLabel}</b>
                 </span>
               </div>
             </aside>
           ) : null}
           {frameSearchResults.length ? (
             <section className="recordings-related-events recording-frame-search-results" aria-label="Find similar results">
-              <header><strong>Find similar</strong><span>{frameSearchResults.length} matches</span><button type="button" onClick={closeFrameSearch}>Nearby</button></header>
+              <header><strong>Find similar</strong><span>{frameSearchResults.length} matches</span></header>
               <div className="recordings-v2-events recording-frame-search-results-grid">
                 {frameSearchResults.map((result) => {
                   const item = result.event || {};
                   const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
-                  const observedAt = formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone);
-                  const matchLabel = visualMatchLabel(result.match_strength);
+                  const epoch = Number.isFinite(Number(item.incident_epoch))
+                    ? Number(item.incident_epoch)
+                    : (item.created_at ? new Date(item.created_at).getTime() / 1000 : null);
+                  const observedAt = Number.isFinite(epoch) ? formatDateTime(epoch, timeZone) : "";
+                  const objectLabel = result.evidence?.object_label || item.labels?.[0] || "Match";
                   const selected = Number(item.id) === Number(selectedEventId);
-                  return <article key={item.id} className={selected ? "selected" : ""} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}>
+                  return (
                     <button
+                      key={item.id}
                       type="button"
-                      className={`recording-frame-search-thumb${selected ? " selected" : ""}`}
+                      className={`${item.has_objects !== false ? "object" : "motion"}${selected ? " selected" : ""}`}
                       onClick={() => openFindSimilarResult(result)}
                       aria-pressed={selected}
-                      aria-label={`Seek to ${matchLabel} at ${observedAt}`}
+                      aria-label={`${objectLabel} at ${cameraName}, ${observedAt}`}
+                      title={`${observedAt} · ${objectLabel}`}
                     >
-                      <img src={mediaUrl(semanticResultThumbnailUrl(result, 240, 72))} alt="" loading="lazy" decoding="async" />
-                      <time className="recording-frame-search-hud">{formatTimeOnly(new Date(item.created_at).getTime() / 1000, timeZone)}</time>
+                      <span className="recordings-v2-event-image">
+                        <Radar size={20} />
+                        <img src={mediaUrl(semanticResultThumbnailUrl(result, 240, 72))} alt="" loading="lazy" decoding="async" />
+                      </span>
+                      <span className="recordings-v2-event-caption">
+                        <time>{observedAt}</time>
+                        <b>{objectLabel}</b>
+                      </span>
                     </button>
-                    <nav aria-label={`Actions for ${cameraName} result`}>
-                      <a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a>
-                    </nav>
-                  </article>;
+                  );
                 })}
               </div>
             </section>
@@ -2583,7 +2652,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                     className={`${event.has_objects ? "object" : "motion"}${Number(selectedEvent?.id) === Number(event.id) ? " selected" : ""}`}
                     onClick={() => { setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
                     aria-pressed={Number(selectedEvent?.id) === Number(event.id)}
-                    aria-label={`${event.labels?.length ? event.labels.join(", ") : "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
+                    aria-label={`${event.labels?.length ? event.labels.join(", ") : "Motion only"} at ${formatDateTime(event.incident_epoch, timeZone)}`}
                     title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion only"}`}
                   >
                     <span className="recordings-v2-event-image">
@@ -2591,7 +2660,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                       {event.snapshot_path ? <img src={eventThumbnailUrl(event, 240, 72, { objectFocus: true, aspectWidth: 16, aspectHeight: 11 })} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
                     </span>
                     <span className="recordings-v2-event-caption">
-                      <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
+                      <time>{formatDateTime(event.incident_epoch, timeZone)}</time>
                       <b>{isAllCameras ? `${cameras.find((camera) => camera.id === event.camera_id)?.name || event.camera_id} · ` : ""}{event.labels?.length ? event.labels.join(", ") : "Motion only"}</b>
                     </span>
                   </button>
