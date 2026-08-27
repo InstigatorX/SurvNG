@@ -404,8 +404,8 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
                       });
                     }}
                     aria-pressed={selected}
-                    title={`Select ${box.label}`}
-                    aria-label={`Select ${box.label}`}
+                    title={`Find similar: ${box.label}`}
+                    aria-label={`Find similar incidents for ${box.label}`}
                   >
                     <strong>{label}</strong>
                   </button>
