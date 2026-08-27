@@ -514,23 +514,36 @@
 
 .recording-hero-media {
   position: absolute;
-  inset: 0;
-  right: auto;
-  width: calc(100% - var(--timeline-companion-width, 0px));
+  top: 0;
+  left: 0;
+  right: var(--timeline-hero-inset-right, 0);
+  bottom: var(--timeline-hero-inset-bottom, 0);
   overflow: hidden;
   background: #050708;
 }
 
-.recordings-v2-player.selected-camera-stage:not(:has(.recording-selected-companions)) .recording-hero-media {
-  width: 100%;
+.recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) {
+  --timeline-hero-inset-right: var(--timeline-companion-width, 0px);
+}
+
+.recordings-v2-player.selected-camera-stage:has(.recording-frame-search-overlay) {
+  --timeline-hero-inset-right: 0;
+  --timeline-hero-inset-bottom: 0;
+}
+
+.recordings-v2-player.selected-camera-stage:has(.recording-frame-search-overlay) .recording-selected-companions {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .recordings-v2-player.selected-camera-stage .recording-hero-media>video {
+  position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  right: auto;
+  max-height: none;
   object-fit: contain;
+  background: #050708;
 }
 
 .recording-hero-media:has(.recording-frame-search-overlay)>video {
@@ -644,15 +657,6 @@
 .recordings-v2-player.selected-camera-stage,
 .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) {
   --timeline-companion-width: clamp(148px, 22vw, 280px);
-}
-
-.recordings-v2-player.selected-camera-stage video {
-  right: auto;
-  width: calc(100% - var(--timeline-companion-width));
-}
-
-.recordings-v2-player.selected-camera-stage:not(:has(.recording-selected-companions)) video {
-  width: 100%;
 }
 
 .recording-selected-companions {
@@ -1300,18 +1304,14 @@
     grid-row: 1;
   }
 
-  .recordings-v2-player.selected-camera-stage video {
-    width: 100%;
-    height: calc(100% - 86px);
+  .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) {
+    --timeline-hero-inset-right: 0;
+    --timeline-hero-inset-bottom: 86px;
   }
 
-  .recordings-v2-player.selected-camera-stage .recording-hero-media {
-    width: 100%;
-    height: calc(100% - 86px);
-  }
-
-  .recordings-v2-player.selected-camera-stage:not(:has(.recording-selected-companions)) .recording-hero-media {
-    height: 100%;
+  .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) .recording-hero-controls {
+    right: 8px;
+    bottom: calc(86px + 8px);
   }
 
   .recording-selected-companions {
@@ -1535,18 +1535,9 @@
     flex: 0 0 118px;
   }
 
-  .recordings-v2-player.selected-camera-stage video {
-    width: 100%;
-    height: calc(100% - 86px);
-  }
-
-  .recordings-v2-player.selected-camera-stage .recording-hero-media {
-    width: 100%;
-    height: calc(100% - 86px);
-  }
-
-  .recordings-v2-player.selected-camera-stage:not(:has(.recording-selected-companions)) .recording-hero-media {
-    height: 100%;
+  .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) {
+    --timeline-hero-inset-right: 0;
+    --timeline-hero-inset-bottom: 86px;
   }
 
   .recording-selected-companions {
