@@ -3731,6 +3731,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const [productUpdate, setProductUpdate] = useState(null);
   const [productUpdateBusy, setProductUpdateBusy] = useState(false);
   const [productUpdateError, setProductUpdateError] = useState("");
+  const [productUpdateBranch, setProductUpdateBranch] = useState("");
   const [apiTokenDraft, setApiTokenDraft] = useState({ id: "", name: "", scopes: ["read"] });
   const [apiTokenSecret, setApiTokenSecret] = useState("");
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
@@ -3904,13 +3905,22 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
     }
   }
 
-  async function loadProductUpdate(refreshRemote = false) {
+  async function loadProductUpdate(refreshRemote = false, branch = productUpdateBranch) {
     setProductUpdateError("");
     try {
-      const response = await fetch(`/api/system/update?refresh_remote=${refreshRemote ? "true" : "false"}`, { cache: "no-store" });
+      const params = new URLSearchParams({
+        refresh_remote: refreshRemote ? "true" : "false",
+      });
+      const selectedBranch = String(branch || "").trim();
+      if (selectedBranch) params.set("branch", selectedBranch);
+      const response = await fetch(`/api/system/update?${params.toString()}`, { cache: "no-store" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Unable to load update status.");
       setProductUpdate(payload);
+      const nextBranch = String(payload.target_branch || payload.branch || selectedBranch || "").trim();
+      if (nextBranch && nextBranch !== productUpdateBranch) {
+        setProductUpdateBranch(nextBranch);
+      }
       return payload;
     } catch (error) {
       setProductUpdateError(error.message || "Unable to load update status.");
@@ -3939,9 +3949,16 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   async function applyProductUpdate() {
     if (productUpdateBusy) return;
     const pending = Number(productUpdate?.behind_count || 0);
-    const confirmText = pending > 0
-      ? `Update SurvNG with ${pending} commit${pending === 1 ? "" : "s"} from Git, then restart? Live view and detection will be briefly unavailable.`
-      : "Update SurvNG from Git and restart? Live view and detection will be briefly unavailable.";
+    const targetBranch = String(productUpdateBranch || productUpdate?.target_branch || productUpdate?.branch || "").trim();
+    const switching = Boolean(productUpdate?.needs_checkout);
+    let confirmText = "Update SurvNG from Git and restart? Live view and detection will be briefly unavailable.";
+    if (switching && pending > 0) {
+      confirmText = `Switch to ${targetBranch} and apply ${pending} commit${pending === 1 ? "" : "s"} from Git, then restart? Live view and detection will be briefly unavailable.`;
+    } else if (switching) {
+      confirmText = `Switch SurvNG to branch ${targetBranch} and restart? Live view and detection will be briefly unavailable.`;
+    } else if (pending > 0) {
+      confirmText = `Update SurvNG with ${pending} commit${pending === 1 ? "" : "s"} from ${targetBranch || "Git"}, then restart? Live view and detection will be briefly unavailable.`;
+    }
     if (!window.confirm(confirmText)) return;
     setProductUpdateBusy(true);
     setProductUpdateError("");
@@ -3949,14 +3966,18 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       const previousInstanceResponse = await fetch("/api/system/status", { cache: "no-store" });
       const previousStatus = previousInstanceResponse.ok ? await previousInstanceResponse.json() : {};
       const previousInstance = String(previousStatus.instance_id || "");
-      const response = await fetch("/api/system/update", { method: "POST" });
+      const response = await fetch("/api/system/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(targetBranch ? { branch: targetBranch } : {}),
+      });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Unable to start product update.");
       setProductUpdate(payload);
       const deadline = Date.now() + 900_000;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 1_500));
-        const latest = await loadProductUpdate(false);
+        const latest = await loadProductUpdate(false, targetBranch);
         const jobStatus = latest?.status || latest?.job?.status;
         if (jobStatus === "restarting") {
           const restarted = await waitForUpdatedInstance(previousInstance);
@@ -4073,9 +4094,29 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </span>
             <div className="preference-action-buttons">
               <button type="button" onClick={resetLiveCameraOrder}><RotateCcw size={15} /> Reset Order</button>
+              <label className="product-update-branch">
+                <span>Update branch</span>
+                <select
+                  value={productUpdateBranch || productUpdate?.target_branch || productUpdate?.branch || ""}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setProductUpdateBranch(next);
+                    void loadProductUpdate(false, next);
+                  }}
+                  disabled={productUpdateBusy || ["running", "restarting"].includes(productUpdate?.status) || !(productUpdate?.branches || []).length}
+                  title="Git branch used for Check for Updates / Update"
+                >
+                  {(productUpdate?.branches || []).length
+                    ? (productUpdate.branches.includes(productUpdateBranch) || !productUpdateBranch
+                      ? productUpdate.branches
+                      : [productUpdateBranch, ...productUpdate.branches]
+                    ).map((name) => <option key={name} value={name}>{name}</option>)
+                    : <option value={productUpdateBranch || productUpdate?.branch || ""}>{productUpdateBranch || productUpdate?.branch || "Loading…"}</option>}
+                </select>
+              </label>
               <button
                 type="button"
-                onClick={() => void loadProductUpdate(true)}
+                onClick={() => void loadProductUpdate(true, productUpdateBranch)}
                 disabled={productUpdateBusy || ["running", "restarting"].includes(productUpdate?.status)}
               >
                 <RefreshCcw size={15} />
@@ -4094,7 +4135,9 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                   ? (productUpdate?.job?.phase || "Updating...")
                   : productUpdate?.behind_count
                     ? `Update (${productUpdate.behind_count})`
-                    : "Update"}
+                    : productUpdate?.needs_checkout
+                      ? "Switch Branch"
+                      : "Update"}
               </button>
               <button type="button" className="danger" onClick={restartServer} disabled={["requesting", "waiting"].includes(serverRestart.state)}>
                 {serverRestart.state === "requesting" || serverRestart.state === "waiting" ? <RefreshCcw className="spin" size={15} /> : <Power size={15} />}

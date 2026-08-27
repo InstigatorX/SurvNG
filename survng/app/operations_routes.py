@@ -24,6 +24,10 @@ class RecordingRetentionRequest(BaseModel):
     apply: bool = False
 
 
+class ProductUpdateRequest(BaseModel):
+    branch: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class OperationsRouteDependencies:
     get_manager: Callable[[], AppManager]
@@ -119,13 +123,23 @@ def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
     @router.get("/api/system/update")
-    def product_update_status(refresh_remote: bool = False) -> dict[str, Any]:
-        return deps.product_update.status(refresh_remote=refresh_remote)
+    def product_update_status(
+        refresh_remote: bool = False,
+        branch: str | None = None,
+    ) -> dict[str, Any]:
+        return deps.product_update.status(
+            refresh_remote=refresh_remote,
+            branch=branch,
+        )
 
     @router.post("/api/system/update", status_code=202)
-    def start_product_update() -> dict[str, Any]:
+    def start_product_update(
+        request: ProductUpdateRequest | None = None,
+    ) -> dict[str, Any]:
         try:
-            return deps.product_update.start()
+            return deps.product_update.start(
+                branch=(request.branch if request is not None else None),
+            )
         except RuntimeError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
