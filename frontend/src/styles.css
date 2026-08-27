@@ -1761,6 +1761,10 @@ p {
   color: var(--accent);
 }
 
+.incident-visual-similar-error {
+  color: var(--danger);
+}
+
 .incident-visual-similar-card small {
   display: flex;
   flex-wrap: wrap;
