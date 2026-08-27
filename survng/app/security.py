@@ -446,6 +446,13 @@ _CAMERA_CONTROL_SUFFIXES = frozenset({
     "/detection",
 })
 
+# These POST endpoints only query existing media/index data. They use POST to
+# carry bounded search filters and crop geometry, not to mutate SurvNG state.
+_READ_ONLY_POST_PATHS = frozenset({
+    "/api/semantic-search/visual",
+    "/api/semantic-search/visual-frame",
+})
+
 
 def required_api_scope(method: str, path: str) -> ApiScope:
     normalized_method = method.upper()
@@ -460,6 +467,8 @@ def required_api_scope(method: str, path: str) -> ApiScope:
     if path.startswith("/api/auth/") and path not in {"/api/auth/session", "/api/auth/login", "/api/auth/logout", "/api/auth/bootstrap"}:
         return "admin"
     if normalized_method in {"GET", "HEAD", "OPTIONS"}:
+        return "read"
+    if normalized_method == "POST" and path in _READ_ONLY_POST_PATHS:
         return "read"
     if path.startswith("/api/cameras/") and any(
         path.endswith(suffix) for suffix in _CAMERA_CONTROL_SUFFIXES

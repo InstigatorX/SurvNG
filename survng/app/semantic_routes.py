@@ -256,8 +256,12 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
                     source_kinds=request.source_kinds,
                     start_at=request.start_at,
                     end_at=request.end_at,
-                    limit=maximum * 4,
+                    limit=maximum,
                     minimum_score=request.minimum_score,
+                    exclude_event_ids=(
+                        [request.event_id] if request.exclude_anchor else []
+                    ),
+                    unique_events=True,
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -349,8 +353,14 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
                     source_kinds=request.source_kinds,
                     start_at=request.start_at,
                     end_at=request.end_at,
-                    limit=maximum * 4,
+                    limit=maximum,
                     minimum_score=request.minimum_score,
+                    exclude_event_ids=(
+                        [request.exclude_event_id]
+                        if request.exclude_event_id is not None
+                        else []
+                    ),
+                    unique_events=True,
                 )
             except HTTPException:
                 raise

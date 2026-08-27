@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from survng.app.semantic_routes import (
     SemanticRouteDependencies,
+    SemanticVisualSearchRequest,
     SemanticVisualFrameSearchRequest,
     create_semantic_router,
     normalized_crop_bounds,
@@ -42,6 +43,7 @@ class SemanticVisualFrameRouteTests(TestCase):
                 bbox=[1, 2, 3, 4],
             )
         ])
+        self.search_event_object = Mock(return_value=[])
         self.preview = Mock(return_value=self.preview_path)
         self.manager = SimpleNamespace(
             camera=lambda camera_id: object() if camera_id == "gate" else None,
@@ -52,8 +54,18 @@ class SemanticVisualFrameRouteTests(TestCase):
                     "path": "gate.mp4",
                 }])
             ),
-            semantic_search=SimpleNamespace(search_image=self.search_image),
+            semantic_search=SimpleNamespace(
+                search_image=self.search_image,
+                search_event_object=self.search_event_object,
+            ),
             events=SimpleNamespace(
+                get=Mock(return_value={
+                    "id": 8,
+                    "camera_id": "gate",
+                    "kind": "object",
+                    "created_at": "2026-08-27T15:59:00+00:00",
+                    "objects_json": '[{"label":"person","bbox":[1,2,3,4]}]',
+                }),
                 get_many=Mock(return_value=[{
                     "id": 9,
                     "camera_id": "yard",
@@ -74,6 +86,9 @@ class SemanticVisualFrameRouteTests(TestCase):
         )
         self.handler = create_semantic_router(dependencies).handlers[
             "semantic_visual_frame_search"
+        ]
+        self.event_handler = create_semantic_router(dependencies).handlers[
+            "semantic_visual_search"
         ]
 
     def tearDown(self) -> None:
@@ -141,7 +156,52 @@ class SemanticVisualFrameRouteTests(TestCase):
             self.search_image.call_args.kwargs["source_kinds"],
             ["object_crop"],
         )
-        self.assertEqual(self.search_image.call_args.kwargs["limit"], 200)
+        self.assertEqual(self.search_image.call_args.kwargs["limit"], 50)
+        self.assertEqual(
+            self.search_image.call_args.kwargs["exclude_event_ids"],
+            [8],
+        )
+        self.assertTrue(self.search_image.call_args.kwargs["unique_events"])
+
+    def test_visual_event_search_excludes_anchor_before_unique_result_limit(self) -> None:
+        self.search_event_object.return_value = [
+            SimpleNamespace(
+                event_id=8,
+                score=0.99,
+                rank_score=0.99,
+                match_strength="visual_similarity",
+                component_scores={"full": 0.99},
+                source_kind="object_crop",
+                source_key="person:1",
+                object_label="person",
+                bbox=[2, 3, 4, 5],
+            ),
+            self.search_image.return_value[0],
+            SimpleNamespace(
+                event_id=9,
+                score=0.80,
+                rank_score=0.80,
+                match_strength="visual_similarity",
+                component_scores={"full": 0.80},
+                source_kind="full_frame",
+                source_key="frame",
+                object_label="",
+                bbox=None,
+            ),
+        ]
+
+        payload = self.event_handler(SemanticVisualSearchRequest.model_validate({
+            "event_id": 8,
+            "object_index": 0,
+            "limit": 1,
+        }))
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["results"][0]["event"]["id"], 9)
+        call = self.search_event_object.call_args
+        self.assertEqual(call.kwargs["limit"], 1)
+        self.assertEqual(call.kwargs["exclude_event_ids"], [8])
+        self.assertTrue(call.kwargs["unique_events"])
 
     def test_preview_http_error_is_preserved(self) -> None:
         self.preview.side_effect = HTTPException(

@@ -391,6 +391,8 @@ class SemanticIndex:
         camera_ids: Sequence[str] = (),
         object_labels: Sequence[str] = (),
         source_kinds: Sequence[str] = (),
+        exclude_event_ids: Sequence[int] = (),
+        unique_events: bool = False,
         start_at: str = "",
         end_at: str = "",
         limit: int = 100,
@@ -425,6 +427,15 @@ class SemanticIndex:
                     f"source_kind in ({','.join('?' for _ in normalized_source_kinds)})"
                 )
                 parameters.extend(normalized_source_kinds)
+        if exclude_event_ids:
+            normalized_exclusions = sorted({
+                int(value) for value in exclude_event_ids if int(value) > 0
+            })
+            if normalized_exclusions:
+                clauses.append(
+                    f"event_id not in ({','.join('?' for _ in normalized_exclusions)})"
+                )
+                parameters.extend(normalized_exclusions)
         if start_at:
             clauses.append("captured_at >= ?")
             parameters.append(str(start_at))
@@ -488,6 +499,7 @@ class SemanticIndex:
             best_rank = float(rank_scores.max())
         ordered = np.argsort(rank_scores)[::-1]
         hits: list[SemanticSearchHit] = []
+        seen_event_ids: set[int] = set()
         for candidate_index in ordered:
             if not bool(eligible[candidate_index]):
                 continue
@@ -495,6 +507,9 @@ class SemanticIndex:
             if score < minimum_score:
                 continue
             row = candidates[int(candidate_index)][0]
+            event_id = int(row["event_id"])
+            if unique_events and event_id in seen_event_ids:
+                continue
             bbox: tuple[int, int, int, int] | None = None
             try:
                 values = json.loads(str(row["bbox_json"] or ""))
@@ -515,7 +530,7 @@ class SemanticIndex:
                 if name == "full" or name in plan.required
             }
             hits.append(SemanticSearchHit(
-                event_id=int(row["event_id"]), camera_id=str(row["camera_id"]),
+                event_id=event_id, camera_id=str(row["camera_id"]),
                 captured_at=str(row["captured_at"]), source_kind=str(row["source_kind"]),
                 source_key=str(row["source_key"]), image_path=str(row["image_path"]),
                 object_label=str(row["object_label"]), bbox=bbox, score=score,
@@ -523,6 +538,7 @@ class SemanticIndex:
                 match_strength=match_strength,
                 component_scores=component_scores,
             ))
+            seen_event_ids.add(event_id)
             if len(hits) >= max(1, min(int(limit), 500)):
                 break
         return hits

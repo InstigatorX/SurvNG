@@ -588,6 +588,8 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
 export function VisualSimilarIncidents({
   active = true,
   anchorEventId,
+  visualAnchorEventId = anchorEventId,
+  appearanceAnchorEventId = anchorEventId,
   objectIndex,
   objectLabel,
   trackId = null,
@@ -630,7 +632,7 @@ export function VisualSimilarIncidents({
 
     async function load() {
       const appearancePromise = preferAppearance
-        ? fetch(appUrl(appearanceMatchesPath(anchorEventId, {
+        ? fetch(appUrl(appearanceMatchesPath(appearanceAnchorEventId, {
           hours: 24,
           limit: 12,
           trackId: resolvedTrackId,
@@ -654,7 +656,7 @@ export function VisualSimilarIncidents({
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify(visualSearchRequest({
-          eventId: anchorEventId,
+          eventId: visualAnchorEventId,
           objectIndex,
           limit: 16,
         })),
@@ -713,7 +715,7 @@ export function VisualSimilarIncidents({
       cancelled = true;
       controller.abort();
     };
-  }, [searchActive, anchorEventId, objectIndex, objectLabel, preferAppearance, resolvedTrackId]);
+  }, [searchActive, visualAnchorEventId, appearanceAnchorEventId, objectIndex, objectLabel, preferAppearance, resolvedTrackId]);
 
   if (!searchActive) return null;
 
@@ -952,7 +954,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -1078,6 +1080,8 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
       <VisualSimilarIncidents
         active={findSimilarActive}
         anchorEventId={Number.isInteger(findSimilarAnchorId) && findSimilarAnchorId > 0 ? findSimilarAnchorId : null}
+        visualAnchorEventId={visualAnchorEventId}
+        appearanceAnchorEventId={appearanceAnchorEventId}
         objectIndex={findSimilarObjectIndex}
         objectLabel={selectedSearchObject?.label || ""}
         trackId={selectedTrackId}

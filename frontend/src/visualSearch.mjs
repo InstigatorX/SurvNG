@@ -208,18 +208,27 @@ export function mergeHybridFindSimilarResults({
   const appearanceHits = normalizeAppearanceFindSimilarHits(appearanceMatches);
   const visualHits = normalizeVisualFindSimilarHits(visualResults);
   const merged = [];
-  const seen = new Set();
+  const seenEventIds = new Set();
+  const seenIncidents = new Set();
+  const include = (hit) => {
+    const eventId = Number(hit?.event?.id);
+    const cameraId = String(hit?.event?.camera_id || "").trim();
+    const createdAt = String(hit?.event?.created_at || "").trim();
+    // A single camera trigger can persist multiple event variants. They share
+    // the exact capture timestamp and should remain one Find similar result.
+    const incidentKey = cameraId && createdAt ? `${cameraId}:${createdAt}` : "";
+    if (seenEventIds.has(eventId) || (incidentKey && seenIncidents.has(incidentKey))) return false;
+    seenEventIds.add(eventId);
+    if (incidentKey) seenIncidents.add(incidentKey);
+    return true;
+  };
   for (const hit of appearanceHits) {
-    const eventId = Number(hit.event.id);
-    if (seen.has(eventId)) continue;
-    seen.add(eventId);
+    if (!include(hit)) continue;
     merged.push(hit);
     if (merged.length >= bounded) return merged;
   }
   for (const hit of visualHits) {
-    const eventId = Number(hit.event.id);
-    if (seen.has(eventId)) continue;
-    seen.add(eventId);
+    if (!include(hit)) continue;
     merged.push(hit);
     if (merged.length >= bounded) break;
   }

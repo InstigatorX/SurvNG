@@ -16,6 +16,10 @@ assert.doesNotMatch(incidentCard, /const window = incidentClipWindow\(/);
 assert.match(incidentCard, /window\.requestAnimationFrame\(/);
 assert.match(incidentCard, /incident-workspace-chrome/);
 assert.match(incidentCard, /active=\{findSimilarActive\}/);
+assert.match(incidentCard, /visualAnchorEventId=\{visualAnchorEventId\}/);
+assert.match(incidentCard, /appearanceAnchorEventId=\{appearanceAnchorEventId\}/);
+assert.match(incidentsPage, /visualAnchorEventId=\{visualFindSimilarEventId\}/);
+assert.match(incidentsPage, /appearanceAnchorEventId=\{findSimilarEventId\}/);
 assert.match(incidentCard, /RelatedAppearanceIncidents active=\{open\}/);
 assert.match(incidentCard, /isValidObjectIndex\(findSimilarObjectIndex\)/);
 assert.doesNotMatch(

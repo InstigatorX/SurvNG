@@ -40,6 +40,7 @@ import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
 import {
+  clearVisualSearchTrail,
   readVisualSearchTrail,
   serializeTrailEventIds,
   trailHitForEvent,
@@ -739,6 +740,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const frameSearchImageRef = useRef(null);
   const frameSearchDragRef = useRef(null);
   const frameSearchCropPreviewRef = useRef(null);
+  const frameSearchRequestRef = useRef(null);
   const [cameras, setCameras] = useState([]);
   const [cameraTransitionRoutes, setCameraTransitionRoutes] = useState([]);
   const [cameraId, setCameraId] = useState(initialView.cameraId);
@@ -799,6 +801,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [frameSearchResults, setFrameSearchResults] = useState([]);
   const [frameSearchLoading, setFrameSearchLoading] = useState(false);
   const [frameSearchError, setFrameSearchError] = useState("");
+
+  useEffect(() => () => {
+    frameSearchRequestRef.current?.abort();
+    frameSearchRequestRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (!timelineInspectorOpen) return undefined;
@@ -1840,6 +1847,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   function beginFrameSearch() {
     if (!semanticReady || !activeCameraId || !Number.isFinite(playhead)) return;
+    frameSearchRequestRef.current?.abort();
+    frameSearchRequestRef.current = null;
+    setFrameSearchResults([]);
+    setTrailEventIds([]);
+    setTrailMeta(null);
+    clearVisualSearchTrail(window.sessionStorage);
     autoplayRef.current = false;
     setHeroPlaying(false);
     videoRef.current?.pause();
@@ -1851,11 +1864,18 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function closeFrameSearch() {
+    frameSearchRequestRef.current?.abort();
+    frameSearchRequestRef.current = null;
     frameSearchDragRef.current = null;
     setFrameSearchEpoch(null);
     setFrameSearchCrop(null);
     setFrameSearchImageBounds(null);
     setFrameSearchImageReady(false);
+    setFrameSearchResults([]);
+    setTrailEventIds([]);
+    setTrailMeta(null);
+    clearVisualSearchTrail(window.sessionStorage);
+    setFrameSearchLoading(false);
     setFrameSearchError("");
   }
 
@@ -1907,12 +1927,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   async function submitFrameSearch() {
     if (!frameSearchCrop || frameSearchLoading || !semanticReady) return;
+    frameSearchRequestRef.current?.abort();
+    const controller = new AbortController();
+    frameSearchRequestRef.current = controller;
+    const request = controller.signal;
     setFrameSearchLoading(true);
     setFrameSearchError("");
     try {
       const response = await fetch("/api/semantic-search/visual-frame", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: request,
         body: JSON.stringify(visualFrameSearchRequest({
           cameraId: activeCameraId,
           epoch: frameSearchEpoch,
@@ -1934,15 +1959,21 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         hits: results,
         queryMode: "visual",
       });
+      if (frameSearchRequestRef.current !== controller || request.aborted) return;
       setFrameSearchResults(results);
       setTrailEventIds(nextTrail.eventIds);
       setTrailMeta(nextTrail);
       setInvestigationOpen(true);
       if (!results.length) setFrameSearchError("No similar indexed incidents found.");
     } catch (error) {
-      setFrameSearchError(error.message || "Unable to search this frame.");
+      if (error?.name !== "AbortError" && frameSearchRequestRef.current === controller) {
+        setFrameSearchError(error.message || "Unable to search this frame.");
+      }
     } finally {
-      setFrameSearchLoading(false);
+      if (frameSearchRequestRef.current === controller) {
+        frameSearchRequestRef.current = null;
+        setFrameSearchLoading(false);
+      }
     }
   }
 
@@ -2455,7 +2486,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           </aside> : <aside className="recordings-v2-selected-event empty"><span>Select an event on the timeline to investigate</span></aside>}
           {frameSearchResults.length ? (
             <section className="recordings-related-events recording-frame-search-results" aria-label="Find similar results">
-              <header><strong>Find similar</strong><span>{frameSearchResults.length} matches</span><button type="button" onClick={() => setFrameSearchResults([])}>Nearby</button></header>
+              <header><strong>Find similar</strong><span>{frameSearchResults.length} matches</span><button type="button" onClick={closeFrameSearch}>Nearby</button></header>
               <div>
                 {frameSearchResults.map((result) => {
                   const item = result.event || {};

@@ -97,6 +97,8 @@ class PasswordAndSessionTest(unittest.TestCase):
     def test_auth_and_tls_writes_require_admin_scope(self) -> None:
         self.assertEqual(required_api_scope("GET", "/api/auth/users"), "admin")
         self.assertEqual(required_api_scope("GET", "/api/tls"), "admin")
+        self.assertEqual(required_api_scope("POST", "/api/semantic-search/visual"), "read")
+        self.assertEqual(required_api_scope("POST", "/api/semantic-search/visual-frame"), "read")
         self.assertTrue(is_public_api_path("GET", "/api/auth/session"))
         self.assertTrue(is_public_api_path("POST", "/api/auth/login"))
 

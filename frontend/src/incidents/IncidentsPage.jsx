@@ -159,6 +159,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     );
   const findSimilarEvent = focusedEvent;
   const findSimilarEventId = relatedAnchorEventId;
+  const visualFindSimilarEventId = Number(focusedEvent?.representative_event_id || focusedEvent?.id) || null;
   const focusedSnapshotEvent = displayedEvent;
   const focusedSnapshotEventId = Number(focusedSnapshotEvent?.representative_event_id || focusedSnapshotEvent?.id);
   const focusedLoadedImageSize = Number(focusedImageSize?.eventId) === focusedSnapshotEventId ? focusedImageSize : null;
@@ -747,6 +748,8 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
               faceEvent={displayedEvent}
               searchEvent={findSimilarEvent}
               anchorEventId={findSimilarEventId}
+              visualAnchorEventId={visualFindSimilarEventId}
+              appearanceAnchorEventId={findSimilarEventId}
               selectedRelatedEventId={relatedPreviewEventId}
               relatedLoadingEventId={relatedPreviewLoadingEventId}
               cameraNameById={cameraNameById}

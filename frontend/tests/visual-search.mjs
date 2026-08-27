@@ -140,6 +140,11 @@ const merged = mergeHybridFindSimilarResults({
       match_strength: "possible_match",
       event: { id: 3, camera_id: "c", created_at: "t3" },
     },
+    {
+      score: 0.69,
+      match_strength: "possible_match",
+      event: { id: 4, camera_id: "c", created_at: "t3" },
+    },
   ],
   limit: 8,
 });

@@ -1151,6 +1151,19 @@ class EventApiSerializationTest(unittest.TestCase):
 
         self.assertEqual(invalid.exception.status_code, 422)
 
+    def test_event_thumbnail_rejects_non_finite_aspect_before_storage_access(self) -> None:
+        for aspect_w, aspect_h in ((float("nan"), 9.0), (16.0, float("inf"))):
+            with self.subTest(aspect_w=aspect_w, aspect_h=aspect_h):
+                with self.assertRaises(HTTPException) as invalid:
+                    main.event_thumbnail(
+                        1,
+                        object_focus=True,
+                        aspect_w=aspect_w,
+                        aspect_h=aspect_h,
+                    )
+
+                self.assertEqual(invalid.exception.status_code, 422)
+
     def test_event_thumbnail_is_resized_and_cached_locally(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

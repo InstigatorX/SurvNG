@@ -311,8 +311,21 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         safe_quality = max(50, min(int(quality), 95))
         focus_enabled = bool(object_focus)
         focus_zoom = _clamp_object_focus_zoom(zoom)
-        focus_aspect_w = max(0.0, float(aspect_w))
-        focus_aspect_h = max(0.0, float(aspect_h))
+        try:
+            raw_aspect_w = float(aspect_w)
+            raw_aspect_h = float(aspect_h)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="aspect_w and aspect_h must be numeric",
+            ) from exc
+        if not np.isfinite(raw_aspect_w) or not np.isfinite(raw_aspect_h):
+            raise HTTPException(
+                status_code=422,
+                detail="aspect_w and aspect_h must be finite",
+            )
+        focus_aspect_w = max(0.0, raw_aspect_w)
+        focus_aspect_h = max(0.0, raw_aspect_h)
         if focus_enabled and (focus_aspect_w <= 0 or focus_aspect_h <= 0):
             focus_aspect_w, focus_aspect_h = 16.0, 9.0
 
