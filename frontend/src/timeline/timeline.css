@@ -962,6 +962,41 @@
   text-transform: uppercase;
 }
 
+.recordings-v2-forensic-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.recordings-v2-forensic-exit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 18px;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-solid) 88%, var(--canvas));
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: none;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.recordings-v2-forensic-exit:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--active-ink);
+}
+
+.recordings-v2-forensic-exit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .recordings-v2-forensic-image {
   position: relative;
   min-height: 0;
