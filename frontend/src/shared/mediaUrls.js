@@ -21,6 +21,7 @@ export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}
   });
   if (options?.objectFocus) {
     params.set("object_focus", "true");
+    if (options.incidentEligibleOnly) params.set("incident_eligible_only", "true");
     const zoom = Number(options.zoom);
     if (Number.isFinite(zoom)) params.set("zoom", String(zoom));
     const aspectW = Number(options.aspectWidth);
