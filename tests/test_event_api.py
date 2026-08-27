@@ -1245,6 +1245,45 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertGreater(float(focused_image.mean()), float(full_image.mean()))
             self.assertNotEqual(full.path, focused.path)
 
+    def test_event_thumbnail_focus_bbox_crops_explicit_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "wide.jpg"
+            snapshot.parent.mkdir(parents=True)
+            frame = np.zeros((400, 2000, 3), dtype=np.uint8)
+            frame[:, :] = (10, 10, 10)
+            frame[150:250, 900:1100] = (0, 0, 255)
+            self.assertTrue(cv2.imwrite(str(snapshot), frame))
+            event = {
+                "id": 1,
+                "snapshot_path": str(snapshot),
+                "objects_json": "[]",
+            }
+            fake_manager = SimpleNamespace(
+                storage_dir=root,
+                image_cache=LocalImageCache(root / "cache"),
+                events=SimpleNamespace(get=lambda _event_id: event),
+            )
+
+            with patch.object(main, "manager", fake_manager):
+                full = main.event_thumbnail(1, width=640, quality=90)
+                focused = main.event_thumbnail(
+                    1,
+                    width=640,
+                    quality=90,
+                    focus_bbox="900,150,1100,250",
+                    aspect_w=16,
+                    aspect_h=11,
+                )
+
+            full_image = cv2.imread(str(full.path))
+            focused_image = cv2.imread(str(focused.path))
+            self.assertIsNotNone(full_image)
+            self.assertIsNotNone(focused_image)
+            self.assertLess(focused_image.shape[1], full_image.shape[1])
+            self.assertGreater(float(focused_image.mean()), float(full_image.mean()))
+            self.assertNotEqual(full.path, focused.path)
+
     def test_object_focus_crop_rect_tightens_with_zoom(self) -> None:
         from survng.app.appearance_routes import object_focus_crop_rect
 

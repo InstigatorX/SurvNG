@@ -30,6 +30,8 @@ import {
   Trash2,
   UserRound,
   Video,
+  Volume2,
+  VolumeX,
   X,
 } from "lucide-react";
 import { browserStorage } from "../storage.mjs";
@@ -48,6 +50,8 @@ import {
   writeVisualSearchTrail,
 } from "../visualSearchTrail.mjs";
 import {
+  drawContainedCropPreview,
+  semanticResultThumbnailUrl,
   visualFrameCropFromPoints,
   visualFrameSearchRequest,
   visualMatchLabel,
@@ -721,7 +725,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const initialEpoch = initialView.at;
   const initialDate = !initialQuery.get("date") && initialEpoch ? dateKeyForTimeZone(initialEpoch * 1000, timeZone) : initialView.date;
   const videoRef = useRef(null);
-  const timelineInspectorTriggerRef = useRef(null);
   const desiredEpochRef = useRef(initialEpoch);
   const autoplayRef = useRef(false);
   const codecFallbackRef = useRef(false);
@@ -785,11 +788,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [trailNotice, setTrailNotice] = useState("");
   const [selectedIncidentIdentity, setSelectedIncidentIdentity] = useState(null);
   const [selectedIdentityRevision, setSelectedIdentityRevision] = useState(0);
-  const [timelineInspectorTab, setTimelineInspectorTab] = useState(initialView.inspector);
-  const [timelineInspectorOpen, setTimelineInspectorOpen] = useState(false);
   const [investigationOpen, setInvestigationOpen] = useState(
     () => Boolean(initialView.eventId || initialView.trailEventIds?.length),
   );
+  const [heroMuted, setHeroMuted] = useState(false);
   const [followPlayhead, setFollowPlayhead] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(initialView.speed);
   const [timelineViewportAnchor, setTimelineViewportAnchor] = useState(initialView.at);
@@ -799,6 +801,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [frameSearchImageBounds, setFrameSearchImageBounds] = useState(null);
   const [frameSearchImageReady, setFrameSearchImageReady] = useState(false);
   const [frameSearchResults, setFrameSearchResults] = useState([]);
+  const [frameSearchQueryImageUrl, setFrameSearchQueryImageUrl] = useState("");
   const [frameSearchLoading, setFrameSearchLoading] = useState(false);
   const [frameSearchError, setFrameSearchError] = useState("");
 
@@ -808,15 +811,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }, []);
 
   useEffect(() => {
-    if (!timelineInspectorOpen) return undefined;
-    const closeOnEscape = (event) => {
-      if (event.key !== "Escape") return;
-      setTimelineInspectorOpen(false);
-      window.requestAnimationFrame(() => timelineInspectorTriggerRef.current?.focus());
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [timelineInspectorOpen]);
+    if (videoRef.current) videoRef.current.muted = heroMuted;
+  }, [heroMuted, manifestUrl, nativeSegmentUrl]);
 
   const isAllCameras = false;
   const activeCameraId = resolveTimelineHeroCameraId(cameras, cameraId);
@@ -937,6 +933,43 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     () => trailPosition(trailEventIds, selectedEventId),
     [selectedEventId, trailEventIds],
   );
+  const selectedFindSimilarResult = useMemo(
+    () => frameSearchResults.find((result) => Number(result?.event?.id) === Number(selectedEventId)) || null,
+    [frameSearchResults, selectedEventId],
+  );
+  const forensicContext = useMemo(() => {
+    if (!frameSearchResults.length) return null;
+    if (selectedFindSimilarResult) {
+      const item = selectedFindSimilarResult.event || {};
+      const epoch = Number.isFinite(Number(item.incident_epoch))
+        ? Number(item.incident_epoch)
+        : (item.created_at ? new Date(item.created_at).getTime() / 1000 : null);
+      return {
+        imageUrl: mediaUrl(semanticResultThumbnailUrl(selectedFindSimilarResult, 720, 90)),
+        timeLabel: Number.isFinite(epoch) ? formatTimeOnly(epoch, timeZone) : "--",
+        objectLabel: selectedFindSimilarResult.evidence?.object_label
+          || item.labels?.[0]
+          || "Match",
+        kind: item.has_objects !== false ? "object" : "motion",
+      };
+    }
+    if (frameSearchQueryImageUrl) {
+      return {
+        imageUrl: frameSearchQueryImageUrl,
+        timeLabel: Number.isFinite(frameSearchEpoch) ? formatTimeOnly(frameSearchEpoch, timeZone) : "--",
+        objectLabel: "Query crop",
+        kind: "object",
+      };
+    }
+    return null;
+  }, [
+    frameSearchResults.length,
+    selectedFindSimilarResult,
+    frameSearchQueryImageUrl,
+    frameSearchEpoch,
+    timeZone,
+  ]);
+  const showForensicPanel = frameSearchResults.length > 0;
 
   useAppEvents(({ type, data }) => {
     if (type !== "identity_update") return;
@@ -1021,23 +1054,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const image = frameSearchImageRef.current;
     const canvas = frameSearchCropPreviewRef.current;
     if (!image || !canvas || !frameSearchCrop || !image.naturalWidth || !image.naturalHeight) return;
-    const context = canvas.getContext("2d");
-    const sourceX = Math.floor(frameSearchCrop.x * image.naturalWidth);
-    const sourceY = Math.floor(frameSearchCrop.y * image.naturalHeight);
-    const sourceWidth = Math.max(1, Math.ceil(frameSearchCrop.width * image.naturalWidth));
-    const sourceHeight = Math.max(1, Math.ceil(frameSearchCrop.height * image.naturalHeight));
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(
-      image,
-      sourceX,
-      sourceY,
-      sourceWidth,
-      sourceHeight,
-      0,
-      0,
-      canvas.width,
-      canvas.height,
-    );
+    drawContainedCropPreview(canvas, image, frameSearchCrop);
   }, [frameSearchCrop, frameSearchImageReady]);
 
   useEffect(() => {
@@ -1674,13 +1691,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (selectedEventId) params.set("event", String(selectedEventId));
     const trailValue = serializeTrailEventIds(trailEventIds);
     if (trailValue) params.set("trail", trailValue);
-    if (timelineInspectorTab !== "details") params.set("inspector", timelineInspectorTab);
     if (incidentRangeHours !== 1) params.set("window", String(incidentRangeHours));
     if (!timelineLanes.object) params.set("objects", "0");
     if (!timelineLanes.motion) params.set("motion", "0");
     if (playbackRate !== 1) params.set("speed", String(playbackRate));
     window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
-  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, selectedEventId, source, timelineInspectorTab, timelineLanes.motion, timelineLanes.object, trailEventIds]);
+  }, [activeCameraId, date, dayEnd, dayStart, eventFilter, incidentRangeHours, playbackRate, selectedEventId, source, timelineLanes.motion, timelineLanes.object, trailEventIds]);
 
   useEffect(() => {
     const restoreView = () => {
@@ -1703,7 +1719,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       setSelectedEventId(view.eventId);
       setTrailEventIds(view.trailEventIds || []);
       if (view.eventId || view.trailEventIds?.length) setInvestigationOpen(true);
-      setTimelineInspectorTab(view.inspector);
       setIncidentRangeHours(view.windowHours);
       setTimelineLanes(view.lanes);
       setPlaybackRate(view.speed);
@@ -1771,6 +1786,42 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     checkpointTimelineView();
     setInvestigationOpen(true);
     setSelectedEventId(targetId);
+    desiredEpochRef.current = epoch;
+    setPlayhead(epoch);
+    const sameScope = camera === cameraId && nextDate === date;
+    if (camera !== cameraId) setCameraId(camera);
+    if (nextDate !== date) setDate(nextDate);
+    if (sameScope) playAt(epoch, true);
+  }
+
+  async function openFindSimilarResult(result) {
+    const item = result?.event || {};
+    const eventId = Number(item.id);
+    if (!Number.isInteger(eventId) || eventId <= 0) return;
+    let camera = String(item.camera_id || "");
+    let epoch = Number(item.incident_epoch);
+    if (!Number.isFinite(epoch) && item.created_at) {
+      epoch = new Date(item.created_at).getTime() / 1000;
+    }
+    if (!camera || !Number.isFinite(epoch)) {
+      try {
+        const response = await fetch(`/api/incidents/by-event/${encodeURIComponent(eventId)}`);
+        if (!response.ok) throw new Error("Result unavailable");
+        const detail = await response.json();
+        camera = String(detail.camera_id || camera);
+        epoch = Number(detail.created_epoch);
+        if (!Number.isFinite(epoch) && detail.created_at) {
+          epoch = new Date(detail.created_at).getTime() / 1000;
+        }
+      } catch {
+        return;
+      }
+    }
+    if (!camera || !Number.isFinite(epoch)) return;
+    const nextDate = dateKeyForTimeZone(epoch * 1000, timeZone);
+    setTrailNotice("");
+    setInvestigationOpen(true);
+    setSelectedEventId(eventId);
     desiredEpochRef.current = epoch;
     setPlayhead(epoch);
     const sameScope = camera === cameraId && nextDate === date;
@@ -1853,6 +1904,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setTrailEventIds([]);
     setTrailMeta(null);
     clearVisualSearchTrail(window.sessionStorage);
+    setFrameSearchQueryImageUrl("");
     autoplayRef.current = false;
     setHeroPlaying(false);
     videoRef.current?.pause();
@@ -1872,6 +1924,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setFrameSearchImageBounds(null);
     setFrameSearchImageReady(false);
     setFrameSearchResults([]);
+    setFrameSearchQueryImageUrl("");
     setTrailEventIds([]);
     setTrailMeta(null);
     clearVisualSearchTrail(window.sessionStorage);
@@ -1960,11 +2013,28 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         queryMode: "visual",
       });
       if (frameSearchRequestRef.current !== controller || request.aborted) return;
+      const canvas = frameSearchCropPreviewRef.current;
+      if (canvas) {
+        try {
+          setFrameSearchQueryImageUrl(canvas.toDataURL("image/jpeg", 0.92));
+        } catch {
+          setFrameSearchQueryImageUrl("");
+        }
+      }
       setFrameSearchResults(results);
       setTrailEventIds(nextTrail.eventIds);
       setTrailMeta(nextTrail);
       setInvestigationOpen(true);
-      if (!results.length) setFrameSearchError("No similar indexed incidents found.");
+      setSelectedEventId(null);
+      setFrameSearchEpoch(null);
+      setFrameSearchCrop(null);
+      setFrameSearchImageBounds(null);
+      setFrameSearchImageReady(false);
+      if (!results.length) {
+        setTrailNotice("No similar indexed incidents found.");
+      } else {
+        setTrailNotice("");
+      }
     } catch (error) {
       if (error?.name !== "AbortError" && frameSearchRequestRef.current === controller) {
         setFrameSearchError(error.message || "Unable to search this frame.");
@@ -2191,6 +2261,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             <video
               ref={videoRef}
               src={nativeSegmentUrl}
+              muted={heroMuted}
               playsInline
               preload="auto"
               onLoadedMetadata={handleNativeSegmentMetadata}
@@ -2224,6 +2295,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               startTime={manifestStartTime}
               bufferingGoal={8}
               controls={false}
+              muted={heroMuted}
               playsInline
               preload="auto"
               onReady={handleRecordingReady}
@@ -2285,7 +2357,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               <div className="recording-frame-search-panel">
                 <header><div><Search size={15} /><strong>Select area</strong></div><button type="button" onClick={closeFrameSearch} aria-label="Close frame search"><X size={15} /></button></header>
                 <small>Drag around the person, vehicle, or object to match.</small>
-                {frameSearchCrop ? <canvas ref={frameSearchCropPreviewRef} width="180" height="96" aria-label="Selected crop preview" /> : null}
+                {frameSearchCrop ? <canvas ref={frameSearchCropPreviewRef} width="176" height="121" aria-label="Selected crop preview" /> : null}
                 {frameSearchError ? <p>{frameSearchError}</p> : null}
                 <footer>
                   <span>{semanticStatusLabel}</span>
@@ -2314,6 +2386,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 {heroPlaying ? "Pause" : "Play"}
               </button>
               <button type="button" onClick={() => skipPlayback(10)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
+              <button
+                type="button"
+                onClick={() => setHeroMuted((current) => !current)}
+                aria-label={heroMuted ? "Unmute recording" : "Mute recording"}
+                aria-pressed={heroMuted}
+              >
+                {heroMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+              </button>
               <time>{formatDateTime(playhead, timeZone)}</time>
               <button
                 type="button"
@@ -2440,90 +2520,74 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       </section>
 
       <div id="timeline-investigation" className="recordings-v2-incidents" hidden={!investigationOpen}>
-        <div className="recordings-v2-investigation">
-          {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
-            <header>
-              <span>Selected incident</span>
-              {trailNav.count > 1 ? (
-                <div className="recordings-v2-trail-nav" role="group" aria-label="Find similar trail">
-                  <small>Find similar · {trailNav.index >= 0 ? trailNav.index + 1 : "—"} / {trailNav.count}</small>
-                  <button
-                    type="button"
-                    disabled={!trailNav.previousId}
-                    onClick={() => selectTrailHit(trailNav.previousId)}
-                    title="Previous Find similar hit"
-                    aria-label="Previous Find similar hit"
-                  >
-                    <ChevronLeft size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!trailNav.nextId}
-                    onClick={() => selectTrailHit(trailNav.nextId)}
-                    title="Next Find similar hit"
-                    aria-label="Next Find similar hit"
-                  >
-                    <ChevronRight size={15} />
-                  </button>
-                </div>
-              ) : null}
-            </header>
-            {trailNotice ? <p className="recordings-v2-trail-notice">{trailNotice}</p> : null}
-            <a className="recordings-v2-selected-event-image" href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.representative_event_id || selectedEvent.id)}`)} aria-label={`Open selected incident at ${formatTimeOnly(selectedEvent.incident_epoch, timeZone)}`}>
-              <Radar size={22} />
-              {selectedEvent.snapshot_path || Number(selectedEvent.representative_event_id || selectedEvent.id) > 0 ? (
-                <img src={eventThumbnailUrl(selectedEvent, 720, 95)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} />
-              ) : null}
-              {selectedEventDuration > 0 ? <time>{formatDuration(selectedEventDuration)}</time> : null}
-            </a>
-            <div>
-              <strong>{formatTimeOnly(selectedEvent.incident_epoch, timeZone)}</strong>
-              <small>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</small>
-              <IdentityChip item={selectedEvent} />
-              <em>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion only"}</em>
-              {selectedEventConfidence > 0 ? <span>Confidence {Math.round(selectedEventConfidence * 100)}%</span> : null}
-            </div>
-          </aside> : <aside className="recordings-v2-selected-event empty"><span>Select an event on the timeline to investigate</span></aside>}
+        <div className={`recordings-v2-investigation${showForensicPanel ? " forensic-active" : " nearby-only"}`}>
+          {showForensicPanel && forensicContext ? (
+            <aside className="recordings-v2-forensic-context" aria-label="Forensic context">
+              <header>
+                <span>Forensic</span>
+                {trailNav.count > 1 ? (
+                  <div className="recordings-v2-trail-nav" role="group" aria-label="Find similar trail">
+                    <small>{trailNav.index >= 0 ? trailNav.index + 1 : "—"} / {trailNav.count}</small>
+                    <button type="button" disabled={!trailNav.previousId} onClick={() => selectTrailHit(trailNav.previousId)} aria-label="Previous Find similar hit"><ChevronLeft size={15} /></button>
+                    <button type="button" disabled={!trailNav.nextId} onClick={() => selectTrailHit(trailNav.nextId)} aria-label="Next Find similar hit"><ChevronRight size={15} /></button>
+                  </div>
+                ) : null}
+              </header>
+              {trailNotice ? <p className="recordings-v2-trail-notice">{trailNotice}</p> : null}
+              <div className={`recordings-v2-forensic-image ${forensicContext.kind}`}>
+                <img src={forensicContext.imageUrl} alt="" loading="lazy" decoding="async" />
+                <span className="recordings-v2-forensic-hud">
+                  <time>{forensicContext.timeLabel}</time>
+                  <b>{forensicContext.objectLabel}</b>
+                </span>
+              </div>
+            </aside>
+          ) : null}
           {frameSearchResults.length ? (
             <section className="recordings-related-events recording-frame-search-results" aria-label="Find similar results">
               <header><strong>Find similar</strong><span>{frameSearchResults.length} matches</span><button type="button" onClick={closeFrameSearch}>Nearby</button></header>
-              <div>
+              <div className="recordings-v2-events recording-frame-search-results-grid">
                 {frameSearchResults.map((result) => {
                   const item = result.event || {};
-                  const context = incidentRecordingContext(item);
                   const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
                   const observedAt = formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone);
                   const matchLabel = visualMatchLabel(result.match_strength);
-                  return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}>
-                    <div className="recording-frame-search-thumb">
-                      <img src={mediaUrl(result.snapshot_url)} alt="" loading="lazy" decoding="async" />
+                  const selected = Number(item.id) === Number(selectedEventId);
+                  return <article key={item.id} className={selected ? "selected" : ""} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}>
+                    <button
+                      type="button"
+                      className={`recording-frame-search-thumb${selected ? " selected" : ""}`}
+                      onClick={() => openFindSimilarResult(result)}
+                      aria-pressed={selected}
+                      aria-label={`Seek to ${matchLabel} at ${observedAt}`}
+                    >
+                      <img src={mediaUrl(semanticResultThumbnailUrl(result, 240, 72))} alt="" loading="lazy" decoding="async" />
                       <time className="recording-frame-search-hud">{formatTimeOnly(new Date(item.created_at).getTime() / 1000, timeZone)}</time>
-                    </div>
+                    </button>
                     <nav aria-label={`Actions for ${cameraName} result`}>
                       <a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a>
-                      <a href={recordingsHref(context, { trailEventIds: frameSearchTrailIds, queryMode: "visual" })} onClick={() => writeVisualSearchTrail(window.sessionStorage, { eventIds: frameSearchTrailIds, hits: frameSearchResults, queryMode: "visual" })}><Play size={13} />Timeline</a>
                     </nav>
                   </article>;
                 })}
               </div>
             </section>
           ) : (
-            <section className="recordings-related-events" aria-label="Nearby evidence">
-              <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} in view</span><button ref={timelineInspectorTriggerRef} type="button" className="recordings-inspector-toggle" onClick={() => setTimelineInspectorOpen(true)}>Details</button></header>
+            <section className="recordings-related-events recordings-related-events-full" aria-label="Nearby evidence">
+              <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} in view</span></header>
               <div className="recordings-v2-events">
                 {nearbyEvents.length ? nearbyEvents.map((event) => (
                   <button
                     key={event.id}
                     type="button"
                     className={`${event.has_objects ? "object" : "motion"}${Number(selectedEvent?.id) === Number(event.id) ? " selected" : ""}`}
-                    onClick={() => { checkpointTimelineView(); setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
+                    onClick={() => { setInvestigationOpen(true); setSelectedEventId(event.id); playAt(event.incident_epoch, true); }}
                     aria-pressed={Number(selectedEvent?.id) === Number(event.id)}
                     aria-label={`${event.labels?.length ? event.labels.join(", ") : "Motion only"} at ${formatTimeOnly(event.incident_epoch, timeZone)}`}
                     title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion only"}`}
                   >
                     <span className="recordings-v2-event-image">
                       <Radar size={20} />
-                      {event.snapshot_path ? <img src={eventThumbnailUrl(event, 240, 72)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
+                      {event.snapshot_path ? <img src={eventThumbnailUrl(event, 240, 72, { objectFocus: true, aspectWidth: 16, aspectHeight: 11 })} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
                     </span>
                     <span className="recordings-v2-event-caption">
                       <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
@@ -2534,44 +2598,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               </div>
             </section>
           )}
-          <aside className={`recordings-event-inspector${timelineInspectorOpen ? " open" : ""}`} aria-label="Event inspector">
-            <div className="recordings-event-inspector-tabs" role="tablist" aria-label="Incident information">
-              {[["details", "Details"], ["ai", "AI"], ["related", "Nearby"]].map(([id, label], index, tabs) => <button
-                key={id}
-                id={`timeline-inspector-tab-${id}`}
-                type="button"
-                role="tab"
-                aria-controls="timeline-inspector-panel"
-                aria-selected={timelineInspectorTab === id}
-                tabIndex={timelineInspectorTab === id ? 0 : -1}
-                className={timelineInspectorTab === id ? "active" : ""}
-                onClick={() => { checkpointTimelineView(); setTimelineInspectorTab(id); }}
-                onKeyDown={(event) => {
-                  const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-                  const targetIndex = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : direction ? (index + direction + tabs.length) % tabs.length : -1;
-                  if (targetIndex < 0) return;
-                  event.preventDefault();
-                  checkpointTimelineView();
-                  setTimelineInspectorTab(tabs[targetIndex][0]);
-                  event.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[targetIndex]?.focus();
-                }}
-              >{label}</button>)}
-            </div>
-            <button type="button" className="recordings-inspector-close" onClick={() => { setTimelineInspectorOpen(false); window.requestAnimationFrame(() => timelineInspectorTriggerRef.current?.focus()); }} aria-label="Close event details"><X size={15} /></button>
-            <div id="timeline-inspector-panel" role="tabpanel" aria-labelledby={`timeline-inspector-tab-${timelineInspectorTab}`}>
-              {selectedEvent && timelineInspectorTab === "details" ? <dl>
-                <div><dt>Type</dt><dd>{selectedEvent.labels?.join(", ") || "Motion only"}</dd></div>
-                <div><dt>Start</dt><dd>{formatTimeOnly(selectedEvent.incident_epoch, timeZone)}</dd></div>
-                <div><dt>End</dt><dd>{Number.isFinite(selectedEventEnd) ? formatTimeOnly(selectedEventEnd, timeZone) : "—"}</dd></div>
-                <div><dt>Duration</dt><dd>{selectedEventDuration > 0 ? formatDuration(selectedEventDuration) : "—"}</dd></div>
-                <div><dt>Camera</dt><dd>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</dd></div>
-                <div><dt>Event ID</dt><dd>{selectedEvent.id}</dd></div>
-              </dl> : null}
-              {selectedEvent && timelineInspectorTab === "ai" ? <div className="recordings-inspector-message"><Sparkles size={18} /><strong>Ask about this incident</strong><span>The assistant uses this event’s SurvNG context—no separate summary to generate.</span>{onAskAssistant ? <button type="button" className="recordings-ask-assistant" onClick={() => onAskAssistant("Analyze this incident")}>Ask assistant</button> : null}</div> : null}
-              {selectedEvent && timelineInspectorTab === "related" ? <div className="recordings-inspector-message"><Images size={18} /><strong>{Math.max(0, nearbyEvents.length - 1)} nearby events</strong><span>These events are close in time; they are not asserted to be the same activity.</span></div> : null}
-              {!selectedEvent ? <div className="recordings-inspector-message"><Radar size={18} /><strong>No event selected</strong><span>Choose an event from the timeline or related rail.</span></div> : null}
-            </div>
-          </aside>
         </div>
       </div>
     </main>
@@ -3205,9 +3231,6 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
 
   function pointerValue(event, drag) {
     const pointerX = Math.max(0, Math.min(drag.width, event.clientX - drag.left));
-    if (drag.precise) {
-      return drag.startValue + (pointerX - drag.startX);
-    }
     return (pointerX / drag.width) * duration;
   }
 
@@ -3215,43 +3238,29 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     const rect = event.currentTarget.getBoundingClientRect();
     if (!rect.width) return;
     const pointerX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-    const playheadX = (draftRef.current / duration) * rect.width;
-    const grabRadius = event.pointerType === "touch" ? 24 : 14;
+    const value = (pointerX / rect.width) * duration;
     const drag = {
       pointerId: event.pointerId,
       left: rect.left,
       width: rect.width,
       startX: pointerX,
-      startValue: draftRef.current,
+      startValue: value,
       lastX: pointerX,
-      precise: Math.abs(pointerX - playheadX) <= grabRadius,
-      panning: false,
     };
     dragRef.current = drag;
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
     if (previewManifestUrl && !prefersJpegScrubPreview()) setLocalPreviewEnabled(true);
-    if (drag.precise) setScrubbing(true);
+    setScrubbing(true);
+    updateDraft(value, true);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
-    if (drag.precise) schedulePreview(draftRef.current, true);
+    schedulePreview(value, true);
   }
 
   function moveDrag(event) {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
-    const dx = event.clientX - drag.lastX;
-    if (!drag.precise) {
-      if (!drag.panning && Math.abs(event.clientX - drag.startX) > 10) {
-        drag.panning = true;
-        setScrubbing(false);
-      }
-      if (drag.panning && onPanViewport) {
-        onPanViewport(-(dx / drag.width) * duration);
-        drag.lastX = event.clientX;
-      }
-      return;
-    }
     updateDraft(pointerValue(event, drag), true);
   }
 
@@ -3265,20 +3274,13 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     dragRef.current = null;
     if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
     previewTimerRef.current = null;
-    if (drag.panning) {
-      hidePreviewAfterDelay();
-      return;
-    }
     if (cancelled) {
       updateDraft(offset);
+      setScrubbing(false);
       hidePreviewAfterDelay();
       return;
     }
-    if (!drag.precise) {
-      commit(pointerValue(event, drag));
-      hidePreviewAfterDelay();
-      return;
-    }
+    setScrubbing(false);
     hidePreviewAfterDelay();
     commit(pointerValue(event, drag));
   }

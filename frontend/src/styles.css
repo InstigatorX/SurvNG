@@ -11693,10 +11693,17 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-investigation {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(230px, 28%);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.recordings-v2-investigation.forensic-active {
+  grid-template-columns: 280px minmax(0, 1fr);
+}
+
+.recordings-v2-investigation.nearby-only {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .recordings-v2-selected-event {
