@@ -9,6 +9,7 @@ import signal
 import subprocess
 import threading
 import time
+import traceback
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -569,12 +570,19 @@ def frontend_response(filename: str) -> HTMLResponse:
 class MemoryLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        LOG_LINES.append({
+        row = {
             "time": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": redact_log_message(message),
-        })
+        }
+        if record.exc_info:
+            error = "".join(traceback.format_exception_only(*record.exc_info[:2])).strip()
+            if error:
+                # Keep diagnostics useful without exposing credentials that may
+                # have been included by a dependency's exception message.
+                row["exception"] = redact_log_message(error)[:1000]
+        LOG_LINES.append(row)
 
 
 def redact_log_message(message: str) -> str:

@@ -294,11 +294,16 @@ class MotionEventCoordinator:
             on_trigger("triggers")
         if self.durable_store is not None and not trigger.delivery_job_id:
             trigger.delivery_job_id = trigger.detection_intent_id or uuid.uuid4().hex
-            self.durable_store.enqueue_motion_trigger(
+            inserted = self.durable_store.enqueue_motion_trigger(
                 job_id=trigger.delivery_job_id,
                 camera_id=self.camera_id,
                 payload=trigger.durable_payload(),
             )
+            if not inserted:
+                # The durable record is already queued or running.  Adding a
+                # second in-memory wake for it lets this worker reclaim its
+                # own lease while the first delivery is still active.
+                return True
         try:
             self.queue.put_nowait(trigger)
             self._record_enqueue()

@@ -274,6 +274,34 @@ class EventStore(
         route_admission = bool(route_origin_camera and route_origin_event > 0)
         discarded_snapshot_path = ""
         with self._lock, self._connect() as conn:
+            # A route admission is the authoritative identity for a routed
+            # occurrence.  Resolve it before checking the intent ID: a
+            # coalesced camera-primary batch can carry the route job's stable
+            # ID while selecting a later camera timestamp for its event.
+            if route_admission:
+                admitted = conn.execute(
+                    "select event_id from route_incident_admissions "
+                    "where origin_camera_id = ? and origin_event_id = ? "
+                    "and target_camera_id = ?",
+                    (route_origin_camera, route_origin_event, camera_id),
+                ).fetchone()
+                if admitted is not None:
+                    self._delete_snapshot_if_unreferenced(snapshot_path)
+                    return {
+                        "id": int(admitted["event_id"]),
+                        "camera_id": camera_id,
+                        "kind": kind,
+                        "topic": topic,
+                        "message": message,
+                        "snapshot_path": snapshot_path,
+                        "snapshot_size_bytes": snapshot_size_bytes,
+                        "recording_path": recording_path,
+                        "objects_json": objects_json,
+                        "created_at": created_at,
+                        "detection_intent_id": detection_intent_id,
+                        "created": False,
+                        "route_admission_created": False,
+                    }
             cursor = conn.execute(
                 """
                 insert or ignore into events (

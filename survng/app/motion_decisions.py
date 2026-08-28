@@ -299,6 +299,17 @@ class MotionDecisionOrchestrator:
             priority_triggers or triggers,
             key=lambda item: item.event_at,
         )
+        route_trigger = next(
+            (
+                item
+                for item in triggers
+                if item.prequalified is not None
+                and isinstance(
+                    item.prequalified.features.get("route_detection_watch"), dict
+                )
+            ),
+            None,
+        )
         event_at = representative.event_at
         received_at = min(item.received_at for item in triggers)
         decision_id = next(
@@ -418,6 +429,23 @@ class MotionDecisionOrchestrator:
                 and representative.prequalified.features.get("ema_v2")
             ),
         }
+        if route_trigger is not None and route_trigger.prequalified is not None:
+            # The representative controls the camera-primary presentation and
+            # timing, but route provenance controls the durable occurrence
+            # identity and target admission.  Do not lose it when sources
+            # coalesce into the same decision batch.
+            route_features = route_trigger.prequalified.features
+            qualification["features"] = {
+                **qualification["features"],
+                "route_detection_watch": dict(
+                    route_features["route_detection_watch"]
+                ),
+            }
+            route_intent_id = (
+                route_trigger.delivery_job_id or route_trigger.detection_intent_id
+            )
+            if route_intent_id:
+                qualification["detection_intent_id"] = route_intent_id
         effective_accepted = bool(
             mode in {"off", "audit"}
             or result.accepted

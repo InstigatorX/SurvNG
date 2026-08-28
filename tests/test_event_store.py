@@ -356,6 +356,21 @@ class EventStoreTest(unittest.TestCase):
             store.complete_motion_trigger("trigger-1", lease_owner="generation-a")
             self.assertEqual(store.motion_trigger_status("gate"), {})
 
+    def test_motion_trigger_same_owner_cannot_reclaim_running_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.enqueue_motion_trigger(
+                job_id="trigger-1",
+                camera_id="gate",
+                payload={"topic": "onvif/motion"},
+            )
+            self.assertIsNotNone(store.claim_motion_trigger(
+                "gate", "trigger-1", lease_owner="generation-a"
+            ))
+            self.assertIsNone(store.claim_motion_trigger(
+                "gate", "trigger-1", lease_owner="generation-a"
+            ))
+
     def test_route_watch_consumption_survives_store_recreation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -661,6 +676,26 @@ class EventStoreTest(unittest.TestCase):
                     created_at="2026-08-16T12:00:00+00:00",
                     detection_intent_id="intent-1",
                 )
+
+    def test_route_admission_resolves_before_intent_occurrence_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            first = store.add_event(
+                "gate", "motion",
+                created_at="2026-08-28T13:26:50+00:00",
+                detection_intent_id="route:gate:back-left:58395",
+                route_origin_camera_id="back-left",
+                route_origin_event_id=58395,
+            )
+            replay = store.add_event(
+                "gate", "motion",
+                created_at="2026-08-28T13:27:04+00:00",
+                detection_intent_id="route:gate:back-left:58395",
+                route_origin_camera_id="back-left",
+                route_origin_event_id=58395,
+            )
+            self.assertFalse(replay["created"])
+            self.assertEqual(replay["id"], first["id"])
 
     def test_motion_trigger_lease_is_not_stolen_by_store_recreation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

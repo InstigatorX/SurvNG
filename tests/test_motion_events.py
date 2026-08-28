@@ -164,6 +164,39 @@ def test_route_trigger_replay_with_capture_drift_is_idempotent() -> None:
             )
 
 
+def test_duplicate_durable_trigger_does_not_queue_a_second_wake() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        coordinator = MotionEventCoordinator(
+            queue_size=4,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        route_id = "route:gate:back-left:58395"
+        first = MotionTrigger(
+            topic="adaptive/visual_backup",
+            message="route watch",
+            event_at=datetime(2026, 8, 28, 13, 26, 50, tzinfo=timezone.utc),
+            received_at=100.0,
+            detection_intent_id=route_id,
+        )
+        replay = MotionTrigger(
+            topic="adaptive/visual_backup",
+            message="route watch",
+            event_at=datetime(2026, 8, 28, 13, 27, 4, tzinfo=timezone.utc),
+            received_at=114.0,
+            detection_intent_id=route_id,
+        )
+
+        assert coordinator.enqueue(first, evict_oldest=False)
+        assert coordinator.enqueue(replay, evict_oldest=False)
+        assert coordinator.queue.qsize() == 1
+        assert coordinator.next_trigger(timeout=0.1) is first
+        with pytest.raises(queue.Empty):
+            coordinator.next_trigger(timeout=0.02)
+
+
 def test_durable_wake_eviction_is_not_reported_as_trigger_loss() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = EventStore(Path(tmpdir))

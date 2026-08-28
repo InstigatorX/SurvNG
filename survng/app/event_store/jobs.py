@@ -942,9 +942,9 @@ class EventStoreJobsMixin:
                 due = conn.execute(
                     "select 1 from motion_trigger_jobs where id = ? and camera_id = ? "
                     "and ((state = 'queued' and available_at <= ?) or "
-                    "(state = 'running' and (lease_expires_at <= ? or lease_owner = ?))) "
+                    "(state = 'running' and lease_expires_at <= ?)) "
                     "limit 1",
-                    (job_id, camera_id, now_epoch, now_epoch, lease_owner),
+                    (job_id, camera_id, now_epoch, now_epoch),
                 ).fetchone()
             else:
                 due = conn.execute(
@@ -964,8 +964,8 @@ class EventStoreJobsMixin:
                 row = conn.execute(
                     "select * from motion_trigger_jobs where id = ? and camera_id = ? "
                     "and ((state = 'queued' and available_at <= ?) or "
-                    "(state = 'running' and (lease_expires_at <= ? or lease_owner = ?)))",
-                    (job_id, camera_id, now_epoch, now_epoch, lease_owner),
+                    "(state = 'running' and lease_expires_at <= ?))",
+                    (job_id, camera_id, now_epoch, now_epoch),
                 ).fetchone()
             else:
                 row = conn.execute(

@@ -144,6 +144,61 @@ def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> 
     assert events.active_triggers is None
 
 
+def test_camera_primary_batch_preserves_route_provenance_for_admission() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    qualification = Mock()
+    qualification.settings.return_value = ("off", "default", 640)
+    qualification.rescue_settings.return_value = (False, 0.0)
+    qualification.suppression_verification_rate.return_value = 0.0
+    incidents = Mock()
+    incidents.process.return_value.as_dict.return_value = {
+        "event_id": None,
+        "object_detected": False,
+        "snapshot_path": "",
+    }
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=Mock(),
+        config=MotionQualificationConfig(burst_quiet_seconds=0.1),
+        qualification=qualification,
+        incidents=incidents,
+        media=Mock(),
+        analysis=Mock(),
+        state=Mock(),
+    )
+    now = datetime.now(timezone.utc)
+    route_id = "route:gate:back-left:58395"
+    route = MotionTrigger(
+        topic="adaptive/visual_backup",
+        message="route watch",
+        event_at=now,
+        received_at=now.timestamp(),
+        detection_intent_id=route_id,
+        delivery_job_id=route_id,
+        prequalified=MotionQualificationResult(
+            True, 0.8, 0.5, "route_watch", 1,
+            {"route_detection_watch": {
+                "origin_camera_id": "back-left", "origin_event_id": 58395,
+            }},
+        ),
+    )
+    primary = MotionTrigger(
+        topic="rule/person",
+        message="camera primary",
+        event_at=now,
+        received_at=now.timestamp(),
+    )
+
+    orchestrator._process_batch(MotionTriggerBatch((route, primary)), threading.Event())
+
+    persisted_qualification = incidents.process.call_args.args[3]
+    assert persisted_qualification["detection_intent_id"] == route_id
+    assert persisted_qualification["features"]["route_detection_watch"] == {
+        "origin_camera_id": "back-left", "origin_event_id": 58395,
+    }
+
+
 def test_stopping_batch_skips_qualification_and_releases_adaptive_state() -> None:
     events = MotionEventCoordinator(queue_size=4, retry_limit=2)
     stop_event = threading.Event()
