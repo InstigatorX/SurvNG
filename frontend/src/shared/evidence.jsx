@@ -135,6 +135,7 @@ export function objectBoxes(event, incidentEligibleOnly = false) {
       trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
       label: object.label,
       confidence: object.confidence,
+      depthMeters: Number(object?.depth_stats?.median_m),
       maskPolygon: Array.isArray(object.mask_polygon)
         ? object.mask_polygon.filter((point) => Array.isArray(point) && point.length >= 2).map((point) => [Number(point[0]), Number(point[1])])
         : [],
@@ -384,7 +385,8 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
             {renderedBoxes.map((box, index) => {
               const selected = selectedObjectIndex != null && selectedObjectIndex !== ""
                 && Number(selectedObjectIndex) === Number(box.objectIndex);
-              const label = `${box.label}${box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}`;
+              const distanceLabel = Number.isFinite(box.depthMeters) ? ` ~${box.depthMeters.toFixed(1)}m` : "";
+              const label = `${box.label}${box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}${distanceLabel}`;
               if (onSelectObject) {
                 return (
                   <button

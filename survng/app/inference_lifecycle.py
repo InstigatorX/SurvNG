@@ -15,6 +15,7 @@ from .events import EventStore
 from .faces import FaceStore
 from .inference import (
     InferenceSupervisor,
+    IsolatedDepthEstimator,
     IsolatedFaceRecognizer,
     IsolatedPersonReidentifier,
 )
@@ -79,6 +80,7 @@ class InferenceLifecycle:
         try:
             self.face_recognizer = IsolatedFaceRecognizer(self.detector)
             self.person_reidentifier = IsolatedPersonReidentifier(self.detector)
+            self.depth_estimator = IsolatedDepthEstimator(self.detector)
             faces = FaceStore(
                 storage_dir,
                 config.face_max_observations,

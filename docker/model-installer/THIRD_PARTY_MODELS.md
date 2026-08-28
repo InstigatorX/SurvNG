@@ -8,6 +8,7 @@ are SurvNG MIT code.
 | Model | Artifact | License | Source / notes |
 | --- | --- | --- | --- |
 | YOLO26s (Ultralytics) | OpenVINO IR (`*.xml` / `*.bin`) | **AGPL-3.0** | Exported at install time via `ultralytics`. AGPL obligations apply if you run or modify this detector in production. |
+| YOLO26n-depth (Ultralytics) | OpenVINO IR (`*.xml` / `*.bin`) | **AGPL-3.0** | Exported at install time via `ultralytics` (`yolo depth` task). Optional monocular depth enrichment for incident objects. |
 | person-reidentification-retail-0286 | OpenVINO IR (`*.xml` / `*.bin`) | **Apache-2.0** | Intel Open Model Zoo pre-converted FP16 IR. |
 | vehicle-reid-0001 (OSNet) | **ONNX** (single file) | **MIT** | Intel Open Model Zoo publishes ONNX only for this model; OpenVINO loads it directly. Not converted to IR because OMZ does not ship an IR build. |
 | ArcFace embedding | OpenVINO IR after `ovc` | **OMZ / Apache-2.0** | ONNX from OMZ converted to FP16 IR at install time. |

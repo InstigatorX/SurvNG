@@ -134,6 +134,8 @@ class DetectionZone(BaseModel):
     points: list[ZonePoint] = Field(default_factory=list)
     object_classes: list[str] = Field(default_factory=list)
     confidence_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
+    min_depth_m: float | None = Field(default=None, ge=0.01, le=500.0)
+    max_depth_m: float | None = Field(default=None, ge=0.01, le=500.0)
     behavior: Literal["incident", "ignore", "none"] = "incident"
     exclude_from_ema: bool = False
     trigger: Literal["bottom_center"] = "bottom_center"
@@ -550,6 +552,34 @@ class CameraTransitionRoute(BaseModel):
         return self
 
 
+class DepthConfig(BaseModel):
+    """Optional monocular depth enrichment for incident objects."""
+
+    enabled: bool = False
+    model_path: str = Field(default="", max_length=4096)
+    device: str = Field(default="AUTO", min_length=1, max_length=64)
+    input_size: int = Field(default=768, ge=320, le=1280)
+    min_distance_m: float = Field(default=0.05, ge=0.01, le=500.0)
+    max_distance_m: float = Field(default=150.0, ge=1.0, le=500.0)
+    max_incident_distance_m: float | None = Field(default=None, ge=0.5, le=500.0)
+    store_heatmap: bool = False
+    heatmap_max_width: int = Field(default=192, ge=64, le=512)
+    motion_evidence_enabled: bool = True
+
+    @field_validator("model_path", mode="before")
+    @classmethod
+    def normalize_model_path(cls, value: object) -> str:
+        return str(value or "").strip()
+
+    @field_validator("device", mode="before")
+    @classmethod
+    def normalize_device(cls, value: object) -> str:
+        return str(value or "AUTO").strip().upper() or "AUTO"
+
+    def resolved_model_path(self) -> str:
+        return str(self.model_path or "").strip()
+
+
 class ObjectTrackingConfig(BaseModel):
     enabled: bool = True
     implementation: str = Field(default="survng_hybrid", min_length=1, max_length=64)
@@ -721,6 +751,7 @@ class DetectorConfig(BaseModel):
     object_activity_attribution: Literal["off", "shadow", "enforce"] = "enforce"
     require_incident_zone: bool = True
     labels: list[str] = Field(default_factory=list)
+    depth: DepthConfig = Field(default_factory=DepthConfig)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
 
     @field_validator("event_refinement_stages", mode="before")

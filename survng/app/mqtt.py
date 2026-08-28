@@ -838,20 +838,65 @@ class MqttService:
             for item in cls._event_objects(event):
                 label = str(item.get("label") or "").strip()
                 key = label.lower()
+                depth_stats = item.get("depth_stats") if isinstance(item.get("depth_stats"), dict) else {}
+                try:
+                    median_distance_m = float(depth_stats.get("median_m"))
+                except (TypeError, ValueError):
+                    median_distance_m = None
                 current = object_summaries.setdefault(key, {
                     "label": label,
                     "confidence": 0.0,
                     "zones": set(),
                     "count": 0,
+                    "min_distance_m": None,
+                    "max_distance_m": None,
+                    "median_distance_m": None,
                 })
                 current["confidence"] = max(current["confidence"], float(item.get("confidence") or 0))
                 current["zones"].update(str(zone) for zone in item.get("zones", []) if zone)
                 current["count"] += 1
+                if median_distance_m is not None:
+                    if current["min_distance_m"] is None:
+                        current["min_distance_m"] = median_distance_m
+                    else:
+                        current["min_distance_m"] = min(
+                            float(current["min_distance_m"]),
+                            median_distance_m,
+                        )
+                    if current["max_distance_m"] is None:
+                        current["max_distance_m"] = median_distance_m
+                    else:
+                        current["max_distance_m"] = max(
+                            float(current["max_distance_m"]),
+                            median_distance_m,
+                        )
+                    if current["median_distance_m"] is None:
+                        current["median_distance_m"] = median_distance_m
+                    else:
+                        current["median_distance_m"] = round(
+                            (float(current["median_distance_m"]) + median_distance_m) / 2.0,
+                            2,
+                        )
         objects = [
             {
                 **summary,
                 "confidence": round(float(summary["confidence"]), 4),
                 "zones": sorted(summary["zones"]),
+                **(
+                    {"min_distance_m": round(float(summary["min_distance_m"]), 2)}
+                    if summary["min_distance_m"] is not None
+                    else {}
+                ),
+                **(
+                    {"max_distance_m": round(float(summary["max_distance_m"]), 2)}
+                    if summary["max_distance_m"] is not None
+                    else {}
+                ),
+                **(
+                    {"median_distance_m": round(float(summary["median_distance_m"]), 2)}
+                    if summary["median_distance_m"] is not None
+                    else {}
+                ),
             }
             for summary in sorted(object_summaries.values(), key=lambda item: str(item["label"]).lower())
         ]

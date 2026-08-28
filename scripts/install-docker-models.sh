@@ -23,12 +23,14 @@ CONFIG_PATH="${SURVNG_HOST_CONFIG_PATH:-}"
 CACHE_DIR=""
 DEVICE="CPU"
 YOLO_NAME="yolo26s"
+DEPTH_NAME="yolo26n-depth"
 ENABLE=1
 WRITE_CONFIG=1
 FORCE=0
 NATIVE=0
 LXC_APPARMOR=0
 DO_DETECTOR=1
+DO_DEPTH=1
 DO_PERSON_REID=1
 DO_VEHICLE_REID=1
 DO_SEMANTIC=1
@@ -81,6 +83,7 @@ Options:
   --no-enable          Write model paths but leave enabled flags unchanged
   --skip-config        Download only; do not create or patch config.json
   --skip-detector      Skip YOLO26 OpenVINO export
+  --skip-depth         Skip YOLO26-depth OpenVINO export
   --skip-reid          Skip person and vehicle ReID downloads
   --skip-person-reid   Skip person ReID only
   --skip-vehicle-reid  Skip vehicle ReID only
@@ -116,6 +119,7 @@ Examples:
 Default layout under the models directory (container /models):
   yolo26s_openvino_model/yolo26s.xml
   yolo26s_openvino_model/classes.txt
+  yolo26n-depth_openvino_model/yolo26n-depth.xml
   person_reid_model/person-reidentification-retail-0286.xml
   vehicle_reid_model/vehicle-reid-0001.onnx
   face_model/face-recognition-resnet100-arcface-onnx.xml
@@ -160,6 +164,7 @@ run_installer_container() {
   [[ "$ENABLE" -eq 0 ]] && inner+=(--no-enable)
   [[ "$WRITE_CONFIG" -eq 0 ]] && inner+=(--skip-config)
   [[ "$DO_DETECTOR" -eq 0 ]] && inner+=(--skip-detector)
+  [[ "$DO_DEPTH" -eq 0 ]] && inner+=(--skip-depth)
   [[ "$DO_PERSON_REID" -eq 0 && "$DO_VEHICLE_REID" -eq 0 ]] && inner+=(--skip-reid)
   [[ "$DO_PERSON_REID" -eq 0 ]] && inner+=(--skip-person-reid)
   [[ "$DO_VEHICLE_REID" -eq 0 ]] && inner+=(--skip-vehicle-reid)
@@ -449,6 +454,64 @@ PY
   log "Installed detector: $model_dir"
 }
 
+install_depth() {
+  local model_dir="$MODELS_DIR/${DEPTH_NAME}_openvino_model"
+  local xml="$model_dir/${DEPTH_NAME}.xml"
+  local bin="$model_dir/${DEPTH_NAME}.bin"
+  if [[ -f "$xml" && -f "$bin" && "$FORCE" -eq 0 ]]; then
+    log "Depth model already present: $model_dir"
+    return
+  fi
+  need_cmd curl
+  log "Exporting ${DEPTH_NAME} to OpenVINO FP16 (Ultralytics AGPL-3.0)..."
+  local venv
+  venv="$(venv_root)/depth-venv"
+  local work="$CACHE_DIR/depth-export"
+  mkdir -p "$work"
+  ensure_venv "$venv"
+  install_cpu_torch "$venv"
+  ensure_venv "$venv" \
+    'opencv-python>=4.8,<5' \
+    'ultralytics>=8.4.104,<9' \
+    'openvino>=2025.1'
+  finalize_export_venv "$venv"
+  (
+    cd "$work"
+    "$venv/bin/python" - "$DEPTH_NAME" <<'PY'
+import sys
+from pathlib import Path
+
+from ultralytics import YOLO
+
+name = sys.argv[1]
+exported = YOLO(f"{name}.pt").export(
+    format="openvino",
+    imgsz=768,
+    quantize=16,
+)
+print(Path(exported))
+PY
+  )
+  local exported
+  exported="$(find "$work" -maxdepth 1 -type d -name "${DEPTH_NAME}_openvino_model" -print -quit)"
+  if [[ -z "$exported" || ! -d "$exported" ]]; then
+    err "Depth OpenVINO export did not produce ${DEPTH_NAME}_openvino_model"
+    exit 1
+  fi
+  rm -rf "$model_dir"
+  mkdir -p "$(dirname "$model_dir")"
+  mv "$exported" "$model_dir"
+  if [[ ! -f "$xml" ]]; then
+    local found_xml
+    found_xml="$(find "$model_dir" -maxdepth 2 -name '*.xml' -print -quit)"
+    if [[ -n "$found_xml" && "$(basename "$found_xml")" != "${DEPTH_NAME}.xml" ]]; then
+      err "Expected $xml after depth export; found $found_xml"
+      exit 1
+    fi
+  fi
+  log "Installed depth model: $model_dir"
+}
+
 install_person_reid() {
   local model_dir="$MODELS_DIR/person_reid_model"
   local xml="$model_dir/${PERSON_NAME}.xml"
@@ -615,9 +678,10 @@ patch_config() {
   local face_embed="$MODELS_DIR/face_model/${FACE_ARCFACE_NAME}.xml"
   local face_landmark="$MODELS_DIR/face_model/${FACE_LANDMARK_NAME}.xml"
   local face_detector="$MODELS_DIR/face_detector/${FACE_DETECTOR_NAME}.xml"
+  local depth_xml="$MODELS_DIR/${DEPTH_NAME}_openvino_model/${DEPTH_NAME}.xml"
 
   local detector_container="" labels_container="" person_container=""
-  local vehicle_container="" semantic_container=""
+  local vehicle_container="" semantic_container="" depth_container=""
   local face_embed_container="" face_landmark_container="" face_detector_container=""
   [[ -f "$detector_xml" ]] && detector_container="$(container_path "$detector_xml")"
   [[ -f "$labels" ]] && labels_container="$(container_path "$labels")"
@@ -629,8 +693,9 @@ patch_config() {
   [[ -f "$face_embed" ]] && face_embed_container="$(container_path "$face_embed")"
   [[ -f "$face_landmark" ]] && face_landmark_container="$(container_path "$face_landmark")"
   [[ -f "$face_detector" ]] && face_detector_container="$(container_path "$face_detector")"
+  [[ -f "$depth_xml" ]] && depth_container="$(container_path "$depth_xml")"
 
-  if [[ -z "$detector_container$person_container$vehicle_container$semantic_container$face_embed_container" ]]; then
+  if [[ -z "$detector_container$person_container$vehicle_container$semantic_container$face_embed_container$depth_container" ]]; then
     err "No installed models found under $MODELS_DIR; not writing config.json"
     exit 1
   fi
@@ -639,7 +704,8 @@ patch_config() {
   "$PYTHON_BIN" - "$CONFIG_PATH" "$DEVICE" "$ENABLE" \
     "$detector_container" "$labels_container" "$person_container" \
     "$vehicle_container" "$semantic_container" \
-    "$face_embed_container" "$face_landmark_container" "$face_detector_container" <<'PY'
+    "$face_embed_container" "$face_landmark_container" "$face_detector_container" \
+    "$depth_container" <<'PY'
 import json
 import os
 import sys
@@ -657,7 +723,8 @@ enable = sys.argv[3] == "1"
     face_embed,
     face_landmark,
     face_detector,
-) = sys.argv[4:12]
+    depth_xml,
+) = sys.argv[4:13]
 
 DOCKER_DEFAULT = {
     "base_path": "/survng",
@@ -820,6 +887,14 @@ if face_embed or face_landmark or face_detector:
     if enable and face_embed and face_landmark:
         detector["face_recognition_enabled"] = True
 
+if depth_xml:
+    depth = section("detector", "depth")
+    depth["model_path"] = depth_xml
+    depth.setdefault("device", device)
+    depth.setdefault("input_size", 768)
+    if enable:
+        depth["enabled"] = True
+
 temporary = config_path.with_name(config_path.name + ".tmp")
 temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 os.replace(temporary, config_path)
@@ -850,6 +925,7 @@ while [[ $# -gt 0 ]]; do
     --no-enable) ENABLE=0; shift ;;
     --skip-config) WRITE_CONFIG=0; shift ;;
     --skip-detector) DO_DETECTOR=0; shift ;;
+    --skip-depth) DO_DEPTH=0; shift ;;
     --skip-reid) DO_PERSON_REID=0; DO_VEHICLE_REID=0; shift ;;
     --skip-person-reid) DO_PERSON_REID=0; shift ;;
     --skip-vehicle-reid) DO_VEHICLE_REID=0; shift ;;
@@ -900,6 +976,9 @@ log "Attributions: docker/model-installer/THIRD_PARTY_MODELS.md"
 
 if [[ "$DO_DETECTOR" -eq 1 ]]; then
   install_detector || note_step_failure "detector export"
+fi
+if [[ "$DO_DEPTH" -eq 1 ]]; then
+  install_depth || note_step_failure "depth export"
 fi
 if [[ "$DO_PERSON_REID" -eq 1 ]]; then
   install_person_reid || note_step_failure "person ReID download"
