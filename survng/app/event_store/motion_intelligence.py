@@ -725,6 +725,13 @@ class EventStoreMotionIntelligenceMixin:
                 "active_followup_objects": 0,
                 "active_followup_no_object": 0,
                 "active_followup_incomplete": 0,
+                "depth_shadow": {
+                    "decisions": 0,
+                    "objects_evaluated": 0,
+                    "valid_depth": 0,
+                    "near_depth": 0,
+                    "would_admit": 0,
+                },
             })
 
         for row in event_rows:
@@ -763,6 +770,28 @@ class EventStoreMotionIntelligenceMixin:
             )
 
         for row in audit_rows:
+            try:
+                features = json.loads(str(row["features_json"] or "{}"))
+            except (json.JSONDecodeError, TypeError):
+                features = {}
+            depth_attribution = (
+                features.get("depth_attribution")
+                if isinstance(features, dict)
+                else None
+            )
+            if isinstance(depth_attribution, dict):
+                summary = summary_for(
+                    str(row["camera_id"]), str(row["mode"] or "unknown")
+                )
+                depth_shadow = summary["depth_shadow"]
+                depth_shadow["decisions"] += 1
+                for key, field in (
+                    ("evaluated_count", "objects_evaluated"),
+                    ("valid_depth_count", "valid_depth"),
+                    ("near_depth_count", "near_depth"),
+                    ("would_admit_count", "would_admit"),
+                ):
+                    depth_shadow[field] += max(0, int(depth_attribution.get(key) or 0))
             if row["event_id"] is not None:
                 continue
             summary = summary_for(str(row["camera_id"]), str(row["mode"] or "unknown"))
@@ -799,10 +828,6 @@ class EventStoreMotionIntelligenceMixin:
                 )
             else:
                 summary["visual_filtered"] += 1
-                try:
-                    features = json.loads(str(row["features_json"] or "{}"))
-                except (json.JSONDecodeError, TypeError):
-                    features = {}
                 summary["suppression_verification_checks"] += int(
                     bool(features.get("suppression_verification"))
                 )
