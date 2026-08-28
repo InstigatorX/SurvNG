@@ -288,8 +288,6 @@ p {
 
 .header-stat small {
   overflow: hidden;
-  font-size: 9px;
-  font-weight: 760;
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -298,7 +296,6 @@ p {
 .header-stat strong {
   overflow: hidden;
   color: var(--ink);
-  font-size: 12px;
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -7011,11 +7008,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 @media (max-width: 760px) {
   .faces-page {
-    grid-template-columns: 1fr;
-    height: auto;
     min-height: calc(100dvh - 52px);
     padding: 6px;
-    overflow: visible;
   }
 
   .faces-commandbar {
@@ -7041,7 +7035,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .faces-toolbar {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
     gap: 5px;
     padding: 6px;
   }
@@ -7062,7 +7055,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .faces-mobile-person-filter {
     width: 100%;
     min-width: 0;
-    min-height: 44px;
   }
 
   .faces-mobile-person-filter {
@@ -11509,9 +11501,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 @media (max-width: 760px) {
   .recordings-v2-page {
-    height: auto;
     min-height: calc(100dvh - 52px);
-    overflow: visible;
   }
 
   .recordings-tabs {
@@ -11823,8 +11813,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     column-count: initial;
-    gap: 7px;
-    padding: 7px;
   }
 
   .live-camera-grid .camera-tile {
@@ -12215,7 +12203,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .incident-filter-selects select,
   .incident-filter-selects input {
-    min-height: 30px;
     border-radius: 7px;
     font-size: 11px;
     padding: 0 7px;
@@ -12293,9 +12280,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .snapshot-focus-button {
     top: 5px;
     left: 5px;
-    width: 25px;
-    min-width: 25px;
-    min-height: 25px;
   }
 
   .object-box {
