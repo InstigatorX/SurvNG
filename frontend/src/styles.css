@@ -6719,10 +6719,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   gap: 10px;
 }
 
-.faces-panel-heading {
-  padding: 4px 4px 12px;
-}
-
 .faces-panel-heading h2 {
   margin: 0;
   font-size: 17px;
@@ -6817,10 +6813,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   background: transparent;
   padding: 5px;
   text-align: left;
-}
-
-.face-person-row.active {
-  background: var(--accent-soft);
 }
 
 .face-person-select {
