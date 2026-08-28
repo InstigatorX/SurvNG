@@ -1965,10 +1965,6 @@ p {
   grid-template-columns: minmax(240px, 320px) repeat(3, minmax(180px, 1fr));
 }
 
-.settings-grid {
-  align-items: start;
-}
-
 .settings-header-status {
   flex: 0 1 auto;
   margin-left: auto;
@@ -4519,15 +4515,6 @@ button.live-overlay-backdrop:active {
   font-size: 11px;
 }
 
-.log-command-controls select,
-.log-command-controls button {
-  min-height: 44px;
-}
-
-#admin-panel-cameras>.camera-section-tabs {
-  margin: 0 var(--admin-panel-inset);
-}
-
 #admin-panel-general>.section-head,
 #admin-panel-cameras>.section-head {
   position: sticky;
@@ -5574,20 +5561,6 @@ section.detection-settings-card {
 }
 
 @media (max-width: 760px) {
-  .settings-grid .camera-tree .section-head {
-    display: flex;
-  }
-
-  .settings-grid .camera-tree-actions {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-
-  .settings-grid .camera-tree-actions button {
-    flex: 1 1 auto;
-    min-height: 44px;
-  }
-
   .settings-status-stack {
     grid-column: 1 / -1;
     width: 100%;
@@ -8282,10 +8255,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
 }
 
-.telemetry-summary-grid.overview-summary {
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-}
-
 .telemetry-summary-grid.camera-summary {
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }
@@ -8509,10 +8478,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .telemetry-section-head h3,
 .telemetry-section-head p {
   margin: 0;
-}
-
-.telemetry-section-head h3 {
-  font-size: 14px;
 }
 
 .telemetry-section-head p {
@@ -9776,11 +9741,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-height: min(680px, calc(100vh - 220px));
-}
-
-.log-toolbar {
-  border-bottom: 1px solid var(--line);
-  padding: 12px 14px;
 }
 
 .log-filter-control {
