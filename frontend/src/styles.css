@@ -565,10 +565,7 @@ p {
 }
 
 .incidents-desktop-page {
-  height: calc(100dvh - 80px);
-  min-height: 620px;
   overflow: hidden;
-  padding: 10px;
 }
 
 .incidents-desktop-shell {
@@ -582,16 +579,11 @@ p {
 
 .incidents-desktop-toolbar {
   display: grid;
-  gap: 6px;
   border-bottom: 1px solid var(--line);
-  padding: 7px 10px;
 }
 
 .incidents-command-primary {
   display: grid;
-  grid-template-columns: auto minmax(132px, 160px) minmax(280px, 1fr) auto;
-  align-items: end;
-  gap: 8px;
 }
 
 .incidents-command-filters {
@@ -619,10 +611,8 @@ p {
 .incident-active-filters button {
   flex: 0 0 auto;
   min-height: 24px;
-  border-radius: 999px;
   color: var(--muted);
   font-size: 9px;
-  font-weight: 800;
   line-height: 22px;
   padding: 0 8px;
 }
@@ -649,10 +639,7 @@ p {
   grid-template-columns: auto minmax(120px, 1fr) auto auto;
   align-items: center;
   gap: 5px;
-  min-height: 34px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--control-muted);
   padding: 3px 4px 3px 8px;
 }
 
@@ -677,8 +664,6 @@ p {
 }
 
 .incident-semantic-search button {
-  min-height: 26px;
-  border-radius: 6px;
   padding: 0 8px;
   font-size: 10px;
 }
@@ -741,12 +726,10 @@ p {
   min-height: 0;
   overflow: hidden;
   border-right: 1px solid var(--line);
-  background: var(--panel-subtle);
 }
 
 .incident-rail-head {
   display: flex;
-  min-height: 42px;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -756,13 +739,9 @@ p {
 
 .density-control {
   display: flex;
-  gap: 4px;
 }
 
 .density-control button {
-  width: 30px;
-  min-width: 30px;
-  min-height: 28px;
   padding: 0;
 }
 
@@ -773,7 +752,6 @@ p {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 8px;
 }
 
 .incident-rail.compact .incident-rail-list {
@@ -825,7 +803,6 @@ p {
 
 .incident-investigation {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -900,20 +877,15 @@ p {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  padding: 10px;
 }
 
 .incident-focus-arrow {
   position: absolute;
   top: 50%;
   z-index: 12;
-  width: 42px;
-  min-width: 42px;
-  min-height: 54px;
   border-color: rgba(255, 255, 255, 0.18);
   background: rgba(3, 10, 12, 0.7);
   color: #fff;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
   transform: translateY(-50%);
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
@@ -942,40 +914,26 @@ p {
 
 .incident-workspace-chrome {
   position: absolute;
-  top: 8px;
-  right: 8px;
   z-index: 14;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 6px;
 }
 
 .incident-workspace-view-toggle {
   position: relative;
-  top: auto;
-  right: auto;
   z-index: auto;
   display: flex;
-  gap: 3px;
   border: 1px solid rgba(255, 255, 255, .2);
-  border-radius: 8px;
   background: rgba(3, 10, 12, .78);
-  box-shadow: 0 5px 18px rgba(0, 0, 0, .28);
-  padding: 3px;
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
 }
 
 .incident-return-selected {
-  min-height: 30px;
   border: 1px solid rgba(255, 255, 255, .2);
-  border-radius: 8px;
   background: rgba(3, 10, 12, .78);
-  box-shadow: 0 5px 18px rgba(0, 0, 0, .28);
   color: rgba(255, 255, 255, .9);
-  font-size: 10px;
-  font-weight: 550;
   padding: 4px 10px;
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
@@ -988,11 +946,9 @@ p {
 
 .incident-workspace-view-toggle button {
   display: inline-flex;
-  min-height: 27px;
   align-items: center;
   gap: 5px;
   border: 0;
-  border-radius: 6px;
   background: transparent;
   color: rgba(255, 255, 255, .72);
   font-size: 10px;
@@ -1216,15 +1172,12 @@ p {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  border-left: 1px solid var(--line);
-  background: var(--panel-subtle);
   padding: 10px;
 }
 
 .incident-inspector-head {
   display: grid;
   gap: 8px;
-  border-bottom: 1px solid var(--line);
   padding-bottom: 10px;
 }
 
@@ -1242,14 +1195,10 @@ p {
 .incident-inspector section {
   display: grid;
   gap: 7px;
-  border-bottom: 1px solid var(--line);
-  padding: 12px 0;
 }
 
 .incident-inspector h3 {
   margin: 0;
-  font-size: 11px;
-  text-transform: uppercase;
 }
 
 .incident-related-head {
@@ -1891,7 +1840,6 @@ p {
 @media (max-width: 1199px) and (min-width: 761px) {
   .incidents-desktop-page.with-inspector .incidents-desktop-workspace {
     position: relative;
-    grid-template-columns: minmax(260px, 310px) minmax(0, 1fr);
   }
 
   .incident-inspector {
