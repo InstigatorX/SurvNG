@@ -515,7 +515,7 @@
   }
 
   .telemetry-summary-grid.overview-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .telemetry-trend-grid.two-column {
@@ -971,6 +971,10 @@ a.button {
 }
 
 @media (max-width: 760px) {
+  .reid-pair-columns {
+    grid-template-columns: 1fr;
+  }
+
   .reid-sample-strip-row figure,
   .reid-sample-strip-row img {
     width: 80px;
