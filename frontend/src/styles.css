@@ -11673,13 +11673,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   overflow: hidden;
 }
 
-.recordings-v2-incidents-tools {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-
 .recordings-v2-filter-label {
   color: var(--muted);
   font-size: 10px;
@@ -11718,21 +11711,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   overscroll-behavior-inline: contain;
   touch-action: pan-x;
   -webkit-overflow-scrolling: touch;
-}
-
-.recordings-v2-investigation {
-  display: grid;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.recordings-v2-investigation.forensic-active {
-  grid-template-columns: 280px minmax(0, 1fr);
-}
-
-.recordings-v2-investigation.nearby-only {
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .recordings-v2-selected-event {
