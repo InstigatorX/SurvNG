@@ -9832,16 +9832,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-page {
   display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 12px;
-  height: calc(100dvh - 76px);
-  min-height: calc(100dvh - 76px);
   box-sizing: border-box;
-  padding: 12px;
   overflow: hidden;
-  border-top: 1px solid var(--line);
-  background: var(--canvas);
 }
 
 .recordings-tabs {
@@ -9854,27 +9846,13 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-commandbar {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  gap: 12px;
-  min-height: 42px;
-  padding: 4px 6px;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
 }
 
 .recordings-v2-cameras {
   display: grid;
-  grid-column: 1;
-  grid-row: 2;
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
   overflow: hidden;
 }
 
@@ -10226,17 +10204,9 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-workspace {
   display: grid;
-  grid-column: 2;
-  grid-row: 2;
-  grid-template-rows: minmax(260px, 1fr) auto clamp(150px, 19dvh, 210px);
   min-width: 0;
   min-height: 0;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
   overflow: hidden;
-  padding: 8px;
 }
 
 .export-center-workspace {
@@ -10674,15 +10644,12 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .recordings-v2-player {
-  position: relative;
   display: grid;
   place-items: center;
   width: 100%;
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--line);
-  background: #050708;
 }
 
 .recordings-v2-player video {
@@ -10807,10 +10774,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .recording-selected-companions {
   position: absolute;
   inset: 0 0 0 auto;
-  display: grid;
-  width: var(--timeline-companion-width, 40%);
-  grid-template-columns: repeat(var(--companion-columns, 2), minmax(0, 1fr));
-  grid-template-rows: repeat(var(--companion-rows, 3), minmax(0, 1fr));
   gap: var(--timeline-media-gap);
   background: #020608;
 }
@@ -11100,10 +11063,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-controls {
   display: grid;
-  gap: 6px;
-  border: 1px solid var(--line);
   border-top: 0;
-  padding: 5px 8px 6px;
 }
 
 .recordings-v2-player-source {
@@ -11139,7 +11099,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 30px;
   border-color: var(--line-strong);
   background: var(--panel-soft);
   color: var(--text);
@@ -11174,17 +11133,13 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-timeline {
   position: relative;
-  height: 84px;
   padding-top: 0;
 }
 
 .recordings-v2-track {
   position: relative;
-  height: 70px;
   overflow: visible;
   border: 1px solid var(--line);
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--control-muted) 82%, transparent);
 }
 
 .recordings-v2-track>span {
@@ -11229,8 +11184,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   top: -1px;
   left: 4px;
   color: var(--muted);
-  font-size: 8px;
-  font-weight: 760;
   line-height: 1;
   white-space: nowrap;
 }
@@ -11257,7 +11210,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   position: absolute;
   z-index: 2;
   top: 2px;
-  min-width: 3px;
   height: 9px;
   border-radius: 2px;
 }
@@ -11283,21 +11235,16 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   bottom: -5px;
   width: 2px;
   transform: translateX(-1px);
-  background: #f3b33d;
   pointer-events: none;
 }
 
 .recordings-v2-track output {
   position: absolute;
   z-index: 6;
-  top: -30px;
   transform: translateX(-50%);
   border: 1px solid var(--line);
   border-radius: 5px;
-  background: var(--panel-solid);
-  color: var(--ink);
   font-size: 11px;
-  font-weight: 900;
   padding: 4px 6px;
   pointer-events: none;
 }
@@ -11597,8 +11544,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-incidents {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  border: 1px solid var(--line);
   border-top: 0;
   min-width: 0;
   min-height: 0;
@@ -11607,38 +11552,30 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-filter-label {
   color: var(--muted);
-  font-size: 10px;
-  font-weight: 800;
 }
 
 .recordings-v2-event-filter {
   display: flex;
-  gap: 5px;
 }
 
 .recordings-v2-event-filter button {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 30px;
   padding: 4px 9px;
 }
 
 .recordings-v2-event-filter button.active {
-  border-color: rgba(15, 118, 110, .45);
   background: var(--active);
   color: var(--active-ink);
 }
 
 .recordings-v2-events {
   display: flex;
-  align-items: stretch;
-  gap: 7px;
   height: 100%;
   min-height: 88px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 7px 8px 8px;
   scrollbar-width: thin;
   overscroll-behavior-inline: contain;
   touch-action: pan-x;
@@ -11648,11 +11585,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .recordings-v2-selected-event {
   display: grid;
   align-content: center;
-  gap: 10px;
   min-width: 0;
   border-left: 1px solid var(--line);
-  padding: 10px 12px;
-  background: color-mix(in srgb, var(--panel-soft) 78%, transparent);
 }
 
 .recordings-v2-selected-event > header {
@@ -11707,21 +11641,17 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .recordings-v2-selected-event>div {
   display: grid;
-  gap: 2px;
   min-width: 0;
 }
 
 .recordings-v2-selected-event span,
 .recordings-v2-selected-event small {
   color: var(--muted);
-  font-size: 10px;
-  font-weight: 750;
 }
 
 .recordings-v2-selected-event strong {
   overflow: hidden;
   color: var(--ink);
-  font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -11769,38 +11699,25 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 @media (max-width: 760px) {
   .recordings-v2-page {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto minmax(0, 1fr);
-    gap: 8px;
     height: auto;
     min-height: calc(100dvh - 52px);
-    padding: 8px;
     overflow: visible;
   }
 
   .recordings-tabs {
-    grid-column: 1;
-    grid-row: 1;
     overflow-x: auto;
   }
 
   .recordings-commandbar {
     grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
   }
 
   .recordings-v2-cameras {
-    grid-column: 1;
-    grid-row: 2;
     grid-template-rows: auto;
   }
 
   .recordings-v2-workspace {
-    grid-column: 1;
-    grid-row: 3;
     align-content: start;
-    grid-template-rows: auto auto minmax(140px, auto);
-    padding: 0;
   }
 
   .semantic-search-workspace,
@@ -11884,7 +11801,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
-    border-top: 1px solid var(--line);
     border-left: 0;
     padding: 6px 8px;
   }
