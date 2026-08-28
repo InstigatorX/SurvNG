@@ -149,6 +149,7 @@ def depth_motion_evidence_values(
         return {}
     nearest = min(depths)
     farthest = max(depths)
+    foreground_score = round(max(0.0, min(1.0, 1.0 - (nearest / 30.0))), 3)
     return {
         "captured_at": captured_at,
         "frame_offset_s": frame_offset_s,
@@ -156,7 +157,9 @@ def depth_motion_evidence_values(
         "nearest_m": round(nearest, 2),
         "farthest_m": round(farthest, 2),
         "median_m": round(float(np.median(depths)), 2),
-        "foreground_score": round(max(0.0, min(1.0, 1.0 - (nearest / 30.0))), 3),
+        "foreground_score": foreground_score,
+        "score": foreground_score,
+        "warmed": 1.0,
     }
 
 

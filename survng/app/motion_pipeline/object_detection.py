@@ -2180,6 +2180,7 @@ class RecordedMotionObjectDetector:
                     "depth_object",
                     enabled=True,
                     implementation="depth_object",
+                    display_name="Depth object evidence",
                 )
                 self.motion_evidence.append(
                     "depth_object",

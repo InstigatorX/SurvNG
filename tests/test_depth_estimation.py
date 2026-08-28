@@ -85,6 +85,9 @@ class DepthEstimationTests(unittest.TestCase):
         self.assertEqual(values["nearest_m"], 4.0)
         self.assertEqual(values["farthest_m"], 8.0)
         self.assertEqual(values["median_m"], 6.0)
+        self.assertEqual(values["foreground_score"], 0.867)
+        self.assertEqual(values["score"], values["foreground_score"])
+        self.assertEqual(values["warmed"], 1.0)
 
     def test_apply_depth_zone_filters_incident_band(self) -> None:
         from survng.app.config import CameraConfig

@@ -136,10 +136,15 @@ def default_motion_observation_stage_configs() -> list[MotionStageConfig]:
 def default_motion_fusion_stage_configs() -> list[MotionStageConfig]:
     return [
         MotionStageConfig(
+            stage_id="depth_evidence",
+            implementation="depth_object_evidence",
+            options={"enabled": True},
+        ),
+        MotionStageConfig(
             stage_id="evidence_fusion",
             implementation="buffered_evidence_fusion",
             options={
-                "sources": [],
+                "sources": ["depth_object"],
                 "policy": "audit",
                 "include_primary": True,
                 "fail_open": True,

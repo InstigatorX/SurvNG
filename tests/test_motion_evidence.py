@@ -165,7 +165,6 @@ class MotionEvidenceTest(unittest.TestCase):
                     "buffered_evidence_fusion",
                     {"sources": ["aux"], "policy": "audit"},
                 ),
-                *motion_fusion_stage_configs()[1:],
             ],
             initial_artifacts={"scoring"},
         )
@@ -368,6 +367,76 @@ class MotionEvidenceTest(unittest.TestCase):
             result.scoring.features["onvif_topic"],
             "RuleEngine/CellMotionDetector",
         )
+
+    def test_depth_object_evidence_stage_exposes_windowed_samples(self) -> None:
+        repository = MotionEvidenceRepository("gate")
+        repository.append(
+            "depth_object",
+            10.5,
+            {
+                "score": 0.82,
+                "warmed": 1.0,
+                "nearest_m": 5.4,
+                "median_m": 6.1,
+                "object_count": 2,
+            },
+        )
+        pipeline = pipeline_factory(repository).create(
+            "gate",
+            [
+                MotionStageConfig(
+                    "depth_evidence",
+                    "depth_object_evidence",
+                    {"enabled": True},
+                )
+            ],
+            initial_artifacts={"scoring"},
+        )
+        result = pipeline.process(
+            MotionContext(
+                camera_id="gate",
+                captured_at=12.0,
+                original_frame=None,
+                configuration={"evidence_started_at": 9.0, "evidence_ended_at": 12.0},
+                runtime=pipeline.runtime,
+                scoring=MotionScoring(
+                    accepted=True,
+                    score=0.7,
+                    threshold=0.48,
+                    reason="qualified",
+                    frame_count=9,
+                ),
+            )
+        )
+
+        self.assertEqual(result.source_evidence["depth_object"]["depth_object_score"], 0.82)
+        self.assertEqual(result.scoring.features["depth_object_nearest_m"], 5.4)
+        self.assertEqual(result.scoring.features["depth_object_sample_count"], 1)
+
+    def test_depth_object_fusion_audit_preserves_primary_decision(self) -> None:
+        repository = MotionEvidenceRepository("gate")
+        repository.append(
+            "depth_object",
+            11.0,
+            {
+                "foreground_score": 0.75,
+                "nearest_m": 7.5,
+                "median_m": 8.0,
+                "object_count": 1,
+            },
+        )
+        result = apply_fusion_policy(
+            repository,
+            policy="audit",
+            primary_accepted=False,
+            primary_score=0.42,
+            options={"sources": ["depth_object"]},
+        )
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.scoring.score, 0.42)
+        self.assertEqual(result.scoring.features["depth_object_score"], 0.75)
+        self.assertEqual(result.scoring.features["depth_object_nearest_m"], 7.5)
 
 
 if __name__ == "__main__":

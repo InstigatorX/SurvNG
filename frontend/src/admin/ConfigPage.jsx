@@ -4934,8 +4934,8 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
           <div className="motion-evidence-runtime">
             {Object.entries(status.motion_qualification.evidence_sources || {}).map(([source, evidence]) => (
               <span key={source} className={evidence.enabled ? "enabled" : "disabled"}>
-                <strong>{source === "onvif" ? "Camera signal" : source}</strong>
-                {evidence.enabled ? `${evidence.sample_count || 0} samples${evidence.last?.score != null ? ` · ${Math.round(Number(evidence.last.score) * 100)}% last confidence` : ""}` : "Disabled"}
+                <strong>{source === "onvif" ? "Camera signal" : source === "depth_object" ? "Depth evidence" : source}</strong>
+                {evidence.enabled ? `${evidence.sample_count || 0} samples${evidence.last?.score != null ? ` · ${Math.round(Number(evidence.last.score) * 100)}% last confidence` : ""}${source === "depth_object" && evidence.last?.nearest_m != null ? ` · nearest ${Number(evidence.last.nearest_m).toFixed(1)}m` : ""}` : "Disabled"}
               </span>
             ))}
           </div>
