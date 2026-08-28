@@ -165,14 +165,10 @@ class OpenVinoDepthEstimator:
 
     def __init__(self, config: DetectorConfig) -> None:
         self.config = config
-        self.depth_config: DepthConfig = config.depth
-        self.enabled = bool(
-            self.depth_config.enabled and self.depth_config.resolved_model_path()
-        )
+        self._apply_depth_config(config.depth)
         self.ready = False
         self.error = ""
         self.loaded_device = ""
-        self.input_shape = (self.depth_config.input_size, self.depth_config.input_size)
         self.model_load_ms: float | None = None
         self._last_inference_ms: float | None = None
         self._request: Any = None
@@ -186,6 +182,11 @@ class OpenVinoDepthEstimator:
             self._load()
         else:
             self.error = "Depth estimation is not configured."
+
+    def _apply_depth_config(self, depth: DepthConfig) -> None:
+        self.depth_config = depth
+        self.enabled = bool(depth.enabled and depth.resolved_model_path())
+        self.input_shape = (depth.input_size, depth.input_size)
 
     def _load(self) -> None:
         model_path = Path(self.depth_config.resolved_model_path()).expanduser()

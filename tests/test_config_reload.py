@@ -8,8 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from survng.app.config import AppConfig, CameraConfig, DetectorConfig, ObjectTrackingConfig
+from survng.app.config import AppConfig, CameraConfig, DepthConfig, DetectorConfig, ObjectTrackingConfig
 from survng.app.config_application import (
+    DEPTH_ENGINE_FIELDS,
+    DEPTH_HOT_POLICY_FIELDS,
     DETECTOR_FACE_ENGINE_FIELDS,
     DETECTOR_HOT_POLICY_FIELDS,
     DETECTOR_OBJECT_ENGINE_FIELDS,
@@ -166,10 +168,15 @@ class ConfigReloadTest(unittest.TestCase):
             DETECTOR_FACE_ENGINE_FIELDS,
             DETECTOR_SHARED_ENGINE_FIELDS,
             frozenset({"tracking"}),
+            frozenset({"depth"}),
         )
         tracking_groups = (
             TRACKING_SESSION_FIELDS,
             TRACKING_REID_ENGINE_FIELDS,
+        )
+        depth_groups = (
+            DEPTH_ENGINE_FIELDS,
+            DEPTH_HOT_POLICY_FIELDS,
         )
 
         self.assertEqual(
@@ -187,6 +194,14 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(
             sum(len(group) for group in tracking_groups),
             len(set().union(*tracking_groups)),
+        )
+        self.assertEqual(
+            set().union(*depth_groups),
+            set(DepthConfig.model_fields),
+        )
+        self.assertEqual(
+            sum(len(group) for group in depth_groups),
+            len(set().union(*depth_groups)),
         )
         self.assertLessEqual(
             DETECTOR_OBJECT_TRACKING_RESET_FIELDS,
