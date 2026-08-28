@@ -93,6 +93,10 @@ from .system_telemetry import (
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
 from .training_routes import TrainingRouteDependencies, create_training_router
+from .reid_training_routes import (
+    ReidTrainingRouteDependencies,
+    create_reid_training_router,
+)
 from .proxy import apply_trusted_proxy_headers, request_is_secure
 from .security import (
     authenticate_api_token,
@@ -1340,6 +1344,21 @@ app.include_router(
         )
     )
 )
+
+_reid_training_route_bundle = create_reid_training_router(
+    ReidTrainingRouteDependencies(
+        get_manager=get_manager,
+        manager_lock=MANAGER_RELOAD_LOCK,
+        manager_access=MANAGER_ACCESS,
+    )
+)
+app.include_router(_reid_training_route_bundle.router)
+
+reid_training_status = _reid_training_route_bundle.handlers["reid_training_status"]
+reid_training_samples = _reid_training_route_bundle.handlers["reid_training_samples"]
+reid_training_crop = _reid_training_route_bundle.handlers["reid_training_crop"]
+reid_training_review_queue = _reid_training_route_bundle.handlers["reid_training_review_queue"]
+reid_training_review = _reid_training_route_bundle.handlers["reid_training_review"]
 
 
 _face_route_bundle = create_face_router(

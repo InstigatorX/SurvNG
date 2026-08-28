@@ -515,7 +515,7 @@
   }
 
   .telemetry-summary-grid.overview-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .telemetry-trend-grid.two-column {
@@ -877,4 +877,110 @@ a.button {
 
 .camera-order-panel {
   margin: 0 18px 12px;
+}
+
+.reid-training-panel .settings-panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.reid-training-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 12px 0 18px;
+  color: var(--muted, #6b7280);
+  font-size: 0.92rem;
+}
+
+.reid-pair-list,
+.reid-track-list {
+  display: grid;
+  gap: 14px;
+}
+
+.reid-pair-card,
+.reid-track-card {
+  border: 1px solid var(--border, #d7dde5);
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--panel-elevated, rgba(255, 255, 255, 0.04));
+}
+
+.reid-pair-card > header,
+.reid-track-card > header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.reid-pair-columns {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.reid-sample-strip strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+}
+
+.reid-sample-strip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reid-sample-strip-row figure {
+  margin: 0;
+  width: 96px;
+}
+
+.reid-sample-strip-row img {
+  display: block;
+  width: 96px;
+  height: 144px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #111;
+}
+
+.reid-sample-strip-row figcaption {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--muted, #6b7280);
+  line-height: 1.2;
+}
+
+.reid-pair-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.reid-pair-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 760px) {
+  .reid-pair-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .reid-sample-strip-row figure,
+  .reid-sample-strip-row img {
+    width: 80px;
+  }
+
+  .reid-sample-strip-row img {
+    height: 120px;
+  }
 }
