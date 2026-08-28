@@ -12,6 +12,22 @@ from .geometry import _appearance, _box, _confidence, _ensure_detection_appearan
 from .types import Box, ObjectTrackerBackend
 
 
+def _depth_sample(
+    detection: dict[str, Any],
+    captured_at: float,
+) -> tuple[float, float] | None:
+    depth_stats = detection.get("depth_stats")
+    if not isinstance(depth_stats, dict):
+        return None
+    try:
+        depth_m = float(depth_stats.get("median_m"))
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(depth_m):
+        return None
+    return round(captured_at, 3), round(depth_m, 2)
+
+
 @dataclass(slots=True)
 class ObjectTrack:
     track_id: int
@@ -64,16 +80,11 @@ class ObjectTrack:
         self.missed = 0
         self.seeded = False
         self.zones.update(str(zone) for zone in detection.get("zones", []) if zone)
-        depth_stats = detection.get("depth_stats")
-        if isinstance(depth_stats, dict):
-            try:
-                depth_m = float(depth_stats.get("median_m"))
-            except (TypeError, ValueError):
-                depth_m = None
-            if depth_m is not None and np.isfinite(depth_m):
-                self.depth_history.append((round(captured_at, 3), round(depth_m, 2)))
-                if len(self.depth_history) > 60:
-                    del self.depth_history[:-60]
+        depth_sample = _depth_sample(detection, captured_at)
+        if depth_sample is not None:
+            self.depth_history.append(depth_sample)
+            if len(self.depth_history) > 60:
+                del self.depth_history[:-60]
         next_appearance = _appearance(detection.get("_tracking_embedding"))
         if next_appearance is not None:
             if self.appearance is not None and self.appearance.shape == next_appearance.shape:
@@ -219,6 +230,12 @@ class ByteTrackObjectTracker:
                     round(box[3], 1),
                 )],
                 appearance=_ensure_detection_appearance(detection, "track_seed"),
+                depth_history=(
+                    [depth_sample]
+                    if (depth_sample := _depth_sample(detection, captured_at))
+                    is not None
+                    else []
+                ),
                 seeded=confirm_new,
             )
             self._tracks[track.track_id] = track

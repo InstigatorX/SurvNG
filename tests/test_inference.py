@@ -239,6 +239,78 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertEqual(status["classes"]["enrichment"]["shed"], 1)
         self.assertEqual(status["classes"]["incident_initial"]["admitted"], 1)
 
+    def test_interactive_work_is_single_flight_and_yields_to_security(self) -> None:
+        self.assertTrue(
+            self.supervisor._enter_device_workload(
+                InferenceWorkload.INTERACTIVE,
+                shed_optional=True,
+            )
+        )
+        self.assertFalse(
+            self.supervisor._enter_device_workload(
+                InferenceWorkload.INTERACTIVE,
+                shed_optional=True,
+            )
+        )
+        incident_admitted = threading.Event()
+
+        def admit_incident() -> None:
+            if self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_INITIAL,
+            ):
+                incident_admitted.set()
+
+        thread = threading.Thread(target=admit_incident)
+        thread.start()
+        self.assertFalse(incident_admitted.wait(0.05))
+        self.supervisor._leave_device_workload(InferenceWorkload.INTERACTIVE)
+        self.assertTrue(incident_admitted.wait(1.0))
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
+        thread.join(timeout=1.0)
+
+        status = self.supervisor.workload_status()
+        self.assertEqual(status["interactive_active"], 0)
+        self.assertEqual(status["classes"]["interactive"]["shed"], 1)
+
+    def test_optional_depth_requests_are_single_flight(self) -> None:
+        supervisor = InferenceSupervisor(DetectorConfig.model_validate({
+            "depth": {"enabled": True, "model_path": "depth.xml"},
+        }))
+        self.addCleanup(supervisor.stop)
+        self.assertTrue(supervisor._depth_optional_slot.acquire(blocking=False))
+
+        objects = [{"label": "person", "box": [0, 0, 10, 10]}]
+        enriched, metadata = supervisor.estimate_depth_for_objects(
+            np.zeros((12, 12, 3), dtype=np.uint8),
+            objects,
+            workload=InferenceWorkload.INTERACTIVE,
+        )
+
+        self.assertEqual(enriched, objects)
+        self.assertEqual(metadata, {"status": "depth_deferred"})
+        supervisor._depth_optional_slot.release()
+
+    def test_depth_worker_failure_does_not_expose_native_error(self) -> None:
+        supervisor = InferenceSupervisor(DetectorConfig.model_validate({
+            "depth": {"enabled": True, "model_path": "depth.xml"},
+        }))
+        self.addCleanup(supervisor.stop)
+        supervisor._depth.request = Mock(
+            side_effect=RuntimeError("/private/models/depth.xml failed on GPU.0")
+        )
+
+        _objects, metadata = supervisor.estimate_depth_for_objects(
+            np.zeros((12, 12, 3), dtype=np.uint8),
+            [{"label": "person", "box": [0, 0, 10, 10]}],
+        )
+
+        self.assertEqual(metadata["status"], "depth_error")
+        self.assertEqual(
+            metadata["error"],
+            "Depth estimation failed in the isolated worker.",
+        )
+        self.assertNotIn("/private", metadata["error"])
+
     def test_offline_lease_is_exclusive_with_optional_device_work(self) -> None:
         self.assertTrue(
             self.supervisor._enter_device_workload(InferenceWorkload.TRACKING)

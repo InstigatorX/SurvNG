@@ -428,7 +428,7 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
             elif not depth_status or not depth_status.get("enabled"):
                 depth_error = "Depth estimation is not configured."
             elif not depth_status.get("ready"):
-                depth_error = str(depth_status.get("error") or "Depth model is not ready.")
+                depth_error = "Depth model is not ready."
             else:
                 depth_started = time.perf_counter()
                 depth_kwargs: dict[str, Any] = {
@@ -451,9 +451,7 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
                     if depth_metadata.get("status") == "depth_deferred":
                         depth_error = "Depth estimation deferred for higher-priority inference."
                     elif depth_metadata.get("status") == "depth_error":
-                        depth_error = str(
-                            depth_metadata.get("error") or "Depth estimation failed."
-                        )
+                        depth_error = "Depth estimation failed."
                     heatmap_bytes = depth_metadata.get("heatmap_png")
                     if isinstance(heatmap_bytes, (bytes, bytearray)) and heatmap_bytes:
                         heatmap_png_b64 = base64.b64encode(heatmap_bytes).decode("ascii")
@@ -465,7 +463,11 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
                             if key in heatmap_range
                         }
                 except Exception as exc:
-                    depth_error = str(exc) or "Depth estimation failed."
+                    LOGGER.warning(
+                        "Interactive depth replay failed (%s)",
+                        type(exc).__name__,
+                    )
+                    depth_error = "Depth estimation failed."
         response: dict[str, Any] = {
             "width": int(frame.shape[1]),
             "height": int(frame.shape[0]),
@@ -485,7 +487,6 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
                     for key in (
                         "enabled",
                         "ready",
-                        "error",
                         "min_distance_m",
                         "max_distance_m",
                     )

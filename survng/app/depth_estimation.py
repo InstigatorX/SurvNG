@@ -243,8 +243,14 @@ class OpenVinoDepthEstimator:
             )
             self.ready = True
         except Exception as exc:
-            self.error = str(exc) or "Depth estimator failed to load."
-            LOGGER.exception("OpenVINO depth estimator failed to load %s", model_path)
+            # Keep native OpenVINO messages, paths, and device details out of
+            # runtime status and support-facing logs. The exception class is
+            # enough to distinguish dependency/runtime failure categories.
+            self.error = "Depth estimator failed to load."
+            LOGGER.error(
+                "OpenVINO depth estimator failed to load (%s)",
+                type(exc).__name__,
+            )
 
     def _preprocess(self, frame: np.ndarray) -> tuple[np.ndarray, dict[str, float]]:
         input_width, input_height = self.input_shape

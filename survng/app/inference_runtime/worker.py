@@ -164,9 +164,8 @@ class _InferenceWorker:
                         except BaseException as exc:
                             rollback_errors.append(exc)
                 if rollback_errors:
-                    details = "; ".join(str(exc) for exc in rollback_errors)
                     raise InferenceRollbackIncomplete(
-                        f"{self.role} inference rollback failed: {details}"
+                        f"{self.role} inference rollback failed."
                     ) from reconfigure_error
                 raise
 
@@ -291,9 +290,13 @@ class _InferenceWorker:
             if process is not None and process.is_alive():
                 process.terminate()
                 process.join(timeout=3.0)
-            self._last_error = f"{self.role} inference worker failed to start: {exc}"
+            self._last_error = f"{self.role} inference worker failed to start."
             self._next_restart_at = time.monotonic() + INFERENCE_RESTART_DELAY_SECONDS
-            LOGGER.exception("%s", self._last_error)
+            LOGGER.error(
+                "%s (%s)",
+                self._last_error,
+                type(exc).__name__,
+            )
             return False
         self._process = process
         self._connection = parent
@@ -307,7 +310,7 @@ class _InferenceWorker:
             message = parent.recv()
         except (EOFError, OSError) as exc:
             self._terminate_failed_worker_locked(
-                f"{self.role} inference worker startup failed: {exc}"
+                f"{self.role} inference worker startup failed."
             )
             return False
         if message.get("type") != "ready":
@@ -589,8 +592,8 @@ class _InferenceWorker:
                         )
                         raise InferenceUnavailable(self._last_error)
                     response = connection.recv()
-                except (BrokenPipeError, EOFError, OSError) as exc:
-                    error = f"{self.role} inference worker connection failed: {exc}"
+                except (BrokenPipeError, EOFError, OSError):
+                    error = f"{self.role} inference worker connection failed."
                     self._terminate_failed_worker_locked(
                         error
                     )
@@ -647,7 +650,9 @@ class _InferenceWorker:
                     self._status = next_status
             except Exception as exc:
                 with self._lock:
-                    self._last_error = str(exc)
+                    self._last_error = (
+                        f"{self.role} inference status is unavailable."
+                    )
         with self._lock:
             status = dict(self._status)
         status["isolation"] = self.isolation_status()

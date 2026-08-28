@@ -834,7 +834,7 @@ class ConfigReloadTest(unittest.TestCase):
         reload.assert_not_called()
         active.reconfigure_inference.assert_called_once_with(
             effective.detector,
-            {"object", "face", "reid"},
+            {"object", "face", "reid", "depth"},
             refresh_tracking=False,
         )
         self.assertEqual(result["apply_mode"], "targeted")
@@ -844,9 +844,35 @@ class ConfigReloadTest(unittest.TestCase):
                 "object_inference",
                 "face_inference",
                 "reid_inference",
+                "depth_inference",
             ],
         )
         self.assertFalse(result["camera_workers_restarted"])
+
+    def test_depth_policy_change_restarts_depth_worker_and_refreshes_policy(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.depth.max_distance_m = 90.0
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_inference.assert_called_once_with(
+            effective.detector,
+            {"depth"},
+            refresh_tracking=False,
+        )
+        active.reconfigure_detector_policy.assert_called_once_with(effective)
+        self.assertEqual(result["subsystems_restarted"], ["depth_inference"])
+        self.assertIn("detector_policy", result["hot_updated"])
 
     def test_model_change_restarts_object_inference_and_tracking_sessions(self) -> None:
         active = Mock()

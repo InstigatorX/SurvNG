@@ -175,7 +175,6 @@ class ObjectTrackingSession:
         self._cover_baseline: _TrackingCoverCandidate | None = None
         self._cover_candidate: _TrackingCoverCandidate | None = None
         self._cover_promotion: dict[str, Any] | None = None
-        self._depth_enriched = False
 
     @staticmethod
     def _idle_status() -> dict[str, Any]:
@@ -218,6 +217,40 @@ class ObjectTrackingSession:
             "cover_promotion_result": "",
             "cover_verification_inference_ms": 0.0,
         }
+
+    def _enrich_tracking_depth(
+        self,
+        frame: np.ndarray,
+        objects: list[dict[str, Any]],
+        *,
+        frame_offset_s: float,
+    ) -> list[dict[str, Any]]:
+        """Sample depth for every accepted tracking frame when available.
+
+        The isolated depth supervisor sheds overlapping optional work, so a
+        busy device returns the unmodified detections instead of accumulating
+        stale tracking samples.
+        """
+        if not objects or not getattr(
+            getattr(self.detector.config, "depth", None),
+            "enabled",
+            False,
+        ):
+            return objects
+        estimate_depth = getattr(
+            self.detector,
+            "estimate_depth_for_objects",
+            None,
+        )
+        if not callable(estimate_depth):
+            return objects
+        enriched, _depth_metadata = estimate_depth(
+            frame,
+            objects,
+            frame_offset_s=frame_offset_s,
+        )
+        apply_depth_zone_filters(self.camera, enriched)
+        return enriched
 
     def start(
         self,
@@ -917,24 +950,11 @@ class ObjectTrackingSession:
                     float(self.detector.config.confidence_threshold),
                     bool(getattr(self.detector.config, "require_incident_zone", True)),
                 )
-                if (
-                    not self._depth_enriched
-                    and objects
-                    and getattr(getattr(self.detector.config, "depth", None), "enabled", False)
-                ):
-                    estimate_depth = getattr(
-                        self.detector,
-                        "estimate_depth_for_objects",
-                        None,
-                    )
-                    if callable(estimate_depth):
-                        objects, _depth_metadata = estimate_depth(
-                            frame,
-                            objects,
-                            frame_offset_s=0.0,
-                        )
-                        apply_depth_zone_filters(self.camera, objects)
-                        self._depth_enriched = True
+                objects = self._enrich_tracking_depth(
+                    frame,
+                    objects,
+                    frame_offset_s=sample_epoch - event_at.timestamp(),
+                )
                 self._annotate_appearances(
                     frame,
                     objects,

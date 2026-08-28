@@ -45,6 +45,7 @@ class InferenceSupervisor:
         self._initial_active = 0
         self._refinement_active = 0
         self._optional_active = 0
+        self._interactive_active = 0
         self._offline_active = 0
         self._device_workload_stats: dict[InferenceWorkload, dict[str, float | int]] = {
             workload: {
@@ -83,6 +84,10 @@ class InferenceSupervisor:
             self._base_depth_status(),
             start_enabled=bool(config.depth.enabled and config.depth.resolved_model_path()),
         )
+        # The depth role has one process/infer request. Do not let optional
+        # tracking or replay callers build a FIFO in front of later security
+        # inference; callers can retry with a fresh frame.
+        self._depth_optional_slot = threading.BoundedSemaphore(1)
 
     @staticmethod
     def _effective_object_worker_count(config: DetectorConfig) -> int:
@@ -186,10 +191,12 @@ class InferenceSupervisor:
                         self._initial_waiting = max(0, self._initial_waiting - 1)
             else:
                 offline = workload is InferenceWorkload.OFFLINE
+                interactive = workload is InferenceWorkload.INTERACTIVE
                 if shed_optional and (
                     self._security_waiting
                     or self._security_active
                     or self._offline_active
+                    or (interactive and self._interactive_active)
                 ):
                     self._device_workload_stats[workload]["shed"] += 1
                     return False
@@ -208,6 +215,8 @@ class InferenceSupervisor:
                         return False
                     self._device_condition.wait(remaining)
                 self._optional_active += 1
+                if interactive:
+                    self._interactive_active += 1
                 if offline:
                     self._offline_active += 1
             wait_ms = max(0.0, (time.monotonic() - started) * 1000.0)
@@ -228,6 +237,8 @@ class InferenceSupervisor:
                     self._refinement_active = max(0, self._refinement_active - 1)
             else:
                 self._optional_active = max(0, self._optional_active - 1)
+                if workload is InferenceWorkload.INTERACTIVE:
+                    self._interactive_active = max(0, self._interactive_active - 1)
                 if workload is InferenceWorkload.OFFLINE:
                     self._offline_active = max(0, self._offline_active - 1)
             self._device_workload_stats[workload]["completed"] += 1
@@ -254,6 +265,7 @@ class InferenceSupervisor:
                 "refinement_active": self._refinement_active,
                 "max_concurrent_refinements": self._max_concurrent_refinements(),
                 "optional_active": self._optional_active,
+                "interactive_active": self._interactive_active,
                 "offline_active": self._offline_active,
                 "accepting": self._device_accepting,
                 "classes": {},
@@ -467,8 +479,12 @@ class InferenceSupervisor:
                                 start_enabled=start_enabled,
                             )
                     except Exception as exc:
-                        rollback_failures.append(f"{role}: {exc}")
-                        LOGGER.exception("failed to roll back %s inference role", role)
+                        rollback_failures.append(role)
+                        LOGGER.error(
+                            "failed to roll back %s inference role (%s)",
+                            role,
+                            type(exc).__name__,
+                        )
                 if "object" not in completed:
                     for worker in self._object_workers:
                         worker.update_config_reference(previous_config)
@@ -481,7 +497,7 @@ class InferenceSupervisor:
                 if rollback_failures:
                     raise InferenceRollbackIncomplete(
                         "inference rollback incomplete: "
-                        + "; ".join(rollback_failures)
+                        + ", ".join(rollback_failures)
                     ) from reconfigure_error
                 raise
 
@@ -513,8 +529,7 @@ class InferenceSupervisor:
                         rollback_errors.append(rollback_error)
                 if rollback_errors:
                     raise InferenceRollbackIncomplete(
-                        "object inference pool rollback failed: "
-                        + "; ".join(str(item) for item in rollback_errors)
+                        "object inference pool rollback failed."
                     ) from error
                 raise
             return
@@ -538,8 +553,7 @@ class InferenceSupervisor:
                     restore_errors.append(restore_error)
             if restore_errors:
                 raise InferenceRollbackIncomplete(
-                    "object inference pool stop rollback failed: "
-                    + "; ".join(str(item) for item in restore_errors)
+                    "object inference pool stop rollback failed."
                 ) from stop_error
             raise
         replacements = [
@@ -786,6 +800,7 @@ class InferenceSupervisor:
         workload: InferenceWorkload,
     ) -> list[dict[str, Any]]:
         shed_optional = workload in {
+            InferenceWorkload.INTERACTIVE,
             InferenceWorkload.TRACKING,
             InferenceWorkload.ENRICHMENT,
         }
@@ -837,8 +852,14 @@ class InferenceSupervisor:
                     unavailable.append(str(exc))
                     continue
                 except Exception as exc:
-                    LOGGER.error("Isolated object detection unavailable: %s", exc)
-                    return [{"status": "detector_unavailable", "error": str(exc)}]
+                    LOGGER.error(
+                        "Isolated object detection unavailable (%s)",
+                        type(exc).__name__,
+                    )
+                    return [{
+                        "status": "detector_unavailable",
+                        "error": "Object detection failed in the isolated worker.",
+                    }]
             error = "; ".join(dict.fromkeys(unavailable)) or "all object inference workers unavailable"
             LOGGER.error("Isolated object detection unavailable: %s", error)
             return [{"status": "detector_unavailable", "error": error}]
@@ -924,8 +945,12 @@ class InferenceSupervisor:
         if not depth.enabled or not depth.resolved_model_path():
             return list(objects), {}
         workload = InferenceWorkload(workload)
-        shed_optional = workload is not InferenceWorkload.INTERACTIVE
-        if not self._enter_device_workload(workload, shed_optional=shed_optional):
+        optional_slot = workload >= InferenceWorkload.INTERACTIVE
+        if optional_slot and not self._depth_optional_slot.acquire(blocking=False):
+            return list(objects), {"status": "depth_deferred"}
+        if not self._enter_device_workload(workload, shed_optional=True):
+            if optional_slot:
+                self._depth_optional_slot.release()
             return list(objects), {"status": "depth_deferred"}
         try:
             result = dict(
@@ -943,10 +968,18 @@ class InferenceSupervisor:
             metadata = dict(result.get("metadata") or {})
             return enriched, metadata
         except Exception as exc:
-            LOGGER.warning("Depth estimation unavailable: %s", exc)
-            return list(objects), {"status": "depth_error", "error": str(exc)}
+            LOGGER.warning(
+                "Depth estimation unavailable (%s)",
+                type(exc).__name__,
+            )
+            return list(objects), {
+                "status": "depth_error",
+                "error": "Depth estimation failed in the isolated worker.",
+            }
         finally:
             self._leave_device_workload(workload)
+            if optional_slot:
+                self._depth_optional_slot.release()
 
     def depth_status(self) -> dict[str, Any]:
         status = self._depth.status()
@@ -1149,7 +1182,8 @@ class InferenceSupervisor:
                     or {}
                 )
         except Exception as exc:
-            return {"devices": [], "error": str(exc)}
+            LOGGER.warning("OpenVINO device probe failed (%s)", type(exc).__name__)
+            return {"devices": [], "error": "OpenVINO device probe failed."}
 
     def inspect_model(self, path: str) -> dict[str, Any]:
         try:
@@ -1165,7 +1199,12 @@ class InferenceSupervisor:
                     or {}
                 )
         except Exception as exc:
-            return {"input_shape": [], "output_shapes": [], "error": str(exc)}
+            LOGGER.warning("OpenVINO model inspection failed (%s)", type(exc).__name__)
+            return {
+                "input_shape": [],
+                "output_shapes": [],
+                "error": "OpenVINO model inspection failed.",
+            }
 
     def isolation_status(self) -> dict[str, Any]:
         instances = [worker.isolation_status() for worker in self._object_workers]

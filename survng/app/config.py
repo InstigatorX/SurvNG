@@ -140,6 +140,16 @@ class DetectionZone(BaseModel):
     exclude_from_ema: bool = False
     trigger: Literal["bottom_center"] = "bottom_center"
 
+    @model_validator(mode="after")
+    def validate_depth_range(self) -> "DetectionZone":
+        if (
+            self.min_depth_m is not None
+            and self.max_depth_m is not None
+            and self.min_depth_m > self.max_depth_m
+        ):
+            raise ValueError("zone minimum depth must not exceed its maximum depth")
+        return self
+
 
 class MqttConfig(BaseModel):
     enabled: bool = False
@@ -565,6 +575,12 @@ class DepthConfig(BaseModel):
     store_heatmap: bool = False
     heatmap_max_width: int = Field(default=192, ge=64, le=512)
     motion_evidence_enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_distance_range(self) -> "DepthConfig":
+        if self.min_distance_m > self.max_distance_m:
+            raise ValueError("depth minimum distance must not exceed its maximum distance")
+        return self
 
     @field_validator("model_path", mode="before")
     @classmethod

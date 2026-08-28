@@ -103,6 +103,7 @@ class DepthEstimationTests(unittest.TestCase):
                     min_depth_m=1.0,
                     max_depth_m=6.0,
                     object_classes=["person"],
+                    points=[{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 1.0, "y": 1.0}],
                 )
             ],
         )
@@ -111,11 +112,13 @@ class DepthEstimationTests(unittest.TestCase):
                 "label": "person",
                 "depth_stats": {"median_m": 3.5},
                 "incident_eligible": False,
+                "spatial_zones": ["Near Door"],
             },
             {
                 "label": "person",
                 "depth_stats": {"median_m": 20.0},
                 "incident_eligible": True,
+                "spatial_zones": ["Near Door"],
             },
         ]
         filtered = apply_depth_zone_filters(camera, objects)
@@ -124,6 +127,28 @@ class DepthEstimationTests(unittest.TestCase):
         self.assertTrue(filtered[1]["incident_eligible"])
         self.assertNotIn("depth_zone_matched", filtered[1])
 
+    def test_apply_depth_zone_filters_requires_matching_spatial_zone_and_prioritizes_ignore(self) -> None:
+        from survng.app.config import CameraConfig
+
+        camera = CameraConfig(
+            id="cam",
+            name="Cam",
+            stream_url="rtsp://example.invalid/main",
+            zones=[
+                DetectionZone(name="Near", behavior="incident", min_depth_m=1.0, max_depth_m=6.0),
+                DetectionZone(name="Private", behavior="ignore", min_depth_m=1.0, max_depth_m=6.0),
+            ],
+        )
+        outside, overlapping = apply_depth_zone_filters(camera, [
+            {"label": "person", "depth_stats": {"median_m": 3.5}, "incident_eligible": False, "spatial_zones": ["Elsewhere"]},
+            {"label": "person", "depth_stats": {"median_m": 3.5}, "incident_eligible": True, "spatial_zones": ["Near", "Private"]},
+        ])
+
+        self.assertFalse(outside["incident_eligible"])
+        self.assertNotIn("depth_zone_matched", outside)
+        self.assertFalse(overlapping["incident_eligible"])
+        self.assertTrue(overlapping["depth_zone_filtered"])
+
 
 class DepthConfigTests(unittest.TestCase):
     def test_depth_config_defaults(self) -> None:
@@ -131,6 +156,14 @@ class DepthConfigTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertEqual(config.input_size, 768)
         self.assertEqual(config.max_distance_m, 150.0)
+
+    def test_depth_ranges_must_not_be_inverted(self) -> None:
+        from pydantic import ValidationError
+
+        with self.assertRaisesRegex(ValidationError, "minimum distance"):
+            DepthConfig(min_distance_m=10.0, max_distance_m=2.0)
+        with self.assertRaisesRegex(ValidationError, "minimum depth"):
+            DetectionZone(name="Near", min_depth_m=10.0, max_depth_m=2.0)
 
 
 if __name__ == "__main__":

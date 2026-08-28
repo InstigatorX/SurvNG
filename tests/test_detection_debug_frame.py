@@ -107,7 +107,10 @@ class DetectionDebugFrameRouteTests(TestCase):
     def test_detect_debug_frame_depth_includes_stats_and_heatmap(self) -> None:
         payload = asyncio.run(self._call(depth=True, heatmap=True))
         self.assertEqual(payload["objects"], self.enriched_objects)
-        self.assertEqual(payload["depth_ms"], payload["elapsed_ms"] - payload["detect_ms"])
+        self.assertAlmostEqual(
+            payload["depth_ms"],
+            payload["elapsed_ms"] - payload["detect_ms"],
+        )
         self.assertEqual(
             payload["heatmap_png_b64"],
             base64.b64encode(self.heatmap_png).decode("ascii"),

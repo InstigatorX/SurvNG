@@ -250,6 +250,16 @@ def apply_depth_zone_filters(
     for detected in objects:
         if not isinstance(detected, dict):
             continue
+        # The depth pass runs after spatial zone evaluation.  Only a zone the
+        # object actually occupies may affect admission; a matching label and
+        # distance elsewhere in the frame is not a zone match.
+        spatial_zones = {
+            str(name)
+            for name in detected.get("spatial_zones", [])
+            if isinstance(name, str) and name
+        }
+        detected.pop("depth_zone_filtered", None)
+        detected.pop("depth_zone_matched", None)
         depth_stats = detected.get("depth_stats")
         if not isinstance(depth_stats, dict):
             continue
@@ -258,27 +268,29 @@ def apply_depth_zone_filters(
         except (TypeError, ValueError):
             continue
         label = str(detected.get("label") or "").strip().lower()
-        for zone in depth_zones:
-            if zone.object_classes and label not in {
-                item.strip().lower() for item in zone.object_classes if item.strip()
-            }:
-                continue
-            min_depth = zone.min_depth_m
-            max_depth = zone.max_depth_m
-            if min_depth is not None and median_m < float(min_depth):
-                continue
-            if max_depth is not None and median_m > float(max_depth):
-                continue
-            if zone.behavior == "ignore":
-                detected["incident_eligible"] = False
-                detected["zone_eligible"] = False
-                detected["depth_zone_filtered"] = True
-                detected["zone_admission_reason"] = "depth_ignore_zone"
-                break
-            if zone.behavior == "incident":
-                detected["incident_eligible"] = True
-                detected["zone_eligible"] = True
-                detected["depth_zone_matched"] = zone.name
-                detected["zone_admission_reason"] = "depth_incident_zone"
-                break
+        matching_zones = [
+            zone
+            for zone in depth_zones
+            if zone.name in spatial_zones
+            and _class_applies(zone, label)
+            and (zone.min_depth_m is None or median_m >= float(zone.min_depth_m))
+            and (zone.max_depth_m is None or median_m <= float(zone.max_depth_m))
+        ]
+        # Ignore zones retain the same precedence as the primary spatial-zone
+        # evaluation when incident and ignore zones overlap.
+        if any(zone.behavior == "ignore" for zone in matching_zones):
+            detected["incident_eligible"] = False
+            detected["zone_eligible"] = False
+            detected["depth_zone_filtered"] = True
+            detected["zone_admission_reason"] = "depth_ignore_zone"
+            continue
+        incident_zone = next(
+            (zone for zone in matching_zones if zone.behavior == "incident"),
+            None,
+        )
+        if incident_zone is not None:
+            detected["incident_eligible"] = True
+            detected["zone_eligible"] = True
+            detected["depth_zone_matched"] = incident_zone.name
+            detected["zone_admission_reason"] = "depth_incident_zone"
     return objects

@@ -851,6 +851,7 @@ class MqttService:
                     "min_distance_m": None,
                     "max_distance_m": None,
                     "median_distance_m": None,
+                    "_depth_distances_m": [],
                 })
                 current["confidence"] = max(current["confidence"], float(item.get("confidence") or 0))
                 current["zones"].update(str(zone) for zone in item.get("zones", []) if zone)
@@ -870,13 +871,16 @@ class MqttService:
                             float(current["max_distance_m"]),
                             median_distance_m,
                         )
-                    if current["median_distance_m"] is None:
-                        current["median_distance_m"] = median_distance_m
-                    else:
-                        current["median_distance_m"] = round(
-                            (float(current["median_distance_m"]) + median_distance_m) / 2.0,
-                            2,
-                        )
+                    current["_depth_distances_m"].append(median_distance_m)
+        for summary in object_summaries.values():
+            distances = sorted(summary.pop("_depth_distances_m"))
+            if distances:
+                middle = len(distances) // 2
+                summary["median_distance_m"] = (
+                    distances[middle]
+                    if len(distances) % 2
+                    else (distances[middle - 1] + distances[middle]) / 2.0
+                )
         objects = [
             {
                 **summary,

@@ -115,7 +115,8 @@ def _openvino_devices() -> dict[str, Any]:
 
         return {"devices": list(Core().available_devices), "error": ""}
     except Exception as exc:
-        return {"devices": [], "error": str(exc) or "OpenVINO device probe failed"}
+        LOGGER.warning("OpenVINO device probe failed (%s)", type(exc).__name__)
+        return {"devices": [], "error": "OpenVINO device probe failed."}
 
 def _inspect_openvino_model(path_text: str) -> dict[str, Any]:
     try:
@@ -131,7 +132,12 @@ def _inspect_openvino_model(path_text: str) -> dict[str, Any]:
             "error": "",
         }
     except Exception as exc:
-        return {"input_shape": [], "output_shapes": [], "error": str(exc)}
+        LOGGER.warning("OpenVINO model inspection failed (%s)", type(exc).__name__)
+        return {
+            "input_shape": [],
+            "output_shapes": [],
+            "error": "OpenVINO model inspection failed.",
+        }
 
 def _inference_worker_main(
     connection,
@@ -141,8 +147,8 @@ def _inference_worker_main(
 ) -> None:
     _set_worker_process_name(role)
     _disable_worker_core_dumps()
-    config = DetectorConfig.model_validate(config_payload)
     try:
+        config = DetectorConfig.model_validate(config_payload)
         if role == "object":
             from ..detector import OpenVinoDetector
 
@@ -173,8 +179,16 @@ def _inference_worker_main(
             "status": engine_status,
         })
     except BaseException as exc:
+        LOGGER.error(
+            "%s inference worker failed during startup (%s)",
+            role.capitalize(),
+            type(exc).__name__,
+        )
         try:
-            connection.send({"type": "fatal", "error": str(exc) or type(exc).__name__})
+            connection.send({
+                "type": "fatal",
+                "error": f"{role} inference worker failed during startup.",
+            })
         finally:
             connection.close()
         return
@@ -264,10 +278,16 @@ def _inference_worker_main(
                     raise ValueError(f"unknown inference operation: {operation}")
                 connection.send({"id": request_id, "ok": True, "result": result})
             except BaseException as exc:
+                LOGGER.error(
+                    "%s inference operation %s failed (%s)",
+                    role.capitalize(),
+                    operation,
+                    type(exc).__name__,
+                )
                 connection.send({
                     "id": request_id,
                     "ok": False,
-                    "error": str(exc) or type(exc).__name__,
+                    "error": f"{role} inference operation failed.",
                 })
     finally:
         connection.close()

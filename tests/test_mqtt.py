@@ -246,6 +246,25 @@ class MqttServiceTest(unittest.TestCase):
         self.assertEqual(complete["snapshot_url"], "/survng/api/events/42/snapshot.jpg")
         self.assertTrue(all(retained is False for _, _, retained in publications))
 
+    def test_incident_depth_summary_uses_true_median(self) -> None:
+        service = self.service()
+        for event_id, distance in enumerate((1.0, 100.0, 2.0), start=41):
+            service.track_incident({
+                "id": event_id,
+                "camera_id": "front-door",
+                "created_at": f"2026-07-17T12:00:{event_id - 41:02d}+00:00",
+                "objects_json": json.dumps([{
+                    "label": "person",
+                    "confidence": 0.9,
+                    "incident_eligible": True,
+                    "depth_stats": {"median_m": distance},
+                }]),
+            }, "Front Door")
+        service.flush_incidents()
+
+        complete = json.loads(service.client.published[-1][1])
+        self.assertEqual(complete["objects"][0]["median_distance_m"], 2.0)
+
     def test_incident_events_can_be_disabled(self) -> None:
         service = self.service()
         service.config.incident_events_enabled = False

@@ -115,6 +115,21 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual([item["observations"] for item in summaries], [2, 2])
         self.assertTrue(all(item["state"] == "confirmed" for item in summaries))
 
+    def test_depth_history_includes_seed_and_later_observations(self) -> None:
+        tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        initial = detection("person", 0.9, (10, 10, 40, 80))
+        initial["depth_stats"] = {"median_m": 10.0}
+        later = detection("person", 0.9, (12, 10, 42, 80))
+        later["depth_stats"] = {"median_m": 7.0}
+
+        tracker.update([initial], 10.0, confirm_new=True)
+        tracker.update([later], 11.0)
+
+        summary = tracker.summaries(11.0)[0]
+        self.assertEqual(summary["depth_history"], [[10.0, 10.0], [11.0, 7.0]])
+        self.assertEqual(summary["depth_median_m"], 7.0)
+        self.assertEqual(summary["depth_trend_mps"], 3.0)
+
     def test_rescales_catchup_boxes_into_incident_coordinates(self) -> None:
         objects = [detection("person", 0.9, (10, 5, 40, 45))]
 
@@ -575,6 +590,59 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
 
 class ObjectTrackingSessionTest(unittest.TestCase):
+    def test_tracking_depth_is_sampled_on_each_accepted_frame(self) -> None:
+        estimate_depth = Mock(side_effect=lambda _frame, objects, **_kwargs: (
+            [
+                {
+                    **item,
+                    "depth_stats": {"median_m": 8.0 - estimate_depth.call_count},
+                }
+                for item in objects
+            ],
+            {},
+        ))
+        detector = SimpleNamespace(
+            config=SimpleNamespace(
+                confidence_threshold=0.7,
+                depth=SimpleNamespace(enabled=True),
+            ),
+            estimate_depth_for_objects=estimate_depth,
+        )
+        session = ObjectTrackingSession(
+            camera=CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            config=ObjectTrackingConfig(),
+            detector=detector,
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        objects = [detection("person", 0.9, (2, 2, 20, 28))]
+
+        first = session._enrich_tracking_depth(
+            frame,
+            objects,
+            frame_offset_s=0.5,
+        )
+        second = session._enrich_tracking_depth(
+            frame,
+            objects,
+            frame_offset_s=1.5,
+        )
+
+        self.assertEqual(estimate_depth.call_count, 2)
+        self.assertEqual(first[0]["depth_stats"]["median_m"], 7.0)
+        self.assertEqual(second[0]["depth_stats"]["median_m"], 6.0)
+        self.assertEqual(
+            [call.kwargs["frame_offset_s"] for call in estimate_depth.call_args_list],
+            [0.5, 1.5],
+        )
+
     def test_adaptive_sampling_slows_stable_tracks_and_boosts_uncertainty(self) -> None:
         config = ObjectTrackingConfig(
             sample_fps=3.0,

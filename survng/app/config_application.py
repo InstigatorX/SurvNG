@@ -205,9 +205,18 @@ class TargetedConfigApplication:
             roles: set[str] = set()
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_OBJECT_ENGINE_FIELDS): roles.add("object")
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_FACE_ENGINE_FIELDS): roles.add("face")
-            if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_SHARED_ENGINE_FIELDS): roles.update({"object", "face", "reid"})
+            if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_SHARED_ENGINE_FIELDS): roles.update({"object", "face", "reid", "depth"})
             if any(getattr(current.detector.tracking, f) != getattr(incoming.detector.tracking, f) for f in TRACKING_REID_ENGINE_FIELDS): roles.add("reid")
-            if any(getattr(current.detector.depth, f) != getattr(incoming.detector.depth, f) for f in DEPTH_ENGINE_FIELDS): roles.add("depth")
+            if any(
+                getattr(current.detector.depth, f)
+                != getattr(incoming.detector.depth, f)
+                for f in DEPTH_ENGINE_FIELDS | DEPTH_HOT_POLICY_FIELDS
+            ):
+                # Depth inference runs in a child process. Updating the parent
+                # config reference cannot change the estimator's distance
+                # bounds, heatmap policy, or evidence policy, so replace that
+                # child generation transactionally for every depth change.
+                roles.add("depth")
             refresh = (("reid" in roles and current.detector.tracking != incoming.detector.tracking) or any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_OBJECT_TRACKING_RESET_FIELDS) or (tracking_changed and bool(roles)))
             if recorder_changes and (exports := self._active_exports()):
                 kinds = sorted({str(job.get("kind") or "media") for job in exports})
