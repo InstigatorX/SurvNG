@@ -90,3 +90,37 @@ class IsolatedPersonReidentifier:
 
     def status(self) -> dict[str, Any]:
         return self.supervisor.reid_status()
+
+
+class IsolatedDepthEstimator:
+    def __init__(self, supervisor: InferenceSupervisor) -> None:
+        self.supervisor = supervisor
+
+    @property
+    def config(self) -> DetectorConfig:
+        return self.supervisor.config
+
+    @property
+    def enabled(self) -> bool:
+        depth = self.config.depth
+        return bool(depth.enabled and depth.resolved_model_path())
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.status().get("ready"))
+
+    def enrich_objects(
+        self,
+        frame: np.ndarray,
+        objects: list[dict[str, Any]],
+        *,
+        frame_offset_s: float | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return self.supervisor.estimate_depth_for_objects(
+            frame,
+            objects,
+            frame_offset_s=frame_offset_s,
+        )
+
+    def status(self) -> dict[str, Any]:
+        return self.supervisor.depth_status()

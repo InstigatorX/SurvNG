@@ -116,6 +116,7 @@ class CameraWorker:
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
             ),
+            motion_evidence=self.motion_evidence,
         )
         self.media = CameraMediaService(
             camera=camera,

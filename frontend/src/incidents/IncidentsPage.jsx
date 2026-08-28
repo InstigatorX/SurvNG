@@ -80,6 +80,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const incidentRailListRef = useRef(null);
   const [incidentRailSize, setIncidentRailSize] = useState({ width: 0, height: 0 });
   const [desktopAnalysisMode, setDesktopAnalysisMode] = useStoredState("survng.incidentDesktopAnalysis.v1", "clean");
+  const [desktopDepthLayer, setDesktopDepthLayer] = useStoredState("survng.incidentDesktopDepthLayer.v1", "both");
   const [desktopAnalysisStats, setDesktopAnalysisStats] = useState(null);
   const [desktopReplayRequest, setDesktopReplayRequest] = useState(0);
   const [focusedImageSize, setFocusedImageSize] = useState(null);
@@ -519,6 +520,15 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   }, [desktopAnalysisMode, displayedEvent, displayedIncident, setDesktopAnalysisMode]);
 
   useEffect(() => {
+    if (desktopAnalysisMode !== "depth") return;
+    const depthConfigured = Boolean(
+      appConfig?.detector?.depth?.enabled
+      && String(appConfig?.detector?.depth?.model_path || "").trim(),
+    );
+    if (!depthConfigured) setDesktopAnalysisMode("clean");
+  }, [appConfig?.detector?.depth?.enabled, appConfig?.detector?.depth?.model_path, desktopAnalysisMode, setDesktopAnalysisMode]);
+
+  useEffect(() => {
     const context = incidentRecordingContext(selectedEvent || focusedEvent);
     if (context) onRecordingContextChange(context);
   }, [selectedEvent?.id, focusedEvent?.id, focusedEvent?.created_at, focusedEvent?.camera_id, onRecordingContextChange]);
@@ -713,6 +723,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                     thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
                     desktopWorkspace
                     analysisMode={desktopAnalysisMode}
+                    depthLayer={desktopDepthLayer}
                     replayRequest={desktopReplayRequest}
                     selectedObjectIndex={relatedPreviewIncident ? null : (selectedVisualObject?.objectIndex ?? findSimilarObject?.objectIndex ?? null)}
                     onSelectObject={relatedPreviewIncident ? null : ((selection) => {
@@ -757,6 +768,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
               timeZone={timeZone}
               imageSize={focusedLoadedImageSize}
               analysisMode={desktopAnalysisMode}
+              depthLayer={desktopDepthLayer}
               analysisStats={desktopAnalysisStats}
               selectedObjectIndex={selectedVisualObject?.objectIndex ?? null}
               findSimilarObjectIndex={findSimilarObject?.objectIndex ?? null}
@@ -770,6 +782,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 }
               }}
               onAnalysisModeChange={selectDesktopAnalysisMode}
+              onDepthLayerChange={setDesktopDepthLayer}
               onFaceOpen={openFaceReview}
               onRelatedSelect={selectRelatedIncident}
               onRelatedReturn={returnToSelectedIncident}

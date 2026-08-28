@@ -77,6 +77,12 @@ class InferenceSupervisor:
             self._base_reid_status(),
             start_enabled=bool(config.tracking.appearance_reid_enabled),
         )
+        self._depth = _InferenceWorker(
+            config,
+            "depth",
+            self._base_depth_status(),
+            start_enabled=bool(config.depth.enabled and config.depth.resolved_model_path()),
+        )
 
     @staticmethod
     def _effective_object_worker_count(config: DetectorConfig) -> int:
@@ -326,7 +332,7 @@ class InferenceSupervisor:
             )
         )
         with self._config_lock:
-            for worker in (*self._object_workers, self._face, self._reid):
+            for worker in (*self._object_workers, self._face, self._reid, self._depth):
                 worker.update_config_reference(next_config)
             self.config = next_config
             self.labels = next_labels
@@ -361,7 +367,7 @@ class InferenceSupervisor:
         roles: set[str],
     ) -> None:
         """Restart only selected inference processes, transactionally."""
-        invalid = roles - {"object", "face", "reid"}
+        invalid = roles - {"object", "face", "reid", "depth"}
         if invalid:
             raise ValueError(f"unknown inference roles: {', '.join(sorted(invalid))}")
         if not roles:
@@ -403,6 +409,15 @@ class InferenceSupervisor:
                         self._base_face_status(),
                         bool(self.config.face_recognition_enabled),
                     )
+                if role == "depth":
+                    return (
+                        self._depth,
+                        self._base_depth_status(),
+                        bool(
+                            self.config.depth.enabled
+                            and self.config.depth.resolved_model_path()
+                        ),
+                    )
                 return (
                     self._reid,
                     self._base_reid_status(),
@@ -411,7 +426,7 @@ class InferenceSupervisor:
 
             apply_supervisor_config(next_config, next_labels, next_enabled)
             try:
-                for role in ("object", "face", "reid"):
+                for role in ("object", "face", "reid", "depth"):
                     if role not in roles:
                         continue
                     if role == "object":
@@ -431,6 +446,8 @@ class InferenceSupervisor:
                     self._face.update_config_reference(next_config)
                 if "reid" not in roles:
                     self._reid.update_config_reference(next_config)
+                if "depth" not in roles:
+                    self._depth.update_config_reference(next_config)
             except BaseException as reconfigure_error:
                 apply_supervisor_config(
                     previous_config,
@@ -459,6 +476,8 @@ class InferenceSupervisor:
                     self._face.update_config_reference(previous_config)
                 if "reid" not in completed:
                     self._reid.update_config_reference(previous_config)
+                if "depth" not in completed:
+                    self._depth.update_config_reference(previous_config)
                 if rollback_failures:
                     raise InferenceRollbackIncomplete(
                         "inference rollback incomplete: "
@@ -613,13 +632,33 @@ class InferenceSupervisor:
             },
         }
 
+    def _base_depth_status(self) -> dict[str, Any]:
+        depth = self.config.depth
+        return {
+            "enabled": bool(depth.enabled and depth.resolved_model_path()),
+            "ready": False,
+            "error": "Depth inference worker has not started.",
+            "configured_device": depth.device,
+            "loaded_device": "",
+            "model_path": depth.resolved_model_path(),
+            "input_shape": [depth.input_size, depth.input_size],
+            "model_load_ms": None,
+            "last_inference_ms": None,
+            "min_distance_m": depth.min_distance_m,
+            "max_distance_m": depth.max_distance_m,
+            "max_incident_distance_m": depth.max_incident_distance_m,
+            "store_heatmap": depth.store_heatmap,
+            "motion_evidence_enabled": depth.motion_evidence_enabled,
+        }
+
     def start(self) -> bool:
         object_ready = True
         for worker in self._object_workers:
             object_ready = worker.start() and object_ready
         face_ready = self._face.start()
         reid_ready = self._reid.start()
-        ready = object_ready and face_ready and reid_ready
+        depth_ready = self._depth.start()
+        ready = object_ready and face_ready and reid_ready and depth_ready
         with self._device_condition:
             self._device_accepting = bool(ready)
             self._device_condition.notify_all()
@@ -631,6 +670,7 @@ class InferenceSupervisor:
             self._device_condition.notify_all()
         failures: list[tuple[str, BaseException]] = []
         workers = [
+            ("depth", self._depth),
             ("reid", self._reid),
             ("face", self._face),
             *(
@@ -870,6 +910,53 @@ class InferenceSupervisor:
             return np.asarray(result, dtype=np.float32)
         finally:
             self._leave_device_workload(workload)
+
+    def estimate_depth_for_objects(
+        self,
+        frame: np.ndarray,
+        objects: list[dict[str, Any]],
+        *,
+        frame_offset_s: float | None = None,
+        include_heatmap: bool = False,
+        workload: InferenceWorkload = InferenceWorkload.ENRICHMENT,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        depth = self.config.depth
+        if not depth.enabled or not depth.resolved_model_path():
+            return list(objects), {}
+        workload = InferenceWorkload(workload)
+        shed_optional = workload is not InferenceWorkload.INTERACTIVE
+        if not self._enter_device_workload(workload, shed_optional=shed_optional):
+            return list(objects), {"status": "depth_deferred"}
+        try:
+            result = dict(
+                self._depth.request(
+                    "estimate_depth",
+                    frame=frame,
+                    objects=objects,
+                    frame_offset_s=frame_offset_s,
+                    include_heatmap=include_heatmap,
+                    workload=workload,
+                )
+                or {}
+            )
+            enriched = list(result.get("objects") or objects)
+            metadata = dict(result.get("metadata") or {})
+            return enriched, metadata
+        except Exception as exc:
+            LOGGER.warning("Depth estimation unavailable: %s", exc)
+            return list(objects), {"status": "depth_error", "error": str(exc)}
+        finally:
+            self._leave_device_workload(workload)
+
+    def depth_status(self) -> dict[str, Any]:
+        status = self._depth.status()
+        status["enabled"] = bool(
+            self.config.depth.enabled and self.config.depth.resolved_model_path()
+        )
+        status["configured_device"] = self.config.depth.device
+        status["max_incident_distance_m"] = self.config.depth.max_incident_distance_m
+        status["motion_evidence_enabled"] = self.config.depth.motion_evidence_enabled
+        return status
 
     @staticmethod
     def _aggregate_object_status(statuses: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1116,4 +1203,5 @@ class InferenceSupervisor:
             "object": self.isolation_status(),
             "face": self._face.isolation_status(),
             "reid": self._reid.isolation_status(),
+            "depth": self._depth.isolation_status(),
         }

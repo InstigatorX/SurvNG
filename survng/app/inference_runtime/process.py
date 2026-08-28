@@ -157,6 +157,10 @@ def _inference_worker_main(
             from ..person_reidentification import OpenVinoAppearanceReidentifier
 
             engine = OpenVinoAppearanceReidentifier(config)
+        elif role == "depth":
+            from ..depth_estimation import OpenVinoDepthEstimator
+
+            engine = OpenVinoDepthEstimator(config)
         else:
             raise ValueError(f"unknown inference worker role: {role}")
         engine_status = engine.status()
@@ -187,7 +191,14 @@ def _inference_worker_main(
                 connection.send({"id": request_id, "ok": True, "result": {"stopped": True}})
                 return
             try:
-                if operation in {"detect", "detect_faces", "embed", "embed_person", "embed_reid"}:
+                if operation in {
+                    "detect",
+                    "detect_faces",
+                    "embed",
+                    "embed_person",
+                    "embed_reid",
+                    "estimate_depth",
+                }:
                     shape = tuple(int(value) for value in request.get("shape") or ())
                     dtype_name = str(request.get("dtype") or "")
                     byte_count = int(request.get("byte_count") or 0)
@@ -221,6 +232,24 @@ def _inference_worker_main(
                             str(request.get("label") or ""),
                             frame,
                         ).astype(np.float32).tolist()
+                    elif operation == "estimate_depth" and role == "depth":
+                        objects = request.get("objects") or []
+                        frame_offset_s = request.get("frame_offset_s")
+                        include_heatmap = request.get("include_heatmap")
+                        enriched, metadata = engine.enrich_objects(
+                            frame,
+                            list(objects),
+                            frame_offset_s=frame_offset_s,
+                            include_heatmap=(
+                                bool(include_heatmap)
+                                if include_heatmap is not None
+                                else None
+                            ),
+                        )
+                        result = {
+                            "objects": enriched,
+                            "metadata": metadata,
+                        }
                     else:
                         raise ValueError(f"{operation} is unavailable in the {role} worker")
                 elif operation == "status":

@@ -33,6 +33,65 @@ def _safe_unit_score(value: object, default: float = 0.0) -> float:
     return max(0.0, min(1.0, number))
 
 
+def _evidence_sample_score(source: str, values: Mapping[str, Any]) -> float:
+    score = values.get("score")
+    if score is None and source == "depth_object":
+        score = values.get("foreground_score")
+    return _safe_unit_score(score)
+
+
+def _normalize_evidence_values(source: str, values: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(values)
+    if source == "depth_object":
+        if "score" not in normalized and normalized.get("foreground_score") is not None:
+            normalized["score"] = normalized["foreground_score"]
+        normalized.setdefault("warmed", 1.0)
+    return normalized
+
+
+class DepthObjectEvidenceStage:
+    """Expose depth samples written by object detection for fusion and audit."""
+
+    def __init__(
+        self,
+        stage_id: str,
+        repository: MotionEvidenceRepository,
+        *,
+        enabled: bool = True,
+    ) -> None:
+        self._stage_id = stage_id
+        self.repository = repository
+        self.enabled = bool(enabled)
+        repository.configure_source(
+            "depth_object",
+            enabled=self.enabled,
+            implementation="depth_object_evidence",
+        )
+
+    @property
+    def stage_id(self) -> str:
+        return self._stage_id
+
+    def process(self, context: MotionContext) -> MotionContext:
+        if not self.enabled:
+            return context
+        started_at = float(
+            context.configuration.get("evidence_started_at", context.captured_at)
+        )
+        ended_at = float(
+            context.configuration.get("evidence_ended_at", context.captured_at)
+        )
+        samples = self.repository.window("depth_object", started_at, ended_at)
+        aggregate = BufferedMotionFusionStage._aggregate_generic_source(
+            "depth_object",
+            samples,
+        )
+        context.source_evidence["depth_object"] = aggregate
+        if int(aggregate.get("depth_object_sample_count") or 0) > 0:
+            context.scoring.features.update(aggregate)
+        return context
+
+
 class OnvifEventEvidenceStage:
     observation_kinds = frozenset({"motion_event"})
 
@@ -177,9 +236,9 @@ class BufferedMotionFusionStage:
             }
         best = max(
             samples,
-            key=lambda sample: _safe_unit_score(sample.values.get("score", 0.0)),
+            key=lambda sample: _evidence_sample_score(source, sample.values),
         )
-        values = dict(best.values)
+        values = _normalize_evidence_values(source, best.values)
         aggregate = {
             f"{source}_warmed": _safe_unit_score(values.get("warmed", 1.0)),
             f"{source}_score": _safe_unit_score(values.get("score", 0.0)),
@@ -296,6 +355,18 @@ def _repository(dependencies: MotionStageDependencies) -> MotionEvidenceReposito
     return repository
 
 
+def _build_depth_object_evidence(
+    stage_id: str,
+    options: Mapping[str, Any],
+    dependencies: MotionStageDependencies,
+) -> DepthObjectEvidenceStage:
+    return DepthObjectEvidenceStage(
+        stage_id,
+        _repository(dependencies),
+        enabled=bool(options.get("enabled", True)),
+    )
+
+
 def _build_onvif_source(
     stage_id: str,
     options: Mapping[str, Any],
@@ -371,6 +442,24 @@ def _build_buffered_fusion(
 def register_evidence_stages(registry: MotionStageRegistry) -> None:
     registry.register(
         MotionStageRegistration(
+            implementation="depth_object_evidence",
+            builder=_build_depth_object_evidence,
+            requires=frozenset({"configuration", "scoring"}),
+            provides=frozenset({"source_evidence"}),
+            graph="fusion",
+            category="depth",
+            display_name="Depth object evidence",
+            description=(
+                "Reads monocular depth summaries produced during object detection "
+                "and exposes nearest-object distance for audit and fusion."
+            ),
+            options=(
+                MotionStageOption("enabled", "Enabled", "boolean", True),
+            ),
+        )
+    )
+    registry.register(
+        MotionStageRegistration(
             implementation="onvif_event_evidence",
             builder=_build_onvif_source,
             requires=frozenset({"configuration"}),
@@ -399,7 +488,12 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             display_name="Buffered evidence fusion",
             description="Combines the normal motion score with recent independent evidence.",
             options=(
-                MotionStageOption("sources", "Extra sources", "string_list", ["onvif"]),
+                MotionStageOption(
+                    "sources",
+                    "Extra sources",
+                    "string_list",
+                    ["depth_object"],
+                ),
                 MotionStageOption("policy", "Decision style", "string", "audit", choices=("audit", "bypass", "any", "all", "weighted")),
                 MotionStageOption("source_thresholds", "Source confidence levels", "object", {}, advanced=True),
                 MotionStageOption("source_weights", "Source importance", "object", {}, advanced=True),

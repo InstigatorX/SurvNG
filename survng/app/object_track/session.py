@@ -15,7 +15,7 @@ from ..domain_events import TrackingCompleted
 from ..security import redact_secret_text
 from ..video_frames import DecodedVideoFrame, VideoFrameReference
 from ..visual_quality import image_quality
-from ..zones import apply_detection_zones
+from ..zones import apply_depth_zone_filters, apply_detection_zones
 from .geometry import (
     _box,
     _confidence,
@@ -175,6 +175,7 @@ class ObjectTrackingSession:
         self._cover_baseline: _TrackingCoverCandidate | None = None
         self._cover_candidate: _TrackingCoverCandidate | None = None
         self._cover_promotion: dict[str, Any] | None = None
+        self._depth_enriched = False
 
     @staticmethod
     def _idle_status() -> dict[str, Any]:
@@ -916,6 +917,24 @@ class ObjectTrackingSession:
                     float(self.detector.config.confidence_threshold),
                     bool(getattr(self.detector.config, "require_incident_zone", True)),
                 )
+                if (
+                    not self._depth_enriched
+                    and objects
+                    and getattr(getattr(self.detector.config, "depth", None), "enabled", False)
+                ):
+                    estimate_depth = getattr(
+                        self.detector,
+                        "estimate_depth_for_objects",
+                        None,
+                    )
+                    if callable(estimate_depth):
+                        objects, _depth_metadata = estimate_depth(
+                            frame,
+                            objects,
+                            frame_offset_s=0.0,
+                        )
+                        apply_depth_zone_filters(self.camera, objects)
+                        self._depth_enriched = True
                 self._annotate_appearances(
                     frame,
                     objects,

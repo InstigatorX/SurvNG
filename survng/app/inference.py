@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from .inference_runtime.adapters import IsolatedFaceRecognizer, IsolatedPersonReidentifier
+from .inference_runtime.adapters import (
+    IsolatedDepthEstimator,
+    IsolatedFaceRecognizer,
+    IsolatedPersonReidentifier,
+)
 from .inference_runtime.process import (
     load_detector_labels,
     stop_multiprocessing_resource_tracker,
@@ -29,6 +33,7 @@ __all__ = [
     "InferenceSupervisor",
     "InferenceUnavailable",
     "InferenceWorkload",
+    "IsolatedDepthEstimator",
     "IsolatedFaceRecognizer",
     "IsolatedPersonReidentifier",
     "PERSON_REID_REQUEST_TIMEOUT_SECONDS",

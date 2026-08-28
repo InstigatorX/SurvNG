@@ -92,6 +92,8 @@ class _InferenceWorker:
     def configured_device(self) -> str:
         if self.role == "face":
             return self.config.face_recognition_device
+        if self.role == "depth":
+            return self.config.depth.device
         if self.role == "reid":
             devices = {
                 self.config.tracking.reid_device

@@ -31,6 +31,7 @@ class ObjectTrack:
     appearance: np.ndarray | None = field(default=None, repr=False)
     reid_matches: int = 0
     reid_recovery_history: list[dict[str, Any]] = field(default_factory=list)
+    depth_history: list[tuple[float, float]] = field(default_factory=list)
     seeded: bool = False
 
     def predicted_box(self, captured_at: float) -> Box:
@@ -63,6 +64,16 @@ class ObjectTrack:
         self.missed = 0
         self.seeded = False
         self.zones.update(str(zone) for zone in detection.get("zones", []) if zone)
+        depth_stats = detection.get("depth_stats")
+        if isinstance(depth_stats, dict):
+            try:
+                depth_m = float(depth_stats.get("median_m"))
+            except (TypeError, ValueError):
+                depth_m = None
+            if depth_m is not None and np.isfinite(depth_m):
+                self.depth_history.append((round(captured_at, 3), round(depth_m, 2)))
+                if len(self.depth_history) > 60:
+                    del self.depth_history[:-60]
         next_appearance = _appearance(detection.get("_tracking_embedding"))
         if next_appearance is not None:
             if self.appearance is not None and self.appearance.shape == next_appearance.shape:
@@ -84,6 +95,15 @@ class ObjectTrack:
             del self.box_history[:-60]
 
     def summary(self, *, active: bool) -> dict[str, Any]:
+        depth_median_m = None
+        depth_trend_mps = None
+        if self.depth_history:
+            depth_median_m = self.depth_history[-1][1]
+            if len(self.depth_history) >= 2:
+                first_at, first_depth = self.depth_history[0]
+                last_at, last_depth = self.depth_history[-1]
+                elapsed = max(1e-3, last_at - first_at)
+                depth_trend_mps = round((first_depth - last_depth) / elapsed, 3)
         return {
             "track_id": self.track_id,
             "label": self.label,
@@ -93,6 +113,9 @@ class ObjectTrack:
             "duration_seconds": round(max(0.0, self.last_seen - self.first_seen), 3),
             "observations": self.hits,
             "max_confidence": round(self.max_confidence, 4),
+            "depth_median_m": depth_median_m,
+            "depth_trend_mps": depth_trend_mps,
+            "depth_history": [list(sample) for sample in self.depth_history],
             "box": {
                 "x1": round(self.box[0], 1),
                 "y1": round(self.box[1], 1),

@@ -20,6 +20,8 @@ DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({"enabled", "backend", "object_worker_
 DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({"enabled", "backend", "model_path", "model_xml", "coreml_model_path", "labels_path", "nms_threshold", "labels"})
 DETECTOR_FACE_ENGINE_FIELDS = frozenset({"face_recognition_enabled", "face_embedding_model_path", "face_landmark_model_path", "face_detection_model_path", "face_recognition_device"})
 DETECTOR_SHARED_ENGINE_FIELDS = frozenset({"cache_enabled", "cache_dir"})
+DEPTH_ENGINE_FIELDS = frozenset({"enabled", "model_path", "device", "input_size"})
+DEPTH_HOT_POLICY_FIELDS = frozenset({"min_distance_m", "max_distance_m", "max_incident_distance_m", "store_heatmap", "heatmap_max_width", "motion_evidence_enabled"})
 TRACKING_REID_ENGINE_FIELDS = frozenset({"reid_enabled", "reid_model_path", "reid_device", "vehicle_reid_enabled", "vehicle_reid_model_path", "vehicle_reid_device"})
 
 
@@ -66,6 +68,9 @@ def manager_owned_config(config: AppConfig) -> dict:
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
         payload["detector"]["tracking"] = _without_fields(tracking, TRACKING_SESSION_FIELDS | TRACKING_REID_ENGINE_FIELDS)
+    depth = payload["detector"].get("depth")
+    if isinstance(depth, dict):
+        payload["detector"]["depth"] = _without_fields(depth, DEPTH_HOT_POLICY_FIELDS)
     return payload
 
 
@@ -184,6 +189,10 @@ class TargetedConfigApplication:
             image_changed = "image_storage" in changes
             semantic_changed = "semantic_search" in changes
             policy_changed = any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_HOT_POLICY_FIELDS)
+            policy_changed = policy_changed or any(
+                getattr(current.detector.depth, f) != getattr(incoming.detector.depth, f)
+                for f in DEPTH_HOT_POLICY_FIELDS
+            )
             policy_changed = policy_changed or {
                 camera.id: camera.object_activity_attribution
                 for camera in current.cameras
@@ -198,6 +207,7 @@ class TargetedConfigApplication:
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_FACE_ENGINE_FIELDS): roles.add("face")
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_SHARED_ENGINE_FIELDS): roles.update({"object", "face", "reid"})
             if any(getattr(current.detector.tracking, f) != getattr(incoming.detector.tracking, f) for f in TRACKING_REID_ENGINE_FIELDS): roles.add("reid")
+            if any(getattr(current.detector.depth, f) != getattr(incoming.detector.depth, f) for f in DEPTH_ENGINE_FIELDS): roles.add("depth")
             refresh = (("reid" in roles and current.detector.tracking != incoming.detector.tracking) or any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_OBJECT_TRACKING_RESET_FIELDS) or (tracking_changed and bool(roles)))
             if recorder_changes and (exports := self._active_exports()):
                 kinds = sorted({str(job.get("kind") or "media") for job in exports})
@@ -247,7 +257,7 @@ class TargetedConfigApplication:
                     except Exception: LOGGER.exception("failed to restore persisted configuration after targeted apply failure")
                 raise
             restarted = [name for name, changed in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed), ("semantic_search", semantic_changed), ("tracking_sessions", tracking_changed or refresh)) if changed]
-            restarted.extend(f"{role}_inference" for role in ("object", "face", "reid") if role in roles)
+            restarted.extend(f"{role}_inference" for role in ("object", "face", "reid", "depth") if role in roles)
             hot = changes + recorder_changes + (["detector_policy"] if policy_changed else [])
             if motion_hot_ids:
                 hot.append("motion_policy")

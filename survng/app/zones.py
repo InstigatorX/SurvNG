@@ -232,3 +232,53 @@ def apply_detection_zones(
             "below_confidence"
         )
     return objects
+
+
+def apply_depth_zone_filters(
+    camera: CameraConfig,
+    objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply optional per-zone depth bands after spatial zone evaluation."""
+    depth_zones = [
+        zone
+        for zone in camera.zones
+        if zone.enabled
+        and (zone.min_depth_m is not None or zone.max_depth_m is not None)
+    ]
+    if not depth_zones:
+        return objects
+    for detected in objects:
+        if not isinstance(detected, dict):
+            continue
+        depth_stats = detected.get("depth_stats")
+        if not isinstance(depth_stats, dict):
+            continue
+        try:
+            median_m = float(depth_stats.get("median_m"))
+        except (TypeError, ValueError):
+            continue
+        label = str(detected.get("label") or "").strip().lower()
+        for zone in depth_zones:
+            if zone.object_classes and label not in {
+                item.strip().lower() for item in zone.object_classes if item.strip()
+            }:
+                continue
+            min_depth = zone.min_depth_m
+            max_depth = zone.max_depth_m
+            if min_depth is not None and median_m < float(min_depth):
+                continue
+            if max_depth is not None and median_m > float(max_depth):
+                continue
+            if zone.behavior == "ignore":
+                detected["incident_eligible"] = False
+                detected["zone_eligible"] = False
+                detected["depth_zone_filtered"] = True
+                detected["zone_admission_reason"] = "depth_ignore_zone"
+                break
+            if zone.behavior == "incident":
+                detected["incident_eligible"] = True
+                detected["zone_eligible"] = True
+                detected["depth_zone_matched"] = zone.name
+                detected["zone_admission_reason"] = "depth_incident_zone"
+                break
+    return objects

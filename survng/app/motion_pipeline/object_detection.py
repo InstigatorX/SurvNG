@@ -16,10 +16,11 @@ import cv2
 import numpy as np
 
 from ..config import CameraConfig
+from ..depth_estimation import depth_motion_evidence_values
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
 from ..visual_quality import VisualQuality, image_quality
-from ..zones import apply_detection_zones, detection_threshold
+from ..zones import apply_depth_zone_filters, apply_detection_zones, detection_threshold
 from .context import Frame
 from .recorded_decode_budget import RecordedDecodeBudget
 
@@ -977,6 +978,15 @@ class MotionObjectDetectorBackend(Protocol):
     def detect_faces(self, frame: Frame) -> list[dict[str, Any]]:
         ...
 
+    def estimate_depth_for_objects(
+        self,
+        frame: Frame,
+        objects: list[dict[str, Any]],
+        *,
+        frame_offset_s: float | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        ...
+
 
 class MotionRecordingProvider(Protocol):
     ffmpeg_path: str
@@ -1131,6 +1141,7 @@ class RecordedMotionObjectDetector:
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         decode_budget: RecordedDecodeBudget | None = None,
+        motion_evidence: Any | None = None,
     ) -> None:
         self.camera = camera
         self.detector = detector
@@ -1140,6 +1151,7 @@ class RecordedMotionObjectDetector:
         self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
         self.stop_requested = stop_requested
         self.decode_budget = decode_budget
+        self.motion_evidence = motion_evidence
 
     def detect(self, event_at: datetime) -> RecordedDetectionResult:
         (
@@ -1888,6 +1900,13 @@ class RecordedMotionObjectDetector:
         # face_candidates afterward so persistence sees those faces.
         if any(item.get("temporal_consensus") is True for item in objects):
             objects = self._enrich_selected_faces(frame, objects, timing=timing)
+            objects = self._enrich_depth(
+                frame,
+                objects,
+                selected.offset,
+                timing=timing,
+                event_epoch=event_epoch,
+            )
             selected.objects = list(objects)
         face_candidates = self._face_candidates(samples)
         self._release_nonselected_frames(samples, selected)
@@ -2023,6 +2042,7 @@ class RecordedMotionObjectDetector:
             bool(getattr(self.detector.config, "require_incident_zone", True)),
             class_thresholds,
         )
+        apply_depth_zone_filters(self.camera, objects)
         for detected in objects:
             if isinstance(detected, dict):
                 detected["temporal_candidate_threshold"] = candidate_threshold
@@ -2113,6 +2133,68 @@ class RecordedMotionObjectDetector:
                 time.monotonic() - enrichment_started
             ) * 1000.0
         return merged
+
+    def _enrich_depth(
+        self,
+        frame: Frame,
+        objects: list[dict[str, Any]],
+        frame_offset_s: float,
+        *,
+        timing: dict[str, float] | None = None,
+        event_epoch: float | None = None,
+    ) -> list[dict[str, Any]]:
+        depth_config = getattr(self.detector.config, "depth", None)
+        if depth_config is None or not getattr(depth_config, "enabled", False):
+            return objects
+        estimate_depth = getattr(self.detector, "estimate_depth_for_objects", None)
+        if not callable(estimate_depth):
+            return objects
+        enrichment_started = time.monotonic()
+        eligible = [
+            item
+            for item in objects
+            if isinstance(item, dict)
+            and item.get("label")
+            and item.get("incident_eligible") is not False
+        ]
+        if not eligible:
+            return objects
+        enriched, metadata = estimate_depth(
+            frame,
+            list(objects),
+            frame_offset_s=frame_offset_s,
+        )
+        apply_depth_zone_filters(self.camera, enriched)
+        if (
+            self.motion_evidence is not None
+            and getattr(depth_config, "motion_evidence_enabled", False)
+            and event_epoch is not None
+        ):
+            evidence_values = depth_motion_evidence_values(
+                enriched,
+                captured_at=float(event_epoch) + float(frame_offset_s),
+                frame_offset_s=float(frame_offset_s),
+            )
+            if evidence_values:
+                self.motion_evidence.configure_source(
+                    "depth_object",
+                    enabled=True,
+                    implementation="depth_object",
+                    display_name="Depth object evidence",
+                )
+                self.motion_evidence.append(
+                    "depth_object",
+                    float(evidence_values["captured_at"]),
+                    evidence_values,
+                )
+        if timing is not None:
+            timing["depth_enrichment_ms"] = round(
+                (time.monotonic() - enrichment_started) * 1000.0,
+                3,
+            )
+            if metadata.get("inference_ms") is not None:
+                timing["depth_inference_ms"] = float(metadata["inference_ms"])
+        return enriched
 
     @staticmethod
     def _detect_faces_in_people(
@@ -2618,6 +2700,7 @@ class RecordedMotionObjectDetectorFactory:
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
+        motion_evidence: Any | None = None,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
             camera=camera,
@@ -2628,4 +2711,5 @@ class RecordedMotionObjectDetectorFactory:
             timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
             stop_requested=stop_requested,
             decode_budget=self.decode_budget,
+            motion_evidence=motion_evidence,
         )

@@ -19,6 +19,7 @@ import {
   Cpu,
   Gauge,
   KeyRound,
+  Layers,
   GripVertical,
   HardDrive,
   Search,
@@ -4382,7 +4383,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       {section === "detection" ? (
         <div className="detection-settings subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
+            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="detection-settings-content">
           {detectionSection === "object" ? <section className="detection-settings-card primary">
@@ -4628,6 +4629,23 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                   { ...(config.motion_qualification?.pipeline || {}), fusion },
                 )}
               />
+            </div>
+          </details> : null}
+
+          {detectionSection === "depth" ? <details className="detection-settings-card detection-feature-card wide-card" open>
+            <summary><span className="detection-settings-card-icon"><Layers size={18} /></span><span><strong>Monocular depth</strong><small>Estimate per-object distance on representative incident frames.</small></span></summary>
+            <div className="detection-feature-body detection-field-grid">
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.depth?.enabled ?? false} onChange={(event) => updateConfig(["detector", "depth", "enabled"], event.target.checked)} /><span>Depth enrichment enabled</span></label>
+              <label>Depth Model<input value={config.detector?.depth?.model_path || ""} onChange={(event) => updateConfig(["detector", "depth", "model_path"], event.target.value)} placeholder="yolo26n-depth_openvino_model/yolo26n-depth.xml" /></label>
+              <label>Depth Device<select value={config.detector?.depth?.device || "AUTO"} onChange={(event) => updateConfig(["detector", "depth", "device"], event.target.value)}>
+                {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select></label>
+              <label>Input Size<input type="number" min="320" max="1280" step="32" value={config.detector?.depth?.input_size ?? 768} onChange={(event) => updateConfig(["detector", "depth", "input_size"], Number(event.target.value))} /></label>
+              <label>Minimum Distance (m)<input type="number" min="0.01" max="500" step="0.01" value={config.detector?.depth?.min_distance_m ?? 0.05} onChange={(event) => updateConfig(["detector", "depth", "min_distance_m"], Number(event.target.value))} /></label>
+              <label>Maximum Distance (m)<input type="number" min="1" max="500" step="0.1" value={config.detector?.depth?.max_distance_m ?? 150} onChange={(event) => updateConfig(["detector", "depth", "max_distance_m"], Number(event.target.value))} /></label>
+              <label>Ignore Incidents Beyond (m)<input type="number" min="0.5" max="500" step="0.1" value={config.detector?.depth?.max_incident_distance_m ?? ""} onChange={(event) => updateConfig(["detector", "depth", "max_incident_distance_m"], event.target.value === "" ? null : Number(event.target.value))} placeholder="optional" /></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.depth?.motion_evidence_enabled ?? true} onChange={(event) => updateConfig(["detector", "depth", "motion_evidence_enabled"], event.target.checked)} /><span>Publish depth motion evidence</span></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.depth?.store_heatmap ?? false} onChange={(event) => updateConfig(["detector", "depth", "store_heatmap"], event.target.checked)} /><span>Store representative depth heatmap</span></label>
             </div>
           </details> : null}
 
@@ -4916,8 +4934,8 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
           <div className="motion-evidence-runtime">
             {Object.entries(status.motion_qualification.evidence_sources || {}).map(([source, evidence]) => (
               <span key={source} className={evidence.enabled ? "enabled" : "disabled"}>
-                <strong>{source === "onvif" ? "Camera signal" : source}</strong>
-                {evidence.enabled ? `${evidence.sample_count || 0} samples${evidence.last?.score != null ? ` · ${Math.round(Number(evidence.last.score) * 100)}% last confidence` : ""}` : "Disabled"}
+                <strong>{source === "onvif" ? "Camera signal" : source === "depth_object" ? "Depth evidence" : source}</strong>
+                {evidence.enabled ? `${evidence.sample_count || 0} samples${evidence.last?.score != null ? ` · ${Math.round(Number(evidence.last.score) * 100)}% last confidence` : ""}${source === "depth_object" && evidence.last?.nearest_m != null ? ` · nearest ${Number(evidence.last.nearest_m).toFixed(1)}m` : ""}` : "Disabled"}
               </span>
             ))}
           </div>
