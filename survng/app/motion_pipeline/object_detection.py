@@ -1140,6 +1140,7 @@ class RecordedMotionObjectDetector:
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         decode_budget: RecordedDecodeBudget | None = None,
+        motion_evidence: Any | None = None,
     ) -> None:
         self.camera = camera
         self.detector = detector
@@ -1149,6 +1150,9 @@ class RecordedMotionObjectDetector:
         self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
         self.stop_requested = stop_requested
         self.decode_budget = decode_budget
+        # Compatibility-only: refinement depth no longer publishes rolling
+        # motion evidence, so callers may keep passing this legacy argument.
+        _ = motion_evidence
 
     def detect(self, event_at: datetime) -> RecordedDetectionResult:
         (
@@ -2657,6 +2661,7 @@ class RecordedMotionObjectDetectorFactory:
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
+        motion_evidence: Any | None = None,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
             camera=camera,
@@ -2667,4 +2672,5 @@ class RecordedMotionObjectDetectorFactory:
             timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
             stop_requested=stop_requested,
             decode_budget=self.decode_budget,
+            motion_evidence=motion_evidence,
         )

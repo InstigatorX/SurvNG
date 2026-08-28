@@ -389,6 +389,38 @@ def _admit_semantic_rescues(
     }
 
 
+def _depth_attribution_summary(objects: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return bounded, decision-scoped depth diagnostics for motion audits."""
+    entries: list[dict[str, Any]] = []
+    for detected in objects:
+        attribution = detected.get("depth_attribution")
+        if not isinstance(attribution, dict):
+            continue
+        entries.append({
+            "label": str(detected.get("label") or ""),
+            "box": dict(detected["box"]) if isinstance(detected.get("box"), dict) else None,
+            "median_m": attribution.get("median_m"),
+            "valid_depth": bool(attribution.get("valid_depth")),
+            "near_depth": bool(attribution.get("near_depth")),
+            "would_admit": bool(attribution.get("would_admit")),
+            "alignment_reliable": bool(attribution.get("alignment_reliable")),
+            "spatial_match": bool(attribution.get("spatial_match")),
+            "stable_geometry": bool(attribution.get("stable_geometry")),
+            "provenance": dict(attribution.get("provenance") or {}),
+        })
+    if not entries:
+        return None
+    return {
+        "schema_version": 1,
+        "evaluated_count": len(entries),
+        "valid_depth_count": sum(item["valid_depth"] for item in entries),
+        "near_depth_count": sum(item["near_depth"] for item in entries),
+        "would_admit_count": sum(item["would_admit"] for item in entries),
+        "objects": entries[:12],
+        "truncated": len(entries) > 12,
+    }
+
+
 class MotionEventStore(Protocol):
     def add_event(
         self,
@@ -448,6 +480,7 @@ class MotionDecisionOutcome:
     refinement_pending: bool = False
     processing_timing: dict[str, Any] | None = None
     object_activity: dict[str, Any] | None = None
+    depth_attribution: dict[str, Any] | None = None
     cover_promoted: bool = False
     cover_promotion_reason: str = ""
 
@@ -461,6 +494,7 @@ class MotionDecisionOutcome:
             "refinement_pending": self.refinement_pending,
             "processing_timing": self.processing_timing,
             "object_activity": self.object_activity,
+            "depth_attribution": self.depth_attribution,
             "cover_promoted": self.cover_promoted,
             "cover_promotion_reason": self.cover_promotion_reason,
         }
@@ -761,6 +795,7 @@ class MotionDecisionHandler:
             )
             uncorrelated_eligible_objects -= len(eligible_objects)
             qualification["motion_correlation"] = correlation
+        depth_attribution = _depth_attribution_summary(objects)
         verification_candidate = bool(qualification.get("suppression_verification_candidate"))
         if qualification.get("borderline_candidate"):
             qualification["rescued_by_object"] = bool(eligible_objects)
@@ -852,6 +887,7 @@ class MotionDecisionHandler:
                 ),
                 processing_timing=processing_timing,
                 object_activity=activity_summary,
+                depth_attribution=depth_attribution,
                 cover_promoted=cover_promoted,
                 cover_promotion_reason=cover_promotion_reason,
             )
@@ -928,6 +964,7 @@ class MotionDecisionHandler:
                 refinement_pending=False,
                 processing_timing=processing_timing,
                 object_activity=activity_summary,
+                depth_attribution=depth_attribution,
             )
         self._persist_face_candidates(
             event_id,
@@ -971,6 +1008,7 @@ class MotionDecisionHandler:
             ),
             processing_timing=processing_timing,
             object_activity=activity_summary,
+            depth_attribution=depth_attribution,
         )
 
     def _persist_face_candidates(

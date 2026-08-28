@@ -35,6 +35,32 @@ def _stage_configs(selections: list[MotionStageSelection]) -> tuple[MotionStageC
     )
 
 
+def _retire_depth_object_fusion(
+    stages: tuple[MotionStageConfig, ...],
+) -> tuple[tuple[MotionStageConfig, ...], bool]:
+    """Remove Phase-1 rolling depth fusion from saved pipeline graphs."""
+    migrated = False
+    resolved: list[MotionStageConfig] = []
+    for stage in stages:
+        if stage.implementation == "depth_object_evidence":
+            migrated = True
+            continue
+        if stage.implementation == "buffered_evidence_fusion":
+            sources = _normalized_sources(stage.options.get("sources", ()))
+            filtered = tuple(source for source in sources if source != "depth_object")
+            if filtered != sources:
+                migrated = True
+                resolved.append(MotionStageConfig(
+                    stage_id=stage.stage_id,
+                    implementation=stage.implementation,
+                    options={**stage.options, "sources": list(filtered)},
+                    parallel_group=stage.parallel_group,
+                ))
+                continue
+        resolved.append(stage)
+    return tuple(resolved), migrated
+
+
 def _resolve_graph(
     graph_name: str,
     global_stages: list[MotionStageSelection],
@@ -61,7 +87,15 @@ def _resolve_graph(
                     _stage_configs(migrated) if migrated else tuple(defaults),
                     f"{origin}_episode_v2_migrated",
                 )
-        return _stage_configs(stages), origin
+        resolved = _stage_configs(stages)
+        if graph_name == "fusion":
+            resolved, depth_migrated = _retire_depth_object_fusion(resolved)
+            if depth_migrated:
+                return (
+                    resolved or tuple(defaults),
+                    f"{origin}_depth_object_retired_migrated",
+                )
+        return resolved, origin
 
     if camera_stages is not None:
         if not camera_stages:

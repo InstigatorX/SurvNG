@@ -115,6 +115,22 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertTrue(graphs.fusion[0].options["include_primary"])
         self.assertTrue(graphs.fusion[0].options["fail_open"])
 
+    def test_saved_depth_object_fusion_is_retired_without_losing_other_sources(self) -> None:
+        graphs = resolve_motion_pipeline_graphs(
+            MotionQualificationConfig.model_validate({
+                "mode": "enforce",
+                "pipeline": {"fusion": [
+                    {"stage_id": "depth", "implementation": "depth_object_evidence"},
+                    {"stage_id": "fusion", "implementation": "buffered_evidence_fusion", "options": {"sources": ["depth_object", "aux"]}},
+                ]},
+            }),
+            CameraMotionQualificationConfig(),
+        )
+
+        self.assertEqual(graphs.origins["fusion"], "global_depth_object_retired_migrated")
+        self.assertEqual(len(graphs.fusion), 1)
+        self.assertEqual(graphs.fusion[0].options["sources"], ["aux"])
+
     def test_camera_visual_backup_mode_is_preserved_through_resolution(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
             MotionQualificationConfig(mode="camera_rescue"),
