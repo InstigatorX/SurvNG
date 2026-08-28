@@ -11858,56 +11858,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   box-shadow: inset 0 -2px #5eead4, 0 0 0 1px rgba(94, 234, 212, .35);
 }
 
-.recordings-v2-event-image {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-  background: linear-gradient(145deg, var(--control-muted), var(--canvas));
-}
-
-.recordings-v2-event-image img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.recordings-v2-event-caption {
-  position: absolute;
-  z-index: 2;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 5px;
-  min-width: 0;
-  background: linear-gradient(transparent, rgba(2, 8, 9, .92));
-  color: #fff;
-  padding: 18px 5px 5px;
-  text-shadow: 0 1px 2px #000;
-}
-
-.recordings-v2-event-caption time {
-  flex: 0 0 auto;
-  color: #fff;
-  font-size: 9px;
-  font-weight: 850;
-  white-space: nowrap;
-}
-
-.recordings-v2-event-caption b {
-  overflow: hidden;
-  font-size: 9px;
-  font-weight: 850;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .recordings-v2-no-events {
   display: flex;
   align-items: center;

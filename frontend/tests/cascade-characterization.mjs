@@ -187,6 +187,100 @@ async function assertShellStacking(page, viewportName) {
   }
 }
 
+async function assertTimelineEventLayering(page) {
+  const report = await page.evaluate(() => {
+    const events = document.createElement("div");
+    events.className = "recordings-v2-events";
+    Object.assign(events.style, {
+      position: "fixed",
+      top: "80px",
+      left: "20px",
+      width: "240px",
+      height: "160px",
+      zIndex: "10000",
+    });
+    const button = document.createElement("button");
+    button.type = "button";
+    const image = document.createElement("span");
+    image.className = "recordings-v2-event-image";
+    const img = document.createElement("img");
+    img.alt = "";
+    image.append(img);
+    const caption = document.createElement("span");
+    caption.className = "recordings-v2-event-caption";
+    const time = document.createElement("time");
+    time.textContent = "12:34";
+    const label = document.createElement("b");
+    label.textContent = "Motion";
+    caption.append(time, label);
+    button.append(image, caption);
+    events.append(button);
+    document.body.append(events);
+
+    const describe = (node) => {
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return {
+        position: style.position,
+        zIndex: style.zIndex,
+        inset: [style.top, style.right, style.bottom, style.left],
+        display: style.display,
+        alignItems: style.alignItems,
+        justifyContent: style.justifyContent,
+        gap: style.gap,
+        padding: style.padding,
+        pointerEvents: style.pointerEvents,
+        objectFit: style.objectFit,
+        rect: { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left },
+      };
+    };
+    const buttonRect = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(
+      buttonRect.left + (buttonRect.width / 2),
+      buttonRect.bottom - 4,
+    );
+    const result = {
+      button: describe(button),
+      image: describe(image),
+      img: describe(img),
+      caption: describe(caption),
+      captionInterceptsHit: caption.contains(hit),
+    };
+    events.remove();
+    return result;
+  });
+
+  assert.deepEqual(
+    Object.fromEntries(["position", "zIndex", "inset", "display"].map((key) => [key, report.image[key]])),
+    { position: "absolute", zIndex: "auto", inset: ["0px", "0px", "0px", "0px"], display: "grid" },
+  );
+  assert.deepEqual(
+    Object.fromEntries(["position", "inset", "objectFit"].map((key) => [key, report.img[key]])),
+    { position: "absolute", inset: ["0px", "0px", "0px", "0px"], objectFit: "cover" },
+  );
+  assert.deepEqual(
+    Object.fromEntries(["position", "zIndex", "display", "alignItems", "justifyContent", "gap", "padding", "pointerEvents"].map((key) => [key, report.caption[key]])),
+    {
+      position: "absolute",
+      zIndex: "2",
+      display: "flex",
+      alignItems: "flex-end",
+      justifyContent: "space-between",
+      gap: "6px",
+      padding: "18px 6px 5px",
+      pointerEvents: "none",
+    },
+  );
+  assert.deepEqual(report.caption.inset.slice(1), ["0px", "0px", "0px"], "caption keeps its right/bottom/left anchors");
+  for (const edge of ["top", "right", "bottom", "left"]) {
+    assert.ok(Math.abs(report.image.rect[edge] - report.button.rect[edge]) <= 1.1, `event image ${edge} stays within the button border`);
+  }
+  for (const edge of ["right", "bottom", "left"]) {
+    assert.ok(Math.abs(report.caption.rect[edge] - report.button.rect[edge]) <= 1.1, `caption remains ${edge}-aligned to its button`);
+  }
+  assert.equal(report.captionInterceptsHit, false, "caption does not intercept event-thumbnail input");
+}
+
 async function assertMobileSheetHitTesting(page) {
   const more = page.getByRole("button", { name: "More", exact: true });
   await more.click();
@@ -238,6 +332,7 @@ try {
       assert.equal(await page.locator("html").getAttribute("data-theme"), theme);
       await characterizeCascade(page, workspace, theme, "desktop");
       await assertShellStacking(page, "desktop");
+      if (workspace.id === "timeline") await assertTimelineEventLayering(page);
     }
     for (const [viewportName, viewport] of Object.entries(VIEWPORTS)) {
       await page.setViewportSize(viewport);
