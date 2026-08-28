@@ -6518,8 +6518,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .faces-page {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px 12px;
   height: calc(100dvh - 76px);
   min-height: 0;
@@ -6564,16 +6562,12 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .faces-command-status {
   display: flex;
   align-items: center;
-  gap: 8px;
 }
 
 .faces-command-status>span {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 34px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
   padding: 0 10px;
 }
 
@@ -6617,7 +6611,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .faces-panel-heading h2 {
   margin: 0;
-  font-size: 17px;
 }
 
 .faces-panel-heading span,
@@ -6702,11 +6695,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: flex;
   align-items: center;
   width: 100%;
-  min-height: 50px;
   gap: 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
   padding: 5px;
   text-align: left;
 }
@@ -6717,11 +6706,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   min-width: 0;
   flex: 1;
   gap: 8px;
-  border: 0;
-  background: transparent;
   padding: 0;
   text-align: left;
-  min-height: 44px;
 }
 
 .face-person-row>.icon-button {
@@ -6768,8 +6754,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .faces-toolbar {
   grid-area: toolbar;
-  padding: 10px;
-  border-bottom: 1px solid var(--line);
 }
 
 .faces-toolbar select {
@@ -6778,11 +6762,9 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .faces-filter-group {
   display: flex;
-  gap: 4px;
 }
 
 .faces-filter-group button {
-  min-height: 44px;
   padding: 5px 12px;
   text-transform: capitalize;
 }
@@ -6807,10 +6789,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   grid-auto-rows: max-content;
   align-content: start;
-  gap: 8px;
   min-height: 0;
   overflow-y: auto;
-  padding: 10px;
 }
 
 .face-observation-card {
@@ -6820,8 +6800,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   min-height: 180px;
   align-self: start;
   overflow: hidden;
-  border-radius: 6px;
-  background: var(--thumb);
   padding: 0;
 }
 
@@ -6866,7 +6844,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  border-top: 1px solid var(--line);
   padding: 8px 10px;
 }
 
@@ -6896,7 +6873,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: grid;
   gap: 2px;
   padding: 24px 8px 8px;
-  background: linear-gradient(transparent, rgba(0, 0, 0, 0.82));
   color: white;
   text-align: left;
 }
@@ -7040,7 +7016,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 @media (max-width: 760px) {
   .faces-page {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
     height: auto;
     min-height: calc(100dvh - 52px);
     padding: 6px;
@@ -7083,7 +7058,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .faces-filter-group button {
     flex: 0 0 auto;
-    min-height: 44px;
     padding: 5px 10px;
     font-size: 12px;
   }
@@ -9754,8 +9728,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .search-page {
   display: grid;
-  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px 12px;
   height: calc(100dvh - 76px);
   min-height: 0;
@@ -9811,30 +9783,21 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
 }
 
 .search-scope-heading {
   display: grid;
   gap: 2px;
-  border-bottom: 1px solid var(--line);
-  padding: 12px;
 }
 
 .search-scope-heading small {
   color: var(--muted);
-  font-size: 11px;
 }
 
 .search-camera-list {
   display: grid;
-  gap: 5px;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px;
 }
 
 .search-camera-list button {
@@ -9842,15 +9805,12 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   grid-template-columns: 18px minmax(0, 1fr) 8px;
   align-items: center;
   gap: 8px;
-  min-height: 44px;
   border-color: var(--line);
-  background: var(--control);
   color: var(--muted);
   text-align: left;
 }
 
 .search-camera-list button.active {
-  border-color: rgba(15, 118, 110, .4);
   background: var(--active);
   color: var(--active-ink);
 }
@@ -9870,13 +9830,11 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .search-camera-list i.online {
   background: var(--success, #24b47e);
-  box-shadow: 0 0 0 3px rgba(36, 180, 126, .12);
 }
 
 .search-history-panel {
   display: grid;
   gap: 5px;
-  border-top: 1px solid var(--line);
   padding: 10px 8px;
 }
 
@@ -9923,20 +9881,12 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
-  padding: 14px;
 }
 
 .semantic-status {
   border: 1px solid var(--line);
-  border-radius: 999px;
   padding: 6px 10px;
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
 }
 
 .semantic-status.ready {
@@ -9952,7 +9902,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   gap: 10px;
   border: 1px solid var(--line-strong);
   background: var(--control);
-  border-radius: 8px;
   padding: 6px 8px;
 }
 
@@ -9960,7 +9909,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   border: 0;
   background: transparent;
   min-width: 0;
-  font-size: 16px;
   outline: 0;
   color: var(--text);
 }
@@ -9975,9 +9923,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   border: 1px solid rgba(15, 118, 110, .5);
   background: var(--active);
   color: var(--active-ink);
-  border-radius: 6px;
   padding: 8px 13px;
-  font-weight: 800;
   text-decoration: none;
 }
 
@@ -9996,16 +9942,13 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .semantic-search-results {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 12px;
   margin-top: 16px;
 }
 
 .semantic-search-results article {
   min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 8px;
   overflow: hidden;
-  background: var(--panel);
 }
 
 .semantic-result-image {
@@ -10039,7 +9982,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 9px;
 }
 
 .semantic-search-results footer div {
