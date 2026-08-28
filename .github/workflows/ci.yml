@@ -2,16 +2,7 @@ name: CI
 
 on:
   push:
-    branches:
-      - v1.2
   pull_request:
-
-# Feature branches are validated by their pull request; direct v1.2 pushes are
-# validated here as well. This prevents duplicate push/pull_request campaigns
-# from contending for the shared runner's serialized Python test lock.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
 
 jobs:
   tests:
