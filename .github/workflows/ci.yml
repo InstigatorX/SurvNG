@@ -2,11 +2,13 @@ name: CI
 
 on:
   push:
+    branches:
+      - v1.2
   pull_request:
 
-# A branch with an open PR receives both push and pull_request events.  The
-# Python runner serializes test campaigns for safety, so allowing both jobs to
-# wait on the same lock can make the second job hit its per-suite timeout.
+# Feature branches are validated by their pull request; direct v1.2 pushes are
+# validated here as well.  This prevents duplicate push/pull_request campaigns
+# on the shared runner from contending for the serialized Python test lock.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
