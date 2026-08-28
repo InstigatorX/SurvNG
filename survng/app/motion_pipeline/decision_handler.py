@@ -104,8 +104,16 @@ def motion_correlated_objects(
     objects: list[dict[str, Any]],
     qualification: dict[str, Any],
     alignment: dict[str, Any] | None = None,
+    *,
+    depth_attribution_mode: str = "off",
+    depth_shadow_maximum_m: float = 10.0,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Keep objects that spatially or temporally explain an EMA trigger."""
+    """Keep objects that spatially or temporally explain an EMA trigger.
+
+    ``depth_attribution_mode='shadow'`` emits decision-scoped diagnostics for
+    enriched refinement objects.  It deliberately never changes admission;
+    live qualification has no depth producer on this path.
+    """
     features = qualification.get("features")
     regions = features.get("motion_regions", []) if isinstance(features, dict) else []
     if not isinstance(regions, list):
@@ -179,6 +187,49 @@ def motion_correlated_objects(
             or appearance_match
             or alignment_fallback
         )
+        if (
+            depth_attribution_mode == "shadow"
+            and isinstance(detected.get("depth_stats"), dict)
+        ):
+            depth_stats = detected["depth_stats"]
+            try:
+                median_m = float(depth_stats.get("median_m"))
+            except (TypeError, ValueError):
+                median_m = None
+            valid_depth = median_m is not None and math.isfinite(median_m) and median_m > 0
+            near_depth = bool(valid_depth and median_m <= depth_shadow_maximum_m)
+            would_admit = bool(
+                near_depth
+                and alignment_reliable
+                and spatial
+                and not stable_geometry
+                and not motion_correlated
+            )
+            provenance = {
+                key: detected[key]
+                for key in (
+                    "frame_captured_at_epoch",
+                    "captured_at",
+                    "frame_offset_s",
+                    "temporal_sample_count",
+                    "temporal_incident_observations",
+                )
+                if detected.get(key) is not None
+            }
+            detected["depth_attribution"] = {
+                "mode": "shadow",
+                "decision_scoped": True,
+                "median_m": median_m,
+                "valid_depth": valid_depth,
+                "near_depth": near_depth,
+                "maximum_m": depth_shadow_maximum_m,
+                "alignment_reliable": alignment_reliable,
+                "spatial_match": spatial,
+                "stable_geometry": stable_geometry,
+                "normal_motion_correlated": motion_correlated,
+                "would_admit": would_admit,
+                "provenance": provenance,
+            }
         detected["motion_correlated"] = motion_correlated
         detected["motion_correlation"] = (
             "temporal" if temporal else
@@ -269,6 +320,7 @@ def _admit_semantic_rescues(
         candidates,
         qualification,
         alignment,
+        depth_attribution_mode="shadow",
     )
     admitted_ids = {id(item) for item in correlated}
     admitted = 0
@@ -337,6 +389,38 @@ def _admit_semantic_rescues(
     }
 
 
+def _depth_attribution_summary(objects: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return bounded, decision-scoped depth diagnostics for motion audits."""
+    entries: list[dict[str, Any]] = []
+    for detected in objects:
+        attribution = detected.get("depth_attribution")
+        if not isinstance(attribution, dict):
+            continue
+        entries.append({
+            "label": str(detected.get("label") or ""),
+            "box": dict(detected["box"]) if isinstance(detected.get("box"), dict) else None,
+            "median_m": attribution.get("median_m"),
+            "valid_depth": bool(attribution.get("valid_depth")),
+            "near_depth": bool(attribution.get("near_depth")),
+            "would_admit": bool(attribution.get("would_admit")),
+            "alignment_reliable": bool(attribution.get("alignment_reliable")),
+            "spatial_match": bool(attribution.get("spatial_match")),
+            "stable_geometry": bool(attribution.get("stable_geometry")),
+            "provenance": dict(attribution.get("provenance") or {}),
+        })
+    if not entries:
+        return None
+    return {
+        "schema_version": 1,
+        "evaluated_count": len(entries),
+        "valid_depth_count": sum(item["valid_depth"] for item in entries),
+        "near_depth_count": sum(item["near_depth"] for item in entries),
+        "would_admit_count": sum(item["would_admit"] for item in entries),
+        "objects": entries[:12],
+        "truncated": len(entries) > 12,
+    }
+
+
 class MotionEventStore(Protocol):
     def add_event(
         self,
@@ -396,6 +480,7 @@ class MotionDecisionOutcome:
     refinement_pending: bool = False
     processing_timing: dict[str, Any] | None = None
     object_activity: dict[str, Any] | None = None
+    depth_attribution: dict[str, Any] | None = None
     cover_promoted: bool = False
     cover_promotion_reason: str = ""
 
@@ -409,6 +494,7 @@ class MotionDecisionOutcome:
             "refinement_pending": self.refinement_pending,
             "processing_timing": self.processing_timing,
             "object_activity": self.object_activity,
+            "depth_attribution": self.depth_attribution,
             "cover_promoted": self.cover_promoted,
             "cover_promotion_reason": self.cover_promotion_reason,
         }
@@ -705,9 +791,11 @@ class MotionDecisionHandler:
                 eligible_objects,
                 qualification,
                 self.spatial_alignment,
+                depth_attribution_mode="shadow",
             )
             uncorrelated_eligible_objects -= len(eligible_objects)
             qualification["motion_correlation"] = correlation
+        depth_attribution = _depth_attribution_summary(objects)
         verification_candidate = bool(qualification.get("suppression_verification_candidate"))
         if qualification.get("borderline_candidate"):
             qualification["rescued_by_object"] = bool(eligible_objects)
@@ -799,6 +887,7 @@ class MotionDecisionHandler:
                 ),
                 processing_timing=processing_timing,
                 object_activity=activity_summary,
+                depth_attribution=depth_attribution,
                 cover_promoted=cover_promoted,
                 cover_promotion_reason=cover_promotion_reason,
             )
@@ -875,6 +964,7 @@ class MotionDecisionHandler:
                 refinement_pending=False,
                 processing_timing=processing_timing,
                 object_activity=activity_summary,
+                depth_attribution=depth_attribution,
             )
         self._persist_face_candidates(
             event_id,
@@ -918,6 +1008,7 @@ class MotionDecisionHandler:
             ),
             processing_timing=processing_timing,
             object_activity=activity_summary,
+            depth_attribution=depth_attribution,
         )
 
     def _persist_face_candidates(

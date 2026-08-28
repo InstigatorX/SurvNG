@@ -10,6 +10,7 @@ import numpy as np
 from survng.app.face_candidates import FaceCandidate
 from survng.app.object_activity import ObjectActivityAttributor
 from survng.app.motion_pipeline import MotionDecisionHandler
+from survng.app.motion_pipeline.decision_handler import motion_correlated_objects
 from survng.app.motion_pipeline.object_detection import RecordedDetectionResult
 
 
@@ -28,6 +29,60 @@ class RecordingEventStore:
 
 
 class MotionDecisionHandlerTest(unittest.TestCase):
+    def test_depth_attribution_shadow_is_decision_scoped_and_preserves_result(self) -> None:
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        detected = {
+            "label": "person",
+            "incident_eligible": True,
+            "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 40},
+            "depth_stats": {"median_m": 4.0},
+            "frame_offset_s": 0.5,
+            "temporal_sample_count": 1,
+            "temporal_track_observations": 2,
+        }
+
+        correlated, summary = motion_correlated_objects(
+            frame,
+            [detected],
+            {"features": {"motion_regions": [[0.1, 0.1, 0.5, 0.5]]}},
+            depth_attribution_mode="shadow",
+        )
+
+        self.assertEqual(correlated, [])
+        self.assertFalse(detected["incident_eligible"])
+        self.assertEqual(detected["depth_attribution"], {
+            "mode": "shadow",
+            "decision_scoped": True,
+            "median_m": 4.0,
+            "valid_depth": True,
+            "near_depth": True,
+            "maximum_m": 10.0,
+            "alignment_reliable": True,
+            "spatial_match": True,
+            "stable_geometry": False,
+            "normal_motion_correlated": False,
+            "would_admit": True,
+            "provenance": {"frame_offset_s": 0.5, "temporal_sample_count": 1},
+        })
+        self.assertEqual(summary["correlated_object_count"], 0)
+
+    def test_depth_attribution_is_off_by_default(self) -> None:
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        detected = {
+            "label": "person",
+            "incident_eligible": True,
+            "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 40},
+            "depth_stats": {"median_m": 4.0},
+        }
+
+        motion_correlated_objects(
+            frame,
+            [detected],
+            {"features": {"motion_regions": [[0.1, 0.1, 0.5, 0.5]]}},
+        )
+
+        self.assertNotIn("depth_attribution", detected)
+
     def test_route_duplicate_does_not_publish_or_start_downstream_side_effects(self) -> None:
         events = Mock()
         events.add_event.return_value = {"id": 42, "created": False}

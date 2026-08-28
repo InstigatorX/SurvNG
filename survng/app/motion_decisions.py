@@ -801,6 +801,9 @@ class MotionDecisionOrchestrator:
             "object_detection_timing": outcome.get("processing_timing"),
             "object_activity_attribution": outcome.get("object_activity"),
         }
+        depth_attribution = outcome.get("depth_attribution")
+        if isinstance(depth_attribution, dict):
+            features["depth_attribution"] = depth_attribution
         if visual_backup:
             features["visual_backup_original_reason"] = result.reason
             reason = str(outcome.get("rejection_reason") or "visual_backup_trigger")

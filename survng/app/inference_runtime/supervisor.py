@@ -985,7 +985,6 @@ class InferenceSupervisor:
         )
         status["configured_device"] = self.config.depth.device
         status["max_incident_distance_m"] = self.config.depth.max_incident_distance_m
-        status["motion_evidence_enabled"] = self.config.depth.motion_evidence_enabled
         return status
 
     @staticmethod

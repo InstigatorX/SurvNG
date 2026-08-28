@@ -4644,7 +4644,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label>Minimum Distance (m)<input type="number" min="0.01" max="500" step="0.01" value={config.detector?.depth?.min_distance_m ?? 0.05} onChange={(event) => updateConfig(["detector", "depth", "min_distance_m"], Number(event.target.value))} /></label>
               <label>Maximum Distance (m)<input type="number" min="1" max="500" step="0.1" value={config.detector?.depth?.max_distance_m ?? 150} onChange={(event) => updateConfig(["detector", "depth", "max_distance_m"], Number(event.target.value))} /></label>
               <label>Ignore Incidents Beyond (m)<input type="number" min="0.5" max="500" step="0.1" value={config.detector?.depth?.max_incident_distance_m ?? ""} onChange={(event) => updateConfig(["detector", "depth", "max_incident_distance_m"], event.target.value === "" ? null : Number(event.target.value))} placeholder="optional" /></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.depth?.motion_evidence_enabled ?? true} onChange={(event) => updateConfig(["detector", "depth", "motion_evidence_enabled"], event.target.checked)} /><span>Publish depth motion evidence</span></label>
               <label className="compact-toggle"><input type="checkbox" checked={config.detector?.depth?.store_heatmap ?? false} onChange={(event) => updateConfig(["detector", "depth", "store_heatmap"], event.target.checked)} /><span>Store representative depth heatmap</span></label>
             </div>
           </details> : null}
@@ -4888,6 +4887,40 @@ export function MotionEffectiveness({ cameraId, mode }) {
   );
 }
 
+export function DepthShadowPerformance({ cameraId = "", mode = "" }) {
+  const [summary, setSummary] = useState(null);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    try {
+      const response = await fetch("/api/motion-effectiveness?days=1");
+      if (!response.ok) throw new Error("Depth shadow history unavailable");
+      const payload = await response.json();
+      const cameras = cameraId ? { [cameraId]: payload?.by_camera?.[cameraId] || {} } : payload?.by_camera || {};
+      const totals = { decisions: 0, objects_evaluated: 0, valid_depth: 0, near_depth: 0, would_admit: 0 };
+      Object.entries(cameras).forEach(([, modes]) => Object.entries(modes || {}).forEach(([entryMode, value]) => {
+        if (mode && entryMode !== mode) return;
+        const depth = value?.depth_shadow || {};
+        Object.keys(totals).forEach((key) => { totals[key] += Number(depth[key] || 0); });
+      }));
+      setSummary(totals);
+      setError("");
+    } catch (loadError) {
+      setError(loadError.message || "Depth shadow history unavailable");
+    }
+  };
+  useVisiblePolling(load, 30000, true, { restartKey: `${cameraId}\u0000${mode}` });
+
+  if (error) return <span className="motion-runtime-warning">{error}</span>;
+  if (!summary?.decisions) return <span>Depth shadow: waiting for recorded-frame correlations.</span>;
+  return <div className="motion-effectiveness-summary">
+    <strong>Depth shadow · last 24 hours</strong>
+    <span>{summary.decisions.toLocaleString()} correlated decisions · {summary.objects_evaluated.toLocaleString()} objects sampled</span>
+    <span>{summary.valid_depth.toLocaleString()} valid depth · {summary.near_depth.toLocaleString()} near · {summary.would_admit.toLocaleString()} would meet the experimental depth rule</span>
+    <span>Informational only — depth does not affect incidents, EMA, or fusion.</span>
+  </div>;
+}
+
 export function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
@@ -4925,6 +4958,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
               <span>{status.motion_qualification.visual_backup_not_ready || 0} strong candidates held during scene learning · {status.motion_qualification.visual_backup_uncorrelated_objects || 0} detected objects outside motion areas rejected</span>
             </> : null}
             <MotionEffectiveness cameraId={status.id} mode={status.motion_qualification.mode} />
+            <DepthShadowPerformance cameraId={status.id} mode={status.motion_qualification.mode} />
           </div>
           <div className="motion-pipeline-runtime-grid">
             <MotionPipelineRuntimeCard label="Motion analysis" pipeline={status.motion_qualification.pipeline} origin={status.motion_qualification.pipeline_origins?.qualification} motionCatalog={motionCatalog} />

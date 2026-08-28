@@ -417,5 +417,4 @@ class OpenVinoDepthEstimator:
             "max_distance_m": self.depth_config.max_distance_m,
             "max_incident_distance_m": self.depth_config.max_incident_distance_m,
             "store_heatmap": self.depth_config.store_heatmap,
-            "motion_evidence_enabled": self.depth_config.motion_evidence_enabled,
         }

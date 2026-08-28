@@ -134,17 +134,15 @@ def default_motion_observation_stage_configs() -> list[MotionStageConfig]:
 
 
 def default_motion_fusion_stage_configs() -> list[MotionStageConfig]:
+    # Depth is recorded-refinement attribution, not rolling evidence for the
+    # next unrelated EMA qualification.  Retain a no-source fusion stage for
+    # the pipeline contract and guided configuration UI.
     return [
-        MotionStageConfig(
-            stage_id="depth_evidence",
-            implementation="depth_object_evidence",
-            options={"enabled": True},
-        ),
         MotionStageConfig(
             stage_id="evidence_fusion",
             implementation="buffered_evidence_fusion",
             options={
-                "sources": ["depth_object"],
+                "sources": [],
                 "policy": "audit",
                 "include_primary": True,
                 "fail_open": True,

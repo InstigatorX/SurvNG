@@ -1447,6 +1447,40 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(summary["visual_rejection_rate"], 0.4)
             self.assertEqual(summary["object_yield_rate"], 0.6667)
 
+    def test_motion_effectiveness_summarizes_depth_shadow_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.add_motion_audit(
+                camera_id="gate",
+                snapshot_path="",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                mode="adaptive",
+                sensitivity="balanced",
+                score=0.7,
+                threshold=0.5,
+                reason="object_detected",
+                object_detected=True,
+                trigger_count=1,
+                features={
+                    "depth_attribution": {
+                        "evaluated_count": 2,
+                        "valid_depth_count": 1,
+                        "near_depth_count": 1,
+                        "would_admit_count": 1,
+                    }
+                },
+            )
+
+            depth = store.motion_effectiveness(days=1)["by_camera"]["gate"]["adaptive"]["depth_shadow"]
+
+            self.assertEqual(depth, {
+                "decisions": 1,
+                "objects_evaluated": 2,
+                "valid_depth": 1,
+                "near_depth": 1,
+                "would_admit": 1,
+            })
+
     def test_database_can_be_local_while_media_paths_remain_in_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as database:
             snapshot = Path(storage) / "snapshots" / "gate" / "event.jpg"

@@ -582,6 +582,7 @@ def test_refined_active_followup_updates_completed_outcome_telemetry() -> None:
         "snapshot_path": "followup.webp",
         "rejection_reason": "",
         "motion_correlation": {"required": True},
+        "depth_attribution": {"evaluated_count": 1, "would_admit_count": 1},
     }
     result = MotionQualificationResult(
         True,
@@ -612,6 +613,7 @@ def test_refined_active_followup_updates_completed_outcome_telemetry() -> None:
     audit_kwargs = audit.record_audit.call_args.kwargs
     assert audit_kwargs["category"] == "active_followup"
     assert audit_kwargs["event_id"] == 55
+    assert audit_kwargs["features"]["depth_attribution"]["would_admit_count"] == 1
 
 
 def test_durable_refinement_completion_is_retry_safe_and_idempotent() -> None:

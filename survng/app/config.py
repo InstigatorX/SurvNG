@@ -574,6 +574,9 @@ class DepthConfig(BaseModel):
     max_incident_distance_m: float | None = Field(default=None, ge=0.5, le=500.0)
     store_heatmap: bool = False
     heatmap_max_width: int = Field(default=192, ge=64, le=512)
+    # Retained only so existing configuration files remain loadable. Depth is
+    # now decision-scoped recorded-refinement attribution, not rolling motion
+    # evidence, so this setting has no effect on new runtime behavior.
     motion_evidence_enabled: bool = True
 
     @model_validator(mode="after")
