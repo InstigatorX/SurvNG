@@ -16,7 +16,6 @@ import cv2
 import numpy as np
 
 from ..config import CameraConfig
-from ..depth_estimation import depth_motion_evidence_values
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
 from ..visual_quality import VisualQuality, image_quality
@@ -1141,7 +1140,6 @@ class RecordedMotionObjectDetector:
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         decode_budget: RecordedDecodeBudget | None = None,
-        motion_evidence: Any | None = None,
     ) -> None:
         self.camera = camera
         self.detector = detector
@@ -1151,7 +1149,6 @@ class RecordedMotionObjectDetector:
         self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
         self.stop_requested = stop_requested
         self.decode_budget = decode_budget
-        self.motion_evidence = motion_evidence
 
     def detect(self, event_at: datetime) -> RecordedDetectionResult:
         (
@@ -1905,7 +1902,6 @@ class RecordedMotionObjectDetector:
                 objects,
                 selected.offset,
                 timing=timing,
-                event_epoch=event_epoch,
             )
             selected.objects = list(objects)
         face_candidates = self._face_candidates(samples)
@@ -2141,7 +2137,6 @@ class RecordedMotionObjectDetector:
         frame_offset_s: float,
         *,
         timing: dict[str, float] | None = None,
-        event_epoch: float | None = None,
     ) -> list[dict[str, Any]]:
         depth_config = getattr(self.detector.config, "depth", None)
         if depth_config is None or not getattr(depth_config, "enabled", False):
@@ -2165,28 +2160,6 @@ class RecordedMotionObjectDetector:
             frame_offset_s=frame_offset_s,
         )
         apply_depth_zone_filters(self.camera, enriched)
-        if (
-            self.motion_evidence is not None
-            and getattr(depth_config, "motion_evidence_enabled", False)
-            and event_epoch is not None
-        ):
-            evidence_values = depth_motion_evidence_values(
-                enriched,
-                captured_at=float(event_epoch) + float(frame_offset_s),
-                frame_offset_s=float(frame_offset_s),
-            )
-            if evidence_values:
-                self.motion_evidence.configure_source(
-                    "depth_object",
-                    enabled=True,
-                    implementation="depth_object",
-                    display_name="Depth object evidence",
-                )
-                self.motion_evidence.append(
-                    "depth_object",
-                    float(evidence_values["captured_at"]),
-                    evidence_values,
-                )
         if timing is not None:
             timing["depth_enrichment_ms"] = round(
                 (time.monotonic() - enrichment_started) * 1000.0,
@@ -2684,7 +2657,6 @@ class RecordedMotionObjectDetectorFactory:
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
-        motion_evidence: Any | None = None,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
             camera=camera,
@@ -2695,5 +2667,4 @@ class RecordedMotionObjectDetectorFactory:
             timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
             stop_requested=stop_requested,
             decode_budget=self.decode_budget,
-            motion_evidence=motion_evidence,
         )

@@ -109,12 +109,11 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertEqual(graphs.qualification[1].implementation, "adaptive_ema_background")
         self.assertEqual(len(graphs.observation), 1)
         self.assertEqual(graphs.observation[0].implementation, "onvif_event_evidence")
-        self.assertEqual(len(graphs.fusion), 2)
-        self.assertEqual(graphs.fusion[0].implementation, "depth_object_evidence")
-        self.assertEqual(graphs.fusion[1].implementation, "buffered_evidence_fusion")
-        self.assertEqual(graphs.fusion[1].options["sources"], ["depth_object"])
-        self.assertTrue(graphs.fusion[1].options["include_primary"])
-        self.assertTrue(graphs.fusion[1].options["fail_open"])
+        self.assertEqual(len(graphs.fusion), 1)
+        self.assertEqual(graphs.fusion[0].implementation, "buffered_evidence_fusion")
+        self.assertEqual(graphs.fusion[0].options["sources"], [])
+        self.assertTrue(graphs.fusion[0].options["include_primary"])
+        self.assertTrue(graphs.fusion[0].options["fail_open"])
 
     def test_camera_visual_backup_mode_is_preserved_through_resolution(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
@@ -123,7 +122,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         )
 
         self.assertEqual(resolved_trigger_mode("camera_rescue"), "camera_rescue")
-        self.assertTrue(graphs.fusion[1].options["include_primary"])
+        self.assertTrue(graphs.fusion[0].options["include_primary"])
 
     def test_legacy_graphs_are_migrated_to_adaptive_defaults(self) -> None:
         global_config = MotionQualificationConfig.model_validate({
