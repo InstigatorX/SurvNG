@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
 
+# A branch with an open PR receives both push and pull_request events.  The
+# Python runner serializes test campaigns for safety, so allowing both jobs to
+# wait on the same lock can make the second job hit its per-suite timeout.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   tests:
     runs-on: [self-hosted, Linux, X64]
