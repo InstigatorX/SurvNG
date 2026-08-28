@@ -1947,11 +1947,8 @@ p {
 }
 
 .tree-group-label {
-  margin: 7px 8px 2px;
   color: var(--muted);
   font-size: 9px;
-  font-weight: 850;
-  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
@@ -4401,7 +4398,6 @@ button.live-overlay-backdrop:active {
 .log-command-controls {
   display: flex;
   align-items: end;
-  gap: 8px;
 }
 
 .log-command-controls label {
@@ -7994,14 +7990,10 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .telemetry-viewer {
   display: grid;
-  gap: 8px;
-  padding: 8px 10px 10px;
 }
 
 .telemetry-diagnostics {
   display: grid;
-  gap: 12px;
-  padding: 14px;
 }
 
 .telemetry-diagnostic-controls {
@@ -8041,8 +8033,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   justify-content: space-between;
   gap: 12px;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--control);
   padding: 10px;
 }
 
@@ -8143,7 +8133,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .telemetry-summary-grid article {
   display: grid;
   gap: 5px;
-  padding: 13px;
 }
 
 .telemetry-summary-grid.overview-summary article,
@@ -8216,8 +8205,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .maintenance-viewer {
   display: grid;
-  gap: 12px;
-  padding: 0 14px 14px;
 }
 
 .maintenance-running,
@@ -8226,9 +8213,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   align-items: center;
   gap: 11px;
   border: 1px solid var(--line);
-  border-radius: 7px;
   padding: 13px;
-  background: var(--control-muted);
 }
 
 .maintenance-running div,
@@ -8333,8 +8318,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .telemetry-section-head {
   display: flex;
   justify-content: space-between;
-  border-bottom: 1px solid var(--line);
-  padding: 7px 9px;
 }
 
 .telemetry-section-head h3,
@@ -8344,7 +8327,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .telemetry-section-head p {
   margin-top: 3px;
-  font-size: 11px;
 }
 
 .telemetry-hourly {
@@ -8353,7 +8335,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   height: 112px;
   gap: 3px;
   align-items: end;
-  padding: 10px 9px 3px;
 }
 
 .telemetry-hour {
@@ -8423,8 +8404,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .telemetry-trend-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  padding: 6px;
 }
 
 .telemetry-trend-grid.two-column {
@@ -8437,8 +8416,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   min-width: 0;
   overflow: visible;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
 }
 
 .telemetry-trend.has-tooltip {
@@ -8954,8 +8931,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .telemetry-footnote {
-  margin: 0;
-  font-size: 10px;
   line-height: 1.4;
 }
 
@@ -9639,7 +9614,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   gap: 1px;
   min-height: 0;
   overflow: auto;
-  background: rgba(3, 10, 12, .04);
   padding: 10px;
 }
 
@@ -9649,13 +9623,11 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   gap: 8px;
   align-items: start;
   border: 1px solid transparent;
-  border-radius: 6px;
   background: var(--control);
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.35;
-  padding: 7px 8px;
 }
 
 .log-line.warning {
@@ -13462,7 +13434,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   margin-left: auto;
   min-width: 1.4rem;
   padding: 0.08rem 0.35rem;
-  border-radius: 999px;
   background: var(--accent);
   color: var(--accent-contrast, #071413);
   text-align: center;
@@ -13471,7 +13442,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .tuneup-resume-card {
-  margin: 0.75rem;
   display: flex;
   align-items: center;
   gap: 0.65rem;
@@ -13494,36 +13464,27 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .tuneup-monitoring,
 .tuneup-history {
   display: grid;
-  gap: 1rem;
   min-width: 0;
 }
 
 .tuneup-steps {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 0.35rem;
-  padding: 0.2rem 0 0.8rem;
   border-bottom: 1px solid var(--line);
 }
 
 .tuneup-steps span {
   display: grid;
   justify-items: center;
-  gap: 0.3rem;
   min-width: 0;
   color: var(--muted);
   text-align: center;
-  font-size: 0.72rem;
 }
 
 .tuneup-steps b {
   display: grid;
   place-items: center;
-  width: 1.65rem;
-  height: 1.65rem;
   border: 1px solid var(--line);
-  border-radius: 50%;
-  background: var(--subtle);
   color: var(--muted);
 }
 
@@ -13545,8 +13506,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .tuneup-stage {
   display: grid;
-  gap: 1rem;
-  max-width: 76rem;
   width: 100%;
   margin-inline: auto;
 }
@@ -13558,8 +13517,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .tuneup-stage>header>span {
   color: var(--accent);
-  font-size: 0.76rem;
-  font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -13592,7 +13549,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .tuneup-period-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
 }
 
 .tuneup-choice-grid>button,
@@ -13601,12 +13557,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: grid;
   justify-items: start;
   align-content: start;
-  gap: 0.45rem;
-  min-height: 9rem;
-  padding: 1rem;
   border: 1px solid var(--line);
-  border-radius: 0.75rem;
-  background: var(--subtle);
   text-align: left;
 }
 
@@ -13618,7 +13569,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .tuneup-choice-grid>button.selected,
 .tuneup-period-grid>button.selected {
   border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
   background: color-mix(in srgb, var(--accent) 8%, var(--subtle));
 }
 
@@ -13639,12 +13589,10 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   top: 0.75rem;
   right: 0.75rem;
   padding: 0.15rem 0.45rem;
-  border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 16%, var(--control-muted));
   color: var(--accent);
   font-size: 0.7rem;
   font-style: normal;
-  font-weight: 800;
 }
 
 .tuneup-camera-list {
@@ -13666,7 +13614,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .tuneup-progress-track {
   height: 0.55rem;
   overflow: hidden;
-  border-radius: 999px;
   background: var(--control-muted);
 }
 
@@ -13796,7 +13743,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .tuneup-recommendation-group>h4 {
   margin: 0.4rem 0 0;
-  font-size: 0.82rem;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.045em;
