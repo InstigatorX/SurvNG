@@ -11742,17 +11742,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .recordings-v2-events button {
-  position: relative;
   flex: 0 0 auto;
-  height: 100%;
-  min-height: 68px;
-  min-width: 0;
-  aspect-ratio: 16 / 9;
-  overflow: hidden;
   border-color: var(--line-strong);
-  border-radius: 5px;
-  background: var(--control-muted);
-  padding: 0;
 }
 
 .recordings-v2-events button.object {
