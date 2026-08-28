@@ -806,7 +806,17 @@ class EventStoreMotionIntelligenceMixin:
                     ("spatial_match_count", "spatial_match"),
                     ("stable_geometry_count", "stable_geometry"),
                 ):
-                    depth_shadow[field] += max(0, int(depth_attribution.get(key) or 0))
+                    value = depth_attribution.get(key)
+                    if value is None and key.endswith("_count"):
+                        object_key = key.removesuffix("_count")
+                        objects = depth_attribution.get("objects")
+                        if isinstance(objects, list):
+                            value = sum(
+                                bool(item.get(object_key))
+                                for item in objects
+                                if isinstance(item, dict)
+                            )
+                    depth_shadow[field] += max(0, int(value or 0))
             if row["event_id"] is not None:
                 continue
             summary = summary_for(str(row["camera_id"]), str(row["mode"] or "unknown"))
