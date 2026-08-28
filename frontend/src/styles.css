@@ -11818,17 +11818,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     grid-row: 3;
   }
 
-  .semantic-search-workspace {
-    padding: 12px;
-  }
-
   .recordings-v2-player video {
     max-height: none;
-  }
-
-  .recordings-v2-player {
-    height: min(52dvh, 480px);
-    min-height: 220px;
   }
 
   .recordings-v2-player.all-camera-grid {
@@ -11854,10 +11845,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .recording-grid-controls button {
     min-height: 44px;
     min-width: 44px;
-  }
-
-  .recordings-v2-player.selected-camera-stage:has(.recording-selected-companions) .recording-hero-controls {
-    bottom: calc(86px + 8px);
   }
 
   .recordings-v2-controls {
@@ -12079,11 +12066,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     padding-bottom: calc(72px + var(--safe-area-bottom));
   }
 
-  .live-command-bar {
-    min-height: 44px;
-    padding: 5px 7px 5px 10px;
-  }
-
   .live-command-context strong {
     font-size: 13px;
   }
@@ -12172,11 +12154,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .live-activity-footer>a,
   .live-activity-trigger {
     min-height: 44px;
-  }
-
-  .live-activity-trigger {
-    top: 2px;
-    right: 2px;
   }
 
   .live-activity-footer {
