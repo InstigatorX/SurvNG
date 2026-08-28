@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 import weakref
 from collections import deque
 from dataclasses import asdict, dataclass

@@ -2627,22 +2627,6 @@ class RecordedMotionObjectDetector:
         return {}, process_count
 
     @staticmethod
-    def _split_bmp_stream(payload: bytes) -> list[bytes]:
-        """Split concatenated image2pipe BMP records using their file headers."""
-        frames: list[bytes] = []
-        cursor = 0
-        payload_length = len(payload)
-        while cursor + 6 <= payload_length:
-            if payload[cursor:cursor + 2] != b"BM":
-                break
-            frame_size = int.from_bytes(payload[cursor + 2:cursor + 6], "little")
-            if frame_size < 54 or cursor + frame_size > payload_length:
-                break
-            frames.append(payload[cursor:cursor + frame_size])
-            cursor += frame_size
-        return frames
-
-    @staticmethod
     def _decode_bmp_stream(stream: Any) -> list[Frame]:
         """Read and decode concatenated BMP records without buffering stdout."""
         frames: list[Frame] = []

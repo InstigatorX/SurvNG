@@ -321,14 +321,6 @@ def _ffprobe_video_metadata(
     raise RuntimeError("comparison video dimensions are unavailable")
 
 
-def _ffprobe_video_dimensions(path: Path, ffmpeg_path: str) -> tuple[int, int]:
-    width, height, _time_base_num, _time_base_den = _ffprobe_video_metadata(
-        path,
-        ffmpeg_path,
-    )
-    return width, height
-
-
 def video_frame_at_reference(
     reference: VideoFrameReference,
     *,

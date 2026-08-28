@@ -94,7 +94,7 @@ from .system_telemetry import (
 from .system_routes import SystemRouteDependencies, create_system_router
 from .tls_routes import TlsRouteDependencies, create_tls_router
 from .training_routes import TrainingRouteDependencies, create_training_router
-from .proxy import apply_trusted_proxy_headers, request_is_secure
+from .proxy import apply_trusted_proxy_headers, request_is_secure, scope_header
 from .security import (
     authenticate_api_token,
     authenticate_session,
@@ -201,13 +201,6 @@ class ConfiguredBasePathMiddleware:
         await self.app(scope, receive, send)
 
 
-def _scope_header(scope: dict, name: bytes) -> str:
-    for header_name, value in scope.get("headers", []):
-        if header_name.lower() == name:
-            return value.decode("latin-1").strip()
-    return ""
-
-
 def _origin_tuple(
     value: str,
     *,
@@ -300,9 +293,9 @@ def _trusted_request_origins(scope: dict) -> set[tuple[str, str, int]]:
 
 
 def _same_origin_request(scope: dict) -> bool:
-    origin = _scope_header(scope, b"origin")
+    origin = scope_header(scope, b"origin")
     if not origin:
-        return _scope_header(scope, b"sec-fetch-site").lower() != "cross-site"
+        return scope_header(scope, b"sec-fetch-site").lower() != "cross-site"
     normalized = _origin_tuple(origin)
     return normalized is not None and normalized in _trusted_request_origins(scope)
 
@@ -326,13 +319,13 @@ class SecurityBoundaryMiddleware:
         api_path = _api_scope_path(scope)
         method = str(scope.get("method") or "GET")
         if scope_type in {"http", "websocket"} and api_path.startswith("/api/"):
-            authorization = _scope_header(scope, b"authorization")
+            authorization = scope_header(scope, b"authorization")
             principal = None
             if config.api_auth.enabled:
                 principal = authenticate_api_token(authorization, config.api_auth)
             if principal is None and config.web_auth.enabled:
                 principal = authenticate_session(
-                    _scope_header(scope, b"cookie"),
+                    scope_header(scope, b"cookie"),
                     config.web_auth,
                 )
             if principal is not None:
@@ -340,7 +333,7 @@ class SecurityBoundaryMiddleware:
                 scope["survng_principal"] = principal
                 if getattr(principal, "kind", None) == "user":
                     touch_web_session(
-                        session_cookie_value(_scope_header(scope, b"cookie")),
+                        session_cookie_value(scope_header(scope, b"cookie")),
                         str((scope.get("client") or ("",))[0] or ""),
                     )
             needs_auth = (

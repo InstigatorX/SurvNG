@@ -74,7 +74,7 @@ def ip_is_local(ip: str) -> bool:
     )
 
 
-def _scope_header(scope: dict[str, Any], name: bytes) -> str:
+def scope_header(scope: dict[str, Any], name: bytes) -> str:
     for header_name, value in scope.get("headers", []):
         if header_name.lower() == name:
             return value.decode("latin-1").strip()
@@ -118,10 +118,10 @@ def apply_trusted_proxy_headers(scope: dict[str, Any], trusted_proxies: list[str
     if not ip_is_trusted(peer, trusted_proxies):
         return scope
     next_scope = dict(scope)
-    proto = _scope_header(scope, b"x-forwarded-proto").split(",")[0].strip().lower()
+    proto = scope_header(scope, b"x-forwarded-proto").split(",")[0].strip().lower()
     if proto in {"http", "https"}:
         next_scope["scheme"] = proto
-    forwarded_for = _scope_header(scope, b"x-forwarded-for")
+    forwarded_for = scope_header(scope, b"x-forwarded-for")
     if forwarded_for:
         client_ip = _forwarded_client_ip(forwarded_for, trusted_proxies)
         if client_ip is not None:

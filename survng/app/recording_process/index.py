@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
 from ..media_storage import path_presence

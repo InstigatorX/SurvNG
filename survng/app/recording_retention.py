@@ -1034,13 +1034,6 @@ class RecordingRetentionService:
                 row_groups.append(rows)
         return row_groups
 
-    def _retention_days(self, camera_id: str, source: str) -> int:
-        camera = self._cameras.get(camera_id)
-        override = None
-        if camera is not None:
-            override = camera.retention.main_days if source == "main" else camera.retention.live_days
-        return int(override or (self.config.main_days if source == "main" else self.config.live_days))
-
     @staticmethod
     def _per_camera_storage(
         recording_rows: Sequence[Mapping[str, Any]],

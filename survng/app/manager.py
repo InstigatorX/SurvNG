@@ -123,10 +123,6 @@ def _route_provenance_from_event(
     return (), "", 0
 
 
-def _route_path_from_event(event: object) -> tuple[str, ...]:
-    return _route_provenance_from_event(event)[0]
-
-
 class ManagerShutdownIncompleteError(RuntimeError):
     """Camera-owned work remains active, so shared services must stay alive."""
 

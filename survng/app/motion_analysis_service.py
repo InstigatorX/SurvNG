@@ -1729,25 +1729,6 @@ class MotionAnalysisService:
         )
         return True
 
-    def _consume_route_watch(self, result: MotionQualificationResult) -> None:
-        route_details = result.features.get("route_detection_watch")
-        if (
-            not isinstance(route_details, dict)
-            or not route_details.get("source_event_id")
-            or self._route_watch_consumer is None
-        ):
-            return
-        try:
-            self._route_watch_consumer(
-                self.camera_id,
-                int(route_details["source_event_id"]),
-            )
-        except Exception:
-            LOGGER.exception(
-                "route detection watch consumption failed for %s",
-                self.camera_id,
-            )
-
     def capture_debug(self, captured_at: float) -> None:
         samples = self.samples()
         frames = [frame for _timestamp, frame in samples]

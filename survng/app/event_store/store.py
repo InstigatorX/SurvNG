@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import copy
-import hashlib
 import json
 import math
 import os
 import sqlite3
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -273,6 +270,7 @@ class EventStore(
         route_origin_event = int(route_origin_event_id or 0)
         route_admission = bool(route_origin_camera and route_origin_event > 0)
         discarded_snapshot_path = ""
+        duplicate_route_admission: dict[str, Any] | None = None
         with self._lock, self._connect() as conn:
             # A route admission is the authoritative identity for a routed
             # occurrence.  Resolve it before checking the intent ID: a
@@ -286,8 +284,7 @@ class EventStore(
                     (route_origin_camera, route_origin_event, camera_id),
                 ).fetchone()
                 if admitted is not None:
-                    self._delete_snapshot_if_unreferenced(snapshot_path)
-                    return {
+                    duplicate_route_admission = {
                         "id": int(admitted["event_id"]),
                         "camera_id": camera_id,
                         "kind": kind,
@@ -302,83 +299,87 @@ class EventStore(
                         "created": False,
                         "route_admission_created": False,
                     }
-            cursor = conn.execute(
-                """
-                insert or ignore into events (
-                    camera_id, kind, topic, message, snapshot_path, snapshot_size_bytes,
-                    recording_path, objects_json, created_at, detection_intent_id
-                )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    camera_id,
-                    kind,
-                    topic,
-                    message,
-                    snapshot_path,
-                    snapshot_size_bytes,
-                    recording_path,
-                    objects_json,
-                    created_at,
-                    detection_intent_id,
-                ),
-            )
-            created = bool(cursor.rowcount)
-            if created:
-                event_id = cursor.lastrowid
-            elif detection_intent_id:
-                row = conn.execute(
-                    "select id, camera_id, kind, topic, message, created_at "
-                    "from events where detection_intent_id = ?",
-                    (detection_intent_id,),
-                ).fetchone()
-                if row is None:
-                    raise RuntimeError("detection intent event insert was not recoverable")
-                if (
-                    str(row["camera_id"]) != camera_id
-                    or str(row["kind"]) != kind
-                    or str(row["topic"]) != topic
-                    or str(row["message"]) != message
-                    or str(row["created_at"]) != created_at
-                ):
-                    raise RuntimeError(
-                        "detection intent identity collision with different occurrence"
+            if duplicate_route_admission is None:
+                cursor = conn.execute(
+                    """
+                    insert or ignore into events (
+                        camera_id, kind, topic, message, snapshot_path, snapshot_size_bytes,
+                        recording_path, objects_json, created_at, detection_intent_id
                     )
-                event_id = int(row["id"])
-            else:
-                raise RuntimeError("event insert failed")
-            route_admission_created = False
-            if route_admission:
-                admission = conn.execute(
-                    "insert or ignore into route_incident_admissions "
-                    "(origin_camera_id, origin_event_id, target_camera_id, "
-                    "event_id, admitted_at) values (?, ?, ?, ?, ?)",
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
                     (
-                        route_origin_camera,
-                        route_origin_event,
                         camera_id,
-                        event_id,
-                        datetime.now(timezone.utc).isoformat(),
+                        kind,
+                        topic,
+                        message,
+                        snapshot_path,
+                        snapshot_size_bytes,
+                        recording_path,
+                        objects_json,
+                        created_at,
+                        detection_intent_id,
                     ),
                 )
-                route_admission_created = bool(admission.rowcount)
-                if not route_admission_created:
-                    admitted = conn.execute(
-                        "select event_id from route_incident_admissions "
-                        "where origin_camera_id = ? and origin_event_id = ? "
-                        "and target_camera_id = ?",
-                        (route_origin_camera, route_origin_event, camera_id),
+                created = bool(cursor.rowcount)
+                if created:
+                    event_id = cursor.lastrowid
+                elif detection_intent_id:
+                    row = conn.execute(
+                        "select id, camera_id, kind, topic, message, created_at "
+                        "from events where detection_intent_id = ?",
+                        (detection_intent_id,),
                     ).fetchone()
-                    if admitted is None:
+                    if row is None:
+                        raise RuntimeError("detection intent event insert was not recoverable")
+                    if (
+                        str(row["camera_id"]) != camera_id
+                        or str(row["kind"]) != kind
+                        or str(row["topic"]) != topic
+                        or str(row["message"]) != message
+                        or str(row["created_at"]) != created_at
+                    ):
                         raise RuntimeError(
-                            "route target admission conflict was not recoverable"
+                            "detection intent identity collision with different occurrence"
                         )
-                    admitted_event_id = int(admitted["event_id"])
-                    if created and admitted_event_id != int(event_id):
-                        conn.execute("delete from events where id = ?", (event_id,))
-                        discarded_snapshot_path = snapshot_path
-                    event_id = admitted_event_id
-                    created = False
+                    event_id = int(row["id"])
+                else:
+                    raise RuntimeError("event insert failed")
+                route_admission_created = False
+                if route_admission:
+                    admission = conn.execute(
+                        "insert or ignore into route_incident_admissions "
+                        "(origin_camera_id, origin_event_id, target_camera_id, "
+                        "event_id, admitted_at) values (?, ?, ?, ?, ?)",
+                        (
+                            route_origin_camera,
+                            route_origin_event,
+                            camera_id,
+                            event_id,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                    route_admission_created = bool(admission.rowcount)
+                    if not route_admission_created:
+                        admitted = conn.execute(
+                            "select event_id from route_incident_admissions "
+                            "where origin_camera_id = ? and origin_event_id = ? "
+                            "and target_camera_id = ?",
+                            (route_origin_camera, route_origin_event, camera_id),
+                        ).fetchone()
+                        if admitted is None:
+                            raise RuntimeError(
+                                "route target admission conflict was not recoverable"
+                            )
+                        admitted_event_id = int(admitted["event_id"])
+                        if created and admitted_event_id != int(event_id):
+                            conn.execute("delete from events where id = ?", (event_id,))
+                            discarded_snapshot_path = snapshot_path
+                        event_id = admitted_event_id
+                        created = False
+        if duplicate_route_admission is not None:
+            self._delete_snapshot_if_unreferenced(snapshot_path)
+            return duplicate_route_admission
         if discarded_snapshot_path:
             self._delete_snapshot_if_unreferenced(discarded_snapshot_path)
         return {

@@ -89,12 +89,6 @@ export function recordingIncidentEndEpoch(incident) {
   return Number.isFinite(parsed) ? parsed : recordingIncidentEpoch(incident);
 }
 
-export function recordingEvidenceTypeLabel(type) {
-  if (type === "motion") return "motion-only";
-  if (type === "object") return "object";
-  return "total";
-}
-
 function containedImageBounds(surface, image) {
   if (!surface || !image?.naturalWidth || !image?.naturalHeight) return null;
   const surfaceRect = surface.getBoundingClientRect();

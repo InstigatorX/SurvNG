@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import copy
 from collections import deque
 import hashlib
-import json
 import logging
 import queue
 import threading

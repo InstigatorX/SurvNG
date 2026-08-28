@@ -444,10 +444,6 @@ class RecordingMediaRuntime:
         if not adjusted:
             raise RuntimeError('fragment has no adjustable tfdt boxes')
 
-    def _event_clip_cache_suffix(self, source_codec: str, backend: str) -> str:
-        codec = source_codec or 'unknown'
-        return f'a3-{backend}-{codec}'
-
     def _event_clip_vaapi_enabled(self, source_codec: str) -> bool:
         mode = self._hardware_acceleration_mode()
         if mode not in {'auto', 'vaapi'}:
@@ -1132,6 +1128,3 @@ class RecordingMediaRuntime:
                 escaped = path_value.replace('\\', '\\\\').replace("'", "'\\''")
                 handle.write(f"file '{escaped}'\n")
         return Path(handle.name)
-
-    def _recording_start_epoch(self, path: Path) -> float | None:
-        return self.manager.recorder.recording_start_epoch(path)

@@ -287,9 +287,6 @@ class InferenceSupervisor:
                 }
             return result
 
-    def _select_object_worker(self) -> _InferenceWorker:
-        return self._ordered_object_workers()[0]
-
     def _base_detector_status(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
