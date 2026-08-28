@@ -28,6 +28,35 @@ def _detection_job_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def detection_job_occurrence_equivalent(
+    existing_payload: dict[str, Any],
+    payload: dict[str, Any],
+) -> bool:
+    """Whether two refinement payloads represent one durable occurrence.
+
+    Route-watch delivery is keyed by its stable ``route:...`` intent.  The
+    same watch can qualify more than once while runtime cleanup catches up,
+    so its later capture timestamp is enrichment rather than a new physical
+    occurrence.  All non-route occurrence fields must still agree.
+    """
+    existing = _detection_job_occurrence(existing_payload)
+    candidate = _detection_job_occurrence(payload)
+    if existing == candidate:
+        return True
+    existing_intent = str(existing["detection_intent_id"])
+    candidate_intent = str(candidate["detection_intent_id"])
+    if (
+        not existing_intent.startswith("route:")
+        or existing_intent != candidate_intent
+    ):
+        return False
+    return {
+        key: value for key, value in existing.items() if key != "event_at"
+    } == {
+        key: value for key, value in candidate.items() if key != "event_at"
+    }
+
+
 def _motion_trigger_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "topic": str(payload.get("topic") or ""),
@@ -611,9 +640,7 @@ class EventStoreJobsMixin:
                 existing_payload = json.loads(str(existing["payload_json"]))
             except (TypeError, ValueError):
                 existing_payload = {}
-            if _detection_job_occurrence(existing_payload) != _detection_job_occurrence(
-                payload
-            ):
+            if not detection_job_occurrence_equivalent(existing_payload, payload):
                 raise RuntimeError(
                     "detection job identity collision with different occurrence"
                 )

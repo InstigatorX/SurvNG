@@ -620,6 +620,35 @@ def test_refinement_thread_start_failure_restores_stopped_state() -> None:
     assert service.wait_stopped(0.01)
 
 
+def test_memory_refinement_store_coalesces_route_capture_time_drift() -> None:
+    store = _MemoryDetectionJobStore()
+    route_id = "route:back-right:back-middle:57993"
+    payload = {
+        "topic": "adaptive/visual_backup",
+        "event_at": "2026-08-27T23:41:16.884471+00:00",
+        "qualification": {"detection_intent_id": route_id},
+        "existing_event_id": None,
+        "require_eligible_object": True,
+        "require_motion_correlation": True,
+    }
+
+    assert store.enqueue_detection_job(
+        job_id="job-1",
+        camera_id="back-right",
+        dedupe_key=f"intent:{route_id}",
+        payload=payload,
+    ) == "queued"
+    assert store.enqueue_detection_job(
+        job_id="job-1",
+        camera_id="back-right",
+        dedupe_key=f"intent:{route_id}",
+        payload={
+            **payload,
+            "event_at": "2026-08-27T23:41:20.321719+00:00",
+        },
+    ) == "coalesced"
+
+
 def test_replacement_runtime_same_episode_sequence_queues_distinct_refinement() -> None:
     initial = MotionDecisionOutcome(
         event_id=None,

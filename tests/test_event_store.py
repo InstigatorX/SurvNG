@@ -578,6 +578,46 @@ class EventStoreTest(unittest.TestCase):
                 },
             ), "coalesced")
 
+    def test_route_detection_job_replay_ignores_capture_time_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            route_id = "route:lower-garage:upper-garage:57986"
+            payload = {
+                "topic": "adaptive/visual_backup",
+                "event_at": "2026-08-27T23:40:23.987714+00:00",
+                "qualification": {"detection_intent_id": route_id},
+                "existing_event_id": None,
+                "require_eligible_object": True,
+                "require_motion_correlation": True,
+            }
+            self.assertEqual(store.enqueue_detection_job(
+                job_id="job-1",
+                camera_id="lower-garage",
+                dedupe_key=f"intent:{route_id}",
+                payload=payload,
+            ), "queued")
+            self.assertEqual(store.enqueue_detection_job(
+                job_id="job-1",
+                camera_id="lower-garage",
+                dedupe_key=f"intent:{route_id}",
+                payload={
+                    **payload,
+                    "event_at": "2026-08-27T23:40:26.359163+00:00",
+                },
+            ), "coalesced")
+
+            with self.assertRaisesRegex(RuntimeError, "different occurrence"):
+                store.enqueue_detection_job(
+                    job_id="job-1",
+                    camera_id="lower-garage",
+                    dedupe_key=f"intent:{route_id}",
+                    payload={
+                        **payload,
+                        "event_at": "2026-08-27T23:40:26.359163+00:00",
+                        "require_motion_correlation": False,
+                    },
+                )
+
     def test_detection_job_pruning_is_bounded_and_preserves_active_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
