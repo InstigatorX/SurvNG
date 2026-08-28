@@ -482,20 +482,12 @@ p {
   grid-row: 1;
   display: flex;
   min-width: 0;
-  min-height: 46px;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
-  padding: 6px 9px 6px 13px;
 }
 
 .live-command-context {
-  display: grid;
-  gap: 1px;
   min-width: 0;
 }
 
@@ -514,28 +506,21 @@ p {
 .live-layout-control {
   display: flex;
   align-items: center;
-  gap: 4px;
 }
 
 .live-layout-control>span {
   margin-right: 4px;
   color: var(--muted);
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
 }
 
 .live-layout-control button {
   display: inline-flex;
-  min-height: 44px;
   align-items: center;
   gap: 5px;
-  font-size: 10px;
   padding: 0 9px;
 }
 
 .live-layout-control button.active {
-  border-color: var(--accent);
   background: var(--active);
   color: var(--active-ink);
 }
@@ -2088,18 +2073,13 @@ p {
 
 .live-activity-filters {
   border-bottom: 1px solid var(--line);
-  background: var(--panel-subtle);
 }
 
 .live-activity-filters>summary {
-  min-height: 44px;
   color: var(--muted);
   cursor: pointer;
   font-size: 10px;
-  font-weight: 800;
-  line-height: 44px;
   padding: 0 10px;
-  text-transform: uppercase;
 }
 
 .live-activity-filters .incident-filter-panel {
@@ -2115,20 +2095,15 @@ p {
   display: grid;
   grid-auto-rows: max-content;
   align-content: start;
-  gap: 7px;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 8px;
 }
 
 .live-activity-item {
   position: relative;
   display: grid;
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--control);
 }
 
 .incident-rail .live-activity-item.selected {
@@ -2147,17 +2122,13 @@ p {
 
 .live-activity-select {
   display: grid;
-  grid-template-columns: 102px minmax(0, 1fr);
   align-items: stretch;
-  gap: 8px;
   width: 100%;
   min-width: 0;
-  min-height: 70px;
   border: 0;
   border-radius: 0;
   background: transparent;
   color: var(--ink);
-  padding: 5px;
   text-align: left;
 }
 
@@ -2171,7 +2142,6 @@ p {
 .live-activity-thumb {
   min-width: 0;
   overflow: hidden;
-  border-radius: 5px;
   background: var(--thumb);
 }
 
@@ -2209,8 +2179,6 @@ p {
   display: grid;
   min-width: 0;
   align-content: center;
-  gap: 3px;
-  padding-right: 55px;
 }
 
 .live-activity-copy strong,
@@ -2226,7 +2194,6 @@ p {
 
 .live-activity-copy time {
   color: var(--muted);
-  font-size: 9px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2236,18 +2203,9 @@ p {
 }
 
 .live-activity-trigger {
-  position: absolute;
   z-index: 3;
-  top: 5px;
-  right: 5px;
-  min-height: 44px;
-  border: 1px solid rgba(125, 211, 199, .58);
-  border-radius: 999px;
-  background: rgba(8, 55, 52, .86);
   color: #fff;
   font-size: 8px;
-  font-weight: 850;
-  padding: 2px 6px;
 }
 
 .live-activity-footer>a {
@@ -2257,7 +2215,6 @@ p {
   justify-content: center;
   gap: 4px;
   border: 1px solid var(--line);
-  border-radius: 6px;
   background: var(--control-muted);
   color: var(--ink);
   font-size: 9px;
@@ -2269,9 +2226,7 @@ p {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: 6px;
   border-top: 1px solid var(--line);
-  padding: 6px 8px;
 }
 
 .live-activity-footer .incident-pager {
@@ -2381,13 +2336,8 @@ p {
 .shown-bubble {
   flex: 0 0 auto;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--control);
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
   line-height: 1;
-  padding: 6px 9px;
 }
 
 .camera-grid {
@@ -3846,14 +3796,12 @@ button.live-overlay-backdrop:active {
 .incident-head-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
   min-width: 0;
 }
 
 .incident-filter-toggle {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
 }
 
 .incident-filter-toggle.compact {
@@ -12054,7 +12002,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   }
 
   .live-activity-select {
-    grid-template-columns: 112px minmax(0, 1fr);
     min-height: 78px;
   }
 
