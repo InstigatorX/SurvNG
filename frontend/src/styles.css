@@ -9186,7 +9186,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .telemetry-summary-grid.overview-summary,
   .telemetry-summary-grid.camera-summary {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .telemetry-activity-grid {

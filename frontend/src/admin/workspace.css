@@ -455,7 +455,7 @@
 .admin-home-footer button { border: 0; background: transparent; color: var(--accent); font-size: 11px; font-weight: 650; }
 
 @media (max-width: 760px) {
-  .admin-home-summary { grid-template-columns: 1fr; }
+  .admin-home-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .admin-home-actions { grid-template-columns: 1fr; }
   .admin-home-footer { align-items: flex-start; flex-direction: column; }
 }
@@ -1138,7 +1138,7 @@
 
   .settings-grid .camera-command-bar {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .settings-grid .camera-command-bar button {
@@ -1211,15 +1211,24 @@
   }
 
   #admin-panel-cameras>.camera-section-tabs,
-  .detection-subsection-tabs,
-  .telemetry-section-tabs {
+  .detection-subsection-tabs {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     overflow: visible;
   }
 
   #admin-panel-cameras>.camera-section-tabs button,
-  .detection-subsection-tabs button,
+  .detection-subsection-tabs button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .telemetry-section-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow: visible;
+  }
+
   .telemetry-section-tabs button {
     width: 100%;
     min-width: 0;
@@ -1273,54 +1282,5 @@
     height: 26px !important;
     min-height: 26px !important;
     padding: 0 !important;
-  }
-}
-
-@media (max-width: 760px) {
-  .settings-grid .detection-field-grid,
-  .settings-grid .detection-feature-body.detection-field-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-grid .detection-field-grid .wide-field,
-  .settings-grid .detection-settings-subhead {
-    grid-column: auto;
-  }
-
-  .settings-grid .camera-route-row {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-grid .camera-route-row .camera-route-arrow {
-    justify-self: center;
-    padding-top: 0;
-  }
-
-  .settings-grid .camera-route-row>label:nth-of-type(n + 3),
-  .settings-grid .camera-route-row>button {
-    grid-column: auto;
-  }
-
-  .settings-grid .admin-field-grid,
-  .settings-grid .onvif-field-grid,
-  .settings-grid .field-row,
-  .settings-grid .time-row,
-  .settings-grid .retention-fields,
-  .settings-grid .retention-metrics,
-  .settings-grid .motion-pipeline-runtime-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-grid .per-object-detection-row {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-grid .per-object-detection-row>strong {
-    grid-column: auto;
-  }
-
-  .settings-grid .telemetry-summary-grid.overview-summary,
-  .settings-grid .telemetry-summary-grid.camera-summary {
-    grid-template-columns: 1fr;
   }
 }

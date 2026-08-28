@@ -2,7 +2,6 @@ export const ADMIN_WORKSPACES = Object.freeze([
   { id: "home", label: "Configure Home" },
   { id: "general", label: "Settings" },
   { id: "cameras", label: "Cameras" },
-  { id: "reid", label: "ReID Training" },
   { id: "audit", label: "Motion Audit" },
   { id: "calibration", label: "Detection Tune-Up" },
   { id: "telemetry", label: "Telemetry" },
@@ -37,7 +36,6 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
     label: "Act",
     items: [
       { id: "tuneup", label: "Tune-Up", workspace: "calibration" },
-      { id: "reid", label: "ReID Training", workspace: "reid" },
       { id: "diagnostics", label: "Diagnostics", workspace: "telemetry", subsection: "diagnostics" },
       { id: "maintenance", label: "Maintenance", workspace: "maintenance" },
       { id: "advisor", label: "Camera Advisor", workspace: "general", subsection: "motion-review", secondary: true },
@@ -56,7 +54,6 @@ export const ADMIN_NAV_GROUPS = Object.freeze([
   { id: "intelligence", label: "Intelligence", items: [
     { id: "detection", label: "Detection", workspace: "general", subsection: "detection", description: "Models, confidence, and object recognition." },
     { id: "tuneup", label: "Detection Tune-Up", workspace: "calibration", description: "Review evidence and apply bounded improvements." },
-    { id: "reid", label: "ReID Training", workspace: "reid", description: "Review person crops and cross-camera pairs for domain fine-tuning." },
     { id: "advisor", label: "Camera Advisor", workspace: "general", subsection: "motion-review", description: "Get camera-specific recommendations." },
   ] },
   { id: "data", label: "Data & Retention", items: [

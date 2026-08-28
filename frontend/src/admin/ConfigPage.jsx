@@ -66,7 +66,6 @@ import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraM
 import { AccessSettings } from "./AccessSettings.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
-import ReidTrainingPanel from "./ReidTrainingPanel.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
   home: LayoutDashboard,
@@ -82,7 +81,6 @@ export const ADMIN_DESTINATION_ICONS = {
   audit: Activity,
   logs: ListTree,
   tuneup: Sparkles,
-  reid: ScanFace,
   diagnostics: Wrench,
   maintenance: HardDrive,
   advisor: Sparkles,
@@ -2357,8 +2355,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           </section>
         ) : settingsTab === "calibration" ? (
           <CalibrationLab key={`calibration-${calibrationViewNonce}`} cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
-        ) : settingsTab === "reid" ? (
-          <ReidTrainingPanel />
         ) : settingsTab === "telemetry" ? (
           <>
             <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
@@ -4534,9 +4530,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 <div className="detection-settings-subhead"><strong>Missed-session recovery</strong><small>Recover durable appearance evidence from the saved incident image after full tracking finishes or is skipped.</small></div>
                 <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.deferred_reid_enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "deferred_reid_enabled"], event.target.checked)} /><span>Recover missed appearance evidence</span></label>
                 <label>Recovery delay<input type="number" min="0" max="300" step="1" value={config.detector?.tracking?.deferred_reid_delay_seconds ?? 20} onChange={(event) => updateConfig(["detector", "tracking", "deferred_reid_delay_seconds"], Number(event.target.value))} /><small>Waits for stronger multi-frame tracking evidence before using a single saved snapshot.</small></label>
-                <div className="detection-settings-subhead"><strong>Domain training crops</strong><small>Optional archive of representative person crops for later environment fine-tuning. Off by default; does not change live matching.</small></div>
-                <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.reid_training_collector_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "reid_training_collector_enabled"], event.target.checked)} /><span>Collect ReID training crops</span></label>
-                <label>Samples per track<input type="number" min="1" max="32" step="1" value={config.detector?.tracking?.reid_training_max_samples_per_track ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_training_max_samples_per_track"], Number(event.target.value))} /><small>Representative crops (start/middle/end/largest/diverse), not every frame.</small></label>
                 <label>Nearby-camera window<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.related_sequence_window_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "related_sequence_window_seconds"], Number(event.target.value))} /><small>Seconds on either side used to show clearly labeled sequence candidates. Time alone never claims identity.</small></label>
                 <div className="detection-settings-subhead camera-route-heading"><div><strong>Expected camera routes</strong><small>Describe physically plausible camera-to-camera movement. Direction follows event time; routes strengthen ordering but never establish identity by themselves.</small></div><button type="button" onClick={addCameraRoute} disabled={routeCameras.length < 2}>Add route</button></div>
                 <div className="camera-route-list">

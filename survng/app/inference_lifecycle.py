@@ -13,7 +13,6 @@ from .appearance_index import AppearanceIndex
 from .config import DetectorConfig, SemanticSearchConfig
 from .events import EventStore
 from .faces import FaceStore
-from .image_storage import DurableImageWriter
 from .inference import (
     InferenceSupervisor,
     IsolatedFaceRecognizer,
@@ -24,7 +23,6 @@ from .object_tracking import (
     ObjectTrackingSession,
     ObjectTrackingSessionFactory,
 )
-from .reid_training import ReidTrainingCollector, ReidTrainingStore
 from .semantic_search import DisabledSemanticSearch, SemanticIndex, build_semantic_search
 from .media_storage import MediaStorageRegistry
 from .security import redact_secret_text
@@ -65,8 +63,6 @@ class InferenceLifecycle:
         tracking_burst_guard: Callable[[], bool],
         database_dir: Path,
         media_storage: MediaStorageRegistry | None = None,
-        reid_training_store: ReidTrainingStore | None = None,
-        image_writer: DurableImageWriter | None = None,
     ) -> None:
         self.storage_dir = storage_dir
         self.events = events
@@ -76,8 +72,6 @@ class InferenceLifecycle:
         self.tracking_burst_guard = tracking_burst_guard
         self.database_dir = database_dir
         self.media_storage = media_storage
-        self.reid_training_store = reid_training_store
-        self.image_writer = image_writer
         self.detector = InferenceSupervisor(config)
         faces: FaceStore | None = None
         semantic_search: DisabledSemanticSearch | None = None
@@ -469,17 +463,6 @@ class InferenceLifecycle:
         config: DetectorConfig,
         limiter: AdaptiveTrackingLimiter,
     ) -> ObjectTrackingSessionFactory:
-        training_crop_collector = None
-        if (
-            config.tracking.reid_training_collector_enabled
-            and self.reid_training_store is not None
-            and self.image_writer is not None
-        ):
-            training_crop_collector = ReidTrainingCollector(
-                self.reid_training_store,
-                self.image_writer,
-                config.tracking,
-            )
         return ObjectTrackingSessionFactory(
             config=config.tracking,
             detector=self.detector,
@@ -488,7 +471,6 @@ class InferenceLifecycle:
             limiter=limiter,
             appearance_encoder=self.person_reidentifier,
             appearance_indexer=self.appearance_index.replace_event,
-            training_crop_collector=training_crop_collector,
             cover_promoter=self.events.promote_tracking_cover,
         )
 

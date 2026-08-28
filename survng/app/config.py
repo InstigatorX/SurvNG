@@ -595,15 +595,6 @@ class ObjectTrackingConfig(BaseModel):
         default_factory=lambda: ["car", "truck", "bus", "motorcycle"],
         max_length=32,
     )
-    # Optional domain-adaptation crop archive. Off by default; production ReID
-    # inference does not require it. Samples are anonymous track identities.
-    reid_training_collector_enabled: bool = False
-    reid_training_min_samples_per_track: int = Field(default=3, ge=1, le=32)
-    reid_training_max_samples_per_track: int = Field(default=8, ge=1, le=32)
-    reid_training_max_samples_per_event: int = Field(default=48, ge=1, le=500)
-    reid_training_min_crop_pixels: int = Field(default=4096, ge=256, le=10_000_000)
-    reid_training_min_confidence: float = Field(default=0.35, ge=0.0, le=1.0)
-    reid_training_min_quality: float = Field(default=0.12, ge=0.0, le=1.0)
 
     @field_validator("implementation", mode="before")
     @classmethod
@@ -625,11 +616,6 @@ class ObjectTrackingConfig(BaseModel):
         if self.vehicle_reid_enabled and not self.vehicle_reid_model_path.strip():
             raise ValueError(
                 "vehicle_reid_model_path is required when vehicle ReID is enabled"
-            )
-        if self.reid_training_min_samples_per_track > self.reid_training_max_samples_per_track:
-            raise ValueError(
-                "reid_training_min_samples_per_track cannot exceed "
-                "reid_training_max_samples_per_track"
             )
         self.vehicle_reid_labels = list(dict.fromkeys(
             label

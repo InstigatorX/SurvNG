@@ -64,7 +64,6 @@ from .motion_pipeline import (
 from .motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
 from .motion_analysis import FairMotionAnalysisLimiter
 from .recording_lifecycle import RecordingLifecycle
-from .reid_training import ReidTrainingStore
 from .state_events import StateEventBroker
 from .security import redact_secret_text
 from .telemetry_store import TelemetryStore
@@ -286,7 +285,6 @@ class AppManager:
         migrate_legacy_runtime_telemetry(self.events.db_path, self.telemetry)
         self.appearance_index = AppearanceIndex(self.events.db_path)
         self.semantic_index = SemanticIndex(self.events.db_path)
-        self.reid_training = ReidTrainingStore(self.database_dir, self.storage_dir)
         self.recording = RecordingLifecycle(
             config=config,
             storage_dir=self.storage_dir,
@@ -321,8 +319,6 @@ class AppManager:
                 tracking_burst_guard=self._tracking_burst_available,
                 database_dir=self.database_dir,
                 media_storage=self.media_storage,
-                reid_training_store=self.reid_training,
-                image_writer=self.image_writer,
             )
         except BaseException:
             for label, operation in (
