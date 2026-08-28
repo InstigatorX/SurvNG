@@ -11598,7 +11598,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   }
 
   .recordings-v2-selected-event {
-    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
     border-left: 0;
