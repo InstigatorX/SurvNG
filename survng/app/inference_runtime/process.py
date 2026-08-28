@@ -235,10 +235,16 @@ def _inference_worker_main(
                     elif operation == "estimate_depth" and role == "depth":
                         objects = request.get("objects") or []
                         frame_offset_s = request.get("frame_offset_s")
+                        include_heatmap = request.get("include_heatmap")
                         enriched, metadata = engine.enrich_objects(
                             frame,
                             list(objects),
                             frame_offset_s=frame_offset_s,
+                            include_heatmap=(
+                                bool(include_heatmap)
+                                if include_heatmap is not None
+                                else None
+                            ),
                         )
                         result = {
                             "objects": enriched,

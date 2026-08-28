@@ -617,15 +617,39 @@ export function detectionIou(left, right) {
   return intersection / Math.max(1, leftArea + rightArea - intersection);
 }
 
-export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats }) {
+export function formatDepthMeters(value) {
+  const meters = Number(value);
+  if (!Number.isFinite(meters) || meters <= 0) return "";
+  return meters >= 10 ? `${Math.round(meters)}m` : `${meters.toFixed(1)}m`;
+}
+
+function depthOverlayColor(meters, minM = 0.5, maxM = 30) {
+  const span = Math.max(0.1, maxM - minM);
+  const ratio = Math.max(0, Math.min(1, (meters - minM) / span));
+  const hue = 190 - ratio * 150;
+  return `hsl(${hue}, 82%, 52%)`;
+}
+
+export function DebugDetectionOverlay({
+  videoRef,
+  active,
+  confidence = 0.35,
+  depth = false,
+  depthLayer = "both",
+  onStats,
+}) {
   const canvasRef = useRef(null);
   const captureRef = useRef(document.createElement("canvas"));
   const tracksRef = useRef([]);
   const nextTrackIdRef = useRef(1);
+  const heatmapImageRef = useRef(null);
+  const pendingHeatmapRef = useRef("");
 
   useEffect(() => {
     if (!active) {
       tracksRef.current = [];
+      heatmapImageRef.current = null;
+      pendingHeatmapRef.current = "";
       const canvas = canvasRef.current;
       canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
       return undefined;
@@ -649,11 +673,13 @@ export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onS
           }
         });
         const previous = bestIndex >= 0 ? available.splice(bestIndex, 1)[0] : null;
+        const depthMeters = Number(object?.depth_stats?.median_m);
         return {
           id: previous?.id || nextTrackIdRef.current++,
           label: object.label,
           confidence: Number(object.confidence) || 0,
           box: object.box,
+          depthMeters: Number.isFinite(depthMeters) && depthMeters > 0 ? depthMeters : null,
           seenAt: now,
         };
       });
@@ -661,7 +687,22 @@ export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onS
       return next;
     }
 
-    function draw(tracks, frameWidth, frameHeight) {
+    function drawHeatmap(context, frameWidth, frameHeight, width, height, scale, offsetX, offsetY) {
+      const image = heatmapImageRef.current;
+      if (!image || !image.complete || !image.naturalWidth) return;
+      context.save();
+      context.globalAlpha = 0.32;
+      context.drawImage(
+        image,
+        offsetX,
+        offsetY,
+        frameWidth * scale,
+        frameHeight * scale,
+      );
+      context.restore();
+    }
+
+    function draw(tracks, frameWidth, frameHeight, heatmapRange) {
       const video = videoRef.current;
       const canvas = canvasRef.current;
       if (!video || !canvas) return;
@@ -676,6 +717,12 @@ export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onS
       const scale = Math.min(width / frameWidth, height / frameHeight);
       const offsetX = (width - frameWidth * scale) / 2;
       const offsetY = (height - frameHeight * scale) / 2;
+      const showHeatmap = depth && ["both", "heatmap"].includes(depthLayer);
+      const showBoxes = !depth || ["both", "boxes"].includes(depthLayer);
+      if (showHeatmap) drawHeatmap(context, frameWidth, frameHeight, width, height, scale, offsetX, offsetY);
+      if (!showBoxes) return;
+      const minM = Number(heatmapRange?.min_m) || 0.5;
+      const maxM = Number(heatmapRange?.max_m) || 30;
       context.font = "700 12px system-ui, sans-serif";
       context.lineWidth = 2;
       tracks.forEach((track) => {
@@ -683,10 +730,16 @@ export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onS
         const y = offsetY + track.box.y1 * scale;
         const boxWidth = (track.box.x2 - track.box.x1) * scale;
         const boxHeight = (track.box.y2 - track.box.y1) * scale;
-        const label = `#${track.id} ${track.label} ${Math.round(track.confidence * 100)}%`;
+        const distanceText = depth && track.depthMeters ? ` · ${formatDepthMeters(track.depthMeters)}` : "";
+        const label = `#${track.id} ${track.label} ${Math.round(track.confidence * 100)}%${distanceText}`;
         const labelWidth = context.measureText(label).width + 10;
-        context.strokeStyle = "#2dd4bf";
-        context.fillStyle = "rgba(13, 148, 136, 0.88)";
+        const strokeColor = depth && track.depthMeters
+          ? depthOverlayColor(track.depthMeters, minM, maxM)
+          : "#2dd4bf";
+        context.strokeStyle = strokeColor;
+        context.fillStyle = depth && track.depthMeters
+          ? "rgba(15, 23, 42, 0.84)"
+          : "rgba(13, 148, 136, 0.88)";
         context.strokeRect(x, y, boxWidth, boxHeight);
         context.fillRect(x, Math.max(0, y - 20), labelWidth, 20);
         context.fillStyle = "#ffffff";
@@ -694,11 +747,36 @@ export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onS
       });
     }
 
+    function queueHeatmap(base64Value, tracks, frameWidth, frameHeight, heatmapRange) {
+      if (!base64Value) {
+        heatmapImageRef.current = null;
+        draw(tracks, frameWidth, frameHeight, heatmapRange);
+        return;
+      }
+      if (pendingHeatmapRef.current === base64Value && heatmapImageRef.current?.complete) {
+        draw(tracks, frameWidth, frameHeight, heatmapRange);
+        return;
+      }
+      pendingHeatmapRef.current = base64Value;
+      const image = new Image();
+      image.onload = () => {
+        if (disposed || pendingHeatmapRef.current !== base64Value) return;
+        heatmapImageRef.current = image;
+        draw(tracks, frameWidth, frameHeight, heatmapRange);
+      };
+      image.onerror = () => {
+        if (disposed) return;
+        heatmapImageRef.current = null;
+        draw(tracks, frameWidth, frameHeight, heatmapRange);
+      };
+      image.src = `data:image/png;base64,${base64Value}`;
+    }
+
     async function sample() {
       const video = videoRef.current;
       if (disposed) return;
       if (!video || video.readyState < 2 || video.paused || document.hidden) {
-        timer = window.setTimeout(sample, 350);
+        timer = window.setTimeout(sample, depth ? 450 : 350);
         return;
       }
       const capture = captureRef.current;
@@ -711,7 +789,14 @@ export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onS
         const blob = await new Promise((resolve) => capture.toBlob(resolve, "image/jpeg", 0.78));
         if (!blob || disposed) return;
         controller = new AbortController();
-        const response = await fetch(`/api/detector/frame?confidence=${Number(confidence).toFixed(2)}`, {
+        const params = new URLSearchParams({
+          confidence: Number(confidence).toFixed(2),
+        });
+        if (depth) {
+          params.set("depth", "1");
+          if (["both", "heatmap"].includes(depthLayer)) params.set("heatmap", "1");
+        }
+        const response = await fetch(`/api/detector/frame?${params.toString()}`, {
           method: "POST",
           headers: { "Content-Type": "image/jpeg" },
           body: blob,
@@ -721,12 +806,26 @@ export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onS
         const payload = await response.json();
         if (disposed) return;
         const tracks = updateTracks(payload.objects || []);
-        draw(tracks, payload.width || width, payload.height || height);
-        onStats?.({ inferenceMs: payload.elapsed_ms, objects: tracks.length, tracks: tracks.map((track) => track.id) });
+        const frameWidth = payload.width || width;
+        const frameHeight = payload.height || height;
+        if (depth && payload.heatmap_png_b64 && ["both", "heatmap"].includes(depthLayer)) {
+          queueHeatmap(payload.heatmap_png_b64, tracks, frameWidth, frameHeight, payload.heatmap_range_m);
+        } else {
+          draw(tracks, frameWidth, frameHeight, payload.heatmap_range_m);
+        }
+        onStats?.({
+          inferenceMs: payload.elapsed_ms,
+          detectMs: payload.detect_ms,
+          depthMs: payload.depth_ms,
+          objects: tracks.length,
+          tracks: tracks.map((track) => track.id),
+          depthError: payload.depth_error || "",
+          heatmapRange: payload.heatmap_range_m || null,
+        });
       } catch (error) {
         if (!disposed && error.name !== "AbortError") onStats?.({ error: error.message || "Detection failed" });
       }
-      if (!disposed) timer = window.setTimeout(sample, 500);
+      if (!disposed) timer = window.setTimeout(sample, depth ? 900 : 500);
     }
 
     sample();
@@ -735,7 +834,7 @@ export function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onS
       controller?.abort();
       window.clearTimeout(timer);
     };
-  }, [active, confidence, videoRef, onStats]);
+  }, [active, confidence, depth, depthLayer, videoRef, onStats]);
 
   return <canvas ref={canvasRef} className="event-detection-canvas" aria-hidden="true" />;
 }

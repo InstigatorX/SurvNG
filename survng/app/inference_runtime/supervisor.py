@@ -917,12 +917,15 @@ class InferenceSupervisor:
         objects: list[dict[str, Any]],
         *,
         frame_offset_s: float | None = None,
+        include_heatmap: bool = False,
+        workload: InferenceWorkload = InferenceWorkload.ENRICHMENT,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         depth = self.config.depth
         if not depth.enabled or not depth.resolved_model_path():
             return list(objects), {}
-        workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload, shed_optional=True):
+        workload = InferenceWorkload(workload)
+        shed_optional = workload is not InferenceWorkload.INTERACTIVE
+        if not self._enter_device_workload(workload, shed_optional=shed_optional):
             return list(objects), {"status": "depth_deferred"}
         try:
             result = dict(
@@ -931,6 +934,7 @@ class InferenceSupervisor:
                     frame=frame,
                     objects=objects,
                     frame_offset_s=frame_offset_s,
+                    include_heatmap=include_heatmap,
                     workload=workload,
                 )
                 or {}

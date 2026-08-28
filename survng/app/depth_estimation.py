@@ -340,6 +340,7 @@ class OpenVinoDepthEstimator:
         objects: list[dict[str, Any]],
         *,
         frame_offset_s: float | None = None,
+        include_heatmap: bool | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not objects:
             return objects, {}
@@ -374,13 +375,22 @@ class OpenVinoDepthEstimator:
                     next_item["incident_eligible"] = False
                     next_item["depth_filtered"] = True
             enriched.append(next_item)
-        if self.depth_config.store_heatmap:
+        should_store_heatmap = (
+            self.depth_config.store_heatmap
+            if include_heatmap is None
+            else bool(include_heatmap)
+        )
+        if should_store_heatmap:
             heatmap = encode_depth_heatmap(
                 depth_map,
                 max_width=int(self.depth_config.heatmap_max_width),
             )
             if heatmap:
                 metadata["heatmap_png"] = heatmap
+                metadata["heatmap_range_m"] = {
+                    "min_m": round(min_m, 2),
+                    "max_m": round(max_m, 2),
+                }
         return enriched, metadata
 
     def status(self) -> dict[str, Any]:

@@ -7,6 +7,7 @@ import {
   Download,
   Grid2X2,
   Images,
+  Layers,
   ListTree,
   Play,
   Search,
@@ -40,6 +41,7 @@ import {
   SnapshotImage,
   StoredTrackVideoOverlay,
   eventObjects,
+  formatDepthMeters,
   hasDetectedObjects,
   incidentClipWindow,
   incidentLabels,
@@ -47,7 +49,7 @@ import {
   loadIncidentClipInfo,
 } from "../shared/evidence.jsx";
 
-export function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean", onAnalysisStats, onEnded }) {
+export function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean", depthLayer = "both", onAnalysisStats, onEnded }) {
   const videoRef = useRef(null);
   const [clipInfo, setClipInfo] = useState(null);
   const [clipLoading, setClipLoading] = useState(false);
@@ -167,7 +169,14 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
               lostTimeoutSeconds={trackingEvent?.object_tracking?.lost_timeout_seconds}
             />
           ) : null}
-          <DebugDetectionOverlay videoRef={videoRef} active={analysisMode === "ai"} confidence={0.35} onStats={onAnalysisStats} />
+          <DebugDetectionOverlay
+            videoRef={videoRef}
+            active={analysisMode === "ai" || analysisMode === "depth"}
+            depth={analysisMode === "depth"}
+            depthLayer={depthLayer}
+            confidence={0.35}
+            onStats={onAnalysisStats}
+          />
           {clipLoading ? <div className="incident-video-status preparing">Preparing incident video...</div> : null}
         </>
       ) : (
@@ -177,7 +186,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   );
 }
 
-export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, analysisMode = "clean", depthLayer = "both", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
@@ -512,6 +521,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
               trackingEvent={trackingPreview}
               active={expanded && inlineVideoActive}
               analysisMode={analysisMode}
+              depthLayer={depthLayer}
               onAnalysisStats={onAnalysisStats}
               onEnded={() => setInlineVideoActive(false)}
             />
@@ -954,7 +964,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -1001,6 +1011,10 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   );
   const before = Number(appConfig?.event_clip_before_seconds ?? 5);
   const after = Number(appConfig?.event_clip_after_seconds ?? 5);
+  const depthConfigured = Boolean(
+    appConfig?.detector?.depth?.enabled
+    && String(appConfig?.detector?.depth?.model_path || "").trim(),
+  );
   // Do not name this `window` — it shadows the DOM global and crashes the
   // open-focus effect (requestAnimationFrame) when Find similar / Details opens.
   const clipWindow = incidentClipWindow(incident, before, after);
@@ -1064,9 +1078,25 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
           <button type="button" className={analysisMode === "clean" ? "active" : ""} aria-pressed={analysisMode === "clean"} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
           <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
           <button type="button" className={analysisMode === "ai" ? "active" : ""} aria-pressed={analysisMode === "ai"} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
+          <button type="button" className={analysisMode === "depth" ? "active" : ""} aria-pressed={analysisMode === "depth"} onClick={() => onAnalysisModeChange("depth")} disabled={!depthConfigured} title={depthConfigured ? "Run detection with monocular depth while replaying" : "Enable depth estimation in Intelligence settings"}><Layers size={14} /> Depth</button>
         </div>
+        {analysisMode === "depth" ? (
+          <div className="incident-depth-layers" role="group" aria-label="Depth overlay layers">
+            <button type="button" className={depthLayer === "both" ? "active" : ""} aria-pressed={depthLayer === "both"} onClick={() => onDepthLayerChange?.("both")} title="Show heatmap and distance boxes">Both</button>
+            <button type="button" className={depthLayer === "boxes" ? "active" : ""} aria-pressed={depthLayer === "boxes"} onClick={() => onDepthLayerChange?.("boxes")} title="Show distance boxes only">Boxes</button>
+            <button type="button" className={depthLayer === "heatmap" ? "active" : ""} aria-pressed={depthLayer === "heatmap"} onClick={() => onDepthLayerChange?.("heatmap")} title="Show depth heatmap only">Heatmap</button>
+          </div>
+        ) : null}
         {analysisMode === "tracks" ? <small>{objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
         {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
+        {analysisMode === "depth" && analysisStats ? (
+          <small className={analysisStats.error || analysisStats.depthError ? "analysis-error" : ""}>
+            {analysisStats.error
+              || analysisStats.depthError
+              || `${analysisStats.inferenceMs ?? "--"} ms (${analysisStats.detectMs ?? "--"} detect · ${analysisStats.depthMs ?? "--"} depth) · ${analysisStats.objects ?? 0} objects`}
+            {analysisStats.heatmapRange ? ` · ${formatDepthMeters(analysisStats.heatmapRange.min_m)}–${formatDepthMeters(analysisStats.heatmapRange.max_m)}` : ""}
+          </small>
+        ) : null}
       </section>
       <section>
         <h3>Faces</h3>

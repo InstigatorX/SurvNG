@@ -55,6 +55,24 @@ class DepthEstimationTests(unittest.TestCase):
         encoded = encode_depth_heatmap(depth_map, max_width=4)
         self.assertTrue(encoded.startswith(b"\x89PNG"))
 
+    def test_enrich_objects_can_force_debug_heatmap(self) -> None:
+        from survng.app.depth_estimation import OpenVinoDepthEstimator
+
+        estimator = OpenVinoDepthEstimator.__new__(OpenVinoDepthEstimator)
+        estimator.depth_config = DepthConfig(store_heatmap=False, heatmap_max_width=64)
+        estimator._last_inference_ms = 12.0
+        depth_map = np.linspace(2.0, 8.0, 16, dtype=np.float32).reshape(4, 4)
+        estimator.estimate_depth_map = lambda _frame: depth_map  # type: ignore[method-assign]
+        objects = [{"label": "person", "box": {"x1": 0, "y1": 0, "x2": 2, "y2": 2}}]
+        enriched, metadata = estimator.enrich_objects(
+            np.zeros((4, 4, 3), dtype=np.uint8),
+            objects,
+            include_heatmap=True,
+        )
+        self.assertEqual(enriched[0]["depth_stats"]["median_m"], 3.0)
+        self.assertTrue(metadata.get("heatmap_png", b"").startswith(b"\x89PNG"))
+        self.assertEqual(metadata.get("heatmap_range_m"), {"min_m": 0.05, "max_m": 150.0})
+
     def test_depth_motion_evidence_values(self) -> None:
         values = depth_motion_evidence_values(
             [

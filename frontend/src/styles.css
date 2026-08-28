@@ -1407,7 +1407,7 @@ p {
 
 .incident-analysis-modes {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 5px;
 }
 
@@ -1426,6 +1426,24 @@ p {
   border-color: color-mix(in srgb, var(--accent) 58%, transparent);
   background: color-mix(in srgb, var(--accent) 18%, var(--control));
   color: var(--accent);
+}
+
+.incident-depth-layers {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.incident-depth-layers button {
+  min-height: 30px;
+  padding: 5px 6px;
+  font-size: 10px;
+}
+
+.incident-depth-layers button.active {
+  border-color: color-mix(in srgb, #38bdf8 58%, transparent);
+  background: color-mix(in srgb, #38bdf8 16%, var(--control));
+  color: #7dd3fc;
 }
 
 .incident-replay-analysis>small {
