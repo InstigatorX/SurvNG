@@ -454,12 +454,6 @@
 .admin-home-footer button { display: inline-flex; align-items: center; gap: 6px; }
 .admin-home-footer button { border: 0; background: transparent; color: var(--accent); font-size: 11px; font-weight: 650; }
 
-@media (max-width: 760px) {
-  .admin-home-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .admin-home-actions { grid-template-columns: 1fr; }
-  .admin-home-footer { align-items: flex-start; flex-direction: column; }
-}
-
 .admin-workspace-general {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -956,8 +950,36 @@
     display: block;
     height: auto;
     min-height: var(--workspace-available-height);
+    gap: 0;
     overflow: visible;
-    padding-bottom: 78px;
+    padding: 0 0 78px;
+  }
+
+  .admin-workspace-surface {
+    --admin-panel-inset: 10px;
+  }
+
+  .admin-home-inner {
+    padding: 12px 10px;
+  }
+
+  .admin-home-hero {
+    flex-direction: column;
+    gap: 16px;
+    padding-bottom: 20px;
+  }
+
+  .admin-home-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-home-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-home-footer {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .admin-mobile-toolbar {
@@ -979,19 +1001,24 @@
     position: sticky;
     z-index: 7;
     top: 56px;
-    flex-wrap: wrap;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
     min-height: 52px;
-    padding: 8px 9px;
+    padding: 8px 10px;
   }
 
-  .admin-command-meta {
-    flex: 1 1 100%;
-    order: 3;
+  .admin-command-scope,
+  .admin-command-meta,
+  .admin-command-actions {
+    width: 100%;
+    margin-left: 0;
     justify-content: flex-start;
   }
 
-  .admin-command-actions {
-    margin-left: auto;
+  .admin-command-meta {
+    order: unset;
   }
 
   .admin-mobile-toolbar>button {
@@ -1129,7 +1156,7 @@
   }
 
   .settings-grid .section-head {
-    padding: 11px 12px;
+    padding: 10px;
   }
 
   .settings-grid .section-head>.camera-command-area {
@@ -1138,7 +1165,7 @@
 
   .settings-grid .camera-command-bar {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .settings-grid .camera-command-bar button {
@@ -1183,6 +1210,10 @@
     white-space: normal;
   }
 
+  .admin-save-actions {
+    margin-right: 0;
+  }
+
   .admin-save-actions button {
     min-width: 82px;
     padding-inline: 10px;
@@ -1190,10 +1221,6 @@
 }
 
 @media (max-width: 520px) {
-  .admin-workspace-surface {
-    --admin-panel-inset: 9px;
-  }
-
   .admin-save-state small {
     display: none;
   }
@@ -1204,35 +1231,6 @@
 
   .admin-save-actions button:last-child {
     min-width: 124px;
-  }
-
-  .settings-grid .camera-command-bar {
-    grid-template-columns: 1fr;
-  }
-
-  #admin-panel-cameras>.camera-section-tabs,
-  .detection-subsection-tabs {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    overflow: visible;
-  }
-
-  #admin-panel-cameras>.camera-section-tabs button,
-  .detection-subsection-tabs button {
-    width: 100%;
-    min-width: 0;
-  }
-
-  .telemetry-section-tabs {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    overflow: visible;
-  }
-
-  .telemetry-section-tabs button {
-    width: 100%;
-    min-width: 0;
-    padding-inline: 6px;
   }
 }
 

@@ -7584,6 +7584,17 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .retention-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .settings-grid .admin-field-grid,
+  .settings-grid .onvif-field-grid,
+  .settings-grid .detection-field-grid,
+  .settings-grid .media-location-roles,
+  .settings-grid .stream-field-row,
+  .settings-grid .field-row,
+  .settings-grid .retention-fields,
+  .settings-grid .retention-metrics {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 560px) {
