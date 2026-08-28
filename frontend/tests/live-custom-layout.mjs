@@ -38,9 +38,9 @@ assert.equal(liveCustomDropTarget([], 50, 50, "door"), null);
 assert.deepEqual(resizeLiveCamera({ columns: 3, rows: 1 }, 2, 1), { columns: 5, rows: 2, aspectLocked: false });
 assert.deepEqual(resizeLiveCamera({ columns: 12, rows: 4 }, 4, 3), { columns: 12, rows: 4, aspectLocked: false });
 assert.equal(liveCustomGridMetrics(1200, 800).columnWidth > 90, true);
-assert.equal(liveCustomGridMetrics(1200, 800).rowHeight, 194);
+assert.equal(liveCustomGridMetrics(1200, 800).rowHeight, 197);
 assert.equal(liveCustomGridMetrics(1200, 800).packRowHeight, 2);
-assert.equal(liveCustomGridMetrics(1200, 800).gap, 8);
+assert.equal(liveCustomGridMetrics(1200, 800).gap, 4);
 
 const snapped = resizeLiveCameraToAspect(
   { columns: 3, rows: 1 },
@@ -70,15 +70,15 @@ const packedLandscape = liveCustomTilePlacement(
   16 / 9,
 );
 assert.equal(packedLandscape.columns, 3);
-assert.equal(Math.abs(packedLandscape.height - 165.375) < 0.001, true);
-assert.equal(packedLandscape.packedRows, 18);
+assert.equal(Math.abs(packedLandscape.height - 167.0625) < 0.001, true);
+assert.equal(packedLandscape.packedRows, 29);
 
 const packedFreeform = liveCustomTilePlacement(
   { columns: 4, rows: 2, aspectLocked: false },
   liveCustomGridMetrics(1200, 800),
   16 / 9,
 );
-assert.equal(packedFreeform.height, 396);
-assert.equal(packedFreeform.packedRows, 41);
+assert.equal(packedFreeform.height, 398);
+assert.equal(packedFreeform.packedRows, 67);
 
 console.log("live custom layout tests passed");

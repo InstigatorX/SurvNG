@@ -1,6 +1,8 @@
 const COLUMN_COUNT = 12;
 const ROW_COUNT = 4;
-const GRID_GAP = 8;
+// Keep this in sync with --live-tile-gap in styles.css. The packer must use
+// the rendered grid gap when translating a tile's pixel height into row spans.
+const GRID_GAP = 4;
 const PACK_ROW_HEIGHT = 2;
 
 function defaultSize(camera, aspectOverrides = {}) {
