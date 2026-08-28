@@ -416,6 +416,9 @@ def _depth_attribution_summary(objects: list[dict[str, Any]]) -> dict[str, Any] 
         "valid_depth_count": sum(item["valid_depth"] for item in entries),
         "near_depth_count": sum(item["near_depth"] for item in entries),
         "would_admit_count": sum(item["would_admit"] for item in entries),
+        "alignment_reliable_count": sum(item["alignment_reliable"] for item in entries),
+        "spatial_match_count": sum(item["spatial_match"] for item in entries),
+        "stable_geometry_count": sum(item["stable_geometry"] for item in entries),
         "objects": entries[:12],
         "truncated": len(entries) > 12,
     }

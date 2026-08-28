@@ -1467,6 +1467,9 @@ class EventStoreTest(unittest.TestCase):
                         "valid_depth_count": 1,
                         "near_depth_count": 1,
                         "would_admit_count": 1,
+                        "alignment_reliable_count": 1,
+                        "spatial_match_count": 1,
+                        "stable_geometry_count": 1,
                     }
                 },
             )
@@ -1479,6 +1482,11 @@ class EventStoreTest(unittest.TestCase):
                 "valid_depth": 1,
                 "near_depth": 1,
                 "would_admit": 1,
+                "alignment_reliable": 1,
+                "spatial_match": 1,
+                "stable_geometry": 1,
+                "correlation_accepted": 1,
+                "correlation_rejected": 0,
             })
 
     def test_database_can_be_local_while_media_paths_remain_in_storage(self) -> None:

@@ -731,6 +731,11 @@ class EventStoreMotionIntelligenceMixin:
                     "valid_depth": 0,
                     "near_depth": 0,
                     "would_admit": 0,
+                    "alignment_reliable": 0,
+                    "spatial_match": 0,
+                    "stable_geometry": 0,
+                    "correlation_accepted": 0,
+                    "correlation_rejected": 0,
                 },
             })
 
@@ -785,11 +790,21 @@ class EventStoreMotionIntelligenceMixin:
                 )
                 depth_shadow = summary["depth_shadow"]
                 depth_shadow["decisions"] += 1
+                if row["object_detected"] is not None:
+                    outcome = (
+                        "correlation_accepted"
+                        if bool(row["object_detected"])
+                        else "correlation_rejected"
+                    )
+                    depth_shadow[outcome] += 1
                 for key, field in (
                     ("evaluated_count", "objects_evaluated"),
                     ("valid_depth_count", "valid_depth"),
                     ("near_depth_count", "near_depth"),
                     ("would_admit_count", "would_admit"),
+                    ("alignment_reliable_count", "alignment_reliable"),
+                    ("spatial_match_count", "spatial_match"),
+                    ("stable_geometry_count", "stable_geometry"),
                 ):
                     depth_shadow[field] += max(0, int(depth_attribution.get(key) or 0))
             if row["event_id"] is not None:

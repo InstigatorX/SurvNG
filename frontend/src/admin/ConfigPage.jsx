@@ -667,6 +667,7 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
               <div><dt>Activity attribution · since restart</dt><dd>{activityAttribution.evaluated.toLocaleString()} checked <small>{activityAttribution.active.toLocaleString()} active · {activityAttribution.sceneContext.toLocaleString()} scene context · {activityAttribution.indeterminate.toLocaleString()} uncertain</small></dd></div>
               <div><dt>Context prevented from labeling incidents</dt><dd>{activityAttribution.enforced.toLocaleString()} <small>{activityAttribution.modes.size ? [...activityAttribution.modes].join(" / ").replaceAll("_", " ") : "waiting for detections"}</small></dd></div>
               <div><dt>Object admission · since restart</dt><dd>{activityAttribution.detectorAdmissions.toLocaleString()} detector-eligible <small>{activityAttribution.confidenceRejections.toLocaleString()} low confidence · {activityAttribution.zoneRejections.toLocaleString()} zone-rejected · {activityAttribution.temporalRejections.toLocaleString()} unconfirmed · {activityAttribution.enforced.toLocaleString()} scene context</small></dd></div>
+              <div><dt>Depth-shadow health · 24h</dt><dd><DepthShadowPerformance cameraId={selected?.id || ""} label={selected ? "Depth shadow · this camera · last 24 hours" : "Depth shadow · all cameras · last 24 hours"} /></dd></div>
             </dl>
           </section>
           {!selected ? <section className="telemetry-section">
@@ -4887,7 +4888,7 @@ export function MotionEffectiveness({ cameraId, mode }) {
   );
 }
 
-export function DepthShadowPerformance({ cameraId = "", mode = "" }) {
+export function DepthShadowPerformance({ cameraId = "", mode = "", label = "Depth shadow · last 24 hours" }) {
   const [summary, setSummary] = useState(null);
   const [error, setError] = useState("");
 
@@ -4897,7 +4898,7 @@ export function DepthShadowPerformance({ cameraId = "", mode = "" }) {
       if (!response.ok) throw new Error("Depth shadow history unavailable");
       const payload = await response.json();
       const cameras = cameraId ? { [cameraId]: payload?.by_camera?.[cameraId] || {} } : payload?.by_camera || {};
-      const totals = { decisions: 0, objects_evaluated: 0, valid_depth: 0, near_depth: 0, would_admit: 0 };
+      const totals = { decisions: 0, objects_evaluated: 0, valid_depth: 0, near_depth: 0, would_admit: 0, alignment_reliable: 0, spatial_match: 0, stable_geometry: 0, correlation_accepted: 0, correlation_rejected: 0 };
       Object.entries(cameras).forEach(([, modes]) => Object.entries(modes || {}).forEach(([entryMode, value]) => {
         if (mode && entryMode !== mode) return;
         const depth = value?.depth_shadow || {};
@@ -4912,11 +4913,13 @@ export function DepthShadowPerformance({ cameraId = "", mode = "" }) {
   useVisiblePolling(load, 30000, true, { restartKey: `${cameraId}\u0000${mode}` });
 
   if (error) return <span className="motion-runtime-warning">{error}</span>;
-  if (!summary?.decisions) return <span>Depth shadow: waiting for recorded-frame correlations.</span>;
+  if (!summary?.decisions) return <span>Depth shadow: no recorded-frame correlations yet. This does not indicate a depth failure.</span>;
   return <div className="motion-effectiveness-summary">
-    <strong>Depth shadow · last 24 hours</strong>
-    <span>{summary.decisions.toLocaleString()} correlated decisions · {summary.objects_evaluated.toLocaleString()} objects sampled</span>
-    <span>{summary.valid_depth.toLocaleString()} valid depth · {summary.near_depth.toLocaleString()} near · {summary.would_admit.toLocaleString()} would meet the experimental depth rule</span>
+    <strong>{label}</strong>
+    <span>{summary.decisions.toLocaleString()} decisions · {summary.correlation_accepted.toLocaleString()} correlation accepted · {summary.correlation_rejected.toLocaleString()} correlation rejected</span>
+    <span>{summary.objects_evaluated.toLocaleString()} objects sampled · {summary.valid_depth.toLocaleString()} valid depth · {summary.near_depth.toLocaleString()} near</span>
+    <span>{summary.alignment_reliable.toLocaleString()} aligned · {summary.spatial_match.toLocaleString()} spatially matched · {summary.stable_geometry.toLocaleString()} geometrically stable</span>
+    <span>{summary.would_admit.toLocaleString()} would meet the experimental depth rule</span>
     <span>Informational only — depth does not affect incidents, EMA, or fusion.</span>
   </div>;
 }
@@ -4958,7 +4961,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
               <span>{status.motion_qualification.visual_backup_not_ready || 0} strong candidates held during scene learning · {status.motion_qualification.visual_backup_uncorrelated_objects || 0} detected objects outside motion areas rejected</span>
             </> : null}
             <MotionEffectiveness cameraId={status.id} mode={status.motion_qualification.mode} />
-            <DepthShadowPerformance cameraId={status.id} mode={status.motion_qualification.mode} />
+            <DepthShadowPerformance cameraId={status.id} mode={status.motion_qualification.mode} label="Depth shadow · current mode · last 24 hours" />
           </div>
           <div className="motion-pipeline-runtime-grid">
             <MotionPipelineRuntimeCard label="Motion analysis" pipeline={status.motion_qualification.pipeline} origin={status.motion_qualification.pipeline_origins?.qualification} motionCatalog={motionCatalog} />
