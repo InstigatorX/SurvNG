@@ -19,6 +19,7 @@ import cv2
 
 from .config import SemanticSearchConfig
 from .incident_utils import event_snapshot_path
+from .main_database import connect_main_database
 from .media_storage import MediaStorageRegistry
 from .openclip_tokenizer import OpenClipBpeTokenizer
 
@@ -275,13 +276,20 @@ class SemanticIndex:
 
     MAX_CANDIDATE_ROWS = 50_000
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        database_write_lock: threading.RLock | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
         self._lock = threading.Lock()
+        self._database_write_lock = database_write_lock or threading.RLock()
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10.0)
+        connection = connect_main_database(
+            self.database_path, timeout=10.0, write_lock=self._database_write_lock
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("pragma busy_timeout = 10000")
         connection.execute("pragma foreign_keys = on")

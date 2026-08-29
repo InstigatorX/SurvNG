@@ -250,7 +250,11 @@ def validate_manager_configuration(config: AppConfig) -> None:
 
 
 class AppManager:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        database_write_lock: threading.RLock | None = None,
+    ) -> None:
         validate_manager_configuration(config)
         self.config = config
         self.detection_watch = RouteDetectionWatch(
@@ -264,6 +268,7 @@ class AppManager:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.database_dir = Path(config.database_dir) if config.database_dir else self.storage_dir
         self.database_dir.mkdir(parents=True, exist_ok=True)
+        self.database_write_lock = database_write_lock or threading.RLock()
         self.image_cache = LocalImageCache(self.database_dir / "image-cache")
         self.image_writer = DurableImageWriter(config.image_storage)
         self.media_storage = MediaStorageRegistry(self.storage_dir, config.media_storage)
@@ -271,6 +276,7 @@ class AppManager:
             self.storage_dir,
             database_dir=self.database_dir,
             media_storage=self.media_storage,
+            database_write_lock=self.database_write_lock,
         )
         self.ema_route_candidates = EmaRouteCandidateCache(
             self.database_dir / "ema-route-cache.sqlite3",
@@ -278,9 +284,14 @@ class AppManager:
         )
         self._restore_detection_watches()
         self.telemetry = TelemetryStore(self.database_dir)
-        migrate_legacy_runtime_telemetry(self.events.db_path, self.telemetry)
-        self.appearance_index = AppearanceIndex(self.events.db_path)
-        self.semantic_index = SemanticIndex(self.events.db_path)
+        with self.database_write_lock:
+            migrate_legacy_runtime_telemetry(self.events.db_path, self.telemetry)
+        self.appearance_index = AppearanceIndex(
+            self.events.db_path, self.database_write_lock
+        )
+        self.semantic_index = SemanticIndex(
+            self.events.db_path, self.database_write_lock
+        )
         self.recording = RecordingLifecycle(
             config=config,
             storage_dir=self.storage_dir,
@@ -315,6 +326,7 @@ class AppManager:
                 tracking_burst_guard=self._tracking_burst_available,
                 database_dir=self.database_dir,
                 media_storage=self.media_storage,
+                database_write_lock=self.database_write_lock,
             )
         except BaseException:
             for label, operation in (

@@ -11,6 +11,7 @@ from ..face_recognition import OpenVinoFaceRecognizer
 from ..inference import INFERENCE_REQUEST_TIMEOUT_SECONDS
 from ..incident_utils import event_snapshot_path, portable_media_path
 from ..media_storage import MediaStorageRegistry
+from ..main_database import connect_main_database
 from .benchmarks import FaceStoreBenchmarkMixin
 from .ingest import FaceStoreIngestMixin
 from .people import FaceStorePeopleMixin
@@ -47,6 +48,7 @@ class FaceStore(
         start_recognition: bool = True,
         database_dir: Path | None = None,
         media_storage: MediaStorageRegistry | None = None,
+        database_write_lock: threading.RLock | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.media_storage = media_storage
@@ -56,6 +58,7 @@ class FaceStore(
         self.max_observations = max(100, int(max_observations))
         self.recognizer = recognizer
         self._lock = threading.Lock()
+        self._database_write_lock = database_write_lock or threading.RLock()
         self._lifecycle_lock = threading.RLock()
         self._recognition_queue: Queue[int | None] = Queue(maxsize=self.max_observations + 1)
         self._recognition_pending: set[int] = set()
@@ -95,23 +98,29 @@ class FaceStore(
     def reconfigure_max_observations(self, max_observations: int) -> int:
         """Apply a new history limit and prune transactionally without stopping recognition."""
         next_limit = max(100, int(max_observations))
+        pruned_paths: list[Path] = []
         with self._lock, self._connect() as connection:
             previous_limit = self.max_observations
             self.max_observations = next_limit
             try:
-                return self._prune_locked(connection)
+                removed = self._prune_locked(connection, pruned_paths)
             except BaseException:
                 self.max_observations = previous_limit
                 raise
+        self._delete_face_snapshots(pruned_paths, "pruned")
+        return removed
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=10)
+        connection = connect_main_database(
+            self.db_path, timeout=10, write_lock=self._database_write_lock
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("pragma busy_timeout = 10000")
         connection.execute("pragma foreign_keys = on")
         return connection
 
     def _init_db(self) -> None:
+        pruned_paths: list[Path] = []
         with self._connect() as connection:
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
@@ -319,7 +328,7 @@ class FaceStore(
                     """,
                     (storage_root,),
                 )
-            self._prune_locked(connection)
+            self._prune_locked(connection, pruned_paths)
             for key in (
                 _PEOPLE_DIRECTORY_REVISION_KEY,
                 _UNKNOWN_CLUSTERS_REVISION_KEY,
@@ -388,6 +397,7 @@ class FaceStore(
                 end;
                 """
             )
+        self._delete_face_snapshots(pruned_paths, "pruned")
 
     def _directory_revision(self, key: str) -> int:
         with self._connect() as connection:
@@ -430,7 +440,18 @@ class FaceStore(
                 if self._recognition_thread is thread:
                     self._recognition_thread = None
 
-    def _prune_locked(self, connection: sqlite3.Connection) -> int:
+    def _delete_face_snapshots(self, paths: list[Path], reason: str) -> None:
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.debug("could not remove %s face candidate %s", reason, path)
+
+    def _prune_locked(
+        self,
+        connection: sqlite3.Connection,
+        deferred_paths: list[Path] | None = None,
+    ) -> int:
         total = int(connection.execute(
             "select count(*) from face_observations where canonical = 1"
         ).fetchone()[0])
@@ -482,11 +503,16 @@ class FaceStore(
             self._invalidate_reference_gallery()
             for raw_path in candidate_paths:
                 try:
-                    event_snapshot_path(
+                    path = event_snapshot_path(
                         self.storage_dir,
                         {"snapshot_path": raw_path},
                         self.media_storage,
-                    ).unlink(missing_ok=True)
+                    )
                 except (FileNotFoundError, PermissionError, OSError, RuntimeError):
                     LOGGER.debug("could not remove pruned face candidate %s", raw_path)
+                    continue
+                if deferred_paths is not None:
+                    deferred_paths.append(path)
+                else:
+                    self._delete_face_snapshots([path], "pruned")
         return len(remove_ids)

@@ -114,6 +114,7 @@ FACE_OBSERVATIONS_SYNC_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD: threading.Thread | None = None
 MANAGER_RELOAD_LOCK = threading.RLock()
+MAIN_DATABASE_WRITE_LOCK = threading.RLock()
 MANAGER_ACCESS = ManagerAccessCoordinator()
 APPLICATION_STOPPING = threading.Event()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
@@ -136,7 +137,7 @@ def get_manager() -> AppManager:
     current = globals().get("manager")
     if current is not None:
         return current
-    created = AppManager(config)
+    created = AppManager(config, database_write_lock=MAIN_DATABASE_WRITE_LOCK)
     globals()["manager"] = created
     return created
 
@@ -734,7 +735,9 @@ def reload_manager(
     lifecycle = ManagerGenerationLifecycle(
         lock=MANAGER_RELOAD_LOCK,
         stopping=APPLICATION_STOPPING,
-        manager_factory=AppManager,
+        manager_factory=lambda app_config: AppManager(
+            app_config, database_write_lock=MAIN_DATABASE_WRITE_LOCK
+        ),
         hooks=ManagerReloadHooks(
             active_storage_tasks=_active_storage_tasks,
             active_ai_operations=_active_ai_operations,

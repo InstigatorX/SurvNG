@@ -90,6 +90,7 @@ def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
             active_manager = deps.get_manager()
             storage_dir = active_manager.storage_dir
             db_path = active_manager.events.db_path
+            database_write_lock = active_manager.database_write_lock
             recorder = active_manager.recorder
             media_storage = active_manager.media_storage
         try:
@@ -101,6 +102,7 @@ def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
                     media_storage=media_storage,
                     cancel_event=cancel_event,
                     progress=progress,
+                    database_write_lock=database_write_lock,
                 ),
                 apply=request.apply,
                 full=request.full,

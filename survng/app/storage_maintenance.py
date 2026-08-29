@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import MediaStorageRole
+from .main_database import connect_main_database
 from .media_storage import MediaStorageRegistry, path_presence
 from .recorder import Recorder
 
@@ -37,6 +38,7 @@ class StorageReconciler:
         media_storage: MediaStorageRegistry | None = None,
         cancel_event: threading.Event | None = None,
         progress: Callable[[str, int, int | None], None] | None = None,
+        database_write_lock: threading.RLock | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.database_path = database_path
@@ -44,6 +46,7 @@ class StorageReconciler:
         self.media_storage = media_storage
         self.cancel_event = cancel_event
         self.progress = progress
+        self._database_write_lock = database_write_lock or threading.RLock()
 
     def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
         repairs = {
@@ -138,7 +141,9 @@ class StorageReconciler:
             self.progress(phase, current, total)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10.0)
+        connection = connect_main_database(
+            self.database_path, timeout=10.0, write_lock=self._database_write_lock
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 10000")
         return connection

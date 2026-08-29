@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..incident_utils import event_snapshot_path, portable_media_path
-from .quality import LOGGER, parse_face_box
+from .quality import parse_face_box
 
 
 class FaceStoreIngestMixin:
@@ -77,10 +77,7 @@ class FaceStoreIngestMixin:
                     recognition_ids.append(int(cursor.lastrowid))
                     touched_tracks.add(track_id)
                 else:
-                    try:
-                        resolved_snapshot.unlink(missing_ok=True)
-                    except OSError:
-                        LOGGER.debug("could not remove duplicate face candidate %s", resolved_snapshot)
+                    discarded_paths.append(resolved_snapshot)
             for track_id in touched_tracks:
                 protected_count = int(connection.execute(
                     """
@@ -117,7 +114,7 @@ class FaceStoreIngestMixin:
                         except (FileNotFoundError, PermissionError, OSError, RuntimeError):
                             continue
                 self._reconcile_candidate_track(connection, event_id, track_id)
-            self._prune_locked(connection)
+            self._prune_locked(connection, discarded_paths)
             if recognition_ids:
                 retained_ids = {
                     int(row["id"])
@@ -132,10 +129,7 @@ class FaceStoreIngestMixin:
                     if observation_id in retained_ids
                 ]
         for discarded_path in discarded_paths:
-            try:
-                discarded_path.unlink(missing_ok=True)
-            except OSError:
-                LOGGER.debug("could not remove superseded face candidate %s", discarded_path)
+            self._delete_face_snapshots([discarded_path], "superseded")
         for observation_id in recognition_ids:
             self._queue_recognition(observation_id)
         return inserted
@@ -143,6 +137,7 @@ class FaceStoreIngestMixin:
     def ingest_events(self, events: list[dict[str, Any]]) -> int:
         inserted = 0
         recognition_ids: list[int] = []
+        discarded_paths: list[Path] = []
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as connection:
             for event in events:
@@ -207,7 +202,7 @@ class FaceStoreIngestMixin:
                     if cursor.rowcount > 0:
                         inserted += 1
                         recognition_ids.append(int(cursor.lastrowid))
-            self._prune_locked(connection)
+            self._prune_locked(connection, discarded_paths)
             if recognition_ids:
                 inserted_ids = set(recognition_ids)
                 recognition_ids = [
@@ -218,6 +213,7 @@ class FaceStoreIngestMixin:
                     ).fetchall()
                     if int(row["id"]) in inserted_ids
                 ]
+        self._delete_face_snapshots(discarded_paths, "pruned")
         for observation_id in recognition_ids:
             self._queue_recognition(observation_id)
         return inserted

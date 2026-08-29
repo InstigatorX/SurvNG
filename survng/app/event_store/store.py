@@ -11,6 +11,7 @@ from typing import Any
 
 from ..durable_payload import durable_json_dumps
 from ..incident_utils import event_snapshot_path, portable_media_path
+from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
@@ -44,6 +45,7 @@ class EventStore(
         storage_dir: Path,
         database_dir: Path | None = None,
         media_storage: MediaStorageRegistry | None = None,
+        database_write_lock: threading.RLock | None = None,
     ) -> None:
         self.storage_dir = storage_dir
         self.media_storage = media_storage
@@ -51,6 +53,7 @@ class EventStore(
         self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._database_write_lock = database_write_lock or threading.RLock()
         # SQLite permits a single writer.  Camera event/refinement workers share
         # the jobs ledger, so serialize their short local transactions instead
         # of making them contend through SQLite's busy timeout.
@@ -63,7 +66,9 @@ class EventStore(
         self._migrate_legacy_jobs()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = connect_main_database(
+            self.db_path, timeout=10.0, write_lock=self._database_write_lock
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("pragma busy_timeout = 10000")
         conn.execute("pragma foreign_keys = on")

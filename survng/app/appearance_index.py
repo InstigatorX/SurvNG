@@ -7,6 +7,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from .main_database import connect_main_database
+
 
 class AppearanceIndex:
     """Durable, model-versioned appearance vectors for incident investigation."""
@@ -14,13 +16,20 @@ class AppearanceIndex:
     MAX_EMBEDDING_DIMENSIONS = 8192
     MAX_CANDIDATE_ROWS = 10000
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        database_write_lock: threading.RLock | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
         self._lock = threading.Lock()
+        self._database_write_lock = database_write_lock or threading.RLock()
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10.0)
+        connection = connect_main_database(
+            self.database_path, timeout=10.0, write_lock=self._database_write_lock
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("pragma busy_timeout = 10000")
         connection.execute("pragma foreign_keys = on")

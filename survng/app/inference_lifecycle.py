@@ -64,6 +64,7 @@ class InferenceLifecycle:
         tracking_burst_guard: Callable[[], bool],
         database_dir: Path,
         media_storage: MediaStorageRegistry | None = None,
+        database_write_lock: threading.RLock | None = None,
     ) -> None:
         self.storage_dir = storage_dir
         self.events = events
@@ -73,6 +74,7 @@ class InferenceLifecycle:
         self.tracking_burst_guard = tracking_burst_guard
         self.database_dir = database_dir
         self.media_storage = media_storage
+        self.database_write_lock = database_write_lock or threading.RLock()
         self.detector = InferenceSupervisor(config)
         faces: FaceStore | None = None
         semantic_search: DisabledSemanticSearch | None = None
@@ -88,6 +90,7 @@ class InferenceLifecycle:
                 start_recognition=False,
                 database_dir=database_dir,
                 media_storage=media_storage,
+                database_write_lock=self.database_write_lock,
             )
             semantic_search = build_semantic_search(
                 semantic_config,
@@ -485,6 +488,7 @@ class InferenceLifecycle:
             self.appearance_index,
             self.person_reidentifier,
             media_storage=self.media_storage,
+            database_write_lock=self.database_write_lock,
         )
 
     def _pause_tracking(self, *, best_effort: bool = False) -> None:

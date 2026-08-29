@@ -15,6 +15,7 @@ import numpy as np
 from .appearance_index import AppearanceIndex
 from .config import ObjectTrackingConfig
 from .incident_utils import event_snapshot_path
+from .main_database import connect_main_database
 from .media_storage import MediaStorageRegistry
 
 
@@ -39,6 +40,7 @@ class DeferredAppearanceBackfill:
         index: AppearanceIndex,
         encoder: AppearanceEncoder,
         media_storage: MediaStorageRegistry | None = None,
+        database_write_lock: threading.RLock | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         self.storage_dir = Path(storage_dir)
@@ -47,6 +49,7 @@ class DeferredAppearanceBackfill:
         self.index = index
         self.encoder = encoder
         self.media_storage = media_storage
+        self._database_write_lock = database_write_lock or threading.RLock()
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -55,7 +58,9 @@ class DeferredAppearanceBackfill:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10.0)
+        connection = connect_main_database(
+            self.database_path, timeout=10.0, write_lock=self._database_write_lock
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("pragma busy_timeout = 10000")
         connection.execute("pragma foreign_keys = on")
