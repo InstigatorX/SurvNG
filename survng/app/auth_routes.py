@@ -40,6 +40,9 @@ _LOGIN_MAX_FAILURES = 8
 _LOGIN_IP_MAX_FAILURES = 20
 _LOGIN_FAILURES: dict[str, list[float]] = {}
 _LOGIN_FAILURE_LOCK = threading.Lock()
+_LOGIN_FAILURE_SWEEP_SECONDS = 60.0
+_LOGIN_FAILURE_MAX_KEYS = 8192
+_login_failure_last_sweep = 0.0
 _BOOTSTRAP_TOKEN_NAME = "bootstrap.token"
 LOGGER = logging.getLogger(__name__)
 
@@ -85,27 +88,77 @@ def _client_key(request: Request, username: str) -> str:
     return f"{_client_ip(request) or 'unknown'}:{username.strip().casefold()}"
 
 
+def _ip_failure_key(ip: str) -> str:
+    return f"{ip or 'unknown'}:"
+
+
+def _live_login_stamps(key: str, now: float) -> list[float]:
+    """Return the unexpired failures for ``key``, forgetting spent entries.
+
+    Callers must hold ``_LOGIN_FAILURE_LOCK``. Keys are dropped once their
+    failures age out so that tracking an attempt does not permanently reserve a
+    dictionary slot for the attempted address and username.
+    """
+    stamps = [
+        stamp
+        for stamp in _LOGIN_FAILURES.get(key, [])
+        if now - stamp < _LOGIN_WINDOW_SECONDS
+    ]
+    if stamps:
+        _LOGIN_FAILURES[key] = stamps
+    else:
+        _LOGIN_FAILURES.pop(key, None)
+    return stamps
+
+
+def _sweep_login_failures(now: float) -> None:
+    """Discard throttle entries that can no longer block a sign-in.
+
+    Callers must hold ``_LOGIN_FAILURE_LOCK``. Per-key expiry only runs when the
+    same address and username are seen again, so a caller rotating either one
+    would otherwise retain an entry per identity for the process lifetime.
+    """
+    global _login_failure_last_sweep
+    if now - _login_failure_last_sweep < _LOGIN_FAILURE_SWEEP_SECONDS:
+        return
+    _login_failure_last_sweep = now
+    cutoff = now - _LOGIN_WINDOW_SECONDS
+    for key in [
+        key
+        for key, stamps in _LOGIN_FAILURES.items()
+        if not any(stamp > cutoff for stamp in stamps)
+    ]:
+        del _LOGIN_FAILURES[key]
+    if len(_LOGIN_FAILURES) <= _LOGIN_FAILURE_MAX_KEYS:
+        return
+    # A flood of distinct addresses can outrun expiry inside a single window.
+    # Evicting least-recent activity first keeps the entries most likely to be
+    # actively throttling, in exchange for forgetting long-idle offenders.
+    ranked = sorted(
+        _LOGIN_FAILURES,
+        key=lambda key: max(_LOGIN_FAILURES[key], default=cutoff),
+    )
+    for key in ranked[: len(_LOGIN_FAILURES) - _LOGIN_FAILURE_MAX_KEYS]:
+        del _LOGIN_FAILURES[key]
+
+
 def _login_blocked(key: str, ip: str) -> bool:
     now = time.monotonic()
     with _LOGIN_FAILURE_LOCK:
-        user_stamps = [stamp for stamp in _LOGIN_FAILURES.get(key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
-        _LOGIN_FAILURES[key] = user_stamps
-        ip_key = f"{ip or 'unknown'}:"
-        ip_stamps = [stamp for stamp in _LOGIN_FAILURES.get(ip_key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
-        _LOGIN_FAILURES[ip_key] = ip_stamps
+        _sweep_login_failures(now)
+        user_stamps = _live_login_stamps(key, now)
+        ip_stamps = _live_login_stamps(_ip_failure_key(ip), now)
         return len(user_stamps) >= _LOGIN_MAX_FAILURES or len(ip_stamps) >= _LOGIN_IP_MAX_FAILURES
 
 
 def _record_login_failure(key: str, ip: str) -> None:
     now = time.monotonic()
     with _LOGIN_FAILURE_LOCK:
-        stamps = [stamp for stamp in _LOGIN_FAILURES.get(key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
-        stamps.append(now)
-        _LOGIN_FAILURES[key] = stamps
-        ip_key = f"{ip or 'unknown'}:"
-        ip_stamps = [stamp for stamp in _LOGIN_FAILURES.get(ip_key, []) if now - stamp < _LOGIN_WINDOW_SECONDS]
-        ip_stamps.append(now)
-        _LOGIN_FAILURES[ip_key] = ip_stamps
+        _sweep_login_failures(now)
+        for failure_key in (key, _ip_failure_key(ip)):
+            stamps = _live_login_stamps(failure_key, now)
+            stamps.append(now)
+            _LOGIN_FAILURES[failure_key] = stamps
 
 
 def _clear_login_failures(key: str) -> None:

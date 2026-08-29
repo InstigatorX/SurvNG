@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -8,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from survng.app import auth_routes
 from survng.app.auth_routes import (
     AuthRouteDependencies,
     create_auth_router,
@@ -364,3 +366,51 @@ class SessionPrincipalTest(unittest.TestCase):
         auth = WebAuthConfig(users=[user])
         matched = authenticate_password("alex", "correct-horse", auth)
         self.assertEqual(matched.id, "Alex")
+
+
+class LoginThrottleMemoryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        auth_routes._LOGIN_FAILURES.clear()
+        auth_routes._login_failure_last_sweep = 0.0
+        self.addCleanup(auth_routes._LOGIN_FAILURES.clear)
+
+    def _sweep_at(self, offset: float) -> None:
+        with auth_routes._LOGIN_FAILURE_LOCK:
+            auth_routes._sweep_login_failures(time.monotonic() + offset)
+
+    def test_checking_an_unknown_identity_retains_no_entry(self) -> None:
+        self.assertFalse(auth_routes._login_blocked("10.0.0.1:alex", "10.0.0.1"))
+        self.assertEqual(auth_routes._LOGIN_FAILURES, {})
+
+    def test_successful_sign_in_forgets_the_user_entry(self) -> None:
+        auth_routes._record_login_failure("10.0.0.2:alex", "10.0.0.2")
+        auth_routes._clear_login_failures("10.0.0.2:alex")
+        self.assertNotIn("10.0.0.2:alex", auth_routes._LOGIN_FAILURES)
+
+    def test_failures_expire_for_identities_that_never_return(self) -> None:
+        auth_routes._record_login_failure("10.0.0.3:alex", "10.0.0.3")
+        self.assertTrue(auth_routes._LOGIN_FAILURES)
+        self._sweep_at(
+            auth_routes._LOGIN_WINDOW_SECONDS + auth_routes._LOGIN_FAILURE_SWEEP_SECONDS + 1
+        )
+        self.assertEqual(auth_routes._LOGIN_FAILURES, {})
+
+    def test_flood_of_distinct_identities_stays_capped(self) -> None:
+        for index in range(auth_routes._LOGIN_FAILURE_MAX_KEYS + 500):
+            ip = f"10.0.{index // 256 % 256}.{index % 256}"
+            auth_routes._record_login_failure(f"{ip}:user{index}", ip)
+        self._sweep_at(auth_routes._LOGIN_FAILURE_SWEEP_SECONDS + 1)
+        self.assertLessEqual(
+            len(auth_routes._LOGIN_FAILURES),
+            auth_routes._LOGIN_FAILURE_MAX_KEYS,
+        )
+
+    def test_repeated_failures_still_block_the_user(self) -> None:
+        for _ in range(auth_routes._LOGIN_MAX_FAILURES):
+            auth_routes._record_login_failure("10.0.0.4:alex", "10.0.0.4")
+        self.assertTrue(auth_routes._login_blocked("10.0.0.4:alex", "10.0.0.4"))
+
+    def test_repeated_failures_still_block_the_address(self) -> None:
+        for index in range(auth_routes._LOGIN_IP_MAX_FAILURES):
+            auth_routes._record_login_failure(f"10.0.0.5:user{index}", "10.0.0.5")
+        self.assertTrue(auth_routes._login_blocked("10.0.0.5:fresh", "10.0.0.5"))
