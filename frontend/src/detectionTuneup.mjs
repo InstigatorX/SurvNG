@@ -27,7 +27,7 @@ export function tuneupRecommendationGroup(item) {
   const setting = String(item.setting || "");
   const current = Number(item.current_effective ?? item.current);
   const proposed = Number(item.proposed);
-  if (item.subsystem === "tracking") return "Improve tracking";
+  if (item.subsystem === "tracking") return "Improve identification overlays";
   if (["motion.frame_width", "motion.sample_fps"].includes(setting) && Number.isFinite(current) && proposed < current) return "Reduce processing load";
   if (["motion.visual_backup_min_score", "motion.visual_backup_min_consecutive", "motion.visual_backup_cooldown_seconds"].includes(setting) && Number.isFinite(current)) return proposed > current ? "Reduce unwanted motion" : "Catch more important activity";
   if (setting === "motion.sensitivity") return String(item.proposed) === "high" ? "Catch more important activity" : "Reduce unwanted motion";

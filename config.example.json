@@ -66,6 +66,7 @@
     "window_seconds": 1.6,
     "post_trigger_seconds": 2.5,
     "burst_quiet_seconds": 0.5,
+    "max_concurrent_analysis": 2,
     "rejected_sample_rate": 1.0,
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
@@ -101,7 +102,7 @@
   },
   "detector": {
     "enabled": false,
-    "object_worker_count": 1,
+    "object_worker_count": 2,
     "model_path": "best.onnx",
     "model_xml": "",
     "labels_path": "classes.txt",

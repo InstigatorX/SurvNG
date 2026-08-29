@@ -666,6 +666,34 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIn("motion_policy", result["hot_updated"])
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_motion_analysis_capacity_hot_applies_without_worker_restart(self) -> None:
+        active = Mock()
+        current = AppConfig(cameras=[
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+        ])
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.motion_qualification.max_concurrent_analysis = 4
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_motion.assert_called_once_with(
+            effective,
+            restart_camera_ids=set(),
+            hot_camera_ids={"gate"},
+        )
+        self.assertEqual(result["apply_mode"], "hot")
+        self.assertIn("motion_analysis_capacity", result["hot_updated"])
+        self.assertIn("motion_policy", result["hot_updated"])
+        self.assertFalse(result["camera_workers_restarted"])
+
     def test_camera_motion_structural_change_restarts_only_affected_camera(self) -> None:
         active = Mock()
         current = AppConfig(cameras=[
@@ -749,7 +777,7 @@ class ConfigReloadTest(unittest.TestCase):
         main.config = current
         main.manager = active
         incoming = current.model_copy(deep=True)
-        incoming.detector.object_worker_count = 2
+        incoming.detector.object_worker_count = 3
 
         with (
             patch("survng.app.main.reload_manager") as reload,

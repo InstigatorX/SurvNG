@@ -385,9 +385,12 @@ class AppManager:
             recorder_settle_seconds=CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
         )
         self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
-        # Keep the established two-camera CPU ceiling, but dispatch those slots
-        # fairly so continuous EMA work from one camera cannot starve another.
-        self._motion_analysis_limiter = FairMotionAnalysisLimiter(2)
+        # Keep the established two-camera CPU ceiling by default, but dispatch
+        # those slots fairly so continuous EMA work from one camera cannot
+        # starve another. Operators can raise this on a larger NVR.
+        self._motion_analysis_limiter = FairMotionAnalysisLimiter(
+            self.config.motion_qualification.max_concurrent_analysis
+        )
         workers: dict[str, CameraWorker] = {}
         try:
             for camera in self._unique_cameras():
@@ -1223,6 +1226,9 @@ class AppManager:
                     "motion reconfiguration is fenced after an incomplete rollback; "
                     "reload the application manager before applying another motion change"
                 )
+            self._motion_analysis_limiter.set_capacity(
+                config.motion_qualification.max_concurrent_analysis
+            )
             for camera_id in sorted(hot_camera_ids):
                 worker = self.workers.get(camera_id)
                 camera = cameras.get(camera_id)

@@ -11,12 +11,12 @@ You can run recording without detection. Detection without sensible motion setti
 
 Under **Admin → Cameras → Motion/Object** you pick one complete behavior:
 
-| Choice | Meaning | Good when |
-| --- | --- | --- |
-| **Camera only** | Trust every ordinary camera motion notice | Camera notices are excellent and you want minimum extra CPU |
-| **Camera + EMA validation** | Camera notices still start work; SurvNG double-checks the picture | Notices are frequent but sometimes noisy |
-| **Camera + EMA backup** (default) | Camera notices are primary; SurvNG can still rescue a miss | Typical home/business cameras |
-| **EMA only** | SurvNG watches the video itself for motion | ONVIF notices are unavailable or unreliable |
+| Choice | Meaning | Cost | Good when |
+| --- | --- | --- | --- |
+| **Camera only** | Trust every ordinary camera motion notice | Lowest CPU | Camera notices are excellent |
+| **Camera + EMA validation** | Camera notices still start work; SurvNG double-checks the picture | Continuous EMA plus a short wait | Notices are frequent but sometimes noisy |
+| **Camera + EMA backup** (default) | Camera notices are primary; SurvNG can still rescue a miss | Continuous EMA for recall, not for fewer false positives | Typical home/business cameras |
+| **EMA only** | SurvNG watches the video itself for motion | Continuous EMA is the only automatic trigger | ONVIF notices are unavailable or unreliable |
 
 **EMA** means SurvNG’s enhanced motion analysis on the live picture. It learns a quiet baseline for the scene and looks for lasting, credible change — not every leaf flicker.
 
@@ -46,7 +46,7 @@ You care about people at a side gate but not distant sidewalk traffic:
 
 ## Object tracking
 
-When tracking is enabled, SurvNG can follow an object across frames inside an incident. That improves cover selection and review overlays. Tracking settings live with detection configuration.
+When tracking is enabled, SurvNG can follow an object across frames **after** recorded confirmation. That improves cover selection and review overlays. It does not decide whether the incident is kept, and it spends extra detector time, so it starts only once refinement has finished (or could not run). Tracking settings live with detection configuration.
 
 ## Motion Audit
 

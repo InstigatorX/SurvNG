@@ -135,6 +135,7 @@ def _motion_policy_signature(config: AppConfig, camera_id: str) -> tuple[Any, ..
         config.motion_qualification.visual_backup_warmup_seconds,
         config.motion_qualification.visual_backup_score_margin,
         config.motion_qualification.rejected_sample_rate,
+        config.motion_qualification.max_concurrent_analysis,
     )
 
 
@@ -202,8 +203,17 @@ class TargetedConfigApplication:
             }
             tracking_changed = any(getattr(current.detector.tracking, f) != getattr(incoming.detector.tracking, f) for f in TRACKING_SESSION_FIELDS)
             motion_restart_ids, motion_hot_ids = motion_config_changes(current, incoming)
+            motion_capacity_changed = (
+                current.motion_qualification.max_concurrent_analysis
+                != incoming.motion_qualification.max_concurrent_analysis
+            )
             roles: set[str] = set()
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_OBJECT_ENGINE_FIELDS): roles.add("object")
+            if (
+                current.detector.effective_object_worker_count()
+                != incoming.detector.effective_object_worker_count()
+            ):
+                roles.add("object")
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_FACE_ENGINE_FIELDS): roles.add("face")
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_SHARED_ENGINE_FIELDS): roles.update({"object", "face", "reid", "depth"})
             if any(getattr(current.detector.tracking, f) != getattr(incoming.detector.tracking, f) for f in TRACKING_REID_ENGINE_FIELDS): roles.add("reid")
@@ -235,7 +245,7 @@ class TargetedConfigApplication:
                     (tracking_changed and not refresh, "tracking", lambda c: runtime.reconfigure_object_tracking(c.detector), lambda c: runtime.reconfigure_object_tracking(c.detector)),
                     (policy_changed, "policy", runtime.reconfigure_detector_policy, runtime.reconfigure_detector_policy),
                     (
-                        bool(motion_restart_ids or motion_hot_ids),
+                        bool(motion_restart_ids or motion_hot_ids or motion_capacity_changed),
                         "motion",
                         lambda c: runtime.reconfigure_motion(
                             c,
@@ -270,6 +280,8 @@ class TargetedConfigApplication:
             hot = changes + recorder_changes + (["detector_policy"] if policy_changed else [])
             if motion_hot_ids:
                 hot.append("motion_policy")
+            if motion_capacity_changed:
+                hot.append("motion_analysis_capacity")
             restarted.extend(f"camera:{camera_id}" for camera_id in sorted(motion_restart_ids))
             return incoming, {
                 "apply_mode": "targeted" if restarted else "hot" if hot else "unchanged",
