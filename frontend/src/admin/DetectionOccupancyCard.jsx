@@ -9,7 +9,7 @@ import {
   coverageFromCameraMotion,
   coverageFromRuntimeHistory,
   occupancyToneLabel,
-  resolveObjectWorkerCount,
+  resolveDetectorHealth,
   siteEffectiveness,
 } from "../detectionOccupancy.mjs";
 
@@ -61,13 +61,15 @@ function OccupancyRow({ row, onOpenSetting }) {
 }
 
 function OccupancyPanel({ title, subtitle, report, onOpenSetting, primary = false, icon: HeaderIcon = Cpu }) {
+  const heading = primary && report.summary?.headline ? report.summary.headline : title;
+  const description = report.summary?.detail || subtitle;
   return (
     <section className={`detection-settings-card occupancy-card ${primary ? "primary" : ""} ${report.tone}`}>
       <header className="detection-settings-card-head">
         <div className="detection-settings-card-icon"><HeaderIcon size={18} /></div>
         <div>
-          <h3>{title}</h3>
-          <p>{subtitle}</p>
+          <h3>{heading}</h3>
+          <p>{description}</p>
         </div>
         <span className={`occupancy-tone-chip ${report.tone}`}>{occupancyToneLabel(report.tone)}</span>
       </header>
@@ -109,12 +111,10 @@ export function DetectionOccupancyCard({
   const byCamera = effectiveness?.by_camera || {};
   const slotCount = Number(config?.motion_qualification?.max_concurrent_analysis ?? 2);
   const trackingEnabled = config?.detector?.tracking?.enabled !== false;
-  const { configured: configuredWorkerCount, running: runningWorkerCount } = resolveObjectWorkerCount({
-    config,
-    telemetry,
-  });
+  const detectorHealth = resolveDetectorHealth({ config, telemetry });
+  const { configured: configuredWorkerCount, running: runningWorkerCount } = detectorHealth;
   const workerCount = runningWorkerCount || configuredWorkerCount;
-  const backend = config?.detector?.backend || "openvino";
+  const backend = detectorHealth.backend || config?.detector?.backend || "openvino";
   const backupEnabled = (config?.motion_qualification?.mode || "camera_rescue") === "camera_rescue"
     || (config?.motion_qualification?.mode || "") === "adaptive";
   const siteOnvifHealthy = cameras.length
@@ -139,6 +139,8 @@ export function DetectionOccupancyCard({
       ? ["camera_rescue", "adaptive"].includes(cameraMode(config, configCameras.find((camera) => camera.id === selected.id)))
       : backupEnabled,
     onvifHealthy: selected ? cameraOnvifHealthy(selected) : siteOnvifHealthy,
+    detectorHealth,
+    includeDetectorHealth: true,
   });
 
   const attentionCameras = selected ? [] : cameras.map((camera) => {
@@ -155,6 +157,7 @@ export function DetectionOccupancyCard({
       requireZone: cameraRequiresZone(config, configCamera || camera),
       backupEnabled: ["camera_rescue", "adaptive"].includes(cameraMode(config, configCamera)),
       onvifHealthy: cameraOnvifHealthy(camera),
+      includeDetectorHealth: false,
     });
     return { camera, report };
   }).filter((item) => item.report.tone === OCCUPANCY_TONES.warning || item.report.tone === OCCUPANCY_TONES.bad);
@@ -166,8 +169,8 @@ export function DetectionOccupancyCard({
         primary
         title="Detection at a glance"
         subtitle={selected
-          ? `${selected.name || selected.id} · last 7 days of incidents, plus current visual-analysis load`
-          : "Last 7 days of incidents, plus current visual-analysis load. Green means leave it. Amber or red says what to change."}
+          ? `${selected.name || selected.id} · last 7 days of incidents, plus current detector and visual-analysis health`
+          : "Live detector health plus the last 7 days of incidents. Green means leave it. Amber or red says what to change."}
         report={siteReport}
         onOpenSetting={onOpenSetting}
       />

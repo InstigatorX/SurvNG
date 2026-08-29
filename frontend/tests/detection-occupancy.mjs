@@ -10,6 +10,7 @@ import {
   emaCoverageVerdict,
   incidentSplitVerdict,
   mergeEffectiveness,
+  resolveDetectorHealth,
   resolveObjectWorkerCount,
   siteEffectiveness,
   visualBackupVerdict,
@@ -113,6 +114,66 @@ assert.match(staleWorkers.headline, /Parallel detectors is 3/);
 assert.equal(staleWorkers.setting.detectionSection, "object");
 assert.equal(staleWorkers.setting.label, "Parallel detectors");
 
+assert.equal(detectorLaneVerdict({ enabled: false, workerCount: 2 }).tone, OCCUPANCY_TONES.idle);
+assert.equal(detectorLaneVerdict({ loaded: false, workerCount: 2 }).tone, OCCUPANCY_TONES.bad);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 3,
+  runningWorkerCount: 0,
+}).tone, OCCUPANCY_TONES.bad);
+assert.match(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 3,
+  runningWorkerCount: 0,
+}).headline, /No detector process is running/);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  fallbackActive: true,
+}).tone, OCCUPANCY_TONES.warning);
+assert.match(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  fallbackActive: true,
+}).headline, /CPU fallback/);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  pending: 3,
+}).tone, OCCUPANCY_TONES.warning);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  failed: 4,
+}).tone, OCCUPANCY_TONES.warning);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  crashes: 1,
+}).tone, OCCUPANCY_TONES.warning);
+
+const liveHealth = resolveDetectorHealth({
+  config: { detector: { enabled: true, object_worker_count: 3, tracking: { enabled: true }, backend: "openvino" } },
+  telemetry: {
+    detector: {
+      enabled: true,
+      loaded_backend: "openvino",
+      loaded_device: "GPU",
+      workers: { object: { configured_workers: 3, alive_workers: 3, pending_requests: 0, crash_count: 0 } },
+      runtime: { failed_inferences: 0, queue_depth: 0 },
+    },
+  },
+});
+assert.equal(liveHealth.configured, 3);
+assert.equal(liveHealth.running, 3);
+assert.equal(liveHealth.loaded, true);
+assert.equal(detectorLaneVerdict(liveHealth).tone, OCCUPANCY_TONES.good);
+
 const fromConfigAndLive = resolveObjectWorkerCount({
   config: { detector: { object_worker_count: 3 } },
   telemetry: { detector: { workers: { object: { configured_workers: 2, alive_workers: 2 } } } },
@@ -191,6 +252,8 @@ const report = buildOccupancyReport({
   onvifHealthy: true,
 });
 assert.equal(report.tone, OCCUPANCY_TONES.good);
+assert.equal(report.summary.headline, "Detection looks healthy");
+assert.match(report.summary.detail, /2 detectors/);
 assert.deepEqual(report.rows.map((row) => row.id), [
   "coverage",
   "incident-split",
@@ -225,6 +288,7 @@ const mismatchedReport = buildOccupancyReport({
 });
 const mismatchedLane = mismatchedReport.rows.find((row) => row.id === "detector-lane");
 assert.equal(mismatchedLane.tone, OCCUPANCY_TONES.warning);
+assert.equal(mismatchedReport.summary.headline, "Detection needs a look");
 assert.equal(mismatchedLane.setting.detectionSection, "object");
 assert.match(mismatchedLane.headline, /Parallel detectors is 3/);
 

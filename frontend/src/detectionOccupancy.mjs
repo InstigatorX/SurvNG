@@ -393,10 +393,37 @@ export function visualBackupVerdict({
   };
 }
 
+const PARALLEL_DETECTORS_SETTING = Object.freeze({
+  workspace: "general",
+  detectionSection: "object",
+  label: "Parallel detectors",
+});
+
+const OBJECT_DETECTION_SETTING = Object.freeze({
+  workspace: "general",
+  detectionSection: "object",
+  label: "Object Detection",
+});
+
+const HIGH_ADMISSION_WAIT_MS = 100;
+const QUEUE_WARN_PER_WORKER = 1;
+const FAILED_INFERENCE_WARN = 3;
+const FAILED_INFERENCE_BAD = 15;
+
 function optionalCount(value) {
   if (value == null || value === "") return null;
   const count = Number(value);
   return Number.isFinite(count) && count >= 0 ? Math.round(count) : null;
+}
+
+function optionalNumber(value) {
+  if (value == null || value === "") return null;
+  const count = Number(value);
+  return Number.isFinite(count) ? count : null;
+}
+
+function detectorFinding(tone, headline, detail, suggestion, setting = PARALLEL_DETECTORS_SETTING) {
+  return { tone, headline, detail, suggestion, setting };
 }
 
 export function resolveObjectWorkerCount({ config, telemetry } = {}) {
@@ -414,75 +441,268 @@ export function resolveObjectWorkerCount({ config, telemetry } = {}) {
   return { configured, running, alive, spawned };
 }
 
+export function resolveDetectorHealth({ config, telemetry } = {}) {
+  const detector = telemetry?.detector || {};
+  const runtime = detector.runtime || {};
+  const objectWorkers = detector.workers?.object || detector.isolation || {};
+  const counts = resolveObjectWorkerCount({ config, telemetry });
+  const workloads = runtime.workloads || {};
+  const classes = workloads.classes || {};
+  const initialWait = optionalNumber(classes.incident_initial?.admission_wait_ms_p95);
+  const trackingSkipped = (telemetry?.tracking_capacity_history?.short || []).reduce(
+    (total, point) => total + asCount(point?.skipped),
+    0,
+  );
+  const enabledSetting = config?.detector?.enabled !== false;
+  const enabledRuntime = detector.enabled !== false;
+  const hasLiveDetector = Boolean(
+    detector.loaded_backend
+    || detector.configured_backend
+    || detector.isolation
+    || detector.workers
+    || detector.runtime
+    || detector.enabled != null,
+  );
+  return {
+    ...counts,
+    enabled: enabledSetting,
+    runtimeEnabled: enabledRuntime,
+    trackingEnabled: config?.detector?.tracking?.enabled !== false,
+    backend: String(config?.detector?.backend || detector.configured_backend || "openvino"),
+    loaded: hasLiveDetector
+      ? Boolean(detector.loaded_backend || detector.openvino_loaded || detector.coreml_loaded)
+      : true,
+    loadedBackend: String(detector.loaded_backend || ""),
+    loadedDevice: String(detector.loaded_device || detector.configured_device || objectWorkers.configured_device || ""),
+    fallbackActive: Boolean(objectWorkers.fallback_active),
+    pending: optionalCount(objectWorkers.pending_requests) ?? optionalCount(runtime.queue_depth) ?? 0,
+    failed: optionalCount(runtime.failed_inferences) ?? 0,
+    crashes: optionalCount(objectWorkers.crash_count) ?? 0,
+    restarts: optionalCount(objectWorkers.restart_count) ?? 0,
+    lastError: String(objectWorkers.last_error || detector.warmup_error || "").trim(),
+    initialWaitMs: initialWait,
+    initialWaiting: optionalCount(workloads.initial_waiting) ?? 0,
+    trackingSkipped,
+  };
+}
+
 export function detectorLaneVerdict({
   trackingEnabled = false,
   workerCount = 0,
   configuredWorkerCount = null,
   runningWorkerCount = null,
+  configured: configuredCount = null,
+  running: runningCount = null,
   backend = "openvino",
+  enabled = true,
+  runtimeEnabled = true,
+  loaded = true,
+  loadedDevice = "",
+  fallbackActive = false,
+  pending = 0,
+  failed = 0,
+  crashes = 0,
+  restarts = 0,
+  lastError = "",
+  initialWaitMs = null,
+  initialWaiting = 0,
+  trackingSkipped = 0,
 } = {}) {
-  const setting = {
-    workspace: "general",
-    detectionSection: "object",
-    label: "Parallel detectors",
-  };
+  const configured = optionalCount(configuredWorkerCount) ?? optionalCount(configuredCount) ?? optionalCount(workerCount) ?? 0;
+  const running = optionalCount(runningWorkerCount) ?? optionalCount(runningCount) ?? configured;
+  const workers = Math.max(1, running || configured);
+  const pendingCount = optionalCount(pending) ?? 0;
+  const failedCount = optionalCount(failed) ?? 0;
+  const crashCount = optionalCount(crashes) ?? 0;
+  const restartCount = optionalCount(restarts) ?? optionalCount(crashCount) ?? 0;
+  const findings = [];
+
+  if (enabled === false) {
+    findings.push(detectorFinding(
+      OCCUPANCY_TONES.idle,
+      "Detector is turned off",
+      "Object incidents will not start until the detector is enabled.",
+      "Turn Detector enabled on if you want SurvNG to recognize objects.",
+      OBJECT_DETECTION_SETTING,
+    ));
+  } else if (loaded === false || runtimeEnabled === false) {
+    findings.push(detectorFinding(
+      OCCUPANCY_TONES.bad,
+      "Detector model is not loaded",
+      "The detector process is on, but it does not have a working model.",
+      "Open Object Detection, confirm the model path, then save and wait for it to load.",
+      OBJECT_DETECTION_SETTING,
+    ));
+  } else if (running === 0) {
+    findings.push(detectorFinding(
+      OCCUPANCY_TONES.bad,
+      "No detector process is running",
+      configured
+        ? `Parallel detectors is ${configured}, but none of those processes are up.`
+        : "SurvNG has no live detector process to score objects.",
+      "Open Object Detection, save if you just changed it, then wait for the detector processes to start.",
+      OBJECT_DETECTION_SETTING,
+    ));
+  } else if (String(backend || "") !== "openvino") {
+    findings.push(detectorFinding(
+      OCCUPANCY_TONES.good,
+      "This detector uses one worker",
+      "Core ML keeps a single detector process.",
+      "Nothing to change.",
+      OBJECT_DETECTION_SETTING,
+    ));
+  } else {
+    if (configured && running !== configured) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.warning,
+        `${running} detector${running === 1 ? "" : "s"} running · Parallel detectors is ${configured}`,
+        "The saved setting and the detector processes that are up do not match yet.",
+        "Open Parallel detectors to confirm the setting is saved, then wait for the detector processes to restart.",
+      ));
+    }
+    if (trackingEnabled && workers < 2) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.bad,
+        "Tracking is on with only one detector",
+        "Overlay work can occupy the only detector while a new incident needs a yes or no.",
+        "Set Parallel detectors to 2, or turn tracking off if you only need snapshots.",
+      ));
+    }
+  }
+
+  if (enabled !== false && running > 0) {
+    if (fallbackActive) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.warning,
+        "Detector is on CPU fallback",
+        "The accelerator failed, so object scoring is running on CPU until it recovers.",
+        "Check Object Detection device. If this stays on CPU, GPU or NPU is not available.",
+        OBJECT_DETECTION_SETTING,
+      ));
+    }
+    const queuePressure = Math.max(1, (configured || workers) * QUEUE_WARN_PER_WORKER);
+    if (pendingCount >= queuePressure * 2 || (optionalCount(initialWaiting) || 0) >= 2) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.bad,
+        `${pendingCount.toLocaleString()} detection${pendingCount === 1 ? "" : "s"} waiting in queue`,
+        "New incident checks are backing up behind work already on the detector.",
+        configured >= 4
+          ? "The detector is at its worker limit. Check camera load and tracking before changing anything else."
+          : "Raise Parallel detectors by 1, then watch this queue.",
+      ));
+    } else if (pendingCount >= queuePressure) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.warning,
+        `${pendingCount.toLocaleString()} detection${pendingCount === 1 ? "" : "s"} waiting in queue`,
+        "The detector has a short backlog. That is only a problem if it stays here.",
+        configured >= 4
+          ? "Leave Parallel detectors at 4 and watch Telemetry detector response."
+          : "If this stays queued, raise Parallel detectors by 1.",
+      ));
+    }
+    if (initialWaitMs != null && initialWaitMs >= HIGH_ADMISSION_WAIT_MS) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.warning,
+        `Live incident checks are waiting ${Math.round(initialWaitMs)} ms`,
+        "Admission wait is high enough that a new object can miss its window.",
+        configured >= 4
+          ? "Workers are already at the limit. Check tracking load and camera count."
+          : "Raise Parallel detectors by 1 if this wait stays high.",
+      ));
+    }
+    if (failedCount >= FAILED_INFERENCE_BAD) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.bad,
+        `${failedCount.toLocaleString()} detector failures since restart`,
+        "The model is erroring often enough to miss objects.",
+        "Open Object Detection and confirm the model and device, then watch Detector response on Telemetry.",
+        OBJECT_DETECTION_SETTING,
+      ));
+    } else if (failedCount >= FAILED_INFERENCE_WARN) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.warning,
+        `${failedCount.toLocaleString()} detector failures since restart`,
+        "A few failed inferences are normal after a restart. A rising count is not.",
+        "Watch Detector response on Telemetry. If failures keep climbing, check the model and device.",
+        OBJECT_DETECTION_SETTING,
+      ));
+    }
+    if (crashCount >= 1) {
+      findings.push(detectorFinding(
+        running > 0 && running === configured ? OCCUPANCY_TONES.warning : OCCUPANCY_TONES.bad,
+        `Detector restarted after ${crashCount.toLocaleString()} crash${crashCount === 1 ? "" : "es"}`,
+        lastError || "The process came back. Repeated crashes mean the model or device needs a look.",
+        "If crashes continue, open Object Detection and confirm the model and accelerator.",
+        OBJECT_DETECTION_SETTING,
+      ));
+    } else if (lastError) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.warning,
+        "Detector reported an error",
+        lastError,
+        "Open Object Detection and confirm the model and device if this error stays.",
+        OBJECT_DETECTION_SETTING,
+      ));
+    }
+    if (trackingEnabled && trackingSkipped >= 1 && workers >= 2) {
+      findings.push(detectorFinding(
+        OCCUPANCY_TONES.warning,
+        `${trackingSkipped.toLocaleString()} tracking session${trackingSkipped === 1 ? "" : "s"} skipped in 2 hours`,
+        "Tracking could not get a detector lane, so some overlays were dropped.",
+        configured >= 4
+          ? "Workers are at the limit. Reduce simultaneous tracking or leave overlays off on busy cameras."
+          : "Raise Parallel detectors by 1 if skips keep happening.",
+      ));
+    }
+  }
+
+  const actionable = findings.filter((item) => item.tone !== OCCUPANCY_TONES.good);
+  const primary = actionable.sort((left, right) => (
+    (TONE_RANK[right.tone] || 0) - (TONE_RANK[left.tone] || 0)
+  ))[0];
+  if (primary) {
+    const extras = actionable.filter((item) => item !== primary).map((item) => item.headline);
+    return {
+      id: "detector-lane",
+      title: "Detection engine",
+      tone: primary.tone,
+      headline: primary.headline,
+      detail: [primary.detail, extras.length ? extras.join(" · ") : ""].filter(Boolean).join(" "),
+      suggestion: primary.suggestion,
+      setting: primary.setting,
+    };
+  }
+
+  const device = String(loadedDevice || "").trim();
+  const extras = [
+    pendingCount ? `${pendingCount.toLocaleString()} waiting` : "no queue",
+    failedCount ? `${failedCount.toLocaleString()} failures since restart` : "no failures",
+    trackingEnabled ? "tracking keeps a reserved lane" : "tracking is off",
+    device ? device : "",
+  ].filter(Boolean);
   if (String(backend || "") !== "openvino") {
     return {
       id: "detector-lane",
-      title: "Detector workers",
+      title: "Detection engine",
       tone: OCCUPANCY_TONES.good,
       headline: "This detector uses one worker",
-      detail: "Core ML keeps a single detector process.",
+      detail: extras.join(" · "),
       suggestion: "Nothing to change.",
-      setting,
-    };
-  }
-  const configured = optionalCount(configuredWorkerCount) ?? optionalCount(workerCount) ?? 0;
-  const running = optionalCount(runningWorkerCount) ?? configured;
-  const workers = Math.max(1, running || configured);
-  if (configured !== running) {
-    return {
-      id: "detector-lane",
-      title: "Detector workers",
-      tone: OCCUPANCY_TONES.warning,
-      headline: `${running} detector${running === 1 ? "" : "s"} running · Parallel detectors is ${configured}`,
-      detail: "The saved setting and the detector processes that are up do not match yet.",
-      suggestion: "Open Parallel detectors to confirm the setting is saved, then wait for the detector processes to restart.",
-      setting,
-    };
-  }
-  if (trackingEnabled && workers < 2) {
-    return {
-      id: "detector-lane",
-      title: "Detector workers",
-      tone: OCCUPANCY_TONES.bad,
-      headline: "Tracking is on with only one detector",
-      detail: "Overlay work can occupy the only detector while a new incident needs a yes or no.",
-      suggestion: "Set Parallel detectors to 2, or turn tracking off if you only need snapshots.",
-      setting,
-    };
-  }
-  if (trackingEnabled) {
-    return {
-      id: "detector-lane",
-      title: "Detector workers",
-      tone: OCCUPANCY_TONES.good,
-      headline: `${workers} detectors · tracking keeps a reserved lane`,
-      detail: "New incident checks stay off the overlay queue.",
-      suggestion: "Leave Parallel detectors as it is.",
-      setting,
+      setting: OBJECT_DETECTION_SETTING,
     };
   }
   return {
     id: "detector-lane",
-    title: "Detector workers",
+    title: "Detection engine",
     tone: OCCUPANCY_TONES.good,
-    headline: `${workers} detector${workers === 1 ? "" : "s"} · tracking is off`,
-    detail: "Incident checks are the only work on this queue.",
-    suggestion: workers === 1
+    headline: trackingEnabled
+      ? `${workers} detectors · tracking keeps a reserved lane`
+      : `${workers} detector${workers === 1 ? "" : "s"} · tracking is off`,
+    detail: extras.join(" · "),
+    suggestion: workers === 1 && !trackingEnabled
       ? "One detector is enough while tracking is off."
       : "Leave Parallel detectors as it is.",
-    setting,
+    setting: PARALLEL_DETECTORS_SETTING,
   };
 }
 
@@ -511,6 +731,25 @@ export function occupancyToneLabel(tone) {
   return "No action";
 }
 
+export function occupancyReportSummary(rows = []) {
+  const tone = worstOccupancyTone(rows.map((row) => row.tone));
+  const attention = rows.filter((row) => (
+    row.tone === OCCUPANCY_TONES.warning || row.tone === OCCUPANCY_TONES.bad
+  ));
+  const engine = rows.find((row) => row.id === "detector-lane");
+  if (!attention.length) {
+    return {
+      headline: "Detection looks healthy",
+      detail: engine?.headline
+        || "Live detection, visual backup, and extra checks are in a good range.",
+    };
+  }
+  return {
+    headline: tone === OCCUPANCY_TONES.bad ? "Detection needs attention" : "Detection needs a look",
+    detail: attention.map((row) => row.headline).slice(0, 3).join(" · "),
+  };
+}
+
 export function buildOccupancyReport({
   coverage,
   effectiveness,
@@ -523,6 +762,8 @@ export function buildOccupancyReport({
   requireZone,
   backupEnabled,
   onvifHealthy,
+  detectorHealth = null,
+  includeDetectorHealth = true,
 } = {}) {
   const rows = [
     emaCoverageVerdict({
@@ -547,17 +788,40 @@ export function buildOccupancyReport({
       checks: effectiveness?.suppression_verification_checks,
       rescues: effectiveness?.suppression_verification_rescues,
     }),
-    detectorLaneVerdict({
+  ];
+  if (includeDetectorHealth) {
+    rows.push(detectorLaneVerdict({
       trackingEnabled,
       workerCount,
       configuredWorkerCount,
       runningWorkerCount,
       backend,
-    }),
-    incidentEligibilityRow({ requireZone }),
-  ];
+      ...(detectorHealth ? {
+        trackingEnabled: detectorHealth.trackingEnabled,
+        workerCount: detectorHealth.running,
+        configuredWorkerCount: detectorHealth.configured,
+        runningWorkerCount: detectorHealth.running,
+        backend: detectorHealth.backend,
+        enabled: detectorHealth.enabled,
+        runtimeEnabled: detectorHealth.runtimeEnabled,
+        loaded: detectorHealth.loaded,
+        loadedDevice: detectorHealth.loadedDevice,
+        fallbackActive: detectorHealth.fallbackActive,
+        pending: detectorHealth.pending,
+        failed: detectorHealth.failed,
+        crashes: detectorHealth.crashes,
+        restarts: detectorHealth.restarts,
+        lastError: detectorHealth.lastError,
+        initialWaitMs: detectorHealth.initialWaitMs,
+        initialWaiting: detectorHealth.initialWaiting,
+        trackingSkipped: detectorHealth.trackingSkipped,
+      } : {}),
+    }));
+  }
+  rows.push(incidentEligibilityRow({ requireZone }));
   return {
     tone: worstOccupancyTone(rows.map((row) => row.tone)),
     rows,
+    summary: occupancyReportSummary(rows),
   };
 }
