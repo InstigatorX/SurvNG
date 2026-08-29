@@ -61,8 +61,9 @@ installer supplies `yolo26n-depth_openvino_model/yolo26n-depth.xml`.
 
 Monocular distance is an estimate, not a physical measurement. Validate it
 against known distances before using a distance limit for incident decisions.
-The **Depth-shadow health** telemetry is informational: it shows how depth would
-have affected motion attribution and does not itself change admission.
+Under **Health → Telemetry → Object activity**, **Depth-shadow health** is
+informational: it shows how depth would have affected motion attribution and
+does not itself change admission.
 
 ## Detection at a glance
 
@@ -73,11 +74,11 @@ health:
 - **Admission** explains whether incidents started from camera notices or visual
   backup. A high visual-backup share does not by itself mean ONVIF is dead; the
   card also checks whether camera notices are still arriving and correlating.
-- **Engine** reports configured and running detector workers, queue pressure,
-  failures, and whether tracking retains a detector lane.
+- **Detection engine** reports configured and running detector workers, queue
+  pressure, failures, and whether tracking retains a detector lane.
 - **Tracking** reports sessions that waited or were skipped when detector
   capacity was busy.
-- **Capacity** reports whether the
+- **Visual analysis** reports whether the
   `motion_qualification.max_concurrent_analysis` limit is delaying EMA analysis.
 
 Use each card's settings link to adjust the owning control, then watch the
@@ -86,10 +87,10 @@ summary again before making another change. For deeper raw counters, switch to
 
 ## Updates and support
 
-Under **Server**, choose the release branch used by **Check for updates** and
-product updates. A branch can be selected only when the installation is a Git
-checkout with that branch available; Docker installations update by pulling a
-new image instead.
+Under **Server Preferences**, choose the release branch used by **Check for
+updates** and product updates. A branch can be selected only when the
+installation is a Git checkout with that branch available; Docker installations
+update by pulling a new image instead.
 
 For remote troubleshooting, open **Diagnostics** and choose **Download support
 bundle**. The JSON bundle includes bounded configuration, runtime, telemetry,

@@ -114,9 +114,9 @@ estimated timestamps.
 
 ## Optional depth enrichment
 
-When `detector.depth.enabled` is configured, the isolated inference worker runs
-monocular depth on the selected recorded frame and adds bounded distance
-statistics to each object. A configured
+When `detector.depth.enabled` and a resolvable model path are configured, the
+isolated inference worker runs monocular depth on the selected recorded frame
+and adds bounded distance statistics to each object. A configured
 `detector.depth.max_incident_distance_m`, or a matching zone's
 `min_depth_m`/`max_depth_m`, can make a recorded object ineligible. Depth does
 not replace the trigger, object detector, temporal confirmation, or spatial-zone

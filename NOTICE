@@ -28,7 +28,7 @@ their licenses.
 
 ## Model installer image
 
-The optional `ghcr.io/instigatorx/survng:v1.0-model-installer` image downloads
+The optional `ghcr.io/instigatorx/survng:v1.2-model-installer` image downloads
 third-party model weights at runtime into host bind mounts. It includes install
 tooling only, not SurvNG application weights. See `docker/model-installer/NOTICE`
 and `docker/model-installer/THIRD_PARTY_MODELS.md` for license summaries of

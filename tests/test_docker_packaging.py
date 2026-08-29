@@ -193,6 +193,7 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("survng-install-venvs", text)
         self.assertIn("ensure_models_readable", text)
         self.assertIn("--skip-face", text)
+        self.assertIn("--skip-depth", text)
         self.assertIn("face-recognition-resnet100-arcface-onnx", text)
         self.assertIn("face-detection-retail-0004", text)
         self.assertIn("THIRD_PARTY_MODELS.md", text)
@@ -228,6 +229,7 @@ class DockerPackagingTest(unittest.TestCase):
                     "--cache-dir",
                     str(tmp_path / "cache"),
                     "--skip-detector",
+                    "--skip-depth",
                     "--skip-reid",
                     "--skip-semantic",
                     "--skip-face",
@@ -306,6 +308,7 @@ class DockerPackagingTest(unittest.TestCase):
                     "GPU",
                     "--cache-dir",
                     str(tmp_path / "cache"),
+                    "--skip-depth",
                 ],
                 check=True,
                 capture_output=True,
@@ -392,6 +395,7 @@ class DockerPackagingTest(unittest.TestCase):
                     "--cache-dir",
                     str(tmp_path / "cache"),
                     "--skip-detector",
+                    "--skip-depth",
                     "--skip-reid",
                     "--skip-semantic",
                     "--skip-face",
