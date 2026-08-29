@@ -1437,6 +1437,8 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(summary["allowed_events"], 3)
             self.assertEqual(summary["object_events"], 2)
             self.assertEqual(summary["no_object_events"], 1)
+            self.assertEqual(summary["camera_object_events"], 2)
+            self.assertEqual(summary["ema_object_events"], 0)
             self.assertEqual(summary["borderline_rescued"], 1)
             self.assertEqual(summary["suppression_verification_checks"], 2)
             self.assertEqual(summary["suppression_verification_rescues"], 1)
@@ -1446,6 +1448,49 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(summary["total_decisions"], 6)
             self.assertEqual(summary["visual_rejection_rate"], 0.4)
             self.assertEqual(summary["object_yield_rate"], 0.6667)
+
+    def test_motion_effectiveness_counts_ema_object_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            created_at = "2099-07-27T12:00:00+00:00"
+            store.add_event(
+                "gate",
+                "motion",
+                objects_json=json.dumps([
+                    {
+                        "status": "motion_qualification",
+                        "motion_qualification": {
+                            "mode": "camera_rescue",
+                            "accepted": True,
+                            "trigger_source": "visual_backup",
+                        },
+                    },
+                    {"label": "person", "incident_eligible": True},
+                ]),
+                created_at=created_at,
+            )
+            store.add_event(
+                "gate",
+                "motion",
+                objects_json=json.dumps([
+                    {
+                        "status": "motion_qualification",
+                        "motion_qualification": {
+                            "mode": "camera_rescue",
+                            "accepted": True,
+                            "trigger_source": "camera",
+                        },
+                    },
+                    {"label": "person", "incident_eligible": True},
+                ]),
+                created_at=created_at,
+            )
+
+            summary = store.motion_effectiveness(days=7)["by_camera"]["gate"]["camera_rescue"]
+
+            self.assertEqual(summary["object_events"], 2)
+            self.assertEqual(summary["camera_object_events"], 1)
+            self.assertEqual(summary["ema_object_events"], 1)
 
     def test_motion_effectiveness_summarizes_depth_shadow_attribution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

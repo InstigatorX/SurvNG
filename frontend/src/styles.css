@@ -8191,6 +8191,233 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   overflow: hidden;
 }
 
+.occupancy-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px 14px 4px;
+}
+
+.occupancy-section .telemetry-section-head p {
+  max-width: 62rem;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.occupancy-error {
+  margin: 0;
+  color: var(--hot);
+  font-size: 13px;
+}
+
+.occupancy-panel {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.occupancy-panel.good {
+  border-color: color-mix(in srgb, var(--ok-ink) 28%, var(--line));
+}
+
+.occupancy-panel.warning {
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--line));
+}
+
+.occupancy-panel.bad {
+  border-color: color-mix(in srgb, var(--hot) 36%, var(--line));
+}
+
+.occupancy-panel > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.occupancy-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.occupancy-panel > summary span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.occupancy-panel > summary strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.occupancy-panel > summary small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.occupancy-tone-chip {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.occupancy-tone-chip.good,
+.occupancy-row.good .occupancy-row-head em {
+  background: color-mix(in srgb, var(--ok-bg, #d8f3e7) 70%, var(--panel));
+  color: var(--ok-ink);
+}
+
+.occupancy-tone-chip.warning,
+.occupancy-row.warning .occupancy-row-head em {
+  background: color-mix(in srgb, var(--warn-bg) 70%, var(--panel));
+  color: var(--warn);
+}
+
+.occupancy-tone-chip.bad,
+.occupancy-row.bad .occupancy-row-head em {
+  background: color-mix(in srgb, var(--hot-bg) 70%, var(--panel));
+  color: var(--hot);
+}
+
+.occupancy-row-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.occupancy-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--subtle, var(--panel));
+}
+
+.occupancy-row.good {
+  border-color: color-mix(in srgb, var(--ok-ink) 22%, var(--line));
+  background: color-mix(in srgb, var(--ok-bg, #d8f3e7) 28%, var(--panel));
+}
+
+.occupancy-row.warning {
+  border-color: color-mix(in srgb, var(--warn) 28%, var(--line));
+  background: color-mix(in srgb, var(--warn-bg) 32%, var(--panel));
+}
+
+.occupancy-row.bad {
+  border-color: color-mix(in srgb, var(--hot) 30%, var(--line));
+  background: color-mix(in srgb, var(--hot-bg) 32%, var(--panel));
+}
+
+.occupancy-row-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.occupancy-row-head svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.occupancy-row.good .occupancy-row-head svg {
+  color: var(--ok-ink);
+}
+
+.occupancy-row.warning .occupancy-row-head svg {
+  color: var(--warn);
+}
+
+.occupancy-row.bad .occupancy-row-head svg {
+  color: var(--hot);
+}
+
+.occupancy-row.idle .occupancy-row-head svg {
+  color: var(--muted);
+}
+
+.occupancy-row-head div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+}
+
+.occupancy-row-head strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.occupancy-row-head em {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.occupancy-headline,
+.occupancy-detail,
+.occupancy-suggestion {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.occupancy-headline {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.occupancy-detail,
+.occupancy-suggestion {
+  color: var(--muted);
+}
+
+.occupancy-suggestion span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.occupancy-setting-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.occupancy-attention {
+  display: grid;
+  gap: 10px;
+}
+
+.occupancy-attention h4 {
+  margin: 4px 2px 0;
+  color: var(--ink);
+  font-size: 13px;
+}
+
 .maintenance-panel {
   min-height: 440px;
 }
