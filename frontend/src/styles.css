@@ -8197,6 +8197,28 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   padding: 14px 14px 4px;
 }
 
+.occupancy-workspace {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.occupancy-card {
+  min-width: 0;
+}
+
+.occupancy-card.good {
+  border-color: color-mix(in srgb, var(--ok-ink) 28%, var(--line));
+}
+
+.occupancy-card.warning {
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--line));
+}
+
+.occupancy-card.bad {
+  border-color: color-mix(in srgb, var(--hot) 36%, var(--line));
+}
+
 .occupancy-section .telemetry-section-head p {
   max-width: 62rem;
   color: var(--muted);
@@ -8289,6 +8311,17 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 10px;
   padding: 0 12px 12px;
+}
+
+.occupancy-pillar-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.occupancy-context {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .occupancy-row {

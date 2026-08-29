@@ -93,18 +93,28 @@ export function adminHomeDestinations() {
 
 export function normalizeTelemetrySection(value = "") {
   const candidate = String(value || "");
-  return candidate === "diagnostics" ? "diagnostics" : "health";
+  if (candidate === "diagnostics") return "diagnostics";
+  if (candidate === "occupancy") return "occupancy";
+  return "health";
+}
+
+export function telemetryLocationOptions(section = "health", camera = "") {
+  const normalized = normalizeTelemetrySection(section);
+  if (normalized === "diagnostics") return { subsection: "diagnostics" };
+  if (normalized === "occupancy") return { subsection: "occupancy", camera };
+  return { camera };
 }
 
 export function adminDestination(workspace, { generalSection = "general", telemetrySection = "health" } = {}) {
   if (workspace === "home") return ADMIN_NAV_GROUPS[0].items[0];
+  const telemetryObserve = normalizeTelemetrySection(telemetrySection) === "diagnostics" ? "diagnostics" : "health";
   return ADMIN_RESPONSIBILITY_GROUPS
     .flatMap((group) => group.items)
     .find((item) => item.workspace === workspace && (
       workspace === "general"
         ? (item.subsection || "general") === generalSection
         : workspace === "telemetry"
-          ? normalizeTelemetrySection(item.subsection || "health") === normalizeTelemetrySection(telemetrySection)
+          ? (item.subsection === "diagnostics" ? "diagnostics" : "health") === telemetryObserve
           : true
     )) || ADMIN_RESPONSIBILITY_GROUPS[0].items[0];
 }

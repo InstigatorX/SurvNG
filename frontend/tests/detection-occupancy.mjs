@@ -10,8 +10,10 @@ import {
   emaCoverageVerdict,
   incidentSplitVerdict,
   mergeEffectiveness,
+  resolveDetectorHealth,
   resolveObjectWorkerCount,
   siteEffectiveness,
+  trackingHealthVerdict,
   visualBackupVerdict,
   worstOccupancyTone,
 } from "../src/detectionOccupancy.mjs";
@@ -113,6 +115,66 @@ assert.match(staleWorkers.headline, /Parallel detectors is 3/);
 assert.equal(staleWorkers.setting.detectionSection, "object");
 assert.equal(staleWorkers.setting.label, "Parallel detectors");
 
+assert.equal(detectorLaneVerdict({ enabled: false, workerCount: 2 }).tone, OCCUPANCY_TONES.idle);
+assert.equal(detectorLaneVerdict({ loaded: false, workerCount: 2 }).tone, OCCUPANCY_TONES.bad);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 3,
+  runningWorkerCount: 0,
+}).tone, OCCUPANCY_TONES.bad);
+assert.match(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 3,
+  runningWorkerCount: 0,
+}).headline, /No detector process is running/);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  fallbackActive: true,
+}).tone, OCCUPANCY_TONES.warning);
+assert.match(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  fallbackActive: true,
+}).headline, /CPU fallback/);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  pending: 3,
+}).tone, OCCUPANCY_TONES.warning);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  failed: 4,
+}).tone, OCCUPANCY_TONES.warning);
+assert.equal(detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 2,
+  runningWorkerCount: 2,
+  crashes: 1,
+}).tone, OCCUPANCY_TONES.warning);
+
+const liveHealth = resolveDetectorHealth({
+  config: { detector: { enabled: true, object_worker_count: 3, tracking: { enabled: true }, backend: "openvino" } },
+  telemetry: {
+    detector: {
+      enabled: true,
+      loaded_backend: "openvino",
+      loaded_device: "GPU",
+      workers: { object: { configured_workers: 3, alive_workers: 3, pending_requests: 0, crash_count: 0 } },
+      runtime: { failed_inferences: 0, queue_depth: 0 },
+    },
+  },
+});
+assert.equal(liveHealth.configured, 3);
+assert.equal(liveHealth.running, 3);
+assert.equal(liveHealth.loaded, true);
+assert.equal(detectorLaneVerdict(liveHealth).tone, OCCUPANCY_TONES.good);
+
 const fromConfigAndLive = resolveObjectWorkerCount({
   config: { detector: { object_worker_count: 3 } },
   telemetry: { detector: { workers: { object: { configured_workers: 2, alive_workers: 2 } } } },
@@ -191,6 +253,11 @@ const report = buildOccupancyReport({
   onvifHealthy: true,
 });
 assert.equal(report.tone, OCCUPANCY_TONES.good);
+assert.equal(report.summary.headline, "Detection looks healthy");
+assert.match(report.summary.detail, /admission/i);
+assert.match(report.summary.detail, /tracking/i);
+assert.match(report.summary.detail, /worker capacity/i);
+assert.match(report.summary.detail, /visual analysis/i);
 assert.deepEqual(report.rows.map((row) => row.id), [
   "coverage",
   "incident-split",
@@ -199,9 +266,18 @@ assert.deepEqual(report.rows.map((row) => row.id), [
   "detector-lane",
   "eligibility",
 ]);
+assert.deepEqual(report.pillars.map((row) => row.id), [
+  "admission",
+  "engine",
+  "tracking",
+  "capacity",
+]);
 const reportLane = report.rows.find((row) => row.id === "detector-lane");
 assert.equal(reportLane.setting.detectionSection, "object");
 assert.equal(reportLane.setting.label, "Parallel detectors");
+assert.match(report.pillars.find((row) => row.id === "engine").headline, /2 detectors/);
+assert.equal(report.pillars.find((row) => row.id === "tracking").tone, OCCUPANCY_TONES.good);
+assert.match(report.context, /Only objects inside a zone/);
 
 const mismatchedReport = buildOccupancyReport({
   coverage: { coveragePercent: 99, deferred: 0, staleSkipped: 0 },
@@ -225,7 +301,112 @@ const mismatchedReport = buildOccupancyReport({
 });
 const mismatchedLane = mismatchedReport.rows.find((row) => row.id === "detector-lane");
 assert.equal(mismatchedLane.tone, OCCUPANCY_TONES.warning);
+assert.equal(mismatchedReport.summary.headline, "Detection needs a look");
 assert.equal(mismatchedLane.setting.detectionSection, "object");
 assert.match(mismatchedLane.headline, /Parallel detectors is 3/);
+
+assert.equal(trackingHealthVerdict({ trackingEnabled: false }).tone, OCCUPANCY_TONES.idle);
+assert.equal(trackingHealthVerdict({ trackingEnabled: true, workerCount: 2 }).tone, OCCUPANCY_TONES.good);
+assert.equal(trackingHealthVerdict({ trackingEnabled: true, workerCount: 1 }).tone, OCCUPANCY_TONES.bad);
+assert.equal(trackingHealthVerdict({
+  trackingEnabled: true,
+  workerCount: 2,
+  trackingSkipped: 4,
+  trackingAttempts: 12,
+}).tone, OCCUPANCY_TONES.warning);
+assert.equal(trackingHealthVerdict({ trackingEnabled: true, backend: "coreml", workerCount: 1 }).tone, OCCUPANCY_TONES.good);
+
+const trackingShort = buildOccupancyReport({
+  coverage: { coveragePercent: 99, deferred: 0, staleSkipped: 0 },
+  effectiveness: {
+    camera_object_events: 12,
+    ema_object_events: 2,
+    visual_backup_attempts: 2,
+    visual_backup_objects: 2,
+    suppression_verification_checks: 0,
+    suppression_verification_rescues: 0,
+  },
+  slotCount: 2,
+  trackingEnabled: true,
+  workerCount: 1,
+  configuredWorkerCount: 1,
+  runningWorkerCount: 1,
+  backend: "openvino",
+  requireZone: true,
+  backupEnabled: true,
+  onvifHealthy: true,
+});
+assert.equal(trackingShort.tone, OCCUPANCY_TONES.bad);
+assert.equal(trackingShort.summary.headline, "Detection needs attention");
+assert.match(trackingShort.summary.detail, /only one detector/);
+assert.equal(trackingShort.pillars.find((row) => row.id === "engine").tone, OCCUPANCY_TONES.good);
+assert.equal(trackingShort.pillars.find((row) => row.id === "tracking").tone, OCCUPANCY_TONES.bad);
+
+const highEmaHealthyEngine = buildOccupancyReport({
+  coverage: { coveragePercent: 99, deferred: 0, staleSkipped: 0 },
+  effectiveness: {
+    camera_object_events: 10,
+    ema_object_events: 10,
+    visual_backup_attempts: 8,
+    visual_backup_objects: 6,
+    suppression_verification_checks: 0,
+    suppression_verification_rescues: 0,
+  },
+  slotCount: 2,
+  trackingEnabled: true,
+  workerCount: 2,
+  backend: "openvino",
+  requireZone: true,
+  backupEnabled: true,
+  onvifHealthy: true,
+});
+assert.equal(highEmaHealthyEngine.tone, OCCUPANCY_TONES.warning);
+assert.equal(highEmaHealthyEngine.summary.headline, "Detection needs a look");
+assert.equal(highEmaHealthyEngine.pillars.find((row) => row.id === "engine").tone, OCCUPANCY_TONES.good);
+assert.equal(highEmaHealthyEngine.pillars.find((row) => row.id === "admission").tone, OCCUPANCY_TONES.warning);
+assert.match(highEmaHealthyEngine.summary.detail, /visual backup/i);
+
+const wastedChecks = buildOccupancyReport({
+  coverage: { coveragePercent: 99, deferred: 0, staleSkipped: 0 },
+  effectiveness: {
+    camera_object_events: 12,
+    ema_object_events: 2,
+    visual_backup_attempts: 2,
+    visual_backup_objects: 2,
+    suppression_verification_checks: 80,
+    suppression_verification_rescues: 0,
+  },
+  slotCount: 2,
+  trackingEnabled: true,
+  workerCount: 2,
+  backend: "openvino",
+  requireZone: true,
+  backupEnabled: true,
+  onvifHealthy: true,
+});
+assert.ok(wastedChecks.pillars.some((row) => row.id === "waste"));
+assert.equal(wastedChecks.pillars.find((row) => row.id === "waste").tone, OCCUPANCY_TONES.bad);
+
+const cameraOnly = buildOccupancyReport({
+  coverage: { coveragePercent: 99, deferred: 0, staleSkipped: 0 },
+  effectiveness: {
+    camera_object_events: 12,
+    ema_object_events: 2,
+    visual_backup_attempts: 2,
+    visual_backup_objects: 2,
+    suppression_verification_checks: 0,
+    suppression_verification_rescues: 0,
+  },
+  slotCount: 2,
+  trackingEnabled: true,
+  workerCount: 1,
+  backend: "openvino",
+  requireZone: true,
+  backupEnabled: true,
+  onvifHealthy: true,
+  includeDetectorHealth: false,
+});
+assert.deepEqual(cameraOnly.pillars.map((row) => row.id), ["admission", "capacity"]);
+assert.equal(cameraOnly.tone, OCCUPANCY_TONES.good);
 
 console.log("detection occupancy helpers passed");
