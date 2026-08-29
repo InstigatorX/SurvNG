@@ -12,6 +12,7 @@ from survng.app.motion import MotionQualificationResult
 from survng.app.ema_v2 import CameraNotice
 from survng.app.events import EventStore
 from survng.app.motion_decisions import (
+    COMPLETED_REFINEMENT_MEMORY,
     MotionDecisionOrchestrator,
     audit_features,
     is_confident_nuisance,
@@ -672,3 +673,58 @@ def test_durable_refinement_completion_is_retry_safe_and_idempotent() -> None:
     assert state.increment_stat.call_count == 2
     state.increment_stat.assert_any_call("late_object_rescues", 1)
     state.increment_stat.assert_any_call("active_followup_objects", 1)
+
+
+def test_durable_refinement_dedupe_memory_stays_bounded() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=Mock(),
+        config=MotionQualificationConfig(),
+        qualification=Mock(),
+        incidents=Mock(),
+        media=Mock(),
+        analysis=Mock(),
+        state=Mock(),
+    )
+    refined = Mock()
+    refined.as_dict.return_value = {
+        "event_id": 55,
+        "object_detected": True,
+        "snapshot_path": "followup.webp",
+        "rejection_reason": "",
+        "motion_correlation": {"required": True},
+    }
+    event_at = datetime.now(timezone.utc).isoformat()
+
+    def context_for(index: int) -> dict:
+        return {
+            "completion_id": f"decision-{index}:refinement",
+            "decision_id": f"decision-{index}",
+            "event_at": event_at,
+            "mode": "adaptive",
+            "sensitivity": "balanced",
+            "result": MotionQualificationResult(
+                True,
+                0.82,
+                0.48,
+                "active_event_new_motion",
+                3,
+                {},
+            ).as_dict(),
+            "trigger_count": 1,
+            "active_followup": True,
+            "episode_sequence": events.current_episode_sequence(),
+            "episode_managed": False,
+        }
+
+    overflow = COMPLETED_REFINEMENT_MEMORY + 25
+    for index in range(overflow):
+        orchestrator._record_refined_outcome_from_context(refined, context_for(index))
+
+    assert len(orchestrator._completed_refinement_contexts) == COMPLETED_REFINEMENT_MEMORY
+    assert len(orchestrator._completed_refinement_order) == COMPLETED_REFINEMENT_MEMORY
+    # Recent completions stay deduplicated so durable replays remain idempotent.
+    assert "decision-0:refinement" not in orchestrator._completed_refinement_contexts
+    assert f"decision-{overflow - 1}:refinement" in orchestrator._completed_refinement_contexts

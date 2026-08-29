@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -21,6 +22,9 @@ from .motion_events import (
 LOGGER = logging.getLogger(__name__)
 
 INCIDENT_ACTIVITY_REASONS = frozenset({"event_state_active", "event_state_cooldown"})
+# Durable refinement jobs replay a completion shortly after it lands, so recent
+# ids are all that must be remembered to stay idempotent across a restart.
+COMPLETED_REFINEMENT_MEMORY = 512
 ENFORCING_MODES = frozenset({"camera", "camera_rescue", "adaptive", "enforce"})
 AUDITED_MODES = frozenset({"audit", *ENFORCING_MODES})
 
@@ -160,6 +164,7 @@ class MotionDecisionOrchestrator:
         self._thread: threading.Thread | None = None
         self._refinement_completion_lock = threading.Lock()
         self._completed_refinement_contexts: set[str] = set()
+        self._completed_refinement_order: deque[str] = deque()
         completion_setter = getattr(
             self._incidents,
             "set_refinement_completion_handler",
@@ -867,6 +872,10 @@ class MotionDecisionOrchestrator:
                 return
             self._record_refined_outcome_from_context_once(refined, context)
             self._completed_refinement_contexts.add(completion_id)
+            self._completed_refinement_order.append(completion_id)
+            while len(self._completed_refinement_order) > COMPLETED_REFINEMENT_MEMORY:
+                expired = self._completed_refinement_order.popleft()
+                self._completed_refinement_contexts.discard(expired)
 
     def _record_refined_outcome_from_context_once(
         self,
