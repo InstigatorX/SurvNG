@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import {
   OCCUPANCY_TONES,
+  backupCorrelation,
   buildOccupancyReport,
   cameraEffectiveness,
+  cameraOnvifHealthy,
   coverageFromCameraMotion,
   coverageFromRuntimeHistory,
   detectorLaneVerdict,
@@ -13,6 +15,7 @@ import {
   resolveDetectorHealth,
   resolveObjectWorkerCount,
   siteEffectiveness,
+  siteOnvifHealthy,
   trackingHealthVerdict,
   visualBackupVerdict,
   worstOccupancyTone,
@@ -75,10 +78,58 @@ const halfEma = incidentSplitVerdict({ cameraObjects: 10, emaObjects: 10, backup
 assert.equal(halfEma.tone, OCCUPANCY_TONES.warning);
 assert.match(halfEma.suggestion, /Keep Camera \+ EMA backup/);
 assert.match(halfEma.suggestion, /Do not switch to camera notices only/);
+assert.match(halfEma.suggestion, /Wait for camera notice/);
+assert.match(halfEma.detail, /1\.5 seconds/);
+assert.doesNotMatch(halfEma.detail, /unhealthy/);
+assert.equal(halfEma.setting.label, "Wait for camera notice");
 
-const brokenOnvif = incidentSplitVerdict({ cameraObjects: 2, emaObjects: 18, backupEnabled: true, onvifHealthy: false });
+const noticesProveOnvif = incidentSplitVerdict({
+  cameraObjects: 392,
+  emaObjects: 2175,
+  backupEnabled: true,
+  onvifHealthy: false,
+  backupGraceSeconds: 1.5,
+});
+assert.equal(noticesProveOnvif.tone, OCCUPANCY_TONES.warning);
+assert.doesNotMatch(noticesProveOnvif.detail, /unhealthy/);
+assert.doesNotMatch(noticesProveOnvif.suggestion, /Fix the camera event connection/);
+assert.match(noticesProveOnvif.detail, /event connection is not dead|ONVIF is working/);
+assert.match(noticesProveOnvif.detail, /1\.5 seconds/);
+assert.match(noticesProveOnvif.suggestion, /Wait for camera notice/);
+
+const racingEma = incidentSplitVerdict({
+  cameraObjects: 12,
+  emaObjects: 20,
+  backupEnabled: true,
+  onvifHealthy: true,
+  backupMatchedNotices: 40,
+  backupWithoutNotices: 8,
+  backupGraceSeconds: 1.5,
+});
+assert.match(racingEma.detail, /waits 1\.5 seconds/);
+assert.match(racingEma.detail, /ONVIF is working/);
+assert.match(racingEma.suggestion, /Wait for camera notice/);
+
+const brokenOnvif = incidentSplitVerdict({ cameraObjects: 0, emaObjects: 18, backupEnabled: true, onvifHealthy: false });
 assert.equal(brokenOnvif.tone, OCCUPANCY_TONES.warning);
 assert.match(brokenOnvif.suggestion, /Fix the camera event connection/);
+assert.match(brokenOnvif.detail, /no camera notices arrived/);
+
+assert.equal(cameraOnvifHealthy({ onvif: { enabled: false, connected: false } }), null);
+assert.equal(cameraOnvifHealthy({ onvif: { enabled: true, connected: false } }), false);
+assert.equal(cameraOnvifHealthy({ onvif: { enabled: true, connected: true } }), true);
+assert.equal(siteOnvifHealthy([
+  { onvif: { enabled: false, connected: false } },
+  { onvif: { enabled: true, connected: true } },
+]), true);
+assert.equal(siteOnvifHealthy([
+  { onvif: { enabled: false, connected: false } },
+  { onvif: { enabled: true, connected: false } },
+]), false);
+assert.deepEqual(backupCorrelation([
+  { onvif: { ema_onvif_matches: 4, ema_without_onvif: 1 } },
+  { motion: { visual_backup_onvif_matches: 2 } },
+]), { matches: 6, without: 1 });
 
 assert.equal(visualBackupVerdict({}).tone, OCCUPANCY_TONES.idle);
 assert.equal(visualBackupVerdict({ attempts: 6, objects: 3, none: 3 }).tone, OCCUPANCY_TONES.good);
@@ -365,6 +416,34 @@ assert.equal(highEmaHealthyEngine.summary.headline, "Detection needs a look");
 assert.equal(highEmaHealthyEngine.pillars.find((row) => row.id === "engine").tone, OCCUPANCY_TONES.good);
 assert.equal(highEmaHealthyEngine.pillars.find((row) => row.id === "admission").tone, OCCUPANCY_TONES.warning);
 assert.match(highEmaHealthyEngine.summary.detail, /visual backup/i);
+assert.doesNotMatch(highEmaHealthyEngine.pillars.find((row) => row.id === "admission").detail, /unhealthy/);
+assert.match(highEmaHealthyEngine.pillars.find((row) => row.id === "admission").suggestion, /Wait for camera notice/);
+
+const onvifWorkingHighEma = buildOccupancyReport({
+  coverage: { coveragePercent: 99, deferred: 0, staleSkipped: 0 },
+  effectiveness: {
+    camera_object_events: 392,
+    ema_object_events: 2175,
+    visual_backup_attempts: 2175,
+    visual_backup_objects: 2175,
+    suppression_verification_checks: 0,
+    suppression_verification_rescues: 0,
+  },
+  slotCount: 2,
+  trackingEnabled: true,
+  workerCount: 2,
+  backend: "openvino",
+  requireZone: true,
+  backupEnabled: true,
+  onvifHealthy: false,
+  backupGraceSeconds: 1.5,
+});
+const onvifWorkingAdmission = onvifWorkingHighEma.pillars.find((row) => row.id === "admission");
+assert.equal(onvifWorkingAdmission.tone, OCCUPANCY_TONES.warning);
+assert.doesNotMatch(onvifWorkingAdmission.detail, /unhealthy/);
+assert.doesNotMatch(onvifWorkingAdmission.suggestion, /Fix the camera event connection/);
+assert.match(onvifWorkingAdmission.detail, /1\.5 seconds/);
+assert.match(onvifWorkingAdmission.suggestion, /Wait for camera notice/);
 
 const wastedChecks = buildOccupancyReport({
   coverage: { coveragePercent: 99, deferred: 0, staleSkipped: 0 },

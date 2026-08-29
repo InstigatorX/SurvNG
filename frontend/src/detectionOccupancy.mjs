@@ -264,15 +264,55 @@ export function doubleCheckVerdict({ checks = 0, rescues = 0 } = {}) {
   };
 }
 
+export function cameraOnvifHealthy(camera) {
+  if (!camera?.onvif || camera.onvif.enabled === false) return null;
+  if (camera.onvif.connected === false) return false;
+  return true;
+}
+
+export function siteOnvifHealthy(cameras = []) {
+  const relevant = (cameras || [])
+    .map((camera) => cameraOnvifHealthy(camera))
+    .filter((value) => value !== null);
+  if (!relevant.length) return true;
+  return relevant.some(Boolean);
+}
+
+export function backupCorrelation(cameras = []) {
+  return (cameras || []).reduce((total, camera) => ({
+    matches: total.matches + asCount(camera?.onvif?.ema_onvif_matches || camera?.motion?.visual_backup_onvif_matches),
+    without: total.without + asCount(camera?.onvif?.ema_without_onvif),
+  }), { matches: 0, without: 0 });
+}
+
+function formatGraceSeconds(value) {
+  const seconds = Number(value);
+  const grace = Number.isFinite(seconds) && seconds >= 0 ? seconds : 1.5;
+  const shown = Number.isInteger(grace) ? String(grace) : String(grace);
+  return `${shown} second${shown === "1" ? "" : "s"}`;
+}
+
+const MOTION_BEHAVIOR_SETTING = Object.freeze({
+  workspace: "general",
+  detectionSection: "motion",
+  label: "Motion behavior",
+});
+
+const WAIT_FOR_NOTICE_SETTING = Object.freeze({
+  workspace: "general",
+  detectionSection: "motion",
+  label: "Wait for camera notice",
+});
+
 export function incidentSplitVerdict({
   cameraObjects = 0,
   emaObjects = 0,
   backupEnabled = true,
   onvifHealthy = true,
+  backupMatchedNotices = 0,
+  backupWithoutNotices = 0,
+  backupGraceSeconds = 1.5,
 } = {}) {
-  const setting = backupEnabled
-    ? { workspace: "general", detectionSection: "motion", label: "Motion behavior" }
-    : { workspace: "general", detectionSection: "motion", label: "Motion behavior" };
   const cameraCount = asCount(cameraObjects);
   const emaCount = asCount(emaObjects);
   const total = cameraCount + emaCount;
@@ -284,7 +324,7 @@ export function incidentSplitVerdict({
       headline: "No incidents in the last 7 days",
       detail: "There is not enough activity to judge camera notices versus visual backup.",
       suggestion: "Nothing to change.",
-      setting,
+      setting: MOTION_BEHAVIOR_SETTING,
       cameraCount,
       emaCount,
       emaShare: null,
@@ -293,6 +333,9 @@ export function incidentSplitVerdict({
   const emaShare = emaCount / total;
   const percent = Math.round(emaShare * 100);
   const headline = `${cameraCount.toLocaleString()} from camera notices · ${emaCount.toLocaleString()} from visual backup`;
+  const noticesAreArriving = cameraCount > 0;
+  const connectionDown = onvifHealthy === false && !noticesAreArriving;
+  const waitWindow = formatGraceSeconds(backupGraceSeconds);
   if (emaShare <= 0.35) {
     return {
       id: "incident-split",
@@ -303,21 +346,21 @@ export function incidentSplitVerdict({
       suggestion: backupEnabled
         ? "Keep Camera + EMA backup. It is only filling gaps."
         : "Camera notices are carrying the load.",
-      setting,
+      setting: MOTION_BEHAVIOR_SETTING,
       cameraCount,
       emaCount,
       emaShare,
     };
   }
-  if (!onvifHealthy) {
+  if (connectionDown) {
     return {
       id: "incident-split",
       title: "What starts an incident",
       tone: OCCUPANCY_TONES.warning,
       headline,
-      detail: `${percent}% started from visual backup because camera events look unhealthy.`,
+      detail: `${percent}% started from visual backup, and no camera notices arrived. Backup is carrying detection.`,
       suggestion: "Keep Camera + EMA backup. Fix the camera event connection first. Do not switch to camera notices only.",
-      setting,
+      setting: MOTION_BEHAVIOR_SETTING,
       cameraCount,
       emaCount,
       emaShare,
@@ -331,20 +374,27 @@ export function incidentSplitVerdict({
       headline,
       detail: "Backup is off now. Older visual-backup incidents can still appear in this 7-day count.",
       suggestion: "Nothing to change unless you still want backup for missed camera notices.",
-      setting,
+      setting: MOTION_BEHAVIOR_SETTING,
       cameraCount,
       emaCount,
       emaShare,
     };
   }
+  const matched = asCount(backupMatchedNotices);
+  const unmatched = asCount(backupWithoutNotices);
+  const mostlyRacing = matched > 0 && matched >= unmatched;
   return {
     id: "incident-split",
     title: "What starts an incident",
     tone: OCCUPANCY_TONES.warning,
     headline,
-    detail: `${percent}% started from visual backup because the camera notice was late or missing. The first event in a group keeps that label even if a camera notice arrives later.`,
-    suggestion: "Keep Camera + EMA backup. Do not switch to camera notices only. Check camera event connection on the cameras with the highest backup share.",
-    setting,
+    detail: mostlyRacing
+      ? `${percent}% of groups were started by visual backup. Backup waits ${waitWindow} for a camera notice, then starts detection. The group keeps that first label even if a camera notice arrives later. Camera notices are still arriving, so ONVIF is working.`
+      : noticesAreArriving
+        ? `${percent}% of groups were started by visual backup. Camera notices are still creating incidents, so the event connection is not dead. Backup waits ${waitWindow} for ONVIF, then starts detection and keeps that first label even if the camera notice arrives later.`
+        : `${percent}% started from visual backup because the camera notice was late or missing. Backup waits ${waitWindow} for ONVIF before it starts detection.`,
+    suggestion: "Keep Camera + EMA backup. Do not switch to camera notices only. To label more groups as Camera, raise Wait for camera notice on cameras with the highest backup share.",
+    setting: WAIT_FOR_NOTICE_SETTING,
     cameraCount,
     emaCount,
     emaShare,
@@ -938,6 +988,9 @@ export function buildOccupancyReport({
   requireZone,
   backupEnabled,
   onvifHealthy,
+  backupMatchedNotices = 0,
+  backupWithoutNotices = 0,
+  backupGraceSeconds = 1.5,
   detectorHealth = null,
   includeDetectorHealth = true,
 } = {}) {
@@ -954,6 +1007,9 @@ export function buildOccupancyReport({
       emaObjects: effectiveness?.ema_object_events,
       backupEnabled,
       onvifHealthy,
+      backupMatchedNotices,
+      backupWithoutNotices,
+      backupGraceSeconds,
     }),
     visualBackupVerdict({
       attempts: effectiveness?.visual_backup_attempts,
