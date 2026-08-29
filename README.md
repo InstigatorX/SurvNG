@@ -251,7 +251,7 @@ Evidence is written to a temporary file, flushed, and atomically moved into plac
 
 Set `model_path` to an OpenVINO-readable model, such as `best.onnx` or an OpenVINO IR `.xml` file. Set `labels_path` to a newline-delimited class file such as `classes.txt`.
 
-`object_worker_count` controls how many independent OpenVINO object-detector processes SurvNG starts (`1` through `4`, default `1`). Requests are sent to the least-busy process and can fail over when another process is unavailable. Two workers can reduce inference queue delay when several cameras trigger together, at the cost of loading the model twice and consuming additional accelerator and application memory. Core ML always uses one object worker. Configure this under **Admin → Object Detection → Parallel detectors** and confirm the online count, aggregate response time, queue depth, GPU activity, and worker memory under **Admin → Telemetry** before increasing it further.
+`object_worker_count` controls how many independent OpenVINO object-detector processes SurvNG starts (`1` through `4`, default `2`). Requests are sent to the least-busy process and can fail over when another process is unavailable. Tracking requires at least two OpenVINO workers so live incident checks retain a detector lane; SurvNG raises a lower configured value to `2` while tracking is enabled. Additional workers can reduce inference queue delay when several cameras trigger together, at the cost of loading the model again and consuming more accelerator and application memory. Core ML always uses one object worker. Configure this under **Admin → Detection → Object Detection → Parallel detectors** and confirm the online count, aggregate response time, queue depth, GPU activity, and worker memory under **Admin → Health → Telemetry** before increasing it further.
 
 `event_confirmation_frames` controls the global temporal confirmation requirement from one to five frames. `event_class_confirmation_frames` maps individual model labels to optional overrides, for example `{"robot_lawnmower": 3}`. `event_class_confidence_thresholds` provides the matching per-label confidence override, for example `{"robot_lawnmower": 0.75}`. SurvNG runs inference at the lowest applicable global, class, or zone threshold and then applies the correct threshold to each result, so class overrides may safely be either higher or lower than the global setting. Once confirmation is met, recorded refinement stops early within the current stage instead of inferring every remaining offset. `event_refinement_stages` and `event_refinement_retry_seconds` control the recorded sample window and how long refinement may wait for finalized segments; tighter budgets free the shared detector sooner after each event.
 
@@ -260,6 +260,11 @@ The detector supports YOLO-style ONNX output shaped like `[1, 4 + classes, ancho
 On macOS, the detector can also use Core ML. Set `detector.backend` to `coreml` and `coreml_model_path` to a `.mlmodel` or `.mlpackage` detection model. If Core ML is unavailable or the Core ML model cannot load, the detector falls back to the configured OpenVINO/ONNX model.
 
 The detector is optional. If OpenVINO or the model is missing, the app records a motion event and reports `detector_unavailable` instead of failing the camera loop.
+
+Optional monocular depth estimation can enrich representative incident objects
+with approximate distances and provide a depth replay overlay. Configure it
+under **Admin → Detection → Depth Estimation**; see the
+[Admin guide](docs/guide/admin.md#depth-estimation).
 
 ### Motion Qualification
 

@@ -68,29 +68,28 @@ with an ad-hoc Dockerfile or `docker commit`.
 
 ## GitHub Container Registry
 
-Pushing to a release branch (`v1.0`, `v1.1`, …) or a version tag such as
-`v1.1.0` runs `.github/workflows/docker-publish.yml` on the self-hosted runner
+Pushing to a release branch (`v1.0`, `v1.1`, or `v1.2`) or a version tag such as
+`v1.2.0` runs `.github/workflows/docker-publish.yml` on the self-hosted runner
 and publishes all Dockerfile targets to GHCR:
 
 | Image | When | Target |
 | --- | --- | --- |
-| `ghcr.io/instigatorx/survng:v1.1` | Every push to `v1.1` | `runtime` (CPU tip) |
-| `ghcr.io/instigatorx/survng:v1.1-intel` | Every push to `v1.1` | `runtime-intel` tip |
-| `ghcr.io/instigatorx/survng:v1.1-model-installer` | Every push to `v1.1` | `model-installer` tip |
+| `ghcr.io/instigatorx/survng:v1.2` | Every push to `v1.2` | `runtime` (CPU tip) |
+| `ghcr.io/instigatorx/survng:v1.2-intel` | Every push to `v1.2` | `runtime-intel` tip |
+| `ghcr.io/instigatorx/survng:v1.2-model-installer` | Every push to `v1.2` | `model-installer` tip |
 | `ghcr.io/instigatorx/survng:sha-<7chars>` | Every push to a release branch | Immutable CPU commit |
 | `ghcr.io/instigatorx/survng:sha-<7chars>-intel` | Every push to a release branch | Immutable Intel commit |
 | `ghcr.io/instigatorx/survng:sha-<7chars>-model-installer` | Every push to a release branch | Immutable model-installer commit |
-| `ghcr.io/instigatorx/survng:v1.1.0` | Git tag `v1.1.0` | `runtime` release |
-| `ghcr.io/instigatorx/survng:v1.1.0-intel` | Git tag `v1.1.0` | `runtime-intel` release |
-| `ghcr.io/instigatorx/survng:v1.1.0-model-installer` | Git tag `v1.1.0` | `model-installer` release |
+| `ghcr.io/instigatorx/survng:v1.2.0` | Git tag `v1.2.0` | `runtime` release |
+| `ghcr.io/instigatorx/survng:v1.2.0-intel` | Git tag `v1.2.0` | `runtime-intel` release |
+| `ghcr.io/instigatorx/survng:v1.2.0-model-installer` | Git tag `v1.2.0` | `model-installer` release |
 
-The same pattern applies to other release branches (for example `v1.0` publishes
-`v1.0`, `v1.0-intel`, and `v1.0-model-installer`).
+The same pattern applies to older release branches.
 
 Day-to-day deploys can track the branch tip without cutting a release tag:
 
 ```bash
-docker pull ghcr.io/instigatorx/survng:v1.1
+docker pull ghcr.io/instigatorx/survng:v1.2
 ```
 
 Pin a specific build with the `sha-…` tag. Use a `v*` tag when you want a
@@ -153,7 +152,7 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
    example. `.env` is ignored by Git and the Docker build, but it should contain
    paths and numeric IDs only—not passwords.
 
-3. Download detector, ReID, and optional Smart Search models into the host
+3. Download detector, depth, ReID, and optional Smart Search models into the host
    models directory and patch `config.json`. These weights are not in the
    GHCR runtime image (YOLO26s is AGPL-3.0; MobileCLIP2-B is Apple research/non-commercial).
    No SurvNG Git checkout is required. The script uses the
@@ -170,8 +169,10 @@ For Intel hosts, use the `-intel` tag with `compose.intel-gpu.yaml` device mount
    nested Docker hosts, pass `--lxc` to run the installer with
    `apparmor=unconfined` (opt-in; same trade-off as `compose.lxc.yaml`).
    Drop `--device GPU` on CPU-only hosts. Add `--skip-semantic` to skip the
-   MobileCLIP2-B export, or `--skip-face` to skip ArcFace / landmarks / face
-   detector. The script preserves any cameras already in
+   MobileCLIP2-B export, `--skip-face` to skip ArcFace / landmarks / face
+   detector, or `--skip-depth` to skip monocular depth. Successful depth
+   installation writes and enables the model path unless `--no-enable` is used.
+   The script preserves any cameras already in
    `docker-data/config/config.json` and still patches paths for models that
    installed successfully even when another step fails.
 

@@ -75,6 +75,7 @@ curl -s http://127.0.0.1:8088/api/health
 | POST | `/api/auth/login` | Sign in |
 | POST | `/api/auth/logout` | Sign out |
 | GET | `/api/auth/users` | List local users (`admin`) |
+| GET | `/api/support-bundle` | Download a redacted troubleshooting bundle (`admin`) |
 | GET | `/api/tls` | HTTPS certificate status (`admin`) |
 | POST | `/api/tls/upload` | Store a PEM certificate and key from files (`admin`) |
 | POST | `/api/tls/certificate` | Store pasted PEM certificate and key (`admin`) |
@@ -234,6 +235,7 @@ Field names must match your running build’s OpenAPI schema — use `/docs` if 
 | GET | `/api/semantic-search/status` | Index and model status |
 | POST | `/api/semantic-search` | Search by text description |
 | POST | `/api/semantic-search/visual` | Search by object crop from an event |
+| POST | `/api/semantic-search/visual-frame` | Search by a normalized crop from a recorded frame |
 
 ### Example
 
@@ -247,6 +249,16 @@ curl -s -X POST http://127.0.0.1:8088/api/semantic-search \
 curl -s -X POST http://127.0.0.1:8088/api/semantic-search/visual \
   -H 'Content-Type: application/json' \
   -d '{"event_id":123,"object_index":0,"limit":20}' | python -m json.tool
+```
+
+For a Timeline frame crop, provide the source camera and epoch plus normalized
+crop coordinates:
+
+```bash
+curl -s -X POST http://127.0.0.1:8088/api/semantic-search/visual-frame \
+  -H 'Content-Type: application/json' \
+  -d '{"camera_id":"front-door","epoch":1788012123.5,"source":"main","x":0.2,"y":0.15,"width":0.4,"height":0.6,"limit":20}' \
+  | python -m json.tool
 ```
 
 Setup: [Smart Search model packages](../semantic-search.md).
@@ -371,8 +383,8 @@ Full contract: [Training samples API](../training-api.md).
 | POST | `/api/maintenance/storage` | Start storage maintenance |
 | DELETE | `/api/maintenance/storage` | Cancel storage maintenance |
 | POST | `/api/system/restart` | Request process restart |
-| GET | `/api/system/update` | Product update status |
-| POST | `/api/system/update` | Start product update |
+| GET | `/api/system/update` | Product update status; optional `refresh_remote` and `branch` query parameters |
+| POST | `/api/system/update` | Start product update; optional `{"branch":"v1.2"}` body |
 
 ---
 

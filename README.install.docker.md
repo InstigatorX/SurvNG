@@ -21,7 +21,7 @@ SURVNG_UID=1500
 SURVNG_GID=1500
 SURVNG_TZ=America/New_York
 SURVNG_MEDIA_DIR=/srv/survng/media
-SURVNG_IMAGE=ghcr.io/instigatorx/survng:v1.1
+SURVNG_IMAGE=ghcr.io/instigatorx/survng:v1.2
 
 getent passwd "$SURVNG_UID" || true
 getent group "$SURVNG_GID" || true
@@ -115,7 +115,7 @@ Intel GPU override (skip on CPU-only hosts):
 cat > /tmp/survng.intel.yaml <<'EOF'
 services:
   survng:
-    image: ghcr.io/instigatorx/survng:v1.1-intel
+    image: ghcr.io/instigatorx/survng:v1.2-intel
     devices:
       - /dev/dri:/dev/dri
     environment:
@@ -176,7 +176,7 @@ On LXC, keep `--security-opt apparmor=unconfined`. On a normal VM, you can omit
 that flag.
 
 ```bash
-docker pull ghcr.io/instigatorx/survng:v1.1-model-installer
+docker pull ghcr.io/instigatorx/survng:v1.2-model-installer
 
 docker run --rm --user "${SURVNG_UID}:${SURVNG_GID}" \
   --security-opt apparmor=unconfined \
@@ -185,13 +185,15 @@ docker run --rm --user "${SURVNG_UID}:${SURVNG_GID}" \
   -v /var/lib/survng/config:/config-out \
   -v /var/lib/survng/model-cache:/cache \
   -e SURVNG_INSTALLER_IN_CONTAINER=1 \
-  ghcr.io/instigatorx/survng:v1.1-model-installer \
+  ghcr.io/instigatorx/survng:v1.2-model-installer \
   --device GPU
 ```
 
-Use `--device CPU` without an Intel iGPU. Add `--skip-semantic` or `--skip-face`
-to omit those packages (YOLO26s is AGPL-3.0; MobileCLIP2-B is Apple
-research/non-commercial). Licenses:
+Use `--device CPU` without an Intel iGPU. Add `--skip-semantic`, `--skip-face`,
+or `--skip-depth` to omit those packages (YOLO26s and YOLO26n-depth are
+AGPL-3.0; MobileCLIP2-B is Apple research/non-commercial). A successful depth
+install writes and enables its model path unless `--no-enable` is supplied.
+Licenses:
 [docker/model-installer/THIRD_PARTY_MODELS.md](docker/model-installer/THIRD_PARTY_MODELS.md).
 
 Admin model paths must be container paths such as
@@ -262,7 +264,7 @@ ONVIF, MQTT, and each media location online and writable.
 ## 9. Upgrade (no Git)
 
 Pin a build with `ghcr.io/instigatorx/survng:sha-<7chars>` (add `-intel` for
-GPU) if you do not want the moving `v1.1` tip.
+GPU) if you do not want the moving `v1.2` tip.
 
 ```bash
 cd /opt/survng

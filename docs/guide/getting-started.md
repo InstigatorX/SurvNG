@@ -2,9 +2,9 @@
 
 This walkthrough assumes SurvNG is already installed and reachable in a browser.
 If you still need to install it, use the repository files `README.install`
-([Docker](https://github.com/InstigatorX/SurvNG/blob/v1.1/README.install.docker.md)
+([Docker](https://github.com/InstigatorX/SurvNG/blob/v1.2/README.install.docker.md)
 or
-[systemd](https://github.com/InstigatorX/SurvNG/blob/v1.1/README.install.systemd.md)),
+[systemd](https://github.com/InstigatorX/SurvNG/blob/v1.2/README.install.systemd.md)),
 or the [Docker installation notes](../docker.md), then return here.
 
 ## 1. Open SurvNG

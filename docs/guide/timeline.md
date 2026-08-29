@@ -22,6 +22,18 @@ You can share or bookmark a Timeline moment. SurvNG carries the requested time i
 
 Object and motion markers on the timeline help you jump between interesting points instead of watching hours of empty driveway.
 
+## Find similar from a frame
+
+When Smart Search is enabled, pause near the subject you want to investigate
+and choose **Find similar**. SurvNG freezes the current frame so you can crop the
+person, vehicle, or object precisely, then searches indexed incident evidence.
+Results remain in an evidence rail while you inspect matches or move to nearby
+evidence. Use the previous/next controls to follow the trail, or **Exit** to
+return to ordinary Timeline playback.
+
+This search uses the selected crop as visual evidence; it does not create or
+modify incidents. See [Search](search.md) for object-based and text searches.
+
 ## Exports
 
 **Exports** is the place to save a clip or timelapse for download.

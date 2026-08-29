@@ -14,8 +14,8 @@ dual-encoder package can build a new index without deleting or mixing the
 previous generation.
 
 Smart Search is disabled by default. Put a self-contained model package on a
-local filesystem, then enable it under **Admin → Object Detection → Smart
-Search**. Docker installations should mount the package read-only beneath
+local filesystem, then enable it under **Admin → Detection → Smart Search**.
+Docker installations should mount the package read-only beneath
 `/config/models`.
 
 ## Build the official Apple model

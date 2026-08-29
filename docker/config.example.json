@@ -87,6 +87,7 @@
   },
   "detector": {
     "enabled": false,
+    "object_worker_count": 2,
     "model_path": "/models/detector/model.xml",
     "labels_path": "/models/detector/classes.txt",
     "device": "CPU",
@@ -98,6 +99,17 @@
     "event_class_confirmation_frames": {},
     "event_class_confidence_thresholds": {},
     "labels": [],
+    "depth": {
+      "enabled": false,
+      "model_path": "/models/yolo26n-depth_openvino_model/yolo26n-depth.xml",
+      "device": "AUTO",
+      "input_size": 768,
+      "min_distance_m": 0.05,
+      "max_distance_m": 150.0,
+      "max_incident_distance_m": null,
+      "store_heatmap": false,
+      "heatmap_max_width": 192
+    },
     "tracking": {
       "enabled": true,
       "implementation": "survng_hybrid",
