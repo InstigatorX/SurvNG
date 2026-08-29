@@ -393,15 +393,38 @@ export function visualBackupVerdict({
   };
 }
 
+function optionalCount(value) {
+  if (value == null || value === "") return null;
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? Math.round(count) : null;
+}
+
+export function resolveObjectWorkerCount({ config, telemetry } = {}) {
+  const objectWorkers = telemetry?.detector?.workers?.object
+    || telemetry?.detector?.isolation
+    || {};
+  const fromConfig = optionalCount(config?.detector?.object_worker_count);
+  const spawned = optionalCount(
+    objectWorkers.configured_workers
+    ?? telemetry?.detector?.object_worker_count,
+  );
+  const alive = optionalCount(objectWorkers.alive_workers);
+  const configured = fromConfig ?? spawned ?? 2;
+  const running = alive ?? spawned ?? configured;
+  return { configured, running, alive, spawned };
+}
+
 export function detectorLaneVerdict({
   trackingEnabled = false,
-  workerCount = 2,
+  workerCount = 0,
+  configuredWorkerCount = null,
+  runningWorkerCount = null,
   backend = "openvino",
 } = {}) {
   const setting = {
     workspace: "general",
-    detectionSection: trackingEnabled ? "tracking" : "object",
-    label: trackingEnabled ? "Parallel detectors / tracking" : "Parallel detectors",
+    detectionSection: "object",
+    label: "Parallel detectors",
   };
   if (String(backend || "") !== "openvino") {
     return {
@@ -411,10 +434,23 @@ export function detectorLaneVerdict({
       headline: "This detector uses one worker",
       detail: "Core ML keeps a single detector process.",
       suggestion: "Nothing to change.",
-      setting: { ...setting, detectionSection: "object" },
+      setting,
     };
   }
-  const workers = Math.max(1, asCount(workerCount) || 1);
+  const configured = optionalCount(configuredWorkerCount) ?? optionalCount(workerCount) ?? 0;
+  const running = optionalCount(runningWorkerCount) ?? configured;
+  const workers = Math.max(1, running || configured);
+  if (configured !== running) {
+    return {
+      id: "detector-lane",
+      title: "Detector workers",
+      tone: OCCUPANCY_TONES.warning,
+      headline: `${running} detector${running === 1 ? "" : "s"} running · Parallel detectors is ${configured}`,
+      detail: "The saved setting and the detector processes that are up do not match yet.",
+      suggestion: "Open Parallel detectors to confirm the setting is saved, then wait for the detector processes to restart.",
+      setting,
+    };
+  }
   if (trackingEnabled && workers < 2) {
     return {
       id: "detector-lane",
@@ -441,7 +477,7 @@ export function detectorLaneVerdict({
     id: "detector-lane",
     title: "Detector workers",
     tone: OCCUPANCY_TONES.good,
-    headline: trackingEnabled ? `${workers} detectors` : `${workers} detector${workers === 1 ? "" : "s"} · tracking is off`,
+    headline: `${workers} detector${workers === 1 ? "" : "s"} · tracking is off`,
     detail: "Incident checks are the only work on this queue.",
     suggestion: workers === 1
       ? "One detector is enough while tracking is off."
@@ -481,6 +517,8 @@ export function buildOccupancyReport({
   slotCount,
   trackingEnabled,
   workerCount,
+  configuredWorkerCount,
+  runningWorkerCount,
   backend,
   requireZone,
   backupEnabled,
@@ -509,7 +547,13 @@ export function buildOccupancyReport({
       checks: effectiveness?.suppression_verification_checks,
       rescues: effectiveness?.suppression_verification_rescues,
     }),
-    detectorLaneVerdict({ trackingEnabled, workerCount, backend }),
+    detectorLaneVerdict({
+      trackingEnabled,
+      workerCount,
+      configuredWorkerCount,
+      runningWorkerCount,
+      backend,
+    }),
     incidentEligibilityRow({ requireZone }),
   ];
   return {

@@ -10,6 +10,7 @@ import {
   emaCoverageVerdict,
   incidentSplitVerdict,
   mergeEffectiveness,
+  resolveObjectWorkerCount,
   siteEffectiveness,
   visualBackupVerdict,
   worstOccupancyTone,
@@ -87,6 +88,51 @@ assert.match(detectorLaneVerdict({ trackingEnabled: true, workerCount: 1 }).sugg
 assert.equal(detectorLaneVerdict({ trackingEnabled: false, workerCount: 1 }).tone, OCCUPANCY_TONES.good);
 assert.equal(detectorLaneVerdict({ backend: "coreml", workerCount: 1 }).tone, OCCUPANCY_TONES.good);
 
+const trackingLane = detectorLaneVerdict({ trackingEnabled: true, workerCount: 2 });
+assert.equal(trackingLane.setting.detectionSection, "object");
+assert.equal(trackingLane.setting.label, "Parallel detectors");
+assert.equal(detectorLaneVerdict({ trackingEnabled: false, workerCount: 3 }).setting.detectionSection, "object");
+
+const threeDetectors = detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 3,
+  runningWorkerCount: 3,
+});
+assert.equal(threeDetectors.tone, OCCUPANCY_TONES.good);
+assert.match(threeDetectors.headline, /3 detectors/);
+assert.equal(threeDetectors.setting.detectionSection, "object");
+
+const staleWorkers = detectorLaneVerdict({
+  trackingEnabled: true,
+  configuredWorkerCount: 3,
+  runningWorkerCount: 2,
+});
+assert.equal(staleWorkers.tone, OCCUPANCY_TONES.warning);
+assert.match(staleWorkers.headline, /2 detectors running/);
+assert.match(staleWorkers.headline, /Parallel detectors is 3/);
+assert.equal(staleWorkers.setting.detectionSection, "object");
+assert.equal(staleWorkers.setting.label, "Parallel detectors");
+
+const fromConfigAndLive = resolveObjectWorkerCount({
+  config: { detector: { object_worker_count: 3 } },
+  telemetry: { detector: { workers: { object: { configured_workers: 2, alive_workers: 2 } } } },
+});
+assert.equal(fromConfigAndLive.configured, 3);
+assert.equal(fromConfigAndLive.running, 2);
+
+const fromIsolation = resolveObjectWorkerCount({
+  telemetry: { detector: { isolation: { configured_workers: 3, alive_workers: 3 } } },
+});
+assert.equal(fromIsolation.configured, 3);
+assert.equal(fromIsolation.running, 3);
+
+const oneDown = resolveObjectWorkerCount({
+  config: { detector: { object_worker_count: 3 } },
+  telemetry: { detector: { workers: { object: { configured_workers: 3, alive_workers: 2 } } } },
+});
+assert.equal(oneDown.configured, 3);
+assert.equal(oneDown.running, 2);
+
 const history = coverageFromRuntimeHistory([
   { analysis_frames_sampled: 90, analysis_frames_dropped: 10 },
   { analysis_frames_sampled: 100, analysis_frames_dropped: 0 },
@@ -153,5 +199,33 @@ assert.deepEqual(report.rows.map((row) => row.id), [
   "detector-lane",
   "eligibility",
 ]);
+const reportLane = report.rows.find((row) => row.id === "detector-lane");
+assert.equal(reportLane.setting.detectionSection, "object");
+assert.equal(reportLane.setting.label, "Parallel detectors");
+
+const mismatchedReport = buildOccupancyReport({
+  coverage: { coveragePercent: 99, deferred: 0, staleSkipped: 0 },
+  effectiveness: {
+    camera_object_events: 12,
+    ema_object_events: 2,
+    visual_backup_attempts: 2,
+    visual_backup_objects: 2,
+    suppression_verification_checks: 0,
+    suppression_verification_rescues: 0,
+  },
+  slotCount: 2,
+  trackingEnabled: true,
+  workerCount: 3,
+  configuredWorkerCount: 3,
+  runningWorkerCount: 2,
+  backend: "openvino",
+  requireZone: true,
+  backupEnabled: true,
+  onvifHealthy: true,
+});
+const mismatchedLane = mismatchedReport.rows.find((row) => row.id === "detector-lane");
+assert.equal(mismatchedLane.tone, OCCUPANCY_TONES.warning);
+assert.equal(mismatchedLane.setting.detectionSection, "object");
+assert.match(mismatchedLane.headline, /Parallel detectors is 3/);
 
 console.log("detection occupancy helpers passed");

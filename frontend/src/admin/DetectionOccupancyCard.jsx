@@ -9,6 +9,7 @@ import {
   coverageFromCameraMotion,
   coverageFromRuntimeHistory,
   occupancyToneLabel,
+  resolveObjectWorkerCount,
   siteEffectiveness,
 } from "../detectionOccupancy.mjs";
 
@@ -107,7 +108,11 @@ export function DetectionOccupancyCard({
   const byCamera = effectiveness?.by_camera || {};
   const slotCount = Number(config?.motion_qualification?.max_concurrent_analysis ?? 2);
   const trackingEnabled = config?.detector?.tracking?.enabled !== false;
-  const workerCount = Number(config?.detector?.object_worker_count ?? 2);
+  const { configured: configuredWorkerCount, running: runningWorkerCount } = resolveObjectWorkerCount({
+    config,
+    telemetry,
+  });
+  const workerCount = runningWorkerCount || configuredWorkerCount;
   const backend = config?.detector?.backend || "openvino";
   const backupEnabled = (config?.motion_qualification?.mode || "camera_rescue") === "camera_rescue"
     || (config?.motion_qualification?.mode || "") === "adaptive";
@@ -123,6 +128,8 @@ export function DetectionOccupancyCard({
     slotCount,
     trackingEnabled,
     workerCount,
+    configuredWorkerCount,
+    runningWorkerCount,
     backend,
     requireZone: selected
       ? cameraRequiresZone(config, configCameras.find((camera) => camera.id === selected.id) || selected)
@@ -141,6 +148,8 @@ export function DetectionOccupancyCard({
       slotCount,
       trackingEnabled,
       workerCount,
+      configuredWorkerCount,
+      runningWorkerCount,
       backend,
       requireZone: cameraRequiresZone(config, configCamera || camera),
       backupEnabled: ["camera_rescue", "adaptive"].includes(cameraMode(config, configCamera)),
