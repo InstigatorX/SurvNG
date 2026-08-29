@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace } from "../src/adminWorkspace.mjs";
+import { ADMIN_RESPONSIBILITY_GROUPS, adminDestination, adminHomeDestinations, adminWorkspaceId, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, preferredStoredValue, readAdminSubsection, readAdminWorkspace, telemetryLocationOptions } from "../src/adminWorkspace.mjs";
 
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS.map((group) => group.label), ["Configure", "Observe", "Act"]);
 assert.deepEqual(ADMIN_RESPONSIBILITY_GROUPS[0].items.slice(0, 5).map((item) => item.label), ["Cameras", "Detection", "Storage", "Integrations", "Access"]);
@@ -9,9 +9,15 @@ assert.deepEqual(adminHomeDestinations().map((item) => item.id), ["cameras", "de
 assert.equal(adminDestination("home").id, "home");
 assert.equal(adminDestination("telemetry", { telemetrySection: "diagnostics" }).id, "diagnostics");
 assert.equal(adminDestination("telemetry", { telemetrySection: "health" }).id, "health");
-assert.equal(adminDestination("logs").id, "logs");
+assert.equal(adminDestination("telemetry", { telemetrySection: "occupancy" }).id, "health");
 assert.equal(normalizeTelemetrySection("overview"), "health");
 assert.equal(normalizeTelemetrySection("cameras"), "health");
+assert.equal(normalizeTelemetrySection("occupancy"), "occupancy");
+assert.equal(normalizeTelemetrySection("diagnostics"), "diagnostics");
+assert.deepEqual(telemetryLocationOptions("health", "porch"), { camera: "porch" });
+assert.deepEqual(telemetryLocationOptions("occupancy", "porch"), { subsection: "occupancy", camera: "porch" });
+assert.deepEqual(telemetryLocationOptions("diagnostics"), { subsection: "diagnostics" });
+assert.equal(adminDestination("logs").id, "logs");
 
 assert.equal(adminWorkspaceId("telemetry"), "telemetry");
 assert.equal(adminWorkspaceId("invalid"), "general");
@@ -21,6 +27,7 @@ assert.equal(adminWorkspaceSearch("general", "?audit_id=12"), "");
 assert.equal(adminWorkspaceSearch("general", "", { subsection: "storage" }), "?section=general&subsection=storage");
 assert.equal(adminWorkspaceSearch("audit", "?audit_id=12"), "?section=audit&audit_id=12");
 assert.equal(adminWorkspaceSearch("telemetry", "?audit_id=12"), "?section=telemetry");
+assert.equal(adminWorkspaceSearch("telemetry", "", { subsection: "occupancy", camera: "porch" }), "?section=telemetry&subsection=occupancy&camera=porch");
 assert.equal(adminWorkspaceSearch("cameras", "", { subsection: "zones", camera: "gate" }), "?section=cameras&subsection=zones&camera=gate");
 assert.equal(adminWorkspaceSearch("audit", "", { camera: "gate" }), "?section=audit&camera=gate");
 assert.equal(readAdminSubsection("?subsection=zones", ["settings", "zones"], "settings"), "zones");
