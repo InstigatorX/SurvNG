@@ -1,6 +1,8 @@
 """Measurement-backed guidance for object_worker_count (Campaign 10).
 
-Guidance only — does not change process architecture or the default of 1.
+Guidance only — does not change process architecture. When tracking is
+enabled, DetectorConfig raises object_worker_count to at least 2 so live
+incident inference keeps a protected lane.
 """
 
 from __future__ import annotations

@@ -173,6 +173,21 @@ class FairMotionAnalysisLimiter:
                 callbacks = self._available_callbacks_locked()
             self._notify_callbacks(callbacks)
 
+    def set_capacity(self, capacity: int) -> None:
+        """Raise or lower the fleet-wide analysis ceiling without dropping work.
+
+        Active cameras keep their current slot. A lower ceiling simply waits
+        for those leases to end before granting additional waiters.
+        """
+        if capacity < 1:
+            raise ValueError("motion analysis capacity must be positive")
+        callbacks: list[Callable[[], None]]
+        with self._condition:
+            self.capacity = int(capacity)
+            self._condition.notify_all()
+            callbacks = self._available_callbacks_locked()
+        self._notify_callbacks(callbacks)
+
     def cancel(self, camera_id: str) -> None:
         """Remove a camera's ungranted request during shutdown."""
         callbacks: list[Callable[[], None]]

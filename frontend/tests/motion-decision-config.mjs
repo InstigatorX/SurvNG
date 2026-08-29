@@ -14,7 +14,10 @@ import {
 assert.deepEqual(MOTION_MODE_OPTIONS.map((option) => option.value), ["camera", "camera_rescue", "adaptive"]);
 assert.deepEqual(MOTION_BEHAVIOR_OPTIONS.map((option) => option.value), ["camera", "camera_validation", "camera_rescue", "adaptive"]);
 assert.match(motionModeInfo("camera").description, /Only camera ONVIF notices/);
-assert.match(motionModeInfo("camera_rescue").description, /must overlap that motion or move/);
+assert.match(motionModeInfo("camera_rescue").description, /Pays extra CPU for recall/);
+assert.match(motionBehaviorOption("camera").description, /minimum extra CPU/);
+assert.match(motionBehaviorOption("camera_validation").description, /cut noisy false notices/);
+assert.match(motionBehaviorOption("camera_rescue").description, /does not filter ONVIF false positives/);
 assert.match(motionModeInfo("adaptive").description, /ONVIF notices.*cannot trigger detection/);
 assert.equal(motionModeInfo("unknown").value, "camera_rescue");
 assert.equal(motionBehaviorOption("unknown").value, "camera_rescue");

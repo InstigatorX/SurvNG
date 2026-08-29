@@ -14,8 +14,23 @@ from survng.app.inference_runtime.worker_topology import (
 
 
 class WorkerTopologyTests(unittest.TestCase):
-    def test_object_worker_count_default_remains_one(self) -> None:
-        self.assertEqual(DetectorConfig().object_worker_count, 1)
+    def test_object_worker_count_defaults_to_protected_tracking_lane(self) -> None:
+        self.assertEqual(DetectorConfig().object_worker_count, 2)
+        self.assertEqual(
+            DetectorConfig(object_worker_count=1).object_worker_count,
+            2,
+        )
+        self.assertEqual(
+            DetectorConfig(
+                object_worker_count=1,
+                tracking={"enabled": False},
+            ).effective_object_worker_count(),
+            1,
+        )
+        self.assertEqual(
+            DetectorConfig(object_worker_count=3).effective_object_worker_count(),
+            3,
+        )
 
     def test_clamp_bounds(self) -> None:
         self.assertEqual(clamp_object_worker_count(0), MIN_OBJECT_WORKERS)

@@ -25,6 +25,21 @@ from survng.app.inference import (
 )
 
 
+def _single_object_detector(**overrides) -> DetectorConfig:
+    """Disabled detector with one object worker and tracking off.
+
+    Tracking would otherwise raise the OpenVINO worker floor to 2, which
+    resizes the pool during tests that only change device, cache, or NMS.
+    """
+    values: dict = {
+        "enabled": False,
+        "object_worker_count": 1,
+        "tracking": {"enabled": False},
+    }
+    values.update(overrides)
+    return DetectorConfig(**values)
+
+
 class InferenceSupervisorTest(unittest.TestCase):
     def test_worker_rollback_failure_raises_fencing_exception(self) -> None:
         worker = _InferenceWorker(
@@ -65,7 +80,7 @@ class InferenceSupervisorTest(unittest.TestCase):
             DetectorConfig(object_activity_attribution="unsupported")
 
     def setUp(self) -> None:
-        self.supervisor = InferenceSupervisor(DetectorConfig(enabled=False))
+        self.supervisor = InferenceSupervisor(_single_object_detector())
 
     def tearDown(self) -> None:
         self.supervisor.stop()
@@ -549,7 +564,7 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertFalse(self.supervisor.workload_status()["accepting"])
 
     def test_role_reconfiguration_restarts_only_selected_worker(self) -> None:
-        updated = DetectorConfig(enabled=False, device="GPU")
+        updated = _single_object_detector(device="GPU")
 
         with (
             patch.object(self.supervisor._object, "reconfigure") as object_reconfigure,
@@ -568,7 +583,7 @@ class InferenceSupervisorTest(unittest.TestCase):
     def test_object_role_reconfiguration_replaces_live_worker_process(self) -> None:
         self.assertTrue(self.supervisor.start())
         previous_pid = self.supervisor.isolation_status()["worker_pid"]
-        updated = DetectorConfig(enabled=False, nms_threshold=0.51)
+        updated = _single_object_detector(nms_threshold=0.51)
 
         self.supervisor.reconfigure_roles(updated, {"object"})
 
@@ -595,7 +610,7 @@ class InferenceSupervisorTest(unittest.TestCase):
 
     def test_multi_role_reconfiguration_rolls_back_completed_roles(self) -> None:
         previous = self.supervisor.config.model_copy(deep=True)
-        updated = DetectorConfig(enabled=False, cache_dir="/tmp/new-cache")
+        updated = _single_object_detector(cache_dir="/tmp/new-cache")
 
         with (
             patch.object(self.supervisor._object, "reconfigure") as object_reconfigure,

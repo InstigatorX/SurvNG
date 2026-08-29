@@ -521,10 +521,21 @@ class MotionIncidentService:
                     self._refinement_accepting = False
             raise
 
+    def _refinement_worker_accepting(self) -> bool:
+        with self._status_lock:
+            stop = self._refinement_stop
+            return bool(
+                self._refinement_accepting
+                and stop is not None
+                and not stop.is_set()
+                and self._refinement_thread is not None
+                and self._refinement_thread.is_alive()
+            )
+
     def request_stop(self) -> None:
-        # Close admission before publishing the sentinel. Otherwise a producer
-        # can enqueue behind the sentinel while the worker is still alive and
-        # lose the initial tracking handoff when shutdown drains that job.
+        # Close admission before publishing the sentinel. A producer that
+        # arrives after this sees no accepting worker and hands tracking off
+        # from live evidence instead of waiting for a job that will not run.
         with self._status_lock:
             self._refinement_accepting = False
         try:
@@ -614,9 +625,16 @@ class MotionIncidentService:
                     initial_outcome=outcome,
                 )
             )
-        # Strong provisional evidence can begin tracking immediately. Handoff
-        # is idempotent per event, so later refined evidence cannot duplicate it.
-        if not outcome.refinement_pending or outcome.object_detected is True:
+        # Tracking is identification/cover enrichment, not admission. Wait for
+        # recorded confirmation whenever a refinement worker can actually run
+        # this job. If refinement cannot run now, preserve a live handoff so a
+        # confirmed object is not left without a session.
+        defer_tracking = (
+            outcome.refinement_pending
+            and refinement_admission in {"queued", "coalesced"}
+            and self._refinement_worker_accepting()
+        )
+        if not defer_tracking:
             self._handoff(outcome, event_at)
         try:
             if self.tracking_enabled():
@@ -632,10 +650,6 @@ class MotionIncidentService:
                 type(error).__name__,
                 redact_secret_text(error)[:500],
             )
-        if outcome.refinement_pending and refinement_admission == "dropped":
-            # Initial detection is already valid evidence. Capacity loss must
-            # not also discard its tracking handoff.
-            self._handoff(outcome, event_at)
         return outcome
 
     def _handoff(self, outcome: MotionDecisionOutcome, event_at: datetime) -> bool:

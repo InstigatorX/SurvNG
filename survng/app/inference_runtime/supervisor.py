@@ -91,7 +91,7 @@ class InferenceSupervisor:
 
     @staticmethod
     def _effective_object_worker_count(config: DetectorConfig) -> int:
-        return config.object_worker_count if config.backend == "openvino" else 1
+        return config.effective_object_worker_count()
 
     def _build_object_workers(self, config: DetectorConfig) -> list[_InferenceWorker]:
         return [
