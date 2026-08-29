@@ -42,13 +42,20 @@ Under **Admin → Storage**, you can crop compact incident thumbnails to detecte
 
 Focused compact thumbnails are cropped from the **full-resolution snapshot on the server**, then resized near the tile size — so the client downloads a small crop instead of a large full-frame JPEG. Padding favors showing the full subject (head/feet often sit outside detection boxes). The crop expands with background to match the tile aspect (16:9 in lists, 16:10 in card previews) so tiles stay uniform without letterboxing. Expanded viewers can still use CSS focus when a manual button is shown. Zoom is capped so SurvNG does not over-crop distant detections into empty blur.
 
-## Clean, AI, and tracks
+## Clean, AI, tracks, and depth
 
 Depending on what SurvNG stored for the incident, you may switch between:
 
 - A clean picture
 - Annotated detection overlays
 - Track playback when object tracking produced a path
+- **Depth** replay when monocular depth is configured
+
+Depth replay runs object detection and depth estimation over the incident clip.
+Choose **Both**, **Boxes**, or **Heatmap** to show distance-labeled boxes, the
+depth heatmap, or both. Stored object badges may also show an estimated distance
+when representative-frame depth enrichment was available. These values are
+monocular estimates; use them as scene context rather than precise measurements.
 
 ## Example review flow
 

@@ -93,10 +93,12 @@ accelerator.
 
 SurvNG associates detections across distinct timestamps, votes on labels, uses
 median confidence rather than the highest outlier, and applies the configured
-global or per-class confirmation count. The selected frame is chosen from the
-confirmed temporal evidence, not simply the first or highest-confidence frame.
-If that representative clips or poorly shows the subject, SurvNG may inspect a
-bounded later stage for a better cover.
+global or per-class confirmation count. Every frame counted toward confirmation
+must independently meet the applicable class confidence threshold; a weak
+association alone does not confirm an object. The selected frame is chosen from
+the confirmed temporal evidence, not simply the first or highest-confidence
+frame. If that representative clips or poorly shows the subject, SurvNG may
+inspect a bounded later stage for a better cover.
 
 Recorded results carry:
 
@@ -109,6 +111,22 @@ Recorded results carry:
 Snapshot filenames and stored object provenance use the selected frame's actual
 time, not merely the trigger time. Exact timestamps remain distinct from
 estimated timestamps.
+
+## Optional depth enrichment
+
+When `detector.depth.enabled` is configured, the isolated inference worker runs
+monocular depth on the selected recorded frame and adds bounded distance
+statistics to each object. A configured
+`detector.depth.max_incident_distance_m`, or a matching zone's
+`min_depth_m`/`max_depth_m`, can make a recorded object ineligible. Depth does
+not replace the trigger, object detector, temporal confirmation, or spatial-zone
+checks.
+
+`store_heatmap` optionally persists a small encoded heatmap with the incident;
+otherwise only object distance statistics are retained. Motion-attribution
+**depth shadow** results are separate, decision-scoped diagnostics. Shadow mode
+reports what depth would have changed but deliberately does not change
+admission.
 
 ## Four independent decisions
 

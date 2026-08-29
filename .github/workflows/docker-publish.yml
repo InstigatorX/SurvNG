@@ -5,6 +5,7 @@ on:
     branches:
       - v1.0
       - v1.1
+      - v1.2
     tags:
       - "v*"
   workflow_dispatch:

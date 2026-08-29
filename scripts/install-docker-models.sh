@@ -36,9 +36,9 @@ DO_VEHICLE_REID=1
 DO_SEMANTIC=1
 DO_FACE=1
 PYTHON_BIN=""
-SEMANTIC_EXPORTER_REF="${SURVNG_INSTALLER_REF:-v1.0}"
+SEMANTIC_EXPORTER_REF="${SURVNG_INSTALLER_REF:-v1.2}"
 IN_CONTAINER="${SURVNG_INSTALLER_IN_CONTAINER:-0}"
-INSTALLER_IMAGE="${SURVNG_MODEL_INSTALLER_IMAGE:-ghcr.io/instigatorx/survng:v1.0-model-installer}"
+INSTALLER_IMAGE="${SURVNG_MODEL_INSTALLER_IMAGE:-ghcr.io/instigatorx/survng:v1.2-model-installer}"
 INSTALL_FAILURES=0
 
 PERSON_NAME="person-reidentification-retail-0286"
@@ -75,7 +75,7 @@ Options:
   --yolo NAME          Ultralytics detect weights to export (default: yolo26s)
   --python PATH        Python used for venvs and config patching (--native only)
   --native             Run on this host (requires python3 + venvs); skip installer image
-  --installer-image IMG  Override installer image (default: ghcr.io/.../survng:v1.0-model-installer)
+  --installer-image IMG  Override installer image (default: ghcr.io/.../survng:v1.2-model-installer)
   --lxc                Proxmox/LXC nested Docker: pass --security-opt apparmor=unconfined
                        to the installer container. Weakens isolation; opt-in only
                        (same trade-off as compose.lxc.yaml for the SurvNG service).
@@ -93,8 +93,8 @@ Options:
 
 Environment:
   SURVNG_MODELS_DIR, SURVNG_CONFIG_DIR, SURVNG_HOST_CONFIG_PATH
-  SURVNG_INSTALLER_REF          Git ref for bundled exporter download (default: v1.0)
-  SURVNG_MODEL_INSTALLER_IMAGE    Installer image (default: ghcr.io/instigatorx/survng:v1.0-model-installer)
+  SURVNG_INSTALLER_REF          Git ref for bundled exporter download (default: v1.2)
+  SURVNG_MODEL_INSTALLER_IMAGE    Installer image (default: ghcr.io/instigatorx/survng:v1.2-model-installer)
   SURVNG_INSTALLER_IN_CONTAINER   Set by the installer image entrypoint (do not set on host)
 
 Licenses (not SurvNG MIT; not baked into GHCR images):
@@ -181,7 +181,7 @@ run_installer_container() {
   log "License notices for downloaded models: docker/model-installer/THIRD_PARTY_MODELS.md"
   if ! docker pull "$INSTALLER_IMAGE"; then
     err "Could not pull $INSTALLER_IMAGE"
-    err "The installer image is published as ghcr.io/instigatorx/survng:v1.0-model-installer"
+    err "The installer image is published as ghcr.io/instigatorx/survng:v1.2-model-installer"
     err "If the package is private, run: docker login ghcr.io"
     err "Or run inline on this host without Docker: install-docker-models.sh --native [options]"
     return 1

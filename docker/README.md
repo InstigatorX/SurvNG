@@ -20,7 +20,7 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `.env.example` | Non-secret host path, identity, timezone, and GPU group settings |
 | `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
 | `scripts/install-docker-models.sh` | Download detector/ReID/Smart Search models and patch `config.json` (uses `survng-model-installer` container by default) |
-| `Dockerfile.model-installer` | One-shot installer image published as `ghcr.io/.../survng:v1.0-model-installer` |
+| `Dockerfile.model-installer` | One-shot installer image published as `ghcr.io/.../survng:v1.2-model-installer` |
 | `.github/workflows/docker-publish.yml` | Build and push all image targets to GHCR on release-branch commits and `v*` tags |
 | `docker/config.example.json` | Camera-free initial configuration |
 | `docker/go2rtc.example.yaml` | Seeded go2rtc config for the bundled restreamer |
@@ -55,7 +55,7 @@ scripts/install-docker-models.sh --device GPU
 ```
 
 By default the script runs the published **`survng-model-installer`** container
-(`ghcr.io/instigatorx/survng:v1.0-model-installer`) so the host does not need
+(`ghcr.io/instigatorx/survng:v1.2-model-installer`) so the host does not need
 PyTorch or Ultralytics venvs. Pass `--native` to run inline on a dev checkout.
 On Proxmox/LXC nested Docker hosts, pass `--lxc` so the installer container gets
 `--security-opt apparmor=unconfined` (same intentional isolation trade-off as
@@ -71,6 +71,7 @@ other settings.
 | Host path under `SURVNG_MODELS_DIR` | Container path | License |
 | --- | --- | --- |
 | `yolo26s_openvino_model/yolo26s.xml` | `/models/yolo26s_openvino_model/yolo26s.xml` | Ultralytics AGPL-3.0 |
+| `yolo26n-depth_openvino_model/yolo26n-depth.xml` | `/models/yolo26n-depth_openvino_model/yolo26n-depth.xml` | Ultralytics AGPL-3.0 |
 | `person_reid_model/person-reidentification-retail-0286.xml` | `/models/person_reid_model/person-reidentification-retail-0286.xml` | Intel OMZ Apache-2.0 |
 | `vehicle_reid_model/vehicle-reid-0001.onnx` | `/models/vehicle_reid_model/vehicle-reid-0001.onnx` | MIT |
 | `face_model/face-recognition-resnet100-arcface-onnx.xml` | `/models/face_model/...` | Intel OMZ |
@@ -85,9 +86,11 @@ directly. Face ArcFace is converted from ONNX to IR with `ovc` inside the
 installer container; landmarks and the face detector are OMZ IR downloads.
 
 The detector folder name must end in `_openvino_model`. Use `--skip-semantic`
-to omit MobileCLIP2-B, `--skip-face` to omit face recognition, `--skip-detector`
-if you already have a custom OpenVINO detector, and `--no-enable` to write paths
-without turning the features on.
+to omit MobileCLIP2-B, `--skip-face` to omit face recognition, `--skip-depth`
+to omit monocular depth, `--skip-detector` if you already have a custom OpenVINO
+detector, and `--no-enable` to write paths without turning the features on.
+When depth installs successfully, the script writes its model path and enables
+depth enrichment unless `--no-enable` was supplied.
 If Smart Search export fails, detector and ReID paths are still written to
 `config.json` (re-run or pass `--skip-semantic` after fixing the error).
 The standalone `scripts/install-face-model.sh` remains for native checkouts.

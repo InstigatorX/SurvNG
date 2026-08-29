@@ -47,7 +47,7 @@ CC-BY-4.0); retain those notices when redistributing the corresponding files.
 
 ## Model installer image (`survng-model-installer`)
 
-The GHCR tag `ghcr.io/instigatorx/survng:v1.0-model-installer` (see
+The GHCR tag `ghcr.io/instigatorx/survng:v1.2-model-installer` (see
 `Dockerfile.model-installer`) downloads third-party weights at install time.
 It does not ship those weights in the image layer. License summaries:
 `docker/model-installer/THIRD_PARTY_MODELS.md` and `docker/model-installer/NOTICE`.

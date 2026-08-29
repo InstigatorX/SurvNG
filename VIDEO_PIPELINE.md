@@ -447,6 +447,21 @@ preferred. SurvNG retries briefly while newly written recording segments are
 being finalized. If no recorded frame becomes readable, it fails over to the
 latest live frame and marks that source in event metadata.
 
+### Monocular depth enrichment
+
+When `detector.depth.enabled` and a model path are configured, the object worker
+runs depth estimation on the representative recorded frame after object
+detection. It records each object's median and bounded depth statistics in
+meters. The global `max_incident_distance_m` policy and per-zone
+`min_depth_m`/`max_depth_m` policies can mark recorded objects ineligible;
+ordinary confidence, temporal, and zone checks still apply.
+
+Depth heatmaps are optional. With `store_heatmap=true`, SurvNG stores a bounded
+encoded heatmap alongside the incident evidence; otherwise it retains only the
+per-object statistics. Decision-scoped depth-shadow telemetry measures how a
+near-depth rule would affect EMA/object correlation. Shadow results are
+informational and never alter admission.
+
 ### Detection-triggered object tracking
 
 When the selected event frame contains an incident-eligible object and
@@ -717,6 +732,7 @@ Global motion qualification:
     "window_seconds": 1.6,
     "post_trigger_seconds": 2.5,
     "burst_quiet_seconds": 0.5,
+    "max_concurrent_analysis": 2,
     "rejected_sample_rate": 0.05,
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
@@ -728,6 +744,31 @@ Global motion qualification:
   }
 }
 ```
+
+Object inference and optional depth enrichment:
+
+```json
+{
+  "detector": {
+    "object_worker_count": 2,
+    "depth": {
+      "enabled": false,
+      "model_path": "",
+      "device": "AUTO",
+      "input_size": 768,
+      "min_distance_m": 0.05,
+      "max_distance_m": 150.0,
+      "max_incident_distance_m": null,
+      "store_heatmap": false,
+      "heatmap_max_width": 192
+    }
+  }
+}
+```
+
+OpenVINO uses one to four object workers and defaults to two. When tracking is
+enabled, SurvNG floors `object_worker_count` at two so incident admission keeps
+a detector lane. Core ML uses one worker.
 
 Per-camera override:
 

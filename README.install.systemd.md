@@ -21,7 +21,7 @@ SURVNG_TZ=America/New_York
 SURVNG_ROOT=/opt/survng
 SURVNG_MEDIA_DIR=/srv/survng/media
 SURVNG_GIT_URL=https://github.com/InstigatorX/SurvNG.git
-SURVNG_GIT_BRANCH=v1.1
+SURVNG_GIT_BRANCH=v1.2
 
 getent passwd "$SURVNG_UID" || true
 getent group "$SURVNG_GID" || true

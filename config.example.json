@@ -117,6 +117,17 @@
       "robot_lawnmower": 0.75
     },
     "labels": [],
+    "depth": {
+      "enabled": false,
+      "model_path": "",
+      "device": "AUTO",
+      "input_size": 768,
+      "min_distance_m": 0.05,
+      "max_distance_m": 150.0,
+      "max_incident_distance_m": null,
+      "store_heatmap": false,
+      "heatmap_max_width": 192
+    },
     "tracking": {
       "enabled": true,
       "implementation": "survng_hybrid",
