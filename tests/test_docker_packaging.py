@@ -184,7 +184,7 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("No SurvNG Git checkout is required", text)
         self.assertIn("raw.githubusercontent.com/InstigatorX/SurvNG", text)
         self.assertIn("--native", text)
-        self.assertIn("survng:v1.0-model-installer", text)
+        self.assertIn("survng:v1.2-model-installer", text)
         self.assertIn("--lxc", text)
         self.assertIn("apparmor=unconfined", text)
         self.assertIn("download.pytorch.org/whl/cpu", text)
