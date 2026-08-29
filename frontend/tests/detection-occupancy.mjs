@@ -3,6 +3,7 @@ import {
   OCCUPANCY_TONES,
   buildOccupancyReport,
   cameraEffectiveness,
+  cameraOnvifHealthy,
   coverageFromCameraMotion,
   coverageFromRuntimeHistory,
   detectorLaneVerdict,
@@ -11,6 +12,7 @@ import {
   incidentSplitVerdict,
   mergeEffectiveness,
   siteEffectiveness,
+  siteOnvifHealthy,
   visualBackupVerdict,
   worstOccupancyTone,
 } from "../src/detectionOccupancy.mjs";
@@ -72,8 +74,22 @@ const halfEma = incidentSplitVerdict({ cameraObjects: 10, emaObjects: 10, backup
 assert.equal(halfEma.tone, OCCUPANCY_TONES.warning);
 assert.match(halfEma.suggestion, /Keep Camera \+ EMA backup/);
 assert.match(halfEma.suggestion, /Do not switch to camera notices only/);
+assert.match(halfEma.detail, /not a looser object detector/);
 
-const brokenOnvif = incidentSplitVerdict({ cameraObjects: 2, emaObjects: 18, backupEnabled: true, onvifHealthy: false });
+const racingEma = incidentSplitVerdict({
+  cameraObjects: 398,
+  emaObjects: 2180,
+  backupEnabled: true,
+  onvifHealthy: false,
+  backupMatchedNotices: 40,
+  backupWithoutNotices: 5,
+});
+assert.equal(racingEma.tone, OCCUPANCY_TONES.warning);
+assert.match(racingEma.detail, /1\.5 seconds/);
+assert.doesNotMatch(racingEma.detail, /unhealthy/);
+assert.match(racingEma.suggestion, /Wait for camera notice/);
+
+const brokenOnvif = incidentSplitVerdict({ cameraObjects: 0, emaObjects: 18, backupEnabled: true, onvifHealthy: false });
 assert.equal(brokenOnvif.tone, OCCUPANCY_TONES.warning);
 assert.match(brokenOnvif.suggestion, /Fix the camera event connection/);
 
@@ -153,5 +169,18 @@ assert.deepEqual(report.rows.map((row) => row.id), [
   "detector-lane",
   "eligibility",
 ]);
+
+assert.equal(cameraOnvifHealthy({ onvif: { enabled: false, connected: false } }), null);
+assert.equal(cameraOnvifHealthy({ onvif: { enabled: true, connected: false } }), false);
+assert.equal(cameraOnvifHealthy({ onvif: { enabled: true, connected: true } }), true);
+assert.equal(siteOnvifHealthy([
+  { onvif: { enabled: true, connected: true } },
+  { onvif: { enabled: true, connected: false } },
+  { onvif: { enabled: false, connected: false } },
+]), true);
+assert.equal(siteOnvifHealthy([
+  { onvif: { enabled: true, connected: false } },
+  { onvif: { enabled: false, connected: false } },
+]), false);
 
 console.log("detection occupancy helpers passed");

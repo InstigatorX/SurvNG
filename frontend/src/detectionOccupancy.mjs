@@ -264,15 +264,29 @@ export function doubleCheckVerdict({ checks = 0, rescues = 0 } = {}) {
   };
 }
 
+export function cameraOnvifHealthy(camera) {
+  if (!camera?.onvif || camera.onvif.enabled === false) return null;
+  if (camera.onvif.connected === false) return false;
+  return true;
+}
+
+export function siteOnvifHealthy(cameras = []) {
+  const relevant = (cameras || [])
+    .map((camera) => cameraOnvifHealthy(camera))
+    .filter((value) => value !== null);
+  if (!relevant.length) return true;
+  return relevant.some(Boolean);
+}
+
 export function incidentSplitVerdict({
   cameraObjects = 0,
   emaObjects = 0,
   backupEnabled = true,
   onvifHealthy = true,
+  backupMatchedNotices = 0,
+  backupWithoutNotices = 0,
 } = {}) {
-  const setting = backupEnabled
-    ? { workspace: "general", detectionSection: "motion", label: "Motion behavior" }
-    : { workspace: "general", detectionSection: "motion", label: "Motion behavior" };
+  const setting = { workspace: "general", detectionSection: "motion", label: "Motion behavior" };
   const cameraCount = asCount(cameraObjects);
   const emaCount = asCount(emaObjects);
   const total = cameraCount + emaCount;
@@ -293,6 +307,8 @@ export function incidentSplitVerdict({
   const emaShare = emaCount / total;
   const percent = Math.round(emaShare * 100);
   const headline = `${cameraCount.toLocaleString()} from camera notices · ${emaCount.toLocaleString()} from visual backup`;
+  const noticesAreArriving = cameraCount > 0;
+  const connectionDown = onvifHealthy === false && !noticesAreArriving;
   if (emaShare <= 0.35) {
     return {
       id: "incident-split",
@@ -309,13 +325,13 @@ export function incidentSplitVerdict({
       emaShare,
     };
   }
-  if (!onvifHealthy) {
+  if (connectionDown) {
     return {
       id: "incident-split",
       title: "What starts an incident",
       tone: OCCUPANCY_TONES.warning,
       headline,
-      detail: `${percent}% started from visual backup because camera events look unhealthy.`,
+      detail: `${percent}% started from visual backup, and camera event connections look down. Backup is carrying detection.`,
       suggestion: "Keep Camera + EMA backup. Fix the camera event connection first. Do not switch to camera notices only.",
       setting,
       cameraCount,
@@ -337,13 +353,18 @@ export function incidentSplitVerdict({
       emaShare,
     };
   }
+  const matched = asCount(backupMatchedNotices);
+  const unmatched = asCount(backupWithoutNotices);
+  const mostlyRacing = matched > 0 && matched >= unmatched;
   return {
     id: "incident-split",
     title: "What starts an incident",
     tone: OCCUPANCY_TONES.warning,
     headline,
-    detail: `${percent}% started from visual backup because the camera notice was late or missing. The first event in a group keeps that label even if a camera notice arrives later.`,
-    suggestion: "Keep Camera + EMA backup. Do not switch to camera notices only. Check camera event connection on the cameras with the highest backup share.",
+    detail: mostlyRacing
+      ? `${percent}% of groups were started by visual backup. Backup waits about 1.5 seconds for a camera notice, then starts detection. The group keeps that first label even if a camera notice arrives later. This is not a looser object detector — the same model still has to confirm a person or vehicle.`
+      : `${percent}% of groups were started by visual backup. Camera notices are still creating incidents, so the connection is not dead. Backup often wins the race, or the camera is slow to send motion. This is not a looser object detector.`,
+    suggestion: "Keep Camera + EMA backup. Do not switch to camera notices only. To label more groups as Camera, raise Wait for camera notice on cameras with the highest backup share.",
     setting,
     cameraCount,
     emaCount,
@@ -485,6 +506,8 @@ export function buildOccupancyReport({
   requireZone,
   backupEnabled,
   onvifHealthy,
+  backupMatchedNotices,
+  backupWithoutNotices,
 } = {}) {
   const rows = [
     emaCoverageVerdict({
@@ -498,6 +521,8 @@ export function buildOccupancyReport({
       emaObjects: effectiveness?.ema_object_events,
       backupEnabled,
       onvifHealthy,
+      backupMatchedNotices,
+      backupWithoutNotices,
     }),
     visualBackupVerdict({
       attempts: effectiveness?.visual_backup_attempts,
