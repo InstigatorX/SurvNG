@@ -55,9 +55,9 @@ import { logPayloadSignature } from "../pollingPolicy.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { motionAuditRegions } from "../motionAudit.mjs";
 import { insertZonePointWithIndex } from "../zoneGeometry.mjs";
-import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, readAdminWorkspace } from "../adminWorkspace.mjs";
+import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS, adminDestination, adminHomeDestinations, adminWorkspaceSearch, cameraConfigDirtyState, comparableCameraSettings, comparableSystemConfig, configValuesEqual, dirtyCameraCount, nextTabId, normalizeTelemetrySection, perCameraDirtyState, readAdminSubsection, readAdminWorkspace, telemetryLocationOptions } from "../adminWorkspace.mjs";
 import { appUrl, mediaUrl, fetch } from "../shared/api.js";
-import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
+import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, HEALTH_TELEMETRY_SECTIONS, GENERAL_ADMIN_SECTIONS, US_TIME_ZONES, THEMES } from "../shared/constants.js";
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
 import { secretInputValue, secretInputHint } from "../shared/secrets.js";
 import { formatDateTime, formatTimeOnly, formatBytes, formatMilliseconds, formatAge, formatDuration, formatCompactDuration } from "../shared/format.js";
@@ -472,7 +472,7 @@ export function TelemetryContinuity({ data }) {
   );
 }
 
-export function TelemetryViewer({ data, cameraId, timeZone, config, onOpenSetting }) {
+export function TelemetryViewer({ data, cameraId, timeZone, config }) {
   if (!data) return <div className="empty-state">Waiting for telemetry...</div>;
   const selected = cameraId ? data.cameras?.find((camera) => camera.id === cameraId) : null;
   const activity = selected?.activity || data.activity;
@@ -558,12 +558,6 @@ export function TelemetryViewer({ data, cameraId, timeZone, config, onOpenSettin
   return (
     <TelemetryInterruptionsContext.Provider value={selected ? [] : (data.interruptions || [])}>
       <div className="telemetry-viewer">
-        <DetectionOccupancyCard
-          telemetry={data}
-          cameraId={cameraId}
-          config={config}
-          onOpenSetting={onOpenSetting}
-        />
         <div className={`telemetry-summary-grid${selected ? " camera-summary" : " overview-summary"}`}>
           <article><span>Events · 1h</span><strong>{Number(lastHour.events || 0).toLocaleString()}</strong><small>{Number(lastDay.events || 0).toLocaleString()} in the shown 24-hour window</small></article>
           <article><span>Object incidents · 24h</span><strong>{Number(lastDay.object_incidents || 0).toLocaleString()}</strong><small>{Number(lastDay.objects || 0).toLocaleString()} eligible object detections</small></article>
@@ -1119,7 +1113,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [telemetryError, setTelemetryError] = useState("");
   const [telemetrySection, setTelemetrySection] = useStoredState("survng.telemetrySection.v1", normalizeTelemetrySection(readAdminSubsection(
     initialAdminSearch,
-    ["diagnostics", "overview", "cameras", "health"],
+    TELEMETRY_ADMIN_SECTIONS,
     "health",
   )), { preferInitial: initialAdminWorkspace === "telemetry" && (initialAdminParams.has("subsection") || initialAdminParams.has("camera")) });
   const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", initialAdminParams.get("camera") || "", { preferInitial: initialAdminWorkspace === "telemetry" && initialAdminParams.has("camera") });
@@ -1148,10 +1142,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       camera: generalSection === "motion-review" ? selectedId : "",
     };
     if (section === "cameras") return { subsection: cameraSection === "settings" ? "" : cameraSection, camera: selectedId };
-    if (section === "telemetry") {
-      if (telemetrySection === "diagnostics") return { subsection: "diagnostics" };
-      return { camera: telemetryCamera };
-    }
+    if (section === "telemetry") return telemetryLocationOptions(telemetrySection, telemetryCamera);
     if (section === "audit") return { camera: auditCamera };
     return {};
   }
@@ -1200,7 +1191,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         setSelectedId(new URLSearchParams(window.location.search).get("camera") || selectedId);
       }
       if (nextSection === "telemetry") {
-        setTelemetrySection(normalizeTelemetrySection(readAdminSubsection(window.location.search, ["diagnostics", "overview", "cameras", "health"], telemetrySection)));
+        setTelemetrySection(normalizeTelemetrySection(readAdminSubsection(window.location.search, TELEMETRY_ADMIN_SECTIONS, telemetrySection)));
         setTelemetryCamera(new URLSearchParams(window.location.search).get("camera") || telemetryCamera);
       }
       if (nextSection === "audit") {
@@ -1271,7 +1262,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         : nextWorkspace === "cameras"
           ? cameraSection === "settings" && selectedId === (cameras[0]?.id || "")
         : nextWorkspace === "telemetry"
-          ? normalizeTelemetrySection(nextSubsection || "health") === telemetrySection
+          ? (nextSubsection === "diagnostics") === (normalizeTelemetrySection(telemetrySection) === "diagnostics")
             && (normalizeTelemetrySection(nextSubsection || "health") !== "health" || !telemetryCamera)
         : nextWorkspace === "calibration"
           ? false
@@ -1324,7 +1315,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       : nextWorkspace === "telemetry"
         ? nextSubsection === "diagnostics"
           ? { subsection: "diagnostics" }
-          : {}
+          : telemetryLocationOptions(nextSubsection || "health", "")
         : nextWorkspace === "audit"
           ? { camera: cameras[0]?.id || "" }
         : adminLocationOptions(nextWorkspace);
@@ -1342,8 +1333,8 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       ? { subsection: nextSubsection === "general" ? "" : nextSubsection }
       : section === "cameras"
         ? { subsection: nextSubsection === "settings" ? "" : nextSubsection, camera: cameraOverride || selectedId }
-        : nextSubsection === "diagnostics"
-          ? { subsection: "diagnostics" }
+        : section === "telemetry"
+          ? telemetryLocationOptions(nextSubsection, cameraOverride || telemetryCamera)
           : { camera: cameraOverride || telemetryCamera };
     const search = adminWorkspaceSearch(section, window.location.search, options);
     const location = appUrl(`/admin${search}`);
@@ -1783,7 +1774,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   function selectTelemetryCamera(nextCameraId) {
     setTelemetryCamera(nextCameraId);
     if (telemetrySection === "diagnostics") setTelemetrySection("health");
-    const search = adminWorkspaceSearch("telemetry", window.location.search, { camera: nextCameraId });
+    const search = adminWorkspaceSearch("telemetry", window.location.search, telemetryLocationOptions(telemetrySection === "diagnostics" ? "health" : telemetrySection, nextCameraId));
     const location = appUrl(`/admin${search}`);
     window.history.pushState({ ...(window.history.state || {}), survngTelemetryCamera: nextCameraId }, "", location);
     acceptedAdminLocationRef.current = location;
@@ -2415,9 +2406,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           <CalibrationLab key={`calibration-${calibrationViewNonce}`} cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
         ) : settingsTab === "telemetry" ? (
           <>
-            <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
+            <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide subsection-workspace" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
               {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
-              <div id="telemetry-view-panel" className="telemetry-tab-panel" role="tabpanel">{telemetrySection === "diagnostics" ? <div className="telemetry-diagnostics">
+              {telemetrySection === "diagnostics" ? <div id="telemetry-view-panel" className="telemetry-tab-panel" role="tabpanel"><div className="telemetry-diagnostics">
                 <ModelsAndHardwarePanel config={config} updateConfig={updateConfig} detectorModels={detectorModels} accelerator={accelerator} />
                 <section className="telemetry-section support-bundle-section">
                   <div className="telemetry-section-head"><div><h3>Support bundle</h3><p>Download one redacted system report to share when you need help troubleshooting. It includes software and runtime status, safe configuration, recent health events, diagnostics, and logs—never video, images, passwords, tokens, cookies, private keys, or camera stream URLs.</p></div><a className="button primary" href={appUrl("/api/support-bundle")} download="survng-support-bundle.json"><Download size={15} />Download support bundle</a></div>
@@ -2445,7 +2436,21 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 </section>
                 {(telemetry?.diagnostics?.recent || []).some((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()) ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent diagnostic reports</summary><div className="telemetry-diagnostic-list">{telemetry.diagnostics.recent.filter((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()).map((session) => <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? cameras.find((camera) => camera.id === session.camera_id)?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>{formatDateTime(session.started_at, timeZone)}</span></div><a className="button" href={appUrl(`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`)} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a></article>)}</div></details></section> : null}
                 {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
-              </div> : <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} config={config} onOpenSetting={openOccupancySetting} />}</div>
+              </div></div> : (
+                <div className="detection-settings subsection-workspace health-subsection-workspace">
+                  <nav id="health-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label="Health sections" onKeyDown={(event) => moveTabFocus(event, HEALTH_TELEMETRY_SECTIONS, telemetrySection === "occupancy" ? "occupancy" : "health", (next) => selectAdminSubsection(next, setTelemetrySection, "telemetry"))}>
+                    <button id="health-tab-health" data-tab-id="health" type="button" tabIndex={telemetrySection === "occupancy" ? -1 : 0} aria-controls="telemetry-view-panel" className={telemetrySection === "occupancy" ? "" : "active"} onClick={() => selectAdminSubsection("health", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection !== "occupancy"}><Gauge size={15} />Telemetry</button>
+                    <button id="health-tab-occupancy" data-tab-id="occupancy" type="button" tabIndex={telemetrySection === "occupancy" ? 0 : -1} aria-controls="telemetry-view-panel" className={telemetrySection === "occupancy" ? "active" : ""} onClick={() => selectAdminSubsection("occupancy", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "occupancy"}><Cpu size={15} />Detection at a glance</button>
+                  </nav>
+                  <div id="telemetry-view-panel" className="detection-settings-content health-subsection-content telemetry-tab-panel" role="tabpanel" aria-labelledby={telemetrySection === "occupancy" ? "health-tab-occupancy" : "health-tab-health"}>
+                    {telemetrySection === "occupancy" ? (
+                      <DetectionOccupancyCard telemetry={telemetry} cameraId={telemetryCamera} config={config} onOpenSetting={openOccupancySetting} />
+                    ) : (
+                      <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} config={config} />
+                    )}
+                  </div>
+                </div>
+              )}
             </section>
           </>
         ) : settingsTab === "maintenance" ? (

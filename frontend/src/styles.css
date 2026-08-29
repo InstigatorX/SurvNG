@@ -8197,6 +8197,28 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   padding: 14px 14px 4px;
 }
 
+.occupancy-workspace {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.occupancy-card {
+  min-width: 0;
+}
+
+.occupancy-card.good {
+  border-color: color-mix(in srgb, var(--ok-ink) 28%, var(--line));
+}
+
+.occupancy-card.warning {
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--line));
+}
+
+.occupancy-card.bad {
+  border-color: color-mix(in srgb, var(--hot) 36%, var(--line));
+}
+
 .occupancy-section .telemetry-section-head p {
   max-width: 62rem;
   color: var(--muted);

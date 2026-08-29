@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ArrowRight, CircleAlert, CircleCheck, CircleDot, CircleHelp } from "lucide-react";
+import { ArrowRight, CircleAlert, CircleCheck, CircleDot, CircleHelp, Cpu } from "lucide-react";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { fetch } from "../shared/api.js";
 import {
@@ -60,22 +60,23 @@ function OccupancyRow({ row, onOpenSetting }) {
   );
 }
 
-function OccupancyPanel({ title, subtitle, report, onOpenSetting, defaultOpen = true }) {
+function OccupancyPanel({ title, subtitle, report, onOpenSetting, primary = false, icon: HeaderIcon = Cpu }) {
   return (
-    <details className={`occupancy-panel ${report.tone}`} open={defaultOpen}>
-      <summary>
+    <section className={`detection-settings-card occupancy-card ${primary ? "primary" : ""} ${report.tone}`}>
+      <header className="detection-settings-card-head">
+        <div className="detection-settings-card-icon"><HeaderIcon size={18} /></div>
+        <div>
+          <h3>{title}</h3>
+          <p>{subtitle}</p>
+        </div>
         <span className={`occupancy-tone-chip ${report.tone}`}>{occupancyToneLabel(report.tone)}</span>
-        <span>
-          <strong>{title}</strong>
-          <small>{subtitle}</small>
-        </span>
-      </summary>
+      </header>
       <div className="occupancy-row-grid">
         {report.rows.map((row) => (
           <OccupancyRow key={row.id} row={row} onOpenSetting={onOpenSetting} />
         ))}
       </div>
-    </details>
+    </section>
   );
 }
 
@@ -159,17 +160,14 @@ export function DetectionOccupancyCard({
   }).filter((item) => item.report.tone === OCCUPANCY_TONES.warning || item.report.tone === OCCUPANCY_TONES.bad);
 
   return (
-    <section className="telemetry-section occupancy-section" aria-label="Detection occupancy">
-      <div className="telemetry-section-head">
-        <div>
-          <h3>Detection at a glance</h3>
-          <p>Plain-language checks for visual backup load, missed camera notices, and extra detector work. Green means leave it. Amber or red says what to change.</p>
-        </div>
-      </div>
+    <div className="occupancy-workspace wide-card" aria-label="Detection occupancy">
       {error ? <p className="occupancy-error">{error}</p> : null}
       <OccupancyPanel
-        title={selected ? `${selected.name || selected.id}` : "Whole system"}
-        subtitle="Last 7 days of incidents, plus current visual-analysis load"
+        primary
+        title="Detection at a glance"
+        subtitle={selected
+          ? `${selected.name || selected.id} · last 7 days of incidents, plus current visual-analysis load`
+          : "Last 7 days of incidents, plus current visual-analysis load. Green means leave it. Amber or red says what to change."}
         report={siteReport}
         onOpenSetting={onOpenSetting}
       />
@@ -185,6 +183,7 @@ export function DetectionOccupancyCard({
                 ...report,
                 rows: report.rows.filter((row) => row.tone === OCCUPANCY_TONES.warning || row.tone === OCCUPANCY_TONES.bad),
               }}
+              icon={CircleAlert}
               onOpenSetting={(setting) => onOpenSetting?.({
                 ...setting,
                 workspace: setting.workspace === "general" && setting.detectionSection === "motion"
@@ -195,11 +194,10 @@ export function DetectionOccupancyCard({
                   : setting.subsection,
                 cameraId: camera.id,
               })}
-              defaultOpen={attentionCameras.length <= 3}
             />
           ))}
         </div>
       ) : null}
-    </section>
+    </div>
   );
 }

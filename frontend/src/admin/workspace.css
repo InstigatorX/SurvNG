@@ -640,8 +640,40 @@
 }
 
 .settings-grid .detection-settings-content>.wide-card,
-.settings-grid .detection-settings-content>.detection-settings-card.primary {
+.settings-grid .detection-settings-content>.detection-settings-card.primary,
+.settings-grid .health-subsection-content>.occupancy-workspace,
+.settings-grid .health-subsection-content>.telemetry-viewer {
   grid-column: 1 / -1;
+}
+
+.settings-grid .health-subsection-workspace {
+  padding: 0;
+}
+
+.settings-grid .health-subsection-workspace > .admin-section-tabs {
+  margin: var(--admin-panel-inset) var(--admin-panel-inset) 0;
+}
+
+.settings-grid .health-subsection-content {
+  grid-template-columns: 1fr;
+}
+
+.settings-grid .health-subsection-content>.telemetry-viewer {
+  gap: var(--admin-panel-inset);
+  padding: 0;
+  background: transparent;
+}
+
+.settings-grid .occupancy-card .detection-settings-card-head p {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settings-grid .occupancy-row-grid {
+  padding: 0;
 }
 
 @media (max-width: 900px) {
