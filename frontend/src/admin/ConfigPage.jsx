@@ -1130,6 +1130,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [adminNavOpen, setAdminNavOpen] = useState(false);
   const [calibrationCommandBar, setCalibrationCommandBar] = useState(null);
   const [generalViewNonce, setGeneralViewNonce] = useState(0);
+  const [detectionSection, setDetectionSection] = useState("object");
   const [calibrationViewNonce, setCalibrationViewNonce] = useState(0);
   const [apiTokenSecretVisible, setApiTokenSecretVisible] = useState(false);
   const configLoadSequence = useRef(0);
@@ -2391,6 +2392,8 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 advisorCameraId={selectedId}
                 onAdvisorCameraIdChange={setSelectedId}
                 section={generalSection}
+                detectionSection={detectionSection}
+                onDetectionSectionChange={setDetectionSection}
               />
             </section>
           </>
@@ -3780,7 +3783,7 @@ export function RetentionSummary({ status }) {
   );
 }
 
-export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, onOpenApiTokens = null, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section }) {
+export function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenSecretVisibleChange, onOpenApiTokens = null, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, runtimeStatus = [], advisorCameraId = "", onAdvisorCameraIdChange = null, section, detectionSection = "object", onDetectionSectionChange = null }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
   const [productUpdate, setProductUpdate] = useState(null);
@@ -3792,7 +3795,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
   const [apiTokenError, setApiTokenError] = useState("");
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
-  const [detectionSection, setDetectionSection] = useState("object");
+  const setDetectionSection = onDetectionSectionChange || (() => {});
   const [storageSection, setStorageSection] = useState("locations");
   const [apiSection, setApiSection] = useState("tokens");
   const mediaLocations = config.media_storage?.locations || [];
