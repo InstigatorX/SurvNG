@@ -8313,6 +8313,17 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   padding: 0 12px 12px;
 }
 
+.occupancy-pillar-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.occupancy-context {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .occupancy-row {
   display: grid;
   gap: 6px;

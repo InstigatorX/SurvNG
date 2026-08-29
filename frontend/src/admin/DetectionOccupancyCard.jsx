@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ArrowRight, CircleAlert, CircleCheck, CircleDot, CircleHelp, Cpu } from "lucide-react";
+import { Activity, ArrowRight, CircleAlert, CircleCheck, CircleDot, CircleHelp, Cpu, Gauge } from "lucide-react";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { fetch } from "../shared/api.js";
 import {
@@ -20,6 +20,14 @@ const TONE_ICONS = {
   [OCCUPANCY_TONES.idle]: CircleHelp,
 };
 
+const PILLAR_ICONS = {
+  admission: CircleDot,
+  engine: Cpu,
+  tracking: Activity,
+  capacity: Gauge,
+  waste: CircleAlert,
+};
+
 function cameraMode(config, camera) {
   const override = camera?.motion_qualification?.mode;
   if (override && override !== "inherit") return override;
@@ -37,8 +45,9 @@ function cameraOnvifHealthy(camera) {
   return true;
 }
 
-function OccupancyRow({ row, onOpenSetting }) {
-  const Icon = TONE_ICONS[row.tone] || CircleDot;
+function OccupancyRow({ row, onOpenSetting, compact = false }) {
+  const Icon = PILLAR_ICONS[row.id] || TONE_ICONS[row.tone] || CircleDot;
+  const showAction = !compact && row.tone !== OCCUPANCY_TONES.good && row.tone !== OCCUPANCY_TONES.idle;
   return (
     <article className={`occupancy-row ${row.tone}`}>
       <div className="occupancy-row-head">
@@ -50,7 +59,7 @@ function OccupancyRow({ row, onOpenSetting }) {
       </div>
       <p className="occupancy-headline">{row.headline}</p>
       <p className="occupancy-detail">{row.detail}</p>
-      <p className="occupancy-suggestion"><span>What to do</span>{row.suggestion}</p>
+      {showAction ? <p className="occupancy-suggestion"><span>What to do</span>{row.suggestion}</p> : null}
       {row.setting && onOpenSetting ? (
         <button type="button" className="occupancy-setting-link" onClick={() => onOpenSetting(row.setting)}>
           Open {row.setting.label} <ArrowRight size={14} />
@@ -63,6 +72,7 @@ function OccupancyRow({ row, onOpenSetting }) {
 function OccupancyPanel({ title, subtitle, report, onOpenSetting, primary = false, icon: HeaderIcon = Cpu }) {
   const heading = primary && report.summary?.headline ? report.summary.headline : title;
   const description = report.summary?.detail || subtitle;
+  const cards = report.pillars || report.rows || [];
   return (
     <section className={`detection-settings-card occupancy-card ${primary ? "primary" : ""} ${report.tone}`}>
       <header className="detection-settings-card-head">
@@ -73,9 +83,15 @@ function OccupancyPanel({ title, subtitle, report, onOpenSetting, primary = fals
         </div>
         <span className={`occupancy-tone-chip ${report.tone}`}>{occupancyToneLabel(report.tone)}</span>
       </header>
-      <div className="occupancy-row-grid">
-        {report.rows.map((row) => (
-          <OccupancyRow key={row.id} row={row} onOpenSetting={onOpenSetting} />
+      {primary && report.context ? <p className="occupancy-context">{report.context}. {subtitle}</p> : null}
+      <div className="occupancy-row-grid occupancy-pillar-grid">
+        {cards.map((row) => (
+          <OccupancyRow
+            key={row.id}
+            row={row}
+            compact={row.tone === OCCUPANCY_TONES.good || row.tone === OCCUPANCY_TONES.idle}
+            onOpenSetting={onOpenSetting}
+          />
         ))}
       </div>
     </section>
@@ -106,7 +122,7 @@ export function DetectionOccupancyCard({
   const siteCoverage = {
     ...coverageHistory,
     deferred: cameras.reduce((total, camera) => total + coverageFromCameraMotion(camera).deferred, 0),
-  }
+  };
 
   const byCamera = effectiveness?.by_camera || {};
   const slotCount = Number(config?.motion_qualification?.max_concurrent_analysis ?? 2);
@@ -169,8 +185,8 @@ export function DetectionOccupancyCard({
         primary
         title="Detection at a glance"
         subtitle={selected
-          ? `${selected.name || selected.id} · last 7 days of incidents, plus current detector and visual-analysis health`
-          : "Live detector health plus the last 7 days of incidents. Green means leave it. Amber or red says what to change."}
+          ? `${selected.name || selected.id} · last 7 days of incidents plus live detector health`
+          : "Last 7 days of incidents plus live detector health"}
         report={siteReport}
         onOpenSetting={onOpenSetting}
       />
@@ -184,7 +200,10 @@ export function DetectionOccupancyCard({
               subtitle="Only the checks that are not green"
               report={{
                 ...report,
-                rows: report.rows.filter((row) => row.tone === OCCUPANCY_TONES.warning || row.tone === OCCUPANCY_TONES.bad),
+                summary: null,
+                pillars: (report.pillars || []).filter((row) => (
+                  row.tone === OCCUPANCY_TONES.warning || row.tone === OCCUPANCY_TONES.bad
+                )),
               }}
               icon={CircleAlert}
               onOpenSetting={(setting) => onOpenSetting?.({

@@ -405,6 +405,12 @@ const OBJECT_DETECTION_SETTING = Object.freeze({
   label: "Object Detection",
 });
 
+const TRACKING_SETTING = Object.freeze({
+  workspace: "general",
+  detectionSection: "tracking",
+  label: "Tracking & ReID",
+});
+
 const HIGH_ADMISSION_WAIT_MS = 100;
 const QUEUE_WARN_PER_WORKER = 1;
 const FAILED_INFERENCE_WARN = 3;
@@ -449,9 +455,13 @@ export function resolveDetectorHealth({ config, telemetry } = {}) {
   const workloads = runtime.workloads || {};
   const classes = workloads.classes || {};
   const initialWait = optionalNumber(classes.incident_initial?.admission_wait_ms_p95);
-  const trackingSkipped = (telemetry?.tracking_capacity_history?.short || []).reduce(
-    (total, point) => total + asCount(point?.skipped),
-    0,
+  const trackingCapacity = (telemetry?.tracking_capacity_history?.short || []).reduce(
+    (total, point) => ({
+      attempts: total.attempts + asCount(point?.attempts),
+      waited: total.waited + asCount(point?.waited),
+      skipped: total.skipped + asCount(point?.skipped),
+    }),
+    { attempts: 0, waited: 0, skipped: 0 },
   );
   const enabledSetting = config?.detector?.enabled !== false;
   const enabledRuntime = detector.enabled !== false;
@@ -482,7 +492,9 @@ export function resolveDetectorHealth({ config, telemetry } = {}) {
     lastError: String(objectWorkers.last_error || detector.warmup_error || "").trim(),
     initialWaitMs: initialWait,
     initialWaiting: optionalCount(workloads.initial_waiting) ?? 0,
-    trackingSkipped,
+    trackingSkipped: trackingCapacity.skipped,
+    trackingAttempts: trackingCapacity.attempts,
+    trackingWaited: trackingCapacity.waited,
   };
 }
 
@@ -507,6 +519,7 @@ export function detectorLaneVerdict({
   initialWaitMs = null,
   initialWaiting = 0,
   trackingSkipped = 0,
+  includeTracking = true,
 } = {}) {
   const configured = optionalCount(configuredWorkerCount) ?? optionalCount(configuredCount) ?? optionalCount(workerCount) ?? 0;
   const running = optionalCount(runningWorkerCount) ?? optionalCount(runningCount) ?? configured;
@@ -560,7 +573,7 @@ export function detectorLaneVerdict({
         "Open Parallel detectors to confirm the setting is saved, then wait for the detector processes to restart.",
       ));
     }
-    if (trackingEnabled && workers < 2) {
+    if (includeTracking && trackingEnabled && workers < 2) {
       findings.push(detectorFinding(
         OCCUPANCY_TONES.bad,
         "Tracking is on with only one detector",
@@ -644,7 +657,7 @@ export function detectorLaneVerdict({
         OBJECT_DETECTION_SETTING,
       ));
     }
-    if (trackingEnabled && trackingSkipped >= 1 && workers >= 2) {
+    if (includeTracking && trackingEnabled && trackingSkipped >= 1 && workers >= 2) {
       findings.push(detectorFinding(
         OCCUPANCY_TONES.warning,
         `${trackingSkipped.toLocaleString()} tracking session${trackingSkipped === 1 ? "" : "s"} skipped in 2 hours`,
@@ -677,7 +690,7 @@ export function detectorLaneVerdict({
   const extras = [
     pendingCount ? `${pendingCount.toLocaleString()} waiting` : "no queue",
     failedCount ? `${failedCount.toLocaleString()} failures since restart` : "no failures",
-    trackingEnabled ? "tracking keeps a reserved lane" : "tracking is off",
+    includeTracking ? (trackingEnabled ? "tracking keeps a reserved lane" : "tracking is off") : "",
     device ? device : "",
   ].filter(Boolean);
   if (String(backend || "") !== "openvino") {
@@ -695,14 +708,85 @@ export function detectorLaneVerdict({
     id: "detector-lane",
     title: "Detection engine",
     tone: OCCUPANCY_TONES.good,
-    headline: trackingEnabled
+    headline: includeTracking && trackingEnabled
       ? `${workers} detectors · tracking keeps a reserved lane`
-      : `${workers} detector${workers === 1 ? "" : "s"} · tracking is off`,
+      : `${workers} detector${workers === 1 ? "" : "s"} running`,
     detail: extras.join(" · "),
     suggestion: workers === 1 && !trackingEnabled
       ? "One detector is enough while tracking is off."
       : "Leave Parallel detectors as it is.",
     setting: PARALLEL_DETECTORS_SETTING,
+  };
+}
+
+export function trackingHealthVerdict({
+  trackingEnabled = false,
+  workerCount = 0,
+  configuredWorkerCount = null,
+  runningWorkerCount = null,
+  configured: configuredCount = null,
+  running: runningCount = null,
+  backend = "openvino",
+  trackingSkipped = 0,
+  trackingAttempts = 0,
+  trackingWaited = 0,
+} = {}) {
+  const configured = optionalCount(configuredWorkerCount) ?? optionalCount(configuredCount) ?? optionalCount(workerCount) ?? 0;
+  const running = optionalCount(runningWorkerCount) ?? optionalCount(runningCount) ?? configured;
+  const workers = Math.max(1, running || configured);
+  const skipped = asCount(trackingSkipped);
+  const attempts = asCount(trackingAttempts);
+  const waited = asCount(trackingWaited);
+  if (!trackingEnabled) {
+    return {
+      id: "tracking",
+      title: "Tracking",
+      tone: OCCUPANCY_TONES.idle,
+      headline: "Tracking is off",
+      detail: "Overlays and identity work are not using a detector lane.",
+      suggestion: "Nothing to change unless you want live overlays.",
+      setting: TRACKING_SETTING,
+    };
+  }
+  if (String(backend || "") === "openvino" && workers < 2) {
+    return {
+      id: "tracking",
+      title: "Tracking",
+      tone: OCCUPANCY_TONES.bad,
+      headline: "Tracking is on with only one detector",
+      detail: "Overlay work can occupy the only detector while a new incident needs a yes or no.",
+      suggestion: "Set Parallel detectors to 2, or turn tracking off if you only need snapshots.",
+      setting: PARALLEL_DETECTORS_SETTING,
+    };
+  }
+  if (skipped >= 1) {
+    return {
+      id: "tracking",
+      title: "Tracking",
+      tone: OCCUPANCY_TONES.warning,
+      headline: `${skipped.toLocaleString()} tracking session${skipped === 1 ? "" : "s"} skipped in 2 hours`,
+      detail: attempts
+        ? `${attempts.toLocaleString()} tracking session${attempts === 1 ? "" : "s"} · ${waited.toLocaleString()} waited for a lane.`
+        : "Tracking could not get a detector lane, so some overlays were dropped.",
+      suggestion: configured >= 4
+        ? "Workers are at the limit. Reduce simultaneous tracking or leave overlays off on busy cameras."
+        : "Raise Parallel detectors by 1 if skips keep happening.",
+      setting: PARALLEL_DETECTORS_SETTING,
+    };
+  }
+  const extras = [
+    attempts ? `${attempts.toLocaleString()} session${attempts === 1 ? "" : "s"} in 2 hours` : "no skipped sessions",
+    waited ? `${waited.toLocaleString()} waited briefly` : "no waits",
+    String(backend || "") === "openvino" ? "reserved detector lane" : "single-worker detector",
+  ];
+  return {
+    id: "tracking",
+    title: "Tracking",
+    tone: OCCUPANCY_TONES.good,
+    headline: "Tracking has a reserved detector lane",
+    detail: extras.join(" · "),
+    suggestion: "Leave tracking as it is.",
+    setting: TRACKING_SETTING,
   };
 }
 
@@ -731,22 +815,114 @@ export function occupancyToneLabel(tone) {
   return "No action";
 }
 
-export function occupancyReportSummary(rows = []) {
-  const tone = worstOccupancyTone(rows.map((row) => row.tone));
-  const attention = rows.filter((row) => (
-    row.tone === OCCUPANCY_TONES.warning || row.tone === OCCUPANCY_TONES.bad
+const PILLAR_VOICE = Object.freeze({
+  admission: "admission",
+  engine: "worker capacity",
+  "detector-lane": "worker capacity",
+  tracking: "tracking",
+  capacity: "visual analysis",
+  coverage: "visual analysis",
+});
+
+const SUMMARY_PILLAR_ORDER = Object.freeze(["admission", "tracking", "capacity", "engine"]);
+
+function joinHealthNames(names) {
+  if (!names.length) return "Detection";
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+function mergeHealthPillar(id, title, rows) {
+  const present = (rows || []).filter(Boolean);
+  if (!present.length) return null;
+  const tone = worstOccupancyTone(present.map((row) => row.tone));
+  const ranked = [...present].sort((left, right) => (
+    (TONE_RANK[right.tone] || 0) - (TONE_RANK[left.tone] || 0)
   ));
-  const engine = rows.find((row) => row.id === "detector-lane");
+  const primary = ranked[0];
+  const extras = ranked.slice(1);
+  let headline = primary.headline;
+  let detail = primary.detail;
+  if (id === "admission") {
+    const split = present.find((row) => row.id === "incident-split");
+    const backup = present.find((row) => row.id === "visual-backup");
+    if (split && backup) {
+      if ((TONE_RANK[tone] || 0) <= TONE_RANK[OCCUPANCY_TONES.good]) {
+        headline = split.headline;
+        detail = [split.detail, backup.headline].filter(Boolean).join(" ");
+      } else {
+        detail = [primary.detail, extras.map((row) => row.headline).filter(Boolean).join(" · ")].filter(Boolean).join(" ");
+      }
+    }
+  } else if (extras.length) {
+    detail = [primary.detail, extras.map((row) => row.headline).filter(Boolean).join(" · ")].filter(Boolean).join(" ");
+  }
+  return {
+    id,
+    title,
+    tone,
+    headline,
+    detail,
+    suggestion: primary.suggestion,
+    setting: primary.setting,
+    findings: present,
+  };
+}
+
+export function groupDetectionHealth(rows = []) {
+  const byId = Object.fromEntries((rows || []).filter((row) => row?.id).map((row) => [row.id, row]));
+  const waste = byId["double-check"];
+  return [
+    mergeHealthPillar("admission", "Admission", [byId["incident-split"], byId["visual-backup"]]),
+    byId["detector-lane"] ? {
+      ...byId["detector-lane"],
+      id: "engine",
+      title: "Detection engine",
+      findings: [byId["detector-lane"]],
+    } : null,
+    byId.tracking || null,
+    byId.coverage ? {
+      ...byId.coverage,
+      id: "capacity",
+      title: "Visual analysis",
+      findings: [byId.coverage],
+    } : null,
+    waste && (waste.tone === OCCUPANCY_TONES.warning || waste.tone === OCCUPANCY_TONES.bad)
+      ? { ...waste, id: "waste", title: "Extra detector checks", findings: [waste] }
+      : null,
+  ].filter(Boolean);
+}
+
+export function occupancyReportSummary(items = []) {
+  const engine = items.find((item) => item.id === "engine" || item.id === "detector-lane");
+  const attention = items.filter((item) => (
+    item.tone === OCCUPANCY_TONES.warning || item.tone === OCCUPANCY_TONES.bad
+  ));
+  if (engine?.tone === OCCUPANCY_TONES.idle && !attention.length) {
+    return {
+      headline: engine.headline,
+      detail: engine.detail,
+    };
+  }
   if (!attention.length) {
+    const names = SUMMARY_PILLAR_ORDER
+      .map((id) => items.find((item) => item.id === id))
+      .filter((item) => item && item.tone !== OCCUPANCY_TONES.idle)
+      .map((item) => PILLAR_VOICE[item.id] || String(item.title || "").toLowerCase())
+      .filter(Boolean);
     return {
       headline: "Detection looks healthy",
-      detail: engine?.headline
-        || "Live detection, visual backup, and extra checks are in a good range.",
+      detail: names.length
+        ? `${joinHealthNames(names)} ${names.length === 1 ? "is" : "are"} in a good range.`
+        : "Live detection, visual backup, and extra checks are in a good range.",
     };
   }
   return {
-    headline: tone === OCCUPANCY_TONES.bad ? "Detection needs attention" : "Detection needs a look",
-    detail: attention.map((row) => row.headline).slice(0, 3).join(" · "),
+    headline: worstOccupancyTone(attention.map((item) => item.tone)) === OCCUPANCY_TONES.bad
+      ? "Detection needs attention"
+      : "Detection needs a look",
+    detail: attention.map((item) => item.headline).slice(0, 3).join(" · "),
   };
 }
 
@@ -765,6 +941,7 @@ export function buildOccupancyReport({
   detectorHealth = null,
   includeDetectorHealth = true,
 } = {}) {
+  const trackingOn = detectorHealth?.trackingEnabled ?? trackingEnabled;
   const rows = [
     emaCoverageVerdict({
       coveragePercent: coverage?.coveragePercent,
@@ -796,6 +973,7 @@ export function buildOccupancyReport({
       configuredWorkerCount,
       runningWorkerCount,
       backend,
+      includeTracking: false,
       ...(detectorHealth ? {
         trackingEnabled: detectorHealth.trackingEnabled,
         workerCount: detectorHealth.running,
@@ -818,10 +996,35 @@ export function buildOccupancyReport({
       } : {}),
     }));
   }
-  rows.push(incidentEligibilityRow({ requireZone }));
+  const trackingRow = includeDetectorHealth && trackingOn
+    ? trackingHealthVerdict({
+      trackingEnabled: trackingOn,
+      workerCount,
+      configuredWorkerCount,
+      runningWorkerCount,
+      backend,
+      ...(detectorHealth ? {
+        workerCount: detectorHealth.running,
+        configuredWorkerCount: detectorHealth.configured,
+        runningWorkerCount: detectorHealth.running,
+        backend: detectorHealth.backend,
+        trackingSkipped: detectorHealth.trackingSkipped,
+        trackingAttempts: detectorHealth.trackingAttempts,
+        trackingWaited: detectorHealth.trackingWaited,
+      } : {}),
+    })
+    : null;
+  const eligibility = incidentEligibilityRow({ requireZone });
+  rows.push(eligibility);
+  const pillars = groupDetectionHealth([
+    ...rows,
+    trackingRow,
+  ].filter(Boolean));
   return {
-    tone: worstOccupancyTone(rows.map((row) => row.tone)),
+    tone: worstOccupancyTone(pillars.map((pillar) => pillar.tone)),
     rows,
-    summary: occupancyReportSummary(rows),
+    pillars,
+    context: eligibility.headline,
+    summary: occupancyReportSummary(pillars),
   };
 }

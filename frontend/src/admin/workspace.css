@@ -668,12 +668,19 @@
   display: block;
   margin-top: 2px;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .settings-grid .occupancy-row-grid {
   padding: 0;
+}
+
+.settings-grid .occupancy-context {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 @media (max-width: 900px) {
