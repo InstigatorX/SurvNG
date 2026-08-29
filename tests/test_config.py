@@ -18,6 +18,7 @@ from survng.app.config import (
     DetectionZone,
     MqttConfig,
     ObjectTrackingConfig,
+    MotionQualificationConfig,
     load_config,
     normalize_config,
     save_config,
@@ -215,6 +216,7 @@ class AppConfigTest(unittest.TestCase):
 
         self.assertEqual(config.motion_qualification.frame_width, 320)
         self.assertEqual(config.motion_qualification.mode, "camera_rescue")
+        self.assertEqual(config.motion_qualification.max_concurrent_analysis, 2)
         self.assertEqual(config.motion_qualification.stationary_object_tolerance, "balanced")
         self.assertEqual(config.motion_qualification.camera_mode_background_fps, 2.0)
         self.assertEqual(config.motion_qualification.visual_backup_warmup_seconds, 10.0)
@@ -273,6 +275,13 @@ class AppConfigTest(unittest.TestCase):
         self.assertIsNone(
             config.cameras[0].motion_qualification.pipeline.qualification
         )
+
+    def test_motion_analysis_capacity_defaults_and_bounds(self) -> None:
+        self.assertEqual(MotionQualificationConfig().max_concurrent_analysis, 2)
+        with self.assertRaises(ValidationError):
+            MotionQualificationConfig(max_concurrent_analysis=0)
+        with self.assertRaises(ValidationError):
+            MotionQualificationConfig(max_concurrent_analysis=17)
 
     def test_camera_incident_zone_policy_can_override_global_default(self) -> None:
         config = AppConfig.model_validate({

@@ -180,6 +180,38 @@ class FairMotionAnalysisLimiterTest(unittest.TestCase):
 
         self.assertEqual(limiter.status(), {"capacity": 2, "active": 0, "pending": 0})
 
+    def test_set_capacity_raises_ceiling_and_wakes_waiters(self) -> None:
+        limiter = FairMotionAnalysisLimiter(1)
+        active = threading.Event()
+        granted = threading.Event()
+        release = threading.Event()
+
+        def holder() -> None:
+            with limiter.acquire("gate"):
+                active.set()
+                release.wait(timeout=1)
+
+        def waiter() -> None:
+            active.wait(timeout=1)
+            with limiter.acquire("foyer"):
+                granted.set()
+
+        holding = threading.Thread(target=holder)
+        waiting = threading.Thread(target=waiter)
+        holding.start()
+        waiting.start()
+        self.assertTrue(active.wait(timeout=1))
+        deadline = time.monotonic() + 1
+        while limiter.status()["pending"] != 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        limiter.set_capacity(2)
+        self.assertTrue(granted.wait(timeout=1))
+        self.assertEqual(limiter.status()["capacity"], 2)
+        self.assertEqual(limiter.status()["active"], 2)
+        release.set()
+        holding.join(timeout=1)
+        waiting.join(timeout=1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,7 +187,8 @@ the selected pluggable preprocessor changes.
 
 Each camera's lightweight preprocessing worker continues filling its temporal
 ring at the configured sample rate even when expensive qualification is busy.
-Only qualification competes for the fleet-wide fair two-camera limit. A camera
+Only qualification competes for the fleet-wide fair analysis limit
+(`motion_qualification.max_concurrent_analysis`, default 2). A camera
 that cannot immediately obtain a slot retains one fair pending request and
 keeps ingesting newer temporal samples. Slot release wakes the next fair camera
 without polling or blocking preprocessing; its grant evaluates the latest
@@ -450,10 +451,12 @@ latest live frame and marks that source in event metadata.
 
 When the selected event frame contains an incident-eligible object and
 `detector.tracking.enabled` is true, SurvNG starts a bounded per-camera
-tracking session. The existing OpenVINO detector remains responsible for
-frame-level boxes, classes, and confidence. A separate ByteTrack-style
-tracking-by-detection stage associates those boxes over time and assigns
-camera-local track IDs.
+tracking session **after recorded refinement has finished** (or after live
+evidence if refinement cannot run). Tracking is identification and cover
+enrichment; it does not admit the incident. The existing OpenVINO detector
+remains responsible for frame-level boxes, classes, and confidence. A
+separate ByteTrack-style tracking-by-detection stage associates those boxes
+over time and assigns camera-local track IDs.
 
 The initial incident-eligible detections are confirmed immediately, including
 per-camera detections admitted by a threshold lower than the global default.
@@ -499,11 +502,12 @@ private APIs SurvNG uses. Ultralytics is distributed under AGPL-3.0;
 deployments that redistribute SurvNG with this optional dependency should
 review the applicable license terms.
 
-Tracking runs only after an eligible object is found. It samples the main
-camera source at `sample_fps`, and `max_active_cameras` bounds simultaneous
-sessions so a burst of camera activity cannot create unbounded inference and
-decode load. Track summaries, trajectories, zones, observation counts, and
-first/last-seen timestamps are stored with the originating incident.
+Tracking runs only after an eligible object is found and recorded confirmation
+has completed (or been dropped). It samples the main camera source at
+`sample_fps`, and `max_active_cameras` bounds simultaneous sessions so a burst
+of camera activity cannot create unbounded inference and decode load. Track
+summaries, trajectories, zones, observation counts, and first/last-seen
+timestamps are stored with the originating incident.
 `max_tracks_per_session` additionally bounds association work and persisted
 metadata if a detector produces an abnormal number of boxes.
 

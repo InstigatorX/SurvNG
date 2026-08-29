@@ -87,7 +87,7 @@ Object confidence and confirmation are separate from activity. They establish th
 
 ## CPU and queue behavior
 
-Only enabled visual processors consume analysis time. Camera + EMA backup and EMA-only modes continuously run EMA qualification. A shared semaphore permits no more than two cameras to execute visual analysis at the same instant. Cameras waiting for a slot retain recent frames, while their bounded latest-frame mailboxes replace stale pending requests with the newest request.
+Only enabled visual processors consume analysis time. Camera + EMA backup and EMA-only modes continuously run EMA qualification. A shared fair limiter permits `motion_qualification.max_concurrent_analysis` cameras (default 2) to execute visual analysis at the same instant. Raise that ceiling on a larger NVR if backup coverage is falling behind. Cameras waiting for a slot retain recent frames, while their bounded latest-frame mailboxes replace stale pending requests with the newest request.
 
 ## Episode admission
 

@@ -255,9 +255,9 @@ restart and is retried according to its lease/attempt policy. Cover promotion,
 face enrichment, and tracking presentation are optional enrichment: their
 failure cannot discard or downgrade admitted evidence.
 
-Strong provisional evidence may start tracking immediately. Handoff is
-idempotent per event, so later refinement cannot start a duplicate tracking
-session.
+Tracking starts after recorded confirmation finishes, or immediately from live
+evidence when refinement cannot run. Handoff is idempotent per event, so later
+refinement cannot start a duplicate tracking session.
 
 ## Operator-visible diagnostics
 

@@ -322,6 +322,7 @@ class MotionQualificationConfig(BaseModel):
     window_seconds: float = Field(default=1.6, ge=0.8, le=4.0)
     post_trigger_seconds: float = Field(default=2.5, ge=0.5, le=6.0)
     burst_quiet_seconds: float = Field(default=0.5, ge=0.1, le=2.0)
+    max_concurrent_analysis: int = Field(default=2, ge=1, le=16)
     rejected_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     suppression_verification_rate: float = Field(default=0.05, ge=0.0, le=1.0)
     borderline_rescue_enabled: bool = True
@@ -709,7 +710,7 @@ class ObjectTrackingConfig(BaseModel):
 class DetectorConfig(BaseModel):
     enabled: bool = False
     backend: Literal["openvino", "coreml"] = "openvino"
-    object_worker_count: int = Field(default=1, ge=1, le=4)
+    object_worker_count: int = Field(default=2, ge=1, le=4)
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
     recorded_adaptive_sampling: bool = True
     recorded_decode_max_processes: int = Field(default=2, ge=1, le=16)
@@ -879,6 +880,32 @@ class DetectorConfig(BaseModel):
                 raise ValueError("event class confidence thresholds must be between 0.01 and 0.99")
             normalized[label] = threshold
         return normalized
+
+    @model_validator(mode="after")
+    def ensure_tracking_protected_incident_lane(self) -> "DetectorConfig":
+        """Keep a dedicated object worker when tracking shares the accelerator.
+
+        Tracking reuses the object detector. With one worker, an in-flight
+        tracking frame can occupy the only lane long enough for a new live
+        incident check to miss its admission window. A second OpenVINO worker
+        is the protected incident lane already assumed by the supervisor.
+        The stored default is therefore 2 whenever tracking is enabled.
+        """
+        if (
+            self.backend == "openvino"
+            and self.tracking.enabled
+            and self.object_worker_count < 2
+        ):
+            self.object_worker_count = 2
+        return self
+
+    def effective_object_worker_count(self) -> int:
+        """Worker processes actually spawned for object inference."""
+        if self.backend != "openvino":
+            return 1
+        if self.tracking.enabled:
+            return max(int(self.object_worker_count), 2)
+        return int(self.object_worker_count)
 
     def resolved_model_path(self) -> str:
         return self.model_path or self.model_xml

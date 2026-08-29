@@ -95,6 +95,56 @@ def test_process_prewarms_and_seeds_tracking_from_persisted_snapshot() -> None:
     decision.handle.assert_called_once()
 
 
+def test_provisional_object_defers_tracking_until_refinement_completes() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="initial.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="refined.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+    )
+    service, decision, tracking, _prewarm, image_reader = _service(initial)
+    image_reader.return_value = np.ones((20, 20, 3), dtype=np.uint8)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def refine(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(1.0)
+        return refined
+
+    decision.refine.side_effect = refine
+    tracking.start.return_value = True
+    stop = threading.Event()
+    service.start(stop)
+    event_at = datetime.now(timezone.utc)
+
+    service.process("motion", "person", event_at, {})
+    assert entered.wait(1.0)
+    tracking.start.assert_not_called()
+
+    release.set()
+    for _ in range(100):
+        if service.status()["refinements_completed"]:
+            break
+        threading.Event().wait(0.01)
+    tracking.start.assert_called_once()
+    assert tracking.start.call_args.args[:3] == (
+        42,
+        event_at,
+        [{"label": "person", "incident_eligible": True}],
+    )
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+
 def test_initial_detection_completes_before_tracking_prewarm() -> None:
     outcome = MotionDecisionOutcome(
         event_id=42,
@@ -473,9 +523,9 @@ def test_coalesced_refinement_does_not_duplicate_initial_tracking_handoff() -> N
     service.process("motion", "first", event_at, qualification)
     assert entered.wait(1.0)
     service.process("motion", "first", event_at, qualification)
-    # Strong provisional evidence starts tracking immediately; the duplicate
-    # and later refinement must not start a second session.
-    tracking.start.assert_called_once()
+    # Recorded confirmation still owns tracking. A duplicate live notice must
+    # not start a session while refinement is in flight.
+    tracking.start.assert_not_called()
 
     release.set()
     for _ in range(100):
