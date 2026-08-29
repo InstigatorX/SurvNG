@@ -195,6 +195,7 @@ class FairMotionAnalysisLimiterTest(unittest.TestCase):
             active.wait(timeout=1)
             with limiter.acquire("foyer"):
                 granted.set()
+                release.wait(timeout=1)
 
         holding = threading.Thread(target=holder)
         waiting = threading.Thread(target=waiter)
