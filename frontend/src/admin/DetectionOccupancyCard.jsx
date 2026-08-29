@@ -4,13 +4,16 @@ import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { fetch } from "../shared/api.js";
 import {
   OCCUPANCY_TONES,
+  backupCorrelation,
   buildOccupancyReport,
   cameraEffectiveness,
+  cameraOnvifHealthy,
   coverageFromCameraMotion,
   coverageFromRuntimeHistory,
   occupancyToneLabel,
   resolveDetectorHealth,
   siteEffectiveness,
+  siteOnvifHealthy,
 } from "../detectionOccupancy.mjs";
 
 const TONE_ICONS = {
@@ -39,10 +42,11 @@ function cameraRequiresZone(config, camera) {
   return config?.detector?.require_incident_zone !== false;
 }
 
-function cameraOnvifHealthy(camera) {
-  if (camera?.onvif?.enabled === false) return false;
-  if (camera?.onvif && camera.onvif.connected === false) return false;
-  return true;
+function backupGraceSeconds(config, camera) {
+  const inherited = Number(config?.motion_qualification?.visual_backup_grace_seconds);
+  const override = camera?.motion_qualification?.visual_backup_grace_seconds;
+  const value = override == null || override === "" ? inherited : Number(override);
+  return Number.isFinite(value) && value >= 0 ? value : 1.5;
 }
 
 function OccupancyRow({ row, onOpenSetting, compact = false }) {
@@ -133,14 +137,16 @@ export function DetectionOccupancyCard({
   const backend = detectorHealth.backend || config?.detector?.backend || "openvino";
   const backupEnabled = (config?.motion_qualification?.mode || "camera_rescue") === "camera_rescue"
     || (config?.motion_qualification?.mode || "") === "adaptive";
-  const siteOnvifHealthy = cameras.length
-    ? cameras.every((camera) => cameraOnvifHealthy(camera))
-    : true;
+  const selectedConfigCamera = selected
+    ? configCameras.find((camera) => camera.id === selected.id)
+    : null;
+  const correlation = backupCorrelation(selected ? [selected] : cameras);
+  const graceSeconds = backupGraceSeconds(config, selectedConfigCamera);
 
   const siteReport = buildOccupancyReport({
     coverage: selected ? coverageFromCameraMotion(selected) : siteCoverage,
     effectiveness: selected
-      ? cameraEffectiveness(byCamera, selected.id, cameraMode(config, configCameras.find((camera) => camera.id === selected.id)))
+      ? cameraEffectiveness(byCamera, selected.id, cameraMode(config, selectedConfigCamera))
       : siteEffectiveness(byCamera, configCameras),
     slotCount,
     trackingEnabled,
@@ -149,12 +155,15 @@ export function DetectionOccupancyCard({
     runningWorkerCount,
     backend,
     requireZone: selected
-      ? cameraRequiresZone(config, configCameras.find((camera) => camera.id === selected.id) || selected)
+      ? cameraRequiresZone(config, selectedConfigCamera || selected)
       : config?.detector?.require_incident_zone !== false,
     backupEnabled: selected
-      ? ["camera_rescue", "adaptive"].includes(cameraMode(config, configCameras.find((camera) => camera.id === selected.id)))
+      ? ["camera_rescue", "adaptive"].includes(cameraMode(config, selectedConfigCamera))
       : backupEnabled,
-    onvifHealthy: selected ? cameraOnvifHealthy(selected) : siteOnvifHealthy,
+    onvifHealthy: selected ? cameraOnvifHealthy(selected) !== false : siteOnvifHealthy(cameras),
+    backupMatchedNotices: correlation.matches,
+    backupWithoutNotices: correlation.without,
+    backupGraceSeconds: graceSeconds,
     detectorHealth,
     includeDetectorHealth: true,
   });
@@ -172,7 +181,10 @@ export function DetectionOccupancyCard({
       backend,
       requireZone: cameraRequiresZone(config, configCamera || camera),
       backupEnabled: ["camera_rescue", "adaptive"].includes(cameraMode(config, configCamera)),
-      onvifHealthy: cameraOnvifHealthy(camera),
+      onvifHealthy: cameraOnvifHealthy(camera) !== false,
+      backupMatchedNotices: backupCorrelation([camera]).matches,
+      backupWithoutNotices: backupCorrelation([camera]).without,
+      backupGraceSeconds: backupGraceSeconds(config, configCamera),
       includeDetectorHealth: false,
     });
     return { camera, report };
