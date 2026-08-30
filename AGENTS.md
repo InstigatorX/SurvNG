@@ -169,6 +169,28 @@ agent rediscover everything:
 
 ## SurvNG protocol rules
 
+### Host-local runtime observability
+
+For questions about the **currently running** SurvNG process, prefer the
+owner-only Unix-socket snapshot over saved configuration files, databases, or
+unauthenticated HTTP requests:
+
+```bash
+./survngctl status
+```
+
+- The default socket is `/run/survng/observability.sock`; it is created after
+  SurvNG starts and is accessible only to the service owner or root.
+- It returns allowlisted in-memory state: effective tracking settings and
+  capacity, camera health, detector state, and storage status.
+- Treat it as read-only operational evidence. It intentionally excludes
+  passwords, API tokens, private keys, stream URLs, raw errors, and all
+  mutation commands.
+- Do not work around missing access by extracting browser cookies, asking for
+  secrets in chat, or disabling API security. If the socket is absent, report
+  that the running service has not loaded this feature (usually it needs a
+  restart) and use safe persisted evidence only when appropriate.
+
 ### ONVIF
 
 When debugging ONVIF:

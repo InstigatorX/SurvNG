@@ -56,6 +56,7 @@ from .onvif_inspector_routes import create_onvif_inspector_router
 from .manager import AppManager, validate_manager_configuration
 from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
+from .local_observability import LocalObservabilityServer, build_runtime_status
 from .media_exports import MediaExportManager
 from .model_evaluation import ModelEvaluationRunner
 from .incident_queries import (
@@ -837,6 +838,7 @@ async def lifespan(app: FastAPI):
     early_onvif_lock = threading.Lock()
     media_exports: MediaExportManager | None = None
     calibration_monitor_task: asyncio.Task | None = None
+    local_observability: LocalObservabilityServer | None = None
 
     def release_onvif_before_server_drain() -> None:
         nonlocal early_onvif_thread
@@ -884,11 +886,34 @@ async def lifespan(app: FastAPI):
             _intelligence_route_bundle.service._calibration_followup_monitor(),
             name="survng-calibration-followup-monitor",
         )
+
+        def local_runtime_status() -> dict:
+            with MANAGER_ACCESS.lease(MANAGER_RELOAD_LOCK, get_manager) as active:
+                return build_runtime_status(
+                    active.config,
+                    active,
+                    instance_id=PROCESS_INSTANCE_ID,
+                    uptime_seconds=(
+                        time.monotonic() - SYSTEM_TELEMETRY.process_started_monotonic
+                    ),
+                    stopping=APPLICATION_STOPPING.is_set(),
+                    log_rows=tuple(LOG_LINES),
+                )
+
+        local_observability = LocalObservabilityServer(local_runtime_status)
+        await local_observability.start()
         _record_process_lifecycle("startup_ready")
         yield
     finally:
         _record_process_lifecycle("shutdown_requested")
         APPLICATION_STOPPING.set()
+        if local_observability is not None:
+            try:
+                await local_observability.stop()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "local observability shutdown was incomplete"
+                )
         if calibration_monitor_task is not None:
             calibration_monitor_task.cancel()
             try:

@@ -46,6 +46,27 @@ Admin is grouped into practical jobs.
 
 Some settings apply immediately. Others restart camera workers or heavier services. SurvNG tells you when a change needs a broader reload. Technical detail: [Configuration application boundaries](../configuration-application.md).
 
+## Host-local runtime status
+
+For host-side troubleshooting, SurvNG exposes a read-only runtime snapshot over
+an owner-only Unix socket. It is not an HTTP endpoint and does not expose
+passwords, API tokens, private keys, stream URLs, or raw errors.
+
+After the service starts, run this on the SurvNG host:
+
+```bash
+./survngctl status
+```
+
+The snapshot includes effective tracking limits and current capacity, camera
+health, detector activity, storage status, and a recent in-memory log tail.
+The log tail contains only timestamp, level, logger, and message fields; it is
+size-limited, credential-redacted, and has URLs removed. Tracebacks and
+structured logging extras are not exposed. The default socket is
+`/run/survng/observability.sock`; it is accessible only to the SurvNG service
+owner (or root). Use `--observability-socket /absolute/path.sock` when starting
+SurvNG if your service needs a different runtime directory.
+
 ## Depth estimation
 
 **Detection → Depth Estimation** configures optional monocular depth enrichment

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 import uvicorn
 
 from .config import load_config
+from .local_observability import SOCKET_ENVIRONMENT_VARIABLE, default_socket_path
 from .tls import uvicorn_tls_kwargs
 
 
@@ -17,7 +19,13 @@ def main() -> None:
     parser.add_argument("--reload", action="store_true")
     parser.add_argument("--loop", default="asyncio")
     parser.add_argument("--timeout-graceful-shutdown", type=float, default=30.0)
+    parser.add_argument(
+        "--observability-socket",
+        default=str(default_socket_path()),
+        help="owner-only Unix socket used by survngctl status",
+    )
     args = parser.parse_args()
+    os.environ[SOCKET_ENVIRONMENT_VARIABLE] = args.observability_socket
     config = load_config()
     tls = uvicorn_tls_kwargs(config, args.port)
     kwargs = {
