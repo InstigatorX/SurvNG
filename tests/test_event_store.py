@@ -1819,6 +1819,30 @@ class EventStoreTest(unittest.TestCase):
             self.assertNotIn("message", rows[0])
             self.assertTrue(rows[0]["snapshot_path"])
 
+    def test_between_compact_caps_the_window_and_reports_truncation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            for index in range(8):
+                store.add_event(
+                    camera_id="back-middle",
+                    kind="motion",
+                    created_at=f"2026-07-15T12:00:{index:02d}+00:00",
+                )
+
+            with patch.object(EventStore, "MAX_COMPACT_WINDOW_ROWS", 5):
+                with self.assertLogs(
+                    "survng.app.event_store.store", level="WARNING"
+                ) as logs:
+                    rows = store.between_compact(
+                        "2026-07-15T12:00:00+00:00",
+                        "2026-07-15T12:01:00+00:00",
+                    )
+
+            self.assertEqual(len(rows), 5)
+            self.assertEqual(rows[0]["created_at"], "2026-07-15T12:00:07+00:00")
+            self.assertEqual(rows[-1]["created_at"], "2026-07-15T12:00:03+00:00")
+            self.assertIn("oldest events", logs.output[0])
+
     def test_page_between_uses_stable_cursor_and_camera_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
