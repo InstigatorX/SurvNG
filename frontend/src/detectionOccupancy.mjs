@@ -98,6 +98,7 @@ export function coverageFromRuntimeHistory(history) {
     analyzed: totals.analyzed,
     staleSkipped: totals.superseded,
     coveragePercent: sampled ? (totals.analyzed / sampled) * 100 : null,
+    windowLabel: "last 2 hours",
   };
 }
 
@@ -111,8 +112,37 @@ export function coverageFromCameraMotion(camera) {
     staleSkipped,
     deferred: asCount(analysis.analysis_slot_deferrals),
     captureToAnalysisP95Ms: Number(analysis.capture_to_analysis_p95_ms || 0) || 0,
+    analysisWaitP95Ms: Number(camera?.motion?.analysis_wait_ms_p95 || 0) || 0,
     coveragePercent: sampled ? (analyzed / sampled) * 100 : null,
+    windowLabel: "since restart",
   };
+}
+
+const HIGH_ANALYSIS_WAIT_MS = 250;
+const BAD_ANALYSIS_WAIT_MS = 1000;
+
+function asWaitMs(value) {
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms > 0 ? ms : 0;
+}
+
+function staleReplacementNote(staleSkipped) {
+  const count = asCount(staleSkipped);
+  if (!count) return "";
+  if (count === 1) return " 1 older frame was replaced so analysis stayed current.";
+  return ` ${count.toLocaleString()} older frames were replaced so analysis stayed current.`;
+}
+
+function slotWaitNote(deferred, waitP95Ms) {
+  const count = asCount(deferred);
+  const wait = asWaitMs(waitP95Ms);
+  const waitBit = wait ? ` Current slot wait p95 is ${Math.round(wait)} ms.` : "";
+  if (!count) {
+    return wait
+      ? `Cameras are not queued for an analysis slot.${waitBit}`
+      : "Cameras are not waiting for a free analysis slot.";
+  }
+  return `${count.toLocaleString()} times a camera waited for a free analysis slot since restart.${waitBit}`;
 }
 
 export function emaCoverageVerdict({
@@ -120,6 +150,9 @@ export function emaCoverageVerdict({
   deferred = 0,
   staleSkipped = 0,
   slotCount = 2,
+  analysisWaitP95Ms = 0,
+  captureToAnalysisP95Ms = 0,
+  windowLabel = "",
 } = {}) {
   const slots = Math.max(1, asCount(slotCount) || 2);
   const nextSlots = Math.min(16, slots + 1);
@@ -140,35 +173,65 @@ export function emaCoverageVerdict({
     };
   }
   const coverage = `${Number(coveragePercent).toFixed(coveragePercent >= 99.95 ? 2 : 1)}%`;
-  const waitNote = deferred
-    ? `${asCount(deferred).toLocaleString()} times a camera waited for a free analysis slot.`
-    : "Cameras are not waiting for a free analysis slot.";
-  const staleNote = staleSkipped
-    ? ` ${asCount(staleSkipped).toLocaleString()} older frames were replaced so analysis stayed current.`
-    : "";
-  if (coveragePercent >= 95 && !deferred) {
-    return {
-      id: "coverage",
-      title: "Visual analysis capacity",
-      tone: OCCUPANCY_TONES.good,
-      headline: `${coverage} of visual samples were analyzed`,
-      detail: `${waitNote}${staleNote}`,
-      suggestion: `Leave Simultaneous EMA cameras at ${slots}.`,
-      setting,
-    };
-  }
+  const sampleWindow = windowLabel === "last 2 hours"
+    ? " in the last 2 hours"
+    : windowLabel === "since restart"
+      ? " since restart"
+      : "";
+  const waitP95 = Math.max(asWaitMs(analysisWaitP95Ms), asWaitMs(captureToAnalysisP95Ms));
+  const waitingNow = waitP95 >= HIGH_ANALYSIS_WAIT_MS;
+  const waitingBadly = waitP95 >= BAD_ANALYSIS_WAIT_MS;
+  const queued = asCount(deferred) > 0;
+  const waitNote = slotWaitNote(deferred, waitP95);
+  const staleNote = staleReplacementNote(staleSkipped);
+  const keptCurrent = `${coverage} of visual samples${sampleWindow} were analyzed`;
   if (coveragePercent >= 98) {
+    if (waitingBadly) {
+      return {
+        id: "coverage",
+        title: "Visual analysis capacity",
+        tone: OCCUPANCY_TONES.warning,
+        headline: `Cameras are waiting for analysis slots (${coverage} still analyzed)`,
+        detail: `${waitNote}${staleNote} Samples are still getting through, so this is queue time, not dropped analysis.`,
+        suggestion: `If this wait stays high, raise Simultaneous EMA cameras from ${slots} to ${nextSlots}.`,
+        setting,
+      };
+    }
+    if (waitingNow) {
+      return {
+        id: "coverage",
+        title: "Visual analysis capacity",
+        tone: OCCUPANCY_TONES.warning,
+        headline: `Analysis is keeping up, but cameras are waiting (${coverage})`,
+        detail: `${waitNote}${staleNote} Full coverage means those waits did not drop samples.`,
+        suggestion: `Leave Simultaneous EMA cameras at ${slots} unless this wait stays high.`,
+        setting,
+      };
+    }
     return {
       id: "coverage",
       title: "Visual analysis capacity",
       tone: OCCUPANCY_TONES.good,
-      headline: `${coverage} of visual samples were analyzed`,
+      headline: keptCurrent,
+      detail: queued
+        ? `${waitNote}${staleNote} Those waits still got a slot before the frame went stale, so samples were not dropped.`
+        : `${waitNote}${staleNote}`,
+      suggestion: `Leave Simultaneous EMA cameras at ${slots}.`,
+      setting,
+    };
+  }
+  if (coveragePercent >= 95 && !queued && !waitingNow) {
+    return {
+      id: "coverage",
+      title: "Visual analysis capacity",
+      tone: OCCUPANCY_TONES.good,
+      headline: keptCurrent,
       detail: `${waitNote}${staleNote}`,
       suggestion: `Leave Simultaneous EMA cameras at ${slots}.`,
       setting,
     };
   }
-  if (deferred && coveragePercent < 80) {
+  if ((queued || waitingNow) && coveragePercent < 80) {
     return {
       id: "coverage",
       title: "Visual analysis capacity",
@@ -179,7 +242,7 @@ export function emaCoverageVerdict({
       setting,
     };
   }
-  if (deferred && coveragePercent < 95) {
+  if ((queued || waitingNow) && coveragePercent < 95) {
     return {
       id: "coverage",
       title: "Visual analysis capacity",
@@ -1001,6 +1064,9 @@ export function buildOccupancyReport({
       deferred: coverage?.deferred,
       staleSkipped: coverage?.staleSkipped,
       slotCount,
+      analysisWaitP95Ms: coverage?.analysisWaitP95Ms,
+      captureToAnalysisP95Ms: coverage?.captureToAnalysisP95Ms,
+      windowLabel: coverage?.windowLabel,
     }),
     incidentSplitVerdict({
       cameraObjects: effectiveness?.camera_object_events,

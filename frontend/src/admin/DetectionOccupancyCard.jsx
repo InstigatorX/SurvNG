@@ -123,9 +123,12 @@ export function DetectionOccupancyCard({
   }, 60000, true, { restartKey: String(cameraId || "") });
 
   const coverageHistory = coverageFromRuntimeHistory(telemetry?.runtime_history?.short || []);
+  const liveCoverage = cameras.map((camera) => coverageFromCameraMotion(camera));
   const siteCoverage = {
     ...coverageHistory,
-    deferred: cameras.reduce((total, camera) => total + coverageFromCameraMotion(camera).deferred, 0),
+    deferred: liveCoverage.reduce((total, item) => total + item.deferred, 0),
+    analysisWaitP95Ms: liveCoverage.reduce((max, item) => Math.max(max, item.analysisWaitP95Ms || 0), 0),
+    captureToAnalysisP95Ms: liveCoverage.reduce((max, item) => Math.max(max, item.captureToAnalysisP95Ms || 0), 0),
   };
 
   const byCamera = effectiveness?.by_camera || {};

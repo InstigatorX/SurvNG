@@ -62,6 +62,42 @@ const streamIssue = emaCoverageVerdict({
 assert.equal(streamIssue.tone, OCCUPANCY_TONES.warning);
 assert.match(streamIssue.suggestion, /Do not raise Simultaneous EMA cameras/);
 
+const keptUpAfterWaits = emaCoverageVerdict({
+  coveragePercent: 100,
+  deferred: 4362,
+  staleSkipped: 1,
+  slotCount: 2,
+  windowLabel: "last 2 hours",
+});
+assert.equal(keptUpAfterWaits.tone, OCCUPANCY_TONES.good);
+assert.match(keptUpAfterWaits.headline, /100\.00% of visual samples in the last 2 hours/);
+assert.match(keptUpAfterWaits.detail, /4,362 times/);
+assert.match(keptUpAfterWaits.detail, /since restart/);
+assert.match(keptUpAfterWaits.detail, /1 older frame was replaced/);
+assert.match(keptUpAfterWaits.detail, /were not dropped/);
+assert.match(keptUpAfterWaits.suggestion, /Leave Simultaneous EMA cameras at 2/);
+
+const waitingNowButCovered = emaCoverageVerdict({
+  coveragePercent: 100,
+  deferred: 4362,
+  staleSkipped: 1,
+  slotCount: 2,
+  analysisWaitP95Ms: 400,
+});
+assert.equal(waitingNowButCovered.tone, OCCUPANCY_TONES.warning);
+assert.match(waitingNowButCovered.headline, /keeping up/);
+assert.match(waitingNowButCovered.suggestion, /Leave Simultaneous EMA cameras at 2 unless/);
+
+const longWaitCovered = emaCoverageVerdict({
+  coveragePercent: 100,
+  deferred: 4362,
+  staleSkipped: 1,
+  slotCount: 2,
+  analysisWaitP95Ms: 1200,
+});
+assert.equal(longWaitCovered.tone, OCCUPANCY_TONES.warning);
+assert.match(longWaitCovered.suggestion, /raise Simultaneous EMA cameras from 2 to 3/);
+
 assert.equal(doubleCheckVerdict({}).tone, OCCUPANCY_TONES.good);
 assert.match(doubleCheckVerdict({}).suggestion, /Leave Double-check filtered motion/);
 assert.equal(doubleCheckVerdict({ checks: 8, rescues: 2 }).tone, OCCUPANCY_TONES.good);
@@ -252,15 +288,18 @@ const history = coverageFromRuntimeHistory([
 ]);
 assert.equal(history.coveragePercent, 95);
 assert.equal(history.staleSkipped, 10);
+assert.equal(history.windowLabel, "last 2 hours");
 
 const live = coverageFromCameraMotion({
   motion: {
     analysis_frames_dropped: 4,
+    analysis_wait_ms_p95: 80,
     analysis_runtime: { frames_sampled: 16, analysis_slot_deferrals: 3, capture_to_analysis_p95_ms: 40 },
   },
 });
 assert.equal(live.coveragePercent, 80);
 assert.equal(live.deferred, 3);
+assert.equal(live.analysisWaitP95Ms, 80);
 
 const merged = mergeEffectiveness([
   { object_events: 4, camera_object_events: 3, ema_object_events: 1, suppression_verification_checks: 2 },
