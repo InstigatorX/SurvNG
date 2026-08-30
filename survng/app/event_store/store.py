@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -18,6 +19,8 @@ from .jobs import EventStoreJobsMixin
 from .motion_intelligence import EventStoreMotionIntelligenceMixin
 from .tracking import EventStoreTrackingMixin
 
+LOGGER = logging.getLogger(__name__)
+
 
 class EventStore(
     EventStoreJobsMixin,
@@ -31,6 +34,10 @@ class EventStore(
     COMPACT_COLUMNS = (
         "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at"
     )
+    # Compact rows still carry objects_json, and callers read whole days across
+    # every camera, so an uncapped window can materialize enough of the table to
+    # exhaust the recorder it shares a process with.
+    MAX_COMPACT_WINDOW_ROWS = 50_000
     TRACKING_COMPARISON_HISTORY_PER_CAMERA = 100
     TRACKING_COMPARISON_VERDICTS = {
         "survng_hybrid",
@@ -657,9 +664,21 @@ class EventStore(
                 where created_at >= ? and created_at < ?
                     {"and camera_id = ?" if camera_id else ""}
                 order by created_at desc, id desc
+                limit ?
                 """,
-                (start_at, end_at) + ((camera_id,) if camera_id else ()),
+                (start_at, end_at)
+                + ((camera_id,) if camera_id else ())
+                + (self.MAX_COMPACT_WINDOW_ROWS,),
             ).fetchall()
+        if len(rows) >= self.MAX_COMPACT_WINDOW_ROWS:
+            LOGGER.warning(
+                "event window %s..%s%s reached the %d row cap; the oldest events "
+                "in the window were omitted",
+                start_at,
+                end_at,
+                f" for {camera_id}" if camera_id else "",
+                self.MAX_COMPACT_WINDOW_ROWS,
+            )
         return [dict(row) for row in rows]
 
     def page_between(

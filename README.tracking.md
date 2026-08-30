@@ -58,6 +58,16 @@ The optional Ultralytics installation is substantially larger and has more
 upstream dependencies. SurvNG loads it lazily only when an offline comparison
 starts; routine status checks and production tracking do not load it.
 
+`detector.tracking.sample_fps` is a memory setting as much as an accuracy one.
+Each camera keeps twelve seconds of catch-up history for its main and live
+streams so an unfinalized segment tail can still be walked, so the retained
+frame count scales directly with the sampling rate. At the default 2.0 FPS that
+history is roughly 35 MB per camera for a 1080p stream; at the maximum 5.0 FPS
+it is roughly 85 MB, which raises total per-camera frame memory from around
+55 MB to around 100 MB. The change applies on config reload rather than at
+restart, and it multiplies by camera count, so raise it deliberately on a fleet
+that is already close to its memory limit.
+
 ### Its behavior is directly configurable and observable
 
 Hybrid's association, confirmation, lost-track, appearance-refresh, and
