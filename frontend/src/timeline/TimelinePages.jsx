@@ -62,6 +62,7 @@ import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingMobileWindowUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
+import { DebugDetectionOverlay } from "../shared/evidence.jsx";
 import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
 import { usePollingData } from "../shared/polling.js";
 import { useAppEvents } from "../shared/events.js";
@@ -755,6 +756,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [playbackNotice, setPlaybackNotice] = useState("");
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [heroPlaying, setHeroPlaying] = useState(false);
+  const [heroSeeking, setHeroSeeking] = useState(false);
   const [playbackWindow, setPlaybackWindow] = useState(null);
   const [playbackWindowRevision, setPlaybackWindowRevision] = useState(0);
   const [manifestRetryToken, setManifestRetryToken] = useState(0);
@@ -784,6 +786,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     () => Boolean(initialView.eventId || initialView.trailEventIds?.length),
   );
   const [heroMuted, setHeroMuted] = useState(false);
+  const [aiOverlayEnabled, setAiOverlayEnabled] = useState(false);
   const [followPlayhead, setFollowPlayhead] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(initialView.speed);
   const [timelineViewportAnchor, setTimelineViewportAnchor] = useState(initialView.at);
@@ -836,6 +839,16 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     ? `${recordingMobileWindowUrl(activeCameraId, nativeSegment.start_epoch, source)}&reload=${nativeSegmentRetryToken}`
     : "";
   const hasPlaybackMedia = Boolean(manifestUrl || nativeSegmentUrl);
+  // Keep AI analysis strictly local to an actively playing Timeline video. The
+  // overlay's key resets its temporary tracks when the recording scope changes.
+  const aiOverlayActive = aiOverlayEnabled
+    && !isAllCameras
+    && heroPlaying
+    && !heroSeeking
+    && hasPlaybackMedia
+    && !Number.isFinite(frameSearchEpoch)
+    && !Number.isFinite(pendingSeekEpochRef.current);
+  const aiOverlayKey = `${activeCameraId}:${source}:${playbackDetail?.revision || 0}:${nativeSegmentUrl || manifestUrl}`;
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.muted = heroMuted;
@@ -1235,6 +1248,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
     pendingSeekEpochRef.current = null;
     pendingSeekModeRef.current = null;
+    setHeroSeeking(false);
     setPlaybackNotice("");
     ignorePauseUntilRef.current = performance.now() + ignorePauseAfterSeekMs();
     if (shouldResumePlaybackAfterSeek({ pendingSeekMode: pendingMode, autoplay: autoplayRef.current }) && video.paused) {
@@ -1254,6 +1268,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
     pendingSeekEpochRef.current = null;
     pendingSeekModeRef.current = null;
+    setHeroSeeking(false);
     setPlaybackNotice("");
     ignorePauseUntilRef.current = performance.now() + ignorePauseAfterSeekMs();
     if (autoplayRef.current && video.paused) requestRecordingPlay(video);
@@ -1303,6 +1318,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
     pendingSeekEpochRef.current = null;
     pendingSeekModeRef.current = null;
+    setHeroSeeking(false);
     setPlaybackNotice("");
     if (autoplayRef.current) requestRecordingPlay(video);
   }
@@ -1358,6 +1374,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       desiredEpochRef.current = target;
       return;
     }
+    setHeroSeeking(true);
     autoplayRef.current = autoplay;
     setFollowTarget(null);
     setPlaybackError("");
@@ -1489,6 +1506,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setPlaybackErrorStage("");
     setPlaybackBlocked(false);
     setHeroPlaying(false);
+    setHeroSeeking(false);
     setRecordings([]);
     playbackRequestRef.current += 1;
     setPlaybackDetail(null);
@@ -1857,6 +1875,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!seekRequired) {
       pendingSeekEpochRef.current = null;
       pendingSeekModeRef.current = null;
+      setHeroSeeking(false);
       setPlaybackNotice("");
     }
     setPlaybackError("");
@@ -2077,6 +2096,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   function handleRecordingError(error) {
     const detail = describePlaybackError(error);
+    setHeroSeeking(true);
     console.warn("Recording playback error", { camera: activeCameraId, source, detail, error });
     if (source === "main" && availableSources.includes("live") && !codecFallbackRef.current && isUnsupportedPlaybackError(error)) {
       codecFallbackRef.current = true;
@@ -2331,6 +2351,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
             />
           ) : null}
+          <DebugDetectionOverlay
+            key={aiOverlayKey}
+            videoRef={videoRef}
+            active={aiOverlayActive}
+            confidence={0.35}
+          />
           {Number.isFinite(frameSearchEpoch) ? (
             <div className="recording-frame-search-overlay">
               <div
@@ -2406,6 +2432,15 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 aria-pressed={heroMuted}
               >
                 {heroMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+              </button>
+              <button
+                type="button"
+                className={aiOverlayEnabled ? "active" : ""}
+                aria-pressed={aiOverlayEnabled}
+                onClick={() => setAiOverlayEnabled((current) => !current)}
+                title="Overlay live AI detections while this recording plays"
+              >
+                <Sparkles size={15} />AI
               </button>
               <time>{formatDateTime(playhead, timeZone)}</time>
               <button
