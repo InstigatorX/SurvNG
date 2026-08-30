@@ -5124,6 +5124,18 @@ section.detection-settings-card {
   grid-template-rows: 28px 34px auto;
 }
 
+/* The workspace field height is 38px; keep this card's grid row and controls in sync. */
+.detection-settings-card.primary .detection-field-grid>label:not(.compact-toggle):not(.check-field) {
+  grid-template-rows: 28px var(--admin-field-height, 38px) auto;
+}
+
+.detection-settings-card.primary .detection-field-grid input:not([type="checkbox"]),
+.detection-settings-card.primary .detection-field-grid select {
+  height: var(--admin-field-height, 38px);
+  min-height: var(--admin-field-height, 38px);
+  box-sizing: border-box;
+}
+
 .detection-settings .wide-field,
 .detection-settings-subhead {
   grid-column: 1 / -1;
