@@ -124,6 +124,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(AppConfig().base_path, "/survng")
         self.assertEqual(AppConfig().database_dir, "")
         self.assertEqual(AppConfig().recording_index_dir, "")
+        self.assertEqual(AppConfig().capture_rtsp_transport, "tcp")
         self.assertFalse(AppConfig().incident_thumbnail_annotations)
         self.assertEqual(AppConfig().incident_thumbnail_object_focus, "off")
         self.assertEqual(AppConfig().incident_thumbnail_object_focus_zoom, 1.0)

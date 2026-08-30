@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .camera import CameraWorker
-from .camera_capture import CaptureOpenLimiter, OpenCvFfmpegCaptureBackend
+from .camera_capture import (
+    CaptureOpenLimiter,
+    OpenCvCaptureOptions,
+    OpenCvFfmpegCaptureBackend,
+)
 from .camera_control import CameraControlService
 from .camera_fleet import CameraFleetLifecycle, CameraFleetOperationError
 from .camera_startup import (
@@ -311,7 +315,8 @@ class AppManager:
             CAMERA_STARTUP_MAX_CONCURRENCY
         )
         self.capture_backend = OpenCvFfmpegCaptureBackend(
-            self._capture_open_limiter
+            self._capture_open_limiter,
+            OpenCvCaptureOptions(rtsp_transport=config.capture_rtsp_transport),
         )
         self.state_events = StateEventBroker()
         try:

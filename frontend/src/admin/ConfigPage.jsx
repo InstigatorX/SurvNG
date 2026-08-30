@@ -3801,6 +3801,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const [apiTokenError, setApiTokenError] = useState("");
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
   const setDetectionSection = onDetectionSectionChange || (() => {});
+  const [serverPreferencesSection, setServerPreferencesSection] = useState("general");
   const [storageSection, setStorageSection] = useState("locations");
   const [apiSection, setApiSection] = useState("tokens");
   const mediaLocations = config.media_storage?.locations || [];
@@ -4135,8 +4136,13 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   return (
     <div className={`general-settings-content config-form${section === "detection" ? " detection-settings-content" : ""}${["storage", "access", "mqtt"].includes(section) ? " subsection-settings-content" : ""}`}>
       {section === "general" ? (
+        <>
+        <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Server preferences settings">
+          {[["general", "General", Cog], ["custom", "Custom", Wrench]].map(([value, label, Icon]) => <button type="button" className={serverPreferencesSection === value ? "active" : ""} aria-pressed={serverPreferencesSection === value} onClick={() => setServerPreferencesSection(value)} key={value}><Icon size={15} />{label}</button>)}
+        </nav>
+        {serverPreferencesSection === "general" ? (
         <div className="sub-panel general-preferences-panel">
-          <h3>General</h3>
+          <h3>Server Preferences</h3>
           <label>Timezone<select value={timeZone} onChange={(event) => setTimeZone(event.target.value)}>
             {US_TIME_ZONES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></label>
@@ -4221,12 +4227,28 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           {productUpdateError ? <span className="preference-status error" role="status">{productUpdateError}</span> : null}
           {serverRestart.text ? <span className={`preference-status ${serverRestart.state === "error" ? "error" : ""}`} role="status">{serverRestart.text}</span> : null}
         </div>
+        ) : (
+          <section className="detection-settings-card primary">
+            <header className="detection-settings-card-head">
+              <div className="detection-settings-card-icon"><Wrench size={18} /></div>
+              <div><h3>Custom server settings</h3><p>Use a custom FFmpeg build or adjust RTSP transport behavior for camera capture.</p></div>
+              <span className="admin-action-kind">Save settings to apply</span>
+            </header>
+            <div className="detection-field-grid">
+              <label className="wide-field">Custom FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} placeholder="ffmpeg" /><small>Used by SurvNG recording, probes, clips, and recorded-frame decoding. Leave as <code>ffmpeg</code> to use the system path.</small></label>
+              <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}><option value="auto">Auto (VAAPI preferred)</option><option value="vaapi">VAAPI</option><option value="qsv">Intel QSV</option><option value="off">Off</option></select></label>
+              <label>RTSP Capture Transport<select value={config.capture_rtsp_transport || "tcp"} onChange={(event) => updateConfig(["capture_rtsp_transport"], event.target.value)}><option value="tcp">TCP (recommended)</option><option value="udp">UDP</option></select><small>TCP prevents packet-loss decoder errors on most camera networks. UDP is available for cameras or relays that require it.</small></label>
+            </div>
+            <p className="admin-action-note">Changing RTSP transport reloads camera capture workers. Existing custom <code>OPENCV_FFMPEG_CAPTURE_OPTIONS</code> remains an advanced environment override.</p>
+          </section>
+        )}
+        </>
       ) : null}
 
       {section === "storage" ? (
         <div className="sub-panel subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs storage-subsection-tabs" aria-label="Storage and retention settings">
-            {[['locations', 'Locations', HardDrive], ['media', 'Media', Monitor], ['retention', 'Retention & Cleanup', Clock3], ['advanced', 'Advanced', Wrench]].map(([value, label, Icon]) => (
+            {[['locations', 'Locations', HardDrive], ['media', 'Media', Monitor], ['retention', 'Retention & Cleanup', Clock3]].map(([value, label, Icon]) => (
               <button type="button" key={value} className={storageSection === value ? "active" : ""} aria-pressed={storageSection === value} onClick={() => setStorageSection(value)}><Icon size={15} />{label}</button>
             ))}
           </nav>
@@ -4276,15 +4298,6 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label>Quality<input type="number" min="1" max="100" step="1" value={config.image_storage?.quality ?? 95} onChange={(event) => updateConfig(["image_storage", "quality"], Number(event.target.value))} /></label>
             </div>
             <p>Controls newly saved incident and motion-audit images. Higher quality preserves more forensic detail but uses more space. Existing images are left unchanged, and live snapshots remain JPEG for compatibility.</p>
-          </div>
-          <div className="admin-field-grid" hidden={storageSection !== "advanced"}>
-            <label>FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} /></label>
-            <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}>
-              <option value="auto">Auto (VAAPI preferred)</option>
-              <option value="vaapi">VAAPI</option>
-              <option value="qsv">Intel QSV</option>
-              <option value="off">Off</option>
-            </select></label>
           </div>
           <div className="admin-field-grid" hidden={storageSection !== "media"}>
             <label>Recording Segment Seconds<input type="number" min="2" max="300" step="1" value={config.recording_segment_seconds ?? 10} onChange={(event) => updateConfig(["recording_segment_seconds"], Number(event.target.value))} /></label>

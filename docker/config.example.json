@@ -25,6 +25,7 @@
     ]
   },
   "ffmpeg_path": "/usr/bin/ffmpeg",
+  "capture_rtsp_transport": "tcp",
   "hardware_acceleration": "auto",
   "recording_segment_seconds": 10.0,
   "recording_cache_prewarm": true,

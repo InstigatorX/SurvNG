@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -103,6 +104,7 @@ class OpenCvCaptureOptions:
     open_timeout_ms: int = CAPTURE_OPEN_TIMEOUT_MS
     read_timeout_ms: int = CAPTURE_READ_TIMEOUT_MS
     admission_poll_seconds: float = CAPTURE_OPEN_LOCK_POLL_SECONDS
+    rtsp_transport: str = "tcp"
 
 
 class OpenCvFfmpegCaptureBackend:
@@ -115,6 +117,12 @@ class OpenCvFfmpegCaptureBackend:
     ) -> None:
         self.limiter = limiter
         self.options = options or OpenCvCaptureOptions()
+        if self.options.rtsp_transport not in {"tcp", "udp"}:
+            raise ValueError("rtsp_transport must be tcp or udp")
+        # OpenCV reads FFmpeg capture options from the process environment at
+        # open time. Protect that process-global setting while each RTSP open
+        # is in progress so a concurrent camera cannot receive the wrong mode.
+        self._ffmpeg_option_lock = threading.Lock()
 
     def create_handle(self) -> CaptureHandle:
         return OpenCvCaptureHandle(cv2.VideoCapture())
@@ -135,24 +143,38 @@ class OpenCvFfmpegCaptureBackend:
             try:
                 if cancelled():
                     return False
-                return handle.open(
-                    source_url,
-                    [
-                        cv2.CAP_PROP_N_THREADS,
-                        self.options.decoder_threads,
-                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
-                        max(
-                            1,
-                            int(
-                                self.options.open_timeout_ms
-                                if open_timeout_ms is None
-                                else open_timeout_ms
-                            ),
+                capture_options = [
+                    cv2.CAP_PROP_N_THREADS,
+                    self.options.decoder_threads,
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                    max(
+                        1,
+                        int(
+                            self.options.open_timeout_ms
+                            if open_timeout_ms is None
+                            else open_timeout_ms
                         ),
-                        cv2.CAP_PROP_READ_TIMEOUT_MSEC,
-                        self.options.read_timeout_ms,
-                    ],
-                )
+                    ),
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                    self.options.read_timeout_ms,
+                ]
+                if not source_url.lower().startswith(("rtsp://", "rtsps://")):
+                    return handle.open(source_url, capture_options)
+                with self._ffmpeg_option_lock:
+                    option_name = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
+                    existing = os.environ.get(option_name)
+                    # An explicitly supplied process setting remains the
+                    # advanced override. The saved application setting is the
+                    # safe default for ordinary RTSP camera deployments.
+                    if existing is not None:
+                        return handle.open(source_url, capture_options)
+                    os.environ[option_name] = (
+                        f"rtsp_transport;{self.options.rtsp_transport}"
+                    )
+                    try:
+                        return handle.open(source_url, capture_options)
+                    finally:
+                        os.environ.pop(option_name, None)
             finally:
                 self.limiter.release()
         return False

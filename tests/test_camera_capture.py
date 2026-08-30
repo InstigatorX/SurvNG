@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import deque
@@ -683,6 +684,21 @@ def test_opencv_backend_applies_per_attempt_open_deadline() -> None:
 
     option_values = dict(zip(native.options[::2], native.options[1::2]))
     assert option_values[cv2.CAP_PROP_OPEN_TIMEOUT_MSEC] == 10000
+
+
+def test_opencv_backend_uses_configured_transport_for_rtsp(monkeypatch) -> None:
+    class NativeCapture:
+        def open(self, _source_url, _backend, _options) -> bool:
+            assert os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] == "rtsp_transport;udp"
+            return True
+
+    monkeypatch.delenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", raising=False)
+    backend = OpenCvFfmpegCaptureBackend(
+        CaptureOpenLimiter(1), OpenCvCaptureOptions(rtsp_transport="udp")
+    )
+
+    assert backend.open(OpenCvCaptureHandle(NativeCapture()), "rtsp://camera/live", lambda: False)
+    assert "OPENCV_FFMPEG_CAPTURE_OPTIONS" not in os.environ
 
 
 def test_close_rejects_active_capture_thread() -> None:
