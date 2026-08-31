@@ -58,6 +58,7 @@ class _Waiter:
     amount: int = 0
     frames: int = 0
     frame_bytes: int = 0
+    camera_id: str = ""
 
 
 class RecordedDecodeBudget:
@@ -93,6 +94,7 @@ class RecordedDecodeBudget:
             "workflow": [], "process": [], "memory": []
         }
         self._active_workflows = 0
+        self._camera_allocations: dict[str, dict[str, int]] = {}
         self._admitted_processes = 0
         self._admitted_workflows = 0
         self._process_wait_ms = 0.0
@@ -202,6 +204,10 @@ class RecordedDecodeBudget:
                 "reserved_bytes": self._reserved_bytes,
                 "estimated_frame_bytes": self._estimated_frame_bytes,
                 "observed_frame_bytes": self._largest_observed_frame_bytes,
+                "camera_allocations": {
+                    camera_id: dict(allocation)
+                    for camera_id, allocation in self._camera_allocations.items()
+                },
                 "waiting": sum(len(waiters) for waiters in self._waiters.values()),
                 "admitted_processes": self._admitted_processes,
                 "admitted_workflows": self._admitted_workflows,
@@ -232,6 +238,7 @@ class RecordedDecodeBudget:
         *,
         maximum_frames: int,
         frame_bytes: int | None = None,
+        camera_id: str = "",
         incident_epoch: float,
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
@@ -243,6 +250,7 @@ class RecordedDecodeBudget:
             amount=1,
             frames=0,
             frame_bytes=0,
+            camera_id="",
             incident_epoch=incident_epoch,
             deadline=deadline,
             cancelled=cancelled,
@@ -257,6 +265,7 @@ class RecordedDecodeBudget:
             amount=requested,
             frames=frames,
             frame_bytes=sample_bytes,
+            camera_id=str(camera_id or ""),
             incident_epoch=incident_epoch,
             deadline=deadline,
             cancelled=cancelled,
@@ -280,6 +289,7 @@ class RecordedDecodeBudget:
             amount=1,
             frames=0,
             frame_bytes=0,
+            camera_id="",
             incident_epoch=incident_epoch,
             deadline=deadline,
             cancelled=cancelled,
@@ -292,6 +302,7 @@ class RecordedDecodeBudget:
         amount: int,
         frames: int,
         frame_bytes: int,
+        camera_id: str,
         incident_epoch: float,
         deadline: float | None,
         cancelled: Callable[[], bool] | None,
@@ -306,6 +317,7 @@ class RecordedDecodeBudget:
                 amount=int(amount),
                 frames=int(frames),
                 frame_bytes=int(frame_bytes),
+                camera_id=str(camera_id or ""),
             )
             waiters = self._waiters[kind]
             waiters.append(waiter)
@@ -377,6 +389,20 @@ class RecordedDecodeBudget:
             # then that charge is frozen in the lease for correct release.
             waiter.amount = self._memory_charge(waiter)
             self._reserved_bytes += waiter.amount
+            if waiter.camera_id:
+                allocation = self._camera_allocations.setdefault(
+                    waiter.camera_id,
+                    {"reserved_bytes": 0, "active_workflows": 0, "frame_bytes": 0, "frames": 0},
+                )
+                allocation["reserved_bytes"] += waiter.amount
+                allocation["active_workflows"] += 1
+                allocation["frame_bytes"] = max(
+                    allocation["frame_bytes"],
+                    waiter.frame_bytes or max(
+                        self._fallback_frame_bytes, self._estimated_frame_bytes
+                    ),
+                )
+                allocation["frames"] = max(allocation["frames"], waiter.frames)
 
     def _release(self, waiter: _Waiter) -> None:
         with self._condition:
@@ -392,4 +418,11 @@ class RecordedDecodeBudget:
                 if self._reserved_bytes < waiter.amount:
                     raise ValueError("recorded decode memory lease released too many times")
                 self._reserved_bytes -= waiter.amount
+                if waiter.camera_id:
+                    allocation = self._camera_allocations.get(waiter.camera_id)
+                    if allocation is not None:
+                        allocation["reserved_bytes"] -= waiter.amount
+                        allocation["active_workflows"] -= 1
+                        if allocation["active_workflows"] <= 0:
+                            self._camera_allocations.pop(waiter.camera_id, None)
             self._condition.notify_all()

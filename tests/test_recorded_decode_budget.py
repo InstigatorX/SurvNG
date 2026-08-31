@@ -51,6 +51,27 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         assert recovered is not None
         recovered.release()
 
+    def test_camera_allocation_is_reported_until_workflow_releases(self) -> None:
+        budget = RecordedDecodeBudget(max_processes=1, memory_budget_bytes=16 << 20)
+        lease = budget.reserve_workflow(
+            maximum_frames=1,
+            frame_bytes=8 << 20,
+            camera_id="gate",
+            incident_epoch=1.0,
+        )
+        self.assertIsNotNone(lease)
+        self.assertEqual(budget.status()["camera_allocations"], {
+            "gate": {
+                "reserved_bytes": 8 << 20,
+                "active_workflows": 1,
+                "frame_bytes": 8 << 20,
+                "frames": 1,
+            },
+        })
+        assert lease is not None
+        lease.release()
+        self.assertEqual(budget.status()["camera_allocations"], {})
+
     def test_expanded_burst_scales_memory_capacity_per_decode_process(self) -> None:
         """Each decoder admits one 16-frame full refinement workflow."""
         budget = RecordedDecodeBudget.from_detector_config(DetectorConfig())

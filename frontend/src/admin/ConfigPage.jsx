@@ -488,6 +488,7 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
   const serviceMemory = data.system?.service_memory || {};
   const workerMemory = data.system?.worker_memory || {};
   const memoryMaintenance = data.system?.memory_maintenance || {};
+  const recordedDecode = data.detector?.recorded_decode || {};
   const hourly = activity?.hourly || [];
   const runtimeShort = data.runtime_history?.short || [];
   const runtimeLong = data.runtime_history?.long || [];
@@ -566,6 +567,7 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
             <article><span>Stream interruptions · since restart</span><strong>{(selectedReadFailures + selectedOpenFailures).toLocaleString()}</strong><small>{selectedReadFailures.toLocaleString()} interrupted reads · {selectedOpenFailures.toLocaleString()} failed connections</small></article>
             <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
             <article><span>EMA coverage · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{runtimeTotals.eventLoss ? `${runtimeTotals.eventLoss} events lost` : "No events lost"}</small></article>
+            <article className="telemetry-memory-card"><span>Recorded decode memory</span><strong>{formatBytes(selected.recorded_decode?.reserved_bytes)}</strong><small>{selected.recorded_decode?.active_workflows ? `${selected.recorded_decode.active_workflows} active refinement${selected.recorded_decode.active_workflows === 1 ? "" : "s"}` : "No active refinement"}</small></article>
           </> : <>
             <article><span>Camera uptime · 2h</span><strong>{formatCoverage(averageAvailability)}</strong><small>Lowest minute {formatCoverage(runtimeTotals.minimumAvailability)} · {runtimeTotals.interruptions ? `${runtimeTotals.interruptions.toLocaleString()} recovered stream issues` : "no stream interruptions"}</small></article>
             <article><span>EMA coverage · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{analysisTotal ? (runtimeTotals.superseded ? `${runtimeTotals.superseded.toLocaleString()} stale frames skipped to stay current` : "Every sampled frame analyzed") : "No EMA samples in this window"}{runtimeTotals.eventLoss ? ` · ${runtimeTotals.eventLoss} events lost` : " · no events lost"}</small></article>
@@ -575,9 +577,10 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
             <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.waited} delayed · {Number(backfillCounts.completed || 0).toLocaleString()} recovered · {Number(backfillCounts.queued || 0).toLocaleString()} waiting</small></article>
             <article><span>SurvNG uptime</span><strong>{formatServerUptime(Number(data.system?.uptime_seconds || 0))}</strong><small>Since the last service start</small></article>
             <article><span>CPU demand</span><strong>{data.system?.load_average?.one ?? "--"}</strong><small>Across {data.system?.cpu_count || 1} cores</small></article>
-            <article><span>Host memory</span><strong>{formatBytes(memory.available_bytes)}</strong><small>{memory.used_percent || 0}% currently used</small></article>
-            <article><span>Application memory</span><strong>{formatBytes(serviceMemory.application_bytes)}</strong><small>SurvNG and AI workers</small></article>
-            <article><span>File cache</span><strong>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)}</strong><small>Released automatically as needed</small></article>
+            <article className="telemetry-memory-card"><span>Host memory</span><strong>{formatBytes(memory.available_bytes)}</strong><small>{memory.used_percent || 0}% currently used</small></article>
+            <article className="telemetry-memory-card"><span>Application memory</span><strong>{formatBytes(serviceMemory.application_bytes)}</strong><small>SurvNG and AI workers</small></article>
+            <article className="telemetry-memory-card"><span>Recorded decode memory</span><strong>{formatBytes(recordedDecode.reserved_bytes)}</strong><small>{formatBytes(recordedDecode.memory_budget_bytes)} capacity · {recordedDecode.active_workflows || 0}/{recordedDecode.configured_processes || 0} active</small></article>
+            <article className="telemetry-memory-card"><span>File cache</span><strong>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)}</strong><small>Released automatically as needed</small></article>
             <article><span>Local databases</span><strong>{formatBytes(data.system?.database?.bytes)}</strong><small>Events, indexes, and runtime state</small></article>
           </>}
         </div>
@@ -723,12 +726,14 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
                   <div><dt>Used-Snapshots</dt><dd>{formatBytes(camera.storage?.snapshot_bytes)}</dd></div>
                   <div><dt>Processing health</dt><dd>{performance.summary || "Collecting a representative processing sample"}</dd></div>
                   <div><dt>Camera event connection</dt><dd>{cameraEventStatus}</dd></div>
+                  <div><dt>Recorded decode memory</dt><dd>{camera.recorded_decode?.active_workflows ? `${formatBytes(camera.recorded_decode.reserved_bytes)} · ${camera.recorded_decode.active_workflows} active` : "Idle"}</dd></div>
                 </dl>
                 <details className="telemetry-technical">
                   <summary>Technical diagnostics</summary>
                   <dl>
                     <div><dt>Lifecycle / workers</dt><dd>{camera.lifecycle?.phase || "unknown"} · {camera.lifecycle?.active_worker_count || 0} active</dd></div>
                     <div><dt>Live decoded FPS</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)}</dd></div>
+                    <div><dt>Recorded decode reservation</dt><dd>{camera.recorded_decode?.active_workflows ? `${formatBytes(camera.recorded_decode.reserved_bytes)} · ${formatBytes(camera.recorded_decode.frame_bytes)} × ${camera.recorded_decode.frames || 0} frames` : "None"}</dd></div>
                     <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
                     <div><dt>Read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
                     <div><dt>Capture-to-analysis p95 / p99</dt><dd>{formatMilliseconds(analysisRuntime.capture_to_analysis_p95_ms)} / {formatMilliseconds(analysisRuntime.capture_to_analysis_p99_ms)}</dd></div>

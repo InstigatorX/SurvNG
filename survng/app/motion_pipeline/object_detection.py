@@ -1403,6 +1403,7 @@ class RecordedMotionObjectDetector:
             memory_lease = budget.reserve_workflow(
                 maximum_frames=maximum_frames,
                 frame_bytes=frame_bytes or None,
+                camera_id=self.camera.id,
                 incident_epoch=event_epoch,
                 deadline=deadline,
                 cancelled=self.stop_requested,

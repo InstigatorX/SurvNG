@@ -449,6 +449,7 @@ class SystemTelemetryService:
     def _camera_payload(
         status: dict[str, Any], per_camera_activity: dict[str, Any],
         per_camera_storage: dict[str, dict[str, Any]],
+        decode_allocations: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         camera_id = str(status.get("id") or "")
         motion = status.get("motion_qualification") or {}
@@ -616,6 +617,7 @@ class SystemTelemetryService:
                     "snapshot_files": 0,
                 },
             ),
+            "recorded_decode": dict((decode_allocations or {}).get(camera_id) or {}),
         }
         payload["performance"] = camera_performance_health(payload)
         return payload
@@ -675,8 +677,15 @@ class SystemTelemetryService:
         service_memory = self.cgroup_memory_status()
         cpu_count = os.cpu_count() or 1
         generated_at = datetime.now(timezone.utc).isoformat()
+        recorded_decode = detector.get("recorded_decode") or {}
+        decode_allocations = recorded_decode.get("camera_allocations") or {}
         cameras = [
-            self._camera_payload(status, per_camera_activity, per_camera_storage)
+            self._camera_payload(
+                status,
+                per_camera_activity,
+                per_camera_storage,
+                decode_allocations,
+            )
             for status in camera_statuses
         ]
         detector_runtime = detector.get("runtime") or {}
