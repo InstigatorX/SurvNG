@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import select
 import subprocess
 import threading
@@ -11,6 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Protocol
 
 import numpy as np
@@ -106,8 +108,10 @@ class FfmpegCaptureHandle:
         del size
 
     def start(self, command: list[str]) -> None:
+        self._command_path = command[0]
+        executable = self._named_executable()
         self._process = subprocess.Popen(
-            command,
+            [executable, *command[1:]],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -119,6 +123,19 @@ class FfmpegCaptureHandle:
             daemon=True,
         )
         self._stderr_thread.start()
+
+    def _named_executable(self) -> str:
+        target = os.path.abspath(self._command_path)
+        runtime_dir = Path("/run/survng")
+        link = runtime_dir / "survng-capture"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            if not link.is_symlink() or os.path.realpath(link) != target:
+                link.unlink(missing_ok=True)
+                link.symlink_to(target)
+            return str(link)
+        except OSError:
+            return self._command_path
 
     def prefetch(self, timeout_ms: int, cancelled: Callable[[], bool]) -> bool:
         frame = self._next_frame(

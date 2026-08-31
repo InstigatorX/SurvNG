@@ -30,6 +30,20 @@ TIMESTAMP_ROLLOVER_LIMIT = 3
 TIMESTAMP_ROLLOVER_LIMIT_WINDOW_SECONDS = 300.0
 
 
+def _named_ffmpeg_executable(path: str, name: str) -> str:
+    target = os.path.abspath(path)
+    runtime_dir = Path("/run/survng")
+    link = runtime_dir / name
+    try:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        if not link.is_symlink() or os.path.realpath(link) != target:
+            link.unlink(missing_ok=True)
+            link.symlink_to(target)
+        return str(link)
+    except OSError:
+        return path
+
+
 @dataclass(frozen=True)
 class AudioStreamInfo:
     known: bool
@@ -175,8 +189,9 @@ class Recorder(RecordingIndexMixin):
                 "mp4",
                 output,
             ]
+            executable = _named_ffmpeg_executable(self.ffmpeg_path, "survng-recorder")
             process = subprocess.Popen(
-                command,
+                [executable, *command[1:]],
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
@@ -753,4 +768,3 @@ class Recorder(RecordingIndexMixin):
             self._retry_after.clear()
             self._audio_stream_cache.clear()
             self._audio_probe_unavailable_hosts.clear()
-
