@@ -130,6 +130,34 @@ docker exec survng ffmpeg -version | head -1
 docker exec survng ffmpeg -hide_banner -hwaccels
 ```
 
+### Experimental GStreamer VA capture probe
+
+The Intel image includes a standalone probe for evaluating GStreamer hardware
+decode without changing SurvNG's active FFmpeg capture backend. It pulls
+drop-only, FPS-limited BGR frames through `appsink` and reports the selected
+decoder, first-frame latency, output rate, CPU time, mapped bytes, and peak RSS.
+
+Confirm that the modern GStreamer VA decoders are registered:
+
+```bash
+docker exec survng gst-inspect-1.0 vah264dec
+docker exec survng gst-inspect-1.0 vah265dec
+```
+
+Run the probe against a credential-free local go2rtc stream:
+
+```bash
+printf '%s\n' 'rtsp://127.0.0.1:8554/porch_sub' |
+  docker exec -i survng /usr/bin/python3 -m survng.gstreamer_capture_probe \
+    --decoder va --fps 5 --duration 30
+```
+
+For a credentialed direct URL, place the URL in an owner-readable file and
+redirect it to the command's standard input. Do not put it in the command line.
+The probe exits nonzero when no frames arrive or an explicitly requested
+hardware decoder was not selected. `--decoder qsv` provides an A/B comparison
+against the QSV plugin without changing production capture.
+
 ### go2rtc
 
 The image ships **go2rtc v1.9.14** at `/usr/local/bin/go2rtc`. The entrypoint

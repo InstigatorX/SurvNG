@@ -102,6 +102,12 @@ RUN apt-get update \
     && /usr/local/bin/add-apt-ppa-retry ppa:kobuk-team/intel-graphics \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
+        gir1.2-gst-plugins-base-1.0 \
+        gir1.2-gstreamer-1.0 \
+        gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-tools \
         "intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}" \
         "intel-opencl-icd=${INTEL_COMPUTE_VERSION}" \
         "libigc2=${INTEL_IGC_VERSION}" \
@@ -112,6 +118,7 @@ RUN apt-get update \
         "libze-intel-gpu1=${INTEL_COMPUTE_VERSION}" \
         "libze1=${INTEL_LEVEL_ZERO_VERSION}" \
         ocl-icd-libopencl1 \
+        python3-gi \
     && apt-mark hold \
         intel-media-va-driver-non-free \
         intel-opencl-icd \
