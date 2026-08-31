@@ -15,6 +15,7 @@ from survng.app.camera_capture import (
     CapturedFrame,
     FfmpegCaptureOptions,
     FfmpegCaptureBackend,
+    FfmpegCaptureHandle,
     _bmp_frame_size,
     _decode_capture_bmp,
 )
@@ -698,6 +699,56 @@ def test_ffmpeg_backend_warns_once_without_logging_url_credentials(caplog) -> No
     assert "camera" in warnings[0]
     assert "admin" not in warnings[0]
     assert "secret" not in warnings[0]
+
+
+def test_ffmpeg_capture_close_waits_for_stderr_drain_before_closing_stream() -> None:
+    class Stream:
+        def __init__(self) -> None:
+            self.eof = threading.Event()
+            self.read_started = threading.Event()
+            self.reader_finished = threading.Event()
+            self.closed = False
+
+        def read(self, _size: int) -> bytes:
+            self.read_started.set()
+            assert self.eof.wait(1.0)
+            self.reader_finished.set()
+            return b""
+
+        def close(self) -> None:
+            assert self.reader_finished.is_set()
+            self.closed = True
+
+    class Process:
+        def __init__(self, stderr: Stream) -> None:
+            self.stderr = stderr
+            self.stdout = Stream()
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.stderr.eof.set()
+            self.stdout.reader_finished.set()
+            return 0
+
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000)
+    stderr = Stream()
+    process = Process(stderr)
+    handle._process = process  # type: ignore[assignment]
+    handle._stderr_thread = threading.Thread(target=handle._drain_stderr)
+    handle._stderr_thread.start()
+    assert stderr.read_started.wait(1.0)
+
+    handle.close()
+
+    assert stderr.closed
+    assert process.stdout.closed
 
 
 def test_capture_bmp_limit_accepts_8k_frames_but_remains_bounded() -> None:
