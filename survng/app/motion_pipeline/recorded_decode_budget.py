@@ -106,6 +106,10 @@ class RecordedDecodeBudget:
         self._cancellations = 0
         self._ffmpeg_attempts = {"hardware": 0, "cpu": 0}
         self._ffmpeg_successes = {"hardware": 0, "cpu": 0}
+        # Decoder stderr belongs to a particular recorded-refinement request.
+        # Keep the small since-start summary here with the other decode metrics
+        # rather than persisting noisy per-frame FFmpeg output.
+        self._camera_decoder_errors: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def from_detector_config(cls, config: Any) -> RecordedDecodeBudget:
@@ -222,6 +226,10 @@ class RecordedDecodeBudget:
                 "cancellations": self._cancellations,
                 "ffmpeg_attempts": dict(self._ffmpeg_attempts),
                 "ffmpeg_successes": dict(self._ffmpeg_successes),
+                "camera_decoder_errors": {
+                    camera_id: dict(errors)
+                    for camera_id, errors in self._camera_decoder_errors.items()
+                },
             }
 
     def record_ffmpeg(self, backend: str, *, success: bool) -> None:
@@ -232,6 +240,45 @@ class RecordedDecodeBudget:
             self._ffmpeg_attempts[normalized] += 1
             if success:
                 self._ffmpeg_successes[normalized] += 1
+
+    def record_decoder_errors(
+        self,
+        *,
+        camera_id: str,
+        source: str,
+        recording_name: str,
+        backend: str,
+        codec_lines: dict[str, int],
+    ) -> None:
+        """Record bounded, attributed decoder diagnostics for one FFmpeg run."""
+        normalized_camera_id = str(camera_id or "").strip()
+        if not normalized_camera_id:
+            return
+        counts = {
+            str(codec).strip().lower(): max(0, int(lines))
+            for codec, lines in codec_lines.items()
+            if int(lines) > 0
+        }
+        if not counts:
+            return
+        with self._condition:
+            entry = self._camera_decoder_errors.setdefault(
+                normalized_camera_id,
+                {
+                    "hevc_error_lines": 0,
+                    "h264_error_lines": 0,
+                    "error_batches": 0,
+                    "last_source": "",
+                    "last_recording": "",
+                    "last_backend": "",
+                },
+            )
+            entry["hevc_error_lines"] += counts.get("hevc", 0)
+            entry["h264_error_lines"] += counts.get("h264", 0)
+            entry["error_batches"] += 1
+            entry["last_source"] = str(source or "")
+            entry["last_recording"] = str(recording_name or "")
+            entry["last_backend"] = str(backend or "")
 
     def reserve_workflow(
         self,

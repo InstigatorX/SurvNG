@@ -6,6 +6,7 @@ import re
 import subprocess
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -53,6 +54,7 @@ REPRESENTATIVE_MIN_EDGE_CLEARANCE_RATIO = 0.01
 REPRESENTATIVE_MIN_SUBJECT_AREA_RATIO = 0.0025
 REPRESENTATIVE_MIN_QUALITY_SCORE = 0.25
 SEMANTIC_RESCUE_THRESHOLD_FRACTION = 0.5
+_DECODER_ERROR_CODEC = re.compile(rb"\[(hevc|h264) @", re.IGNORECASE)
 
 
 def _flatten_refinement_stages(
@@ -2466,6 +2468,12 @@ class RecordedMotionObjectDetector:
                 finally:
                     if process_lease is not None:
                         process_lease.release()
+                if result is not None:
+                    self._record_decoder_errors(
+                        stderr=result.stderr or b"",
+                        path=path,
+                        backend=backend,
+                    )
                 if result is None or result.returncode != 0 or not result.stdout:
                     if self.decode_budget is not None:
                         self.decode_budget.record_ffmpeg(backend, success=False)
@@ -2630,6 +2638,7 @@ class RecordedMotionObjectDetector:
                 if process_lease is not None:
                     process_lease.release()
             stderr = b"".join(stderr_chunks)
+            self._record_decoder_errors(stderr=stderr, path=path, backend=backend)
             if (
                 process is None
                 or process.returncode != 0
@@ -2679,6 +2688,35 @@ class RecordedMotionObjectDetector:
             f" ({last_error})" if last_error else "",
         )
         return {}, process_count
+
+    def _record_decoder_errors(self, *, stderr: bytes, path: Path, backend: str) -> None:
+        """Summarize controlled recorded-decoder stderr with camera context."""
+        codec_lines = Counter(
+            match.group(1).decode("ascii").lower()
+            for match in _DECODER_ERROR_CODEC.finditer(stderr)
+        )
+        if not codec_lines:
+            return
+        source = next((part for part in path.parts if part in {"main", "live"}), "")
+        counts = " ".join(
+            f"{codec}={lines}" for codec, lines in sorted(codec_lines.items())
+        )
+        LOGGER.warning(
+            "recorded decoder errors camera=%s source=%s recording=%s backend=%s %s",
+            self.camera.id,
+            source or "unknown",
+            path.name,
+            backend,
+            counts,
+        )
+        if self.decode_budget is not None:
+            self.decode_budget.record_decoder_errors(
+                camera_id=self.camera.id,
+                source=source,
+                recording_name=path.name,
+                backend=backend,
+                codec_lines=dict(codec_lines),
+            )
 
     @staticmethod
     def _decode_bmp_stream(stream: Any) -> list[Frame]:

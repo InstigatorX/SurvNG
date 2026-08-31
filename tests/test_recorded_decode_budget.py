@@ -541,6 +541,35 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         self.assertEqual(status["ffmpeg_attempts"], {"hardware": 1, "cpu": 1})
         self.assertEqual(status["ffmpeg_successes"], {"hardware": 0, "cpu": 1})
 
+    def test_decoder_errors_are_attributed_to_the_camera(self) -> None:
+        budget = RecordedDecodeBudget()
+
+        budget.record_decoder_errors(
+            camera_id="back-left",
+            source="main",
+            recording_name="20260831-123000-0400.mp4",
+            backend="hardware",
+            codec_lines={"hevc": 4, "h264": 1},
+        )
+        budget.record_decoder_errors(
+            camera_id="back-left",
+            source="live",
+            recording_name="20260831-123010-0400.mp4",
+            backend="cpu",
+            codec_lines={"hevc": 2},
+        )
+
+        self.assertEqual(budget.status()["camera_decoder_errors"], {
+            "back-left": {
+                "hevc_error_lines": 6,
+                "h264_error_lines": 1,
+                "error_batches": 2,
+                "last_source": "live",
+                "last_recording": "20260831-123010-0400.mp4",
+                "last_backend": "cpu",
+            }
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -450,6 +450,7 @@ class SystemTelemetryService:
         status: dict[str, Any], per_camera_activity: dict[str, Any],
         per_camera_storage: dict[str, dict[str, Any]],
         decode_allocations: dict[str, dict[str, Any]] | None = None,
+        decode_errors: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         camera_id = str(status.get("id") or "")
         motion = status.get("motion_qualification") or {}
@@ -618,6 +619,7 @@ class SystemTelemetryService:
                 },
             ),
             "recorded_decode": dict((decode_allocations or {}).get(camera_id) or {}),
+            "recorded_decoder_errors": dict((decode_errors or {}).get(camera_id) or {}),
         }
         payload["performance"] = camera_performance_health(payload)
         return payload
@@ -679,12 +681,14 @@ class SystemTelemetryService:
         generated_at = datetime.now(timezone.utc).isoformat()
         recorded_decode = detector.get("recorded_decode") or {}
         decode_allocations = recorded_decode.get("camera_allocations") or {}
+        decode_errors = recorded_decode.get("camera_decoder_errors") or {}
         cameras = [
             self._camera_payload(
                 status,
                 per_camera_activity,
                 per_camera_storage,
                 decode_allocations,
+                decode_errors,
             )
             for status in camera_statuses
         ]

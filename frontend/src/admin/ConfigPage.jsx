@@ -489,6 +489,8 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
   const workerMemory = data.system?.worker_memory || {};
   const memoryMaintenance = data.system?.memory_maintenance || {};
   const recordedDecode = data.detector?.recorded_decode || {};
+  const recordedDecodeErrors = data.detector?.recorded_decode?.camera_decoder_errors || {};
+  const recordedHevcErrors = Object.values(recordedDecodeErrors).reduce((total, item) => total + Number(item?.hevc_error_lines || 0), 0);
   const hourly = activity?.hourly || [];
   const runtimeShort = data.runtime_history?.short || [];
   const runtimeLong = data.runtime_history?.long || [];
@@ -567,7 +569,7 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
             <article><span>Stream interruptions · since restart</span><strong>{(selectedReadFailures + selectedOpenFailures).toLocaleString()}</strong><small>{selectedReadFailures.toLocaleString()} interrupted reads · {selectedOpenFailures.toLocaleString()} failed connections</small></article>
             <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
             <article><span>EMA coverage · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{runtimeTotals.eventLoss ? `${runtimeTotals.eventLoss} events lost` : "No events lost"}</small></article>
-            <article className="telemetry-memory-card"><span>Recorded decode memory</span><strong>{formatBytes(selected.recorded_decode?.reserved_bytes)}</strong><small>{selected.recorded_decode?.active_workflows ? `${selected.recorded_decode.active_workflows} active refinement${selected.recorded_decode.active_workflows === 1 ? "" : "s"}` : "No active refinement"}</small></article>
+            <article className="telemetry-memory-card"><span>Recorded decode memory</span><strong>{formatBytes(selected.recorded_decode?.reserved_bytes)}</strong><small>{selected.recorded_decode?.active_workflows ? `${selected.recorded_decode.active_workflows} active refinement${selected.recorded_decode.active_workflows === 1 ? "" : "s"}` : "No active refinement"}{selected.recorded_decoder_errors?.hevc_error_lines ? ` · ${selected.recorded_decoder_errors.hevc_error_lines} HEVC decode lines` : ""}</small></article>
           </> : <>
             <article><span>Camera uptime · 2h</span><strong>{formatCoverage(averageAvailability)}</strong><small>Lowest minute {formatCoverage(runtimeTotals.minimumAvailability)} · {runtimeTotals.interruptions ? `${runtimeTotals.interruptions.toLocaleString()} recovered stream issues` : "no stream interruptions"}</small></article>
             <article><span>EMA coverage · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{analysisTotal ? (runtimeTotals.superseded ? `${runtimeTotals.superseded.toLocaleString()} stale frames skipped to stay current` : "Every sampled frame analyzed") : "No EMA samples in this window"}{runtimeTotals.eventLoss ? ` · ${runtimeTotals.eventLoss} events lost` : " · no events lost"}</small></article>
@@ -579,7 +581,7 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
             <article><span>CPU demand</span><strong>{data.system?.load_average?.one ?? "--"}</strong><small>Across {data.system?.cpu_count || 1} cores</small></article>
             <article className="telemetry-memory-card"><span>Host memory</span><strong>{formatBytes(memory.available_bytes)}</strong><small>{memory.used_percent || 0}% currently used</small></article>
             <article className="telemetry-memory-card"><span>Application memory</span><strong>{formatBytes(serviceMemory.application_bytes)}</strong><small>SurvNG and AI workers</small></article>
-            <article className="telemetry-memory-card"><span>Recorded decode memory</span><strong>{formatBytes(recordedDecode.reserved_bytes)}</strong><small>{formatBytes(recordedDecode.memory_budget_bytes)} capacity · {recordedDecode.active_workflows || 0}/{recordedDecode.configured_processes || 0} active</small></article>
+            <article className="telemetry-memory-card"><span>Recorded decode memory</span><strong>{formatBytes(recordedDecode.reserved_bytes)}</strong><small>{formatBytes(recordedDecode.memory_budget_bytes)} capacity · {recordedDecode.active_workflows || 0}/{recordedDecode.configured_processes || 0} active{recordedHevcErrors ? ` · ${recordedHevcErrors} HEVC decode lines` : ""}</small></article>
             <article className="telemetry-memory-card"><span>File cache</span><strong>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)}</strong><small>Released automatically as needed</small></article>
             <article><span>Local databases</span><strong>{formatBytes(data.system?.database?.bytes)}</strong><small>Events, indexes, and runtime state</small></article>
           </>}
