@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 
 from ..config import CameraConfig, RecordingRetentionConfig
 from ..ffmpeg_input import ffmpeg_input_args, ffmpeg_timestamp_repair_args
+from ..ffmpeg_process import named_ffmpeg_executable
 from ..go2rtc import Go2RtcAdapter, Go2RtcError
 from ..media_storage import MediaStorageRegistry
 from ..recording_retention import RecordingRetentionService
@@ -28,20 +29,6 @@ DTS_WARNING_WINDOW_SECONDS = 5.0
 DTS_WARNING_RESTART_COUNT = 12
 TIMESTAMP_ROLLOVER_LIMIT = 3
 TIMESTAMP_ROLLOVER_LIMIT_WINDOW_SECONDS = 300.0
-
-
-def _named_ffmpeg_executable(path: str, name: str) -> str:
-    target = os.path.abspath(path)
-    runtime_dir = Path("/run/survng")
-    link = runtime_dir / name
-    try:
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        if not link.is_symlink() or os.path.realpath(link) != target:
-            link.unlink(missing_ok=True)
-            link.symlink_to(target)
-        return str(link)
-    except OSError:
-        return path
 
 
 @dataclass(frozen=True)
@@ -189,7 +176,10 @@ class Recorder(RecordingIndexMixin):
                 "mp4",
                 output,
             ]
-            executable = _named_ffmpeg_executable(self.ffmpeg_path, "survng-recorder")
+            executable = named_ffmpeg_executable(
+                self.ffmpeg_path,
+                "survng-recorder",
+            )
             process = subprocess.Popen(
                 [executable, *command[1:]],
                 stderr=subprocess.PIPE,
@@ -712,7 +702,15 @@ class Recorder(RecordingIndexMixin):
                 pid = int(pid_text)
             except ValueError:
                 continue
-            if "ffmpeg" not in command or "/recordings/" not in command or "%Y-%m-%d" not in command:
+            executable = command.split(" ", 1)[0]
+            if (
+                not (
+                    "ffmpeg" in executable
+                    or Path(executable).name == "survng-recorder"
+                )
+                or "/recordings/" not in command
+                or "%Y-%m-%d" not in command
+            ):
                 continue
             for camera_id, source in keys:
                 source_dir = f"/recordings/{camera_id}/{source}/"

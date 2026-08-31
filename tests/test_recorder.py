@@ -919,6 +919,22 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(marker, str(recorder.recordings_dir.resolve()))
         self.assertEqual(stored_path, str(clip))
 
+    def test_owned_recorders_recognizes_named_ffmpeg_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            process_list = (
+                " 4321 /run/survng/survng-recorder -f segment "
+                "/srv/recordings/gate/main/%Y-%m-%d/%H/clip.mp4\n"
+            )
+
+            with patch(
+                "survng.app.recording_process.recorder.subprocess.check_output",
+                return_value=process_list,
+            ):
+                owned = recorder._owned_ffmpeg_recorders({("gate", "main")})
+
+        self.assertEqual(owned, {("gate", "main"): [4321]})
+
     def test_stale_recorder_cleanup_terminates_processes_concurrently(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

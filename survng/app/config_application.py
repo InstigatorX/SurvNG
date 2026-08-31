@@ -18,6 +18,7 @@ HOT_CONFIG_FIELDS = frozenset({"base_path", "event_clip_before_seconds", "event_
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
 DETECTOR_HOT_POLICY_FIELDS = frozenset({"confidence_threshold", "event_candidate_confidence_threshold", "event_confirmation_frames", "event_class_confirmation_frames", "event_class_confidence_thresholds", "event_refinement_stages", "event_refinement_retry_seconds", "event_refinement_settle_seconds", "event_refinement_retry_interval_seconds", "event_representative_refinement_timeout_seconds", "object_activity_attribution", "require_incident_zone", "max_concurrent_refinements", "recorded_adaptive_sampling", "recorded_decode_max_processes", "face_max_observations", "face_detection_threshold", "face_enrich_max_people", "face_match_threshold", "face_unknown_cluster_threshold", "face_auto_identify_enabled", "face_auto_identify_threshold", "face_auto_identify_margin", "face_min_size", "face_max_references"})
 TRACKING_SESSION_FIELDS = frozenset({"enabled", "implementation", "excluded_labels", "sample_fps", "adaptive_sampling_enabled", "stable_sample_fps", "adaptive_stable_frames", "max_catchup_frames_per_tick", "persist_interval_seconds", "max_session_seconds", "lost_timeout_seconds", "min_confirmations", "low_confidence_threshold", "match_iou_threshold", "match_center_distance_ratio", "max_active_cameras", "adaptive_burst_enabled", "burst_max_active_cameras", "capacity_wait_seconds", "deferred_reid_enabled", "deferred_reid_delay_seconds", "deferred_reid_min_crop_pixels", "deferred_reid_rate_per_minute", "related_sequence_window_seconds", "camera_transition_routes", "max_tracks_per_session", "reid_max_age_seconds", "reid_max_embeddings_per_frame", "reid_refresh_interval_frames", "reid_match_threshold", "vehicle_reid_match_threshold", "vehicle_reid_labels"})
+CAPTURE_TRACKING_FIELDS = frozenset({"sample_fps"})
 DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({"enabled", "backend", "object_worker_count", "model_path", "model_xml", "coreml_model_path", "labels_path", "device", "nms_threshold", "warmup_enabled", "labels"})
 DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({"enabled", "backend", "model_path", "model_xml", "coreml_model_path", "labels_path", "nms_threshold", "labels"})
 DETECTOR_FACE_ENGINE_FIELDS = frozenset({"face_recognition_enabled", "face_embedding_model_path", "face_landmark_model_path", "face_detection_model_path", "face_recognition_device"})
@@ -69,7 +70,11 @@ def manager_owned_config(config: AppConfig) -> dict:
     payload["detector"] = _without_fields(payload.get("detector", {}), DETECTOR_HOT_POLICY_FIELDS | DETECTOR_OBJECT_ENGINE_FIELDS | DETECTOR_FACE_ENGINE_FIELDS | DETECTOR_SHARED_ENGINE_FIELDS)
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
-        payload["detector"]["tracking"] = _without_fields(tracking, TRACKING_SESSION_FIELDS | TRACKING_REID_ENGINE_FIELDS)
+        payload["detector"]["tracking"] = _without_fields(
+            tracking,
+            (TRACKING_SESSION_FIELDS - CAPTURE_TRACKING_FIELDS)
+            | TRACKING_REID_ENGINE_FIELDS,
+        )
     depth = payload["detector"].get("depth")
     if isinstance(depth, dict):
         payload["detector"]["depth"] = _without_fields(depth, DEPTH_HOT_POLICY_FIELDS)

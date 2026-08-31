@@ -51,6 +51,14 @@ credentials in `.env`: Docker environment variables are easier to expose
 through process and container inspection. The Admin API masks stored secrets,
 and SurvNG redacts recognized secret values from its in-memory logs.
 
+External FFmpeg processes necessarily receive their input URL as a command-line
+argument. Keep camera credentials out of those arguments by defining the
+credentialed upstream in `go2rtc.yaml` and configuring SurvNG with the
+credential-free local restream URL
+(`rtsp://127.0.0.1:8554/<stream_name>`). SurvNG logs a bounded warning when a
+credentialed URL is passed directly to capture, but cannot hide it from a
+privileged host process inspector.
+
 Treat SurvNG as a private app even in Docker. Prefer signing in (Admin →
 Access), binding `8088` to loopback, and putting TLS on nginx. See
 [Internet, TLS, and reverse proxies](guide/reverse-proxy.md). Do not publish

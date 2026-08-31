@@ -5,7 +5,10 @@ import time
 import unittest
 
 from survng.app.config import DetectorConfig
-from survng.app.motion_pipeline.object_detection import RecordedMotionObjectDetectorFactory
+from survng.app.motion_pipeline.object_detection import (
+    RecordedMotionObjectDetectorFactory,
+    _DECODER_ERROR_CODEC,
+)
 from survng.app.motion_pipeline.recorded_decode_budget import (
     RecordedDecodeBudget,
     refinement_frame_count,
@@ -569,6 +572,19 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
                 "last_backend": "cpu",
             }
         })
+
+    def test_decoder_error_pattern_includes_qsv_codec_contexts(self) -> None:
+        stderr = (
+            b"[h264_qsv @ 0x1] hardware decode failed\n"
+            b"[hevc @ 0x2] invalid NAL unit\n"
+        )
+
+        codecs = [
+            match.group(1).decode("ascii").lower()
+            for match in _DECODER_ERROR_CODEC.finditer(stderr)
+        ]
+
+        self.assertEqual(codecs, ["h264", "hevc"])
 
 
 if __name__ == "__main__":
