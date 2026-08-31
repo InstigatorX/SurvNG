@@ -57,6 +57,16 @@ def _manager(secret: str = "must-not-leak") -> SimpleNamespace:
                 "alive_workers": 2,
                 "pending_requests": 1,
             },
+            "recorded_decode": {
+                "max_processes": 3,
+                "active_processes": 1,
+                "memory_per_process_bytes": 112 << 20,
+                "memory_budget_bytes": 336 << 20,
+                "reserved_bytes": 112 << 20,
+                "waiting": 2,
+                "process_timeouts": 3,
+                "memory_timeouts": 4,
+            },
             "model_path": f"/models/{secret}",
         }),
         recorder=SimpleNamespace(retention_status=Mock(return_value={
@@ -120,6 +130,16 @@ def test_runtime_status_is_effective_and_strictly_allowlisted() -> None:
         "timeouts": 1,
     }
     assert payload["detector"]["ready"] is True
+    assert payload["detector"]["recorded_decode"] == {
+        "configured_processes": 3,
+        "active_processes": 1,
+        "memory_per_process_bytes": 112 << 20,
+        "memory_budget_bytes": 336 << 20,
+        "reserved_bytes": 112 << 20,
+        "waiting": 2,
+        "process_timeouts": 3,
+        "memory_timeouts": 4,
+    }
     assert payload["storage"]["free_bytes"] == 600
     assert payload["cameras"][0]["connectivity"] == "healthy"
     encoded = json.dumps(payload)

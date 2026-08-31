@@ -27,7 +27,8 @@ from .recorded_decode_budget import RecordedDecodeBudget
 LOGGER = logging.getLogger(__name__)
 RECORDED_EVENT_FRAME_STAGES = (
     (-1.0, -0.5, 0.0, 0.5, 1.0),
-    (4.0, 4.5),
+    (1.5, 2.0, 2.5, 3.0),
+    (3.5, 4.0, 4.5),
     (8.0, 8.5),
     (12.0, 12.5),
 )
@@ -1479,6 +1480,20 @@ class RecordedMotionObjectDetector:
             ).items()
         }
         prefetched_rows: list[dict[str, Any]] = []
+        # Cover-image recovery needs a later, settled view.  The early bridge
+        # improves temporal confirmation but must not replace that recovery
+        # pass when its subject is still clipped or obscured.
+        representative_stage_index = next(
+            (
+                stage_index
+                for stage_index, stage_offsets in enumerate(stages[1:], start=1)
+                if any(math.isclose(offset, 4.0, abs_tol=0.001) for offset in stage_offsets)
+            ),
+            None,
+        )
+        if representative_stage_index is None and len(stages) > 1:
+            representative_stage_index = 1
+        representative_refinement_requested = False
         rows_between = getattr(self.recorder, "recording_rows_between", None)
         if callable(rows_between):
             lookup_started = time.monotonic()
@@ -1537,6 +1552,12 @@ class RecordedMotionObjectDetector:
         )
 
         for stage_index, stage_offsets in enumerate(stages):
+            if (
+                representative_refinement_requested
+                and representative_stage_index is not None
+                and 0 < stage_index < representative_stage_index
+            ):
+                continue
             adaptive_stage = bool(
                 stage_index == 0
                 and getattr(
@@ -1661,13 +1682,19 @@ class RecordedMotionObjectDetector:
                             minimum_confirmations=default_required,
                             class_confirmations=class_confirmations,
                         ):
-                            # Stop spending GPU on remaining offsets once every
-                            # observed track is confirmed and the core window
-                            # has already been sampled.
-                            stage_consensus = True
-                            timing["refinement_early_exit_skipped"] += float(
-                                len(pending) - sample_index - 1
-                            )
+                            if not (
+                                representative_refinement_requested
+                                and stage_index == representative_stage_index
+                            ):
+                                # Stop spending GPU on remaining offsets once every
+                                # observed track is confirmed and the core window
+                                # has already been sampled. The designated cover
+                                # pass intentionally reads its whole stage so a
+                                # better framed subject is not skipped.
+                                stage_consensus = True
+                                timing["refinement_early_exit_skipped"] += float(
+                                    len(pending) - sample_index - 1
+                                )
 
                 samples = [
                     samples_by_offset[offset]
@@ -1723,7 +1750,12 @@ class RecordedMotionObjectDetector:
                         ):
                             adaptive_limit += 1
                             continue
-                        if allow_representative_refinement and representative_needs_refinement:
+                        if (
+                            allow_representative_refinement
+                            and representative_needs_refinement
+                            and representative_stage_index is not None
+                        ):
+                            representative_refinement_requested = True
                             refinement_deadline = min(
                                 deadline,
                                 time.monotonic()
@@ -1733,6 +1765,14 @@ class RecordedMotionObjectDetector:
                                 "recorded object representative refinement requested for %s",
                                 self.camera.id,
                             )
+                            break
+                        if (
+                            representative_refinement_requested
+                            and stage_index < representative_stage_index
+                        ):
+                            # Preserve the later cover-quality pass even
+                            # though the bridge has already confirmed the
+                            # subject.
                             break
                         if stage_index:
                             LOGGER.info(

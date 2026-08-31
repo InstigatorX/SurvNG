@@ -3880,7 +3880,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   ].map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
   const refinementStagePresets = {
-    full: [[-1, -0.5, 0, 0.5, 1], [4, 4.5], [8, 8.5], [12, 12.5]],
+    full: [[-1, -0.5, 0, 0.5, 1], [1.5, 2, 2.5, 3], [3.5, 4, 4.5], [8, 8.5], [12, 12.5]],
     compact: [[-0.5, 0, 0.5], [4, 4.5], [8, 8.5]],
     tight: [[-0.5, 0, 0.5]],
   };
@@ -4481,7 +4481,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 <option value="3">3 detectors</option>
                 <option value="4">4 detectors</option>
               </select><small>Independent OpenVINO workers process simultaneous camera events. Tracking keeps at least 2 so a live incident check is not stuck behind overlay work. More workers use more accelerator and memory.</small></label>
-              <label>Recorded decode processes<input type="number" min="1" max="16" step="1" value={config.detector?.recorded_decode_max_processes ?? 2} onChange={(event) => updateConfig(["detector", "recorded_decode_max_processes"], Number(event.target.value))} /><small>Concurrent recording-video decoders for delayed incident refinement. Keep this at 2 unless decode wait is persistently high.</small></label>
+              <label>Recorded decode processes<input type="number" min="1" max="16" step="1" value={config.detector?.recorded_decode_max_processes ?? 2} onChange={(event) => updateConfig(["detector", "recorded_decode_max_processes"], Number(event.target.value))} /><small>{config.detector?.recorded_decode_memory_per_process_mb == null ? "This saved configuration retains its legacy shared decode-memory ceiling." : `Each process adds ${config.detector.recorded_decode_memory_per_process_mb}MB to the shared estimated decoded-frame budget.`}</small></label>
               <label>Incident confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /><small>A single detection must meet this confidence. Repeated candidates can still qualify through confirmation.</small></label>
               <label>Candidate confidence<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.event_candidate_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "event_candidate_confidence_threshold"], Number(event.target.value))} /><small>Retains weaker detections only as temporal evidence; they require at least three consistent frames.</small></label>
               <label>Object confirmation<select value={String(config.detector?.event_confirmation_frames ?? 2)} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))}><option value="1">Immediate (1 frame)</option><option value="2">Confirmed (2 frames)</option><option value="3">Strong (3 frames)</option><option value="4">Very strict (4 frames)</option><option value="5">Maximum (5 frames)</option></select><small>Requires the same label across this many recorded samples. Refinement stops early once confirmation is met, so lower counts also spend less detector time.</small></label>
@@ -4489,7 +4489,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 const preset = refinementStagePresets[event.target.value];
                 if (preset) updateConfig(["detector", "event_refinement_stages"], preset);
               }}>
-                <option value="full">Full (−1…+1s, then +4/+8/+12s)</option>
+                <option value="full">Full (−1…+4.5s bridge, then +8/+12s)</option>
                 <option value="compact">Compact (−0.5…+0.5s, then +4/+8s)</option>
                 <option value="tight">Tight (−0.5…+0.5s only)</option>
                 {refinementStagePreset === "custom" ? <option value="custom">Custom stages</option> : null}

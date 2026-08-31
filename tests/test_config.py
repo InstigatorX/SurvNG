@@ -265,7 +265,8 @@ class AppConfigTest(unittest.TestCase):
             config.detector.event_refinement_stages,
             [
                 [-1.0, -0.5, 0.0, 0.5, 1.0],
-                [4.0, 4.5],
+                [1.5, 2.0, 2.5, 3.0],
+                [3.5, 4.0, 4.5],
                 [8.0, 8.5],
                 [12.0, 12.5],
             ],
@@ -379,6 +380,18 @@ class AppConfigTest(unittest.TestCase):
             AppConfig.model_validate({
                 "detector": {"event_refinement_stages": [[100.0]]},
             })
+
+    def test_legacy_recorded_decode_memory_budget_remains_an_aggregate_limit(self) -> None:
+        legacy = AppConfig.model_validate({
+            "detector": {
+                "recorded_decode_max_processes": 3,
+                "recorded_decode_memory_budget_mb": 256,
+            },
+        })
+        self.assertIsNone(legacy.detector.recorded_decode_memory_per_process_mb)
+
+        current = AppConfig.model_validate({"detector": {}})
+        self.assertEqual(current.detector.recorded_decode_memory_per_process_mb, 112)
 
     def test_camera_identity_and_stream_urls_are_safe_for_runtime_paths(self) -> None:
         with self.assertRaises(ValidationError):

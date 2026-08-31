@@ -48,6 +48,7 @@ def manager_with_mocks() -> AppManager:
     manager.inference.tracking_limiter = Mock()
     manager.inference.tracking_factory = Mock()
     manager.inference.status.return_value = {}
+    manager._motion_analysis_limiter = Mock()
     manager.motion_object_detector_factory = Mock()
     manager.motion_object_detector_factory.decode_budget.status.return_value = {}
     manager.recorder = Mock()

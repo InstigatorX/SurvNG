@@ -714,7 +714,14 @@ class DetectorConfig(BaseModel):
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
     recorded_adaptive_sampling: bool = True
     recorded_decode_max_processes: int = Field(default=2, ge=1, le=16)
+    # Legacy aggregate ceiling. Preserve its meaning for saved configurations
+    # that predate the per-process setting below.
     recorded_decode_memory_budget_mb: int = Field(default=256, ge=32, le=8192)
+    recorded_decode_memory_per_process_mb: int | None = Field(
+        default=112,
+        ge=32,
+        le=8192,
+    )
     recorded_decode_estimated_frame_mb: int = Field(default=8, ge=1, le=64)
     model_path: str = ""
     model_xml: str = ""
@@ -745,13 +752,13 @@ class DetectorConfig(BaseModel):
     event_confirmation_frames: int = Field(default=2, ge=1, le=5)
     event_class_confirmation_frames: dict[str, int] = Field(default_factory=dict)
     event_class_confidence_thresholds: dict[str, float] = Field(default_factory=dict)
-    # Recorded refinement occupancy budgets. Defaults match the historical
-    # hard-coded stages so existing deployments keep the same evidence window
-    # unless an operator deliberately tightens them.
+    # Recorded refinement occupancy budgets. The bridge after the initial
+    # window confirms subjects that enter or become clear a few seconds late.
     event_refinement_stages: list[list[float]] = Field(
         default_factory=lambda: [
             [-1.0, -0.5, 0.0, 0.5, 1.0],
-            [4.0, 4.5],
+            [1.5, 2.0, 2.5, 3.0],
+            [3.5, 4.0, 4.5],
             [8.0, 8.5],
             [12.0, 12.5],
         ]
@@ -774,13 +781,28 @@ class DetectorConfig(BaseModel):
     depth: DepthConfig = Field(default_factory=DepthConfig)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
 
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_legacy_decode_memory_budget(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        if (
+            "recorded_decode_memory_budget_mb" in value
+            and "recorded_decode_memory_per_process_mb" not in value
+        ):
+            normalized = dict(value)
+            normalized["recorded_decode_memory_per_process_mb"] = None
+            return normalized
+        return value
+
     @field_validator("event_refinement_stages", mode="before")
     @classmethod
     def normalize_event_refinement_stages(cls, value: object) -> list[list[float]]:
         if value in (None, ""):
             return [
                 [-1.0, -0.5, 0.0, 0.5, 1.0],
-                [4.0, 4.5],
+                [1.5, 2.0, 2.5, 3.0],
+                [3.5, 4.0, 4.5],
                 [8.0, 8.5],
                 [12.0, 12.5],
             ]

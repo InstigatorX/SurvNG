@@ -76,9 +76,10 @@ event. Its default sampling stages are:
 | Stage | Requested offsets from the event |
 | --- | --- |
 | Initial temporal window | -1.0, -0.5, 0.0, +0.5, +1.0 seconds |
-| Delayed discovery 1 | +4.0, +4.5 seconds |
-| Delayed discovery 2 | +8.0, +8.5 seconds |
-| Delayed discovery 3 | +12.0, +12.5 seconds |
+| Early bridge 1 | +1.5, +2.0, +2.5, +3.0 seconds |
+| Early bridge 2 | +3.5, +4.0, +4.5 seconds |
+| Delayed discovery 1 | +8.0, +8.5 seconds |
+| Delayed discovery 2 | +12.0, +12.5 seconds |
 
 Operators can tighten `detector.event_refinement_stages` and
 `detector.event_refinement_retry_seconds` when detector occupancy matters more

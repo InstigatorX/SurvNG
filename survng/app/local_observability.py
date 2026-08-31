@@ -108,6 +108,8 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
     isolation = isolation if isinstance(isolation, dict) else {}
     lifecycle = raw.get("lifecycle")
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    recorded_decode = raw.get("recorded_decode")
+    recorded_decode = recorded_decode if isinstance(recorded_decode, dict) else {}
     ready_value = raw.get("ready")
     if ready_value is None:
         ready_value = bool(
@@ -146,6 +148,28 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
                 )
             ),
             "pending_requests": int(_number(isolation.get("pending_requests"))),
+        },
+        "recorded_decode": {
+            "configured_processes": int(
+                _number(recorded_decode.get("max_processes"))
+            ),
+            "active_processes": int(
+                _number(recorded_decode.get("active_processes"))
+            ),
+            "memory_per_process_bytes": _optional_number(
+                recorded_decode.get("memory_per_process_bytes")
+            ),
+            "memory_budget_bytes": int(
+                _number(recorded_decode.get("memory_budget_bytes"))
+            ),
+            "reserved_bytes": int(_number(recorded_decode.get("reserved_bytes"))),
+            "waiting": int(_number(recorded_decode.get("waiting"))),
+            "process_timeouts": int(
+                _number(recorded_decode.get("process_timeouts"))
+            ),
+            "memory_timeouts": int(
+                _number(recorded_decode.get("memory_timeouts"))
+            ),
         },
         "lifecycle": {
             "core_started": bool(lifecycle.get("core_started")),

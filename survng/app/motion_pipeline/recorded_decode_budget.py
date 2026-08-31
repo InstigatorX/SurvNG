@@ -47,11 +47,17 @@ class RecordedDecodeBudget:
         *,
         max_processes: int = 2,
         memory_budget_bytes: int = 256 * 1024 * 1024,
+        memory_per_process_bytes: int | None = None,
         estimated_frame_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         self._condition = threading.Condition()
         self._max_processes = max(1, int(max_processes))
         self._memory_budget_bytes = max(1, int(memory_budget_bytes))
+        self._memory_per_process_bytes = (
+            max(1, int(memory_per_process_bytes))
+            if memory_per_process_bytes is not None
+            else None
+        )
         self._estimated_frame_bytes = max(1, int(estimated_frame_bytes))
         self._active_processes = 0
         self._reserved_bytes = 0
@@ -74,15 +80,11 @@ class RecordedDecodeBudget:
 
     @classmethod
     def from_detector_config(cls, config: Any) -> RecordedDecodeBudget:
+        max_processes, memory_budget_bytes, memory_per_process_bytes = cls._config_limits(config)
         return cls(
-            max_processes=int(
-                getattr(config, "recorded_decode_max_processes", 2) or 2
-            ),
-            memory_budget_bytes=int(
-                getattr(config, "recorded_decode_memory_budget_mb", 256) or 256
-            )
-            * 1024
-            * 1024,
+            max_processes=max_processes,
+            memory_budget_bytes=memory_budget_bytes,
+            memory_per_process_bytes=memory_per_process_bytes,
             estimated_frame_bytes=int(
                 getattr(config, "recorded_decode_estimated_frame_mb", 8) or 8
             )
@@ -96,28 +98,55 @@ class RecordedDecodeBudget:
         max_processes: int,
         memory_budget_bytes: int,
         estimated_frame_bytes: int,
+        memory_per_process_bytes: int | None = None,
     ) -> None:
         with self._condition:
             self._max_processes = max(1, int(max_processes))
             self._memory_budget_bytes = max(1, int(memory_budget_bytes))
+            self._memory_per_process_bytes = (
+                max(1, int(memory_per_process_bytes))
+                if memory_per_process_bytes is not None
+                else None
+            )
             self._estimated_frame_bytes = max(1, int(estimated_frame_bytes))
             self._condition.notify_all()
 
     def reconfigure_from_detector_config(self, config: Any) -> None:
+        max_processes, memory_budget_bytes, memory_per_process_bytes = self._config_limits(config)
         self.reconfigure(
-            max_processes=int(
-                getattr(config, "recorded_decode_max_processes", 2) or 2
-            ),
-            memory_budget_bytes=int(
-                getattr(config, "recorded_decode_memory_budget_mb", 256) or 256
-            )
-            * 1024
-            * 1024,
+            max_processes=max_processes,
+            memory_budget_bytes=memory_budget_bytes,
+            memory_per_process_bytes=memory_per_process_bytes,
             estimated_frame_bytes=int(
                 getattr(config, "recorded_decode_estimated_frame_mb", 8) or 8
             )
             * 1024
             * 1024,
+        )
+
+    @staticmethod
+    def _config_limits(config: Any) -> tuple[int, int, int | None]:
+        max_processes = int(
+            getattr(config, "recorded_decode_max_processes", 2) or 2
+        )
+        memory_per_process_mb = getattr(
+            config,
+            "recorded_decode_memory_per_process_mb",
+            None,
+        )
+        if memory_per_process_mb is None:
+            return (
+                max_processes,
+                int(getattr(config, "recorded_decode_memory_budget_mb", 256) or 256)
+                * 1024
+                * 1024,
+                None,
+            )
+        memory_per_process_bytes = int(memory_per_process_mb) * 1024 * 1024
+        return (
+            max_processes,
+            max_processes * memory_per_process_bytes,
+            memory_per_process_bytes,
         )
 
     def status(self) -> dict[str, Any]:
@@ -126,6 +155,7 @@ class RecordedDecodeBudget:
                 "max_processes": self._max_processes,
                 "active_processes": self._active_processes,
                 "memory_budget_bytes": self._memory_budget_bytes,
+                "memory_per_process_bytes": self._memory_per_process_bytes,
                 "reserved_bytes": self._reserved_bytes,
                 "estimated_frame_bytes": self._estimated_frame_bytes,
                 "waiting": sum(len(waiters) for waiters in self._waiters.values()),
@@ -163,11 +193,9 @@ class RecordedDecodeBudget:
     ) -> RecordedDecodeLease | None:
         frames = max(1, int(maximum_frames))
         requested = frames * self._estimated_frame_bytes
-        with self._condition:
-            charged = min(requested, self._memory_budget_bytes)
         return self._acquire(
             kind="memory",
-            amount=charged,
+            amount=requested,
             incident_epoch=incident_epoch,
             deadline=deadline,
             cancelled=cancelled,
@@ -248,12 +276,16 @@ class RecordedDecodeBudget:
     def _fits(self, waiter: _Waiter) -> bool:
         if waiter.kind == "process":
             return self._active_processes < self._max_processes
-        return self._reserved_bytes + waiter.amount <= self._memory_budget_bytes
+        return self._reserved_bytes + min(
+            waiter.amount,
+            self._memory_budget_bytes,
+        ) <= self._memory_budget_bytes
 
     def _account(self, waiter: _Waiter) -> None:
         if waiter.kind == "process":
             self._active_processes += 1
         else:
+            waiter.amount = min(waiter.amount, self._memory_budget_bytes)
             self._reserved_bytes += waiter.amount
 
     def _release(self, waiter: _Waiter) -> None:

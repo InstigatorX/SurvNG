@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -983,3 +984,61 @@ def test_memory_claim_expires_stale_expired_lease_before_fresh_job() -> None:
     assert claimed["id"] == "fresh"
     assert store._jobs["zombie"]["state"] == "failed"
     assert store._jobs["zombie"]["last_error"] == "stale_refinement"
+
+
+def test_running_multicamera_burst_survives_queued_age_expiry_while_lease_is_valid() -> None:
+    """Decode contention must not stale jobs that have already been claimed.
+
+    Each camera owns one durable refiner.  If a shared decode/inference budget
+    is full, those refiners may be running while waiting for capacity.  The
+    queued-age sweep may discard an old unclaimed episode, but it must retain
+    these lease-protected multi-camera jobs.
+    """
+    store = _MemoryDetectionJobStore()
+    for camera_id in ("back-left", "back-middle", "back-right"):
+        job_id = f"{camera_id}-running"
+        store.enqueue_detection_job(
+            job_id=job_id,
+            camera_id=camera_id,
+            dedupe_key=f"episode:{job_id}",
+            payload={"event_at": "2026-08-30T16:30:00+00:00"},
+        )
+        claimed = store.claim_detection_job(
+            camera_id,
+            lease_owner=f"{camera_id}-worker",
+            maximum_age_seconds=REFINEMENT_MAX_QUEUE_AGE_SECONDS,
+        )
+        assert claimed is not None
+        with store._lock:
+            job = store._jobs[job_id]
+            job["created_at_monotonic"] = (
+                time.monotonic() - REFINEMENT_MAX_QUEUE_AGE_SECONDS - 1.0
+            )
+            job["lease_expires_at"] = time.monotonic() + 60.0
+
+    store.enqueue_detection_job(
+        job_id="same-camera-queued",
+        camera_id="back-left",
+        dedupe_key="episode:same-camera-queued",
+        payload={"event_at": "2026-08-30T16:30:01+00:00"},
+    )
+    with store._lock:
+        store._jobs["same-camera-queued"]["created_at_monotonic"] = (
+            time.monotonic() - REFINEMENT_MAX_QUEUE_AGE_SECONDS - 1.0
+        )
+
+    assert store.expire_stale_detection_jobs(
+        "back-middle", maximum_age_seconds=REFINEMENT_MAX_QUEUE_AGE_SECONDS
+    ) == 0
+    assert store.expire_stale_detection_jobs(
+        "back-right", maximum_age_seconds=REFINEMENT_MAX_QUEUE_AGE_SECONDS
+    ) == 0
+    assert store.expire_stale_detection_jobs(
+        "back-left", maximum_age_seconds=REFINEMENT_MAX_QUEUE_AGE_SECONDS
+    ) == 1
+    with store._lock:
+        assert store._jobs["back-left-running"]["state"] == "running"
+        assert store._jobs["back-middle-running"]["state"] == "running"
+        assert store._jobs["back-right-running"]["state"] == "running"
+        assert store._jobs["same-camera-queued"]["state"] == "failed"
+        assert store._jobs["same-camera-queued"]["last_error"] == "stale_refinement"
