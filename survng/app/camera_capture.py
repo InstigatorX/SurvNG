@@ -156,12 +156,14 @@ class FfmpegCaptureHandle:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=1.0)
+        # Wait for the stderr reader to observe EOF before closing its file
+        # object. Closing it first races a blocking read in _drain_stderr.
+        stderr_thread, self._stderr_thread = self._stderr_thread, None
+        if stderr_thread is not None:
+            stderr_thread.join()
         for stream in (process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
-        if self._stderr_thread is not None:
-            self._stderr_thread.join(timeout=0.2)
-            self._stderr_thread = None
 
     def error_detail(self) -> str:
         process = self._process
