@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import resource
 import signal
 import sys
@@ -19,6 +20,10 @@ DECODERS = {
     "va": ("vah264dec", "vah265dec"),
     "qsv": ("qsvh264dec", "qsvh265dec"),
 }
+_CREDENTIAL_URL_RE = re.compile(
+    r"(\b(?:rtsp|rtsps|http|https)://)([^:/@\s]+):([^@\s]+)@",
+    re.IGNORECASE,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -73,6 +78,13 @@ def _positive_seconds(value: float, name: str) -> float:
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be a positive finite number")
     return value
+
+
+def _redact_error(value: object) -> str:
+    return _CREDENTIAL_URL_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}:***@",
+        str(value),
+    )
 
 
 def _load_gstreamer():
@@ -203,6 +215,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
     started = time.monotonic()
     cpu_started = time.process_time()
     first_frame_at: float | None = None
+    last_frame_at: float | None = None
     frames = 0
     mapped_bytes = 0
     width = 0
@@ -229,6 +242,12 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             sample = sink.emit("try-pull-sample", 200 * Gst.MSECOND)
             if sample is None:
                 continue
+            sample_at = time.monotonic()
+            if (
+                first_frame_at is not None
+                and sample_at - first_frame_at > duration
+            ):
+                break
             buffer = sample.get_buffer()
             caps = sample.get_caps()
             structure = caps.get_structure(0)
@@ -245,7 +264,8 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 buffer.unmap(info)
             frames += 1
             if first_frame_at is None:
-                first_frame_at = time.monotonic()
+                first_frame_at = sample_at
+            last_frame_at = sample_at
     finally:
         pipeline.set_state(Gst.State.NULL)
         for signum, handler in previous_handlers.items():
@@ -272,11 +292,15 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             else None
         ),
         "sample_seconds": round(
-            max(0.0, finished - (first_frame_at or finished)),
+            max(0.0, (last_frame_at or finished) - (first_frame_at or finished)),
             3,
         ),
         "output_fps": round(
-            frames / max(0.001, finished - (first_frame_at or started)),
+            max(0, frames - 1)
+            / max(
+                0.001,
+                (last_frame_at or finished) - (first_frame_at or started),
+            ),
             3,
         ),
         "mapped_bytes": mapped_bytes,
@@ -292,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         args = _parser().parse_args(argv)
         result = _run_probe(args)
     except Exception as exc:
-        result = {"ok": False, "error": str(exc)}
+        result = {"ok": False, "error": _redact_error(exc)}
     print(json.dumps(result, sort_keys=True))
     return 0 if result.get("ok") else 1
 

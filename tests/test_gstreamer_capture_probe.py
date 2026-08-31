@@ -27,6 +27,14 @@ def test_camera_url_rejects_unsupported_protocol_without_echoing_secret() -> Non
     assert "secret" not in str(error.value)
 
 
+def test_probe_errors_redact_url_passwords() -> None:
+    redacted = probe._redact_error(
+        "failed to open rtsp://admin:camera-secret@camera/live"
+    )
+
+    assert redacted == "failed to open rtsp://admin:***@camera/live"
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
