@@ -797,7 +797,10 @@ def apply_config_update(
     # different commits.
     with MANAGER_RELOAD_LOCK:
         current = config
+        previous_ffmpeg_path = current.ffmpeg_path
         if manager_owned_config(current) != manager_owned_config(effective):
+            if effective.ffmpeg_path != previous_ffmpeg_path:
+                _recording_media_runtime.clear_hardware_probe_caches()
             applied = reload_manager(effective, assign_ids=False, persist=persist)
             prepare_bootstrap_token(applied)
             return applied, {
@@ -805,7 +808,6 @@ def apply_config_update(
                 "camera_workers_restarted": True,
                 "subsystems_restarted": ["manager"],
             }
-        previous_ffmpeg_path = current.ffmpeg_path
         effective, result = application.apply(
             current,
             effective,

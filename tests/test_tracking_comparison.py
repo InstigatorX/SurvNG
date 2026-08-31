@@ -135,35 +135,15 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         self.assertEqual(result["appearance_failures"], 1)
         self.assertEqual(result["engines"]["survng_hybrid"]["track_count"], 1)
 
-    def test_video_sampler_uses_source_timing_and_releases_capture(self) -> None:
-        class Capture:
-            def __init__(self) -> None:
-                self.frames = [np.zeros((2, 2, 3), dtype=np.uint8) for _ in range(7)]
-                self.released = False
-
-            def isOpened(self):
-                return True
-
-            def get(self, _property):
-                return 4.0
-
-            def read(self):
-                return (True, self.frames.pop(0)) if self.frames else (False, None)
-
-            def release(self):
-                self.released = True
-
-        capture = Capture()
-        with patch("survng.app.tracking_comparison.cv2.VideoCapture", return_value=capture):
-            frames = list(sampled_video_frames(
+    def test_video_sampler_requires_external_ffmpeg(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ffmpeg_path is required"):
+            list(sampled_video_frames(
                 Path("comparison.mp4"),
                 start_epoch=50.0,
                 sample_fps=2.0,
                 duration_seconds=1.25,
+                ffmpeg_path="",
             ))
-
-        self.assertEqual([epoch for epoch, _frame in frames], [50.0, 50.5, 51.0])
-        self.assertTrue(capture.released)
 
     def test_ffmpeg_sampler_decodes_only_model_sized_sampled_frames(self) -> None:
         payload = bytes(range(96)) * 2

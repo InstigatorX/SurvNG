@@ -12,7 +12,6 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Protocol
 
-import cv2
 import numpy as np
 
 from .config import CameraConfig, ObjectTrackingConfig
@@ -59,7 +58,7 @@ def sampled_video_frames(
     start_epoch: float,
     sample_fps: float,
     duration_seconds: float,
-    ffmpeg_path: str = "",
+    ffmpeg_path: str,
     maximum_width: int = 640,
     start_offset_seconds: float = 0.0,
     concat_input: bool = False,
@@ -71,60 +70,19 @@ def sampled_video_frames(
     source PTS is relative to ``start_offset_seconds``. Callers sampling a
     segment mid-file must pass the wall-clock epoch of that seek point.
     """
-    if ffmpeg_path:
-        yield from _ffmpeg_sampled_video_frames(
-            path,
-            start_epoch=start_epoch,
-            sample_fps=sample_fps,
-            duration_seconds=duration_seconds,
-            ffmpeg_path=ffmpeg_path,
-            maximum_width=maximum_width,
-            start_offset_seconds=start_offset_seconds,
-            concat_input=concat_input,
-            probe_path=probe_path,
-        )
-        return
-    capture = cv2.VideoCapture(str(path))
-    try:
-        if not capture.isOpened():
-            raise RuntimeError("comparison video could not be opened")
-        source_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-        if not np.isfinite(source_fps) or source_fps <= 0.0:
-            source_fps = 30.0
-        source_start = max(0.0, float(start_offset_seconds))
-        if source_start > 0.0:
-            capture.set(cv2.CAP_PROP_POS_MSEC, source_start * 1000.0)
-        interval = 1.0 / max(0.1, float(sample_fps))
-        next_sample = 0.0
-        frame_index = 0
-        while True:
-            ok, frame = capture.read()
-            if not ok:
-                break
-            offset = frame_index / source_fps
-            frame_index += 1
-            if offset > duration_seconds + 1e-6:
-                break
-            if offset + 1e-6 < next_sample:
-                continue
-            captured_at = start_epoch + offset
-            yield DecodedVideoFrame(
-                captured_at,
-                frame,
-                VideoFrameReference(
-                    source_path=path,
-                    seek_offset_seconds=source_start,
-                    pts=max(0, round(offset * source_fps)),
-                    pts_seconds=source_start + offset,
-                    time_base_num=1,
-                    time_base_den=max(1, round(source_fps)),
-                    captured_at=captured_at,
-                    exact=False,
-                ),
-            )
-            next_sample += interval
-    finally:
-        capture.release()
+    if not ffmpeg_path:
+        raise ValueError("ffmpeg_path is required for video frame sampling")
+    yield from _ffmpeg_sampled_video_frames(
+        path,
+        start_epoch=start_epoch,
+        sample_fps=sample_fps,
+        duration_seconds=duration_seconds,
+        ffmpeg_path=ffmpeg_path,
+        maximum_width=maximum_width,
+        start_offset_seconds=start_offset_seconds,
+        concat_input=concat_input,
+        probe_path=probe_path,
+    )
 
 
 def _ffmpeg_sampled_video_frames(
@@ -139,8 +97,7 @@ def _ffmpeg_sampled_video_frames(
     concat_input: bool,
     probe_path: Path | None,
 ) -> Iterator[DecodedVideoFrame]:
-    # Opening another cv2.VideoCapture inside the server can contend with all
-    # active camera capture threads. ffprobe is isolated and substantially
+    # ffprobe is isolated and substantially
     # faster under a full camera workload. A constituent file is used when the
     # decoder input itself is an ffconcat manifest.
     source_width, source_height, time_base_num, time_base_den = _ffprobe_video_metadata(

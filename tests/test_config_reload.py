@@ -304,7 +304,7 @@ class ConfigReloadTest(unittest.TestCase):
         active.reconfigure_recorders.assert_not_called()
         self.assertEqual(main.config.ffmpeg_path, "/old/ffmpeg")
 
-    def test_ffmpeg_hot_reconfiguration_invalidates_hardware_probe_cache(self) -> None:
+    def test_ffmpeg_reconfiguration_reloads_capture_and_invalidates_probe_cache(self) -> None:
         active = Mock()
         current = AppConfig(ffmpeg_path="/old/ffmpeg")
         active.config = current
@@ -314,6 +314,7 @@ class ConfigReloadTest(unittest.TestCase):
 
         with (
             patch("survng.app.main.save_config"),
+            patch("survng.app.main.reload_manager", return_value=incoming) as reload,
             patch.object(
                 main._recording_media_runtime,
                 "clear_hardware_probe_caches",
@@ -322,8 +323,9 @@ class ConfigReloadTest(unittest.TestCase):
             effective, result = main.apply_config_update(incoming)
 
         clear.assert_called_once_with()
-        active.reconfigure_recorders.assert_called_once_with(effective)
-        self.assertEqual(result["subsystems_restarted"], ["recorders"])
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        active.reconfigure_recorders.assert_not_called()
+        self.assertTrue(result["camera_workers_restarted"])
 
     def test_hardware_probe_cache_is_keyed_by_ffmpeg_path(self) -> None:
         runtime = main._recording_media_runtime

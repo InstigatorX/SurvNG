@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import os
 import threading
 import time
 from collections import deque
 
-import cv2
 import numpy as np
 import pytest
 
@@ -14,9 +12,9 @@ from survng.app.camera_capture import (
     CaptureHandle,
     CaptureOpenLimiter,
     CapturedFrame,
-    OpenCvCaptureHandle,
-    OpenCvCaptureOptions,
-    OpenCvFfmpegCaptureBackend,
+    FfmpegCaptureOptions,
+    FfmpegCaptureBackend,
+    _decode_capture_bmp,
 )
 
 
@@ -660,45 +658,41 @@ def test_live_recovers_after_relay_restart_without_a_persistent_consumer() -> No
     assert status["open_timeout_escalations"] >= 1
 
 
-def test_opencv_backend_applies_per_attempt_open_deadline() -> None:
-    class NativeCapture:
-        def __init__(self) -> None:
-            self.options: list[int] = []
-
-        def open(self, _source_url, _backend, options) -> bool:
-            self.options = list(options)
-            return True
-
-    native = NativeCapture()
-    backend = OpenCvFfmpegCaptureBackend(
+def test_ffmpeg_backend_uses_configured_transport_and_policy_rate() -> None:
+    backend = FfmpegCaptureBackend(
         CaptureOpenLimiter(1),
-        OpenCvCaptureOptions(open_timeout_ms=3000),
+        FfmpegCaptureOptions(
+            ffmpeg_path="custom-ffmpeg",
+            rtsp_transport="udp",
+            frame_rate=lambda: 5.0,
+        ),
     )
 
-    assert backend.open(
-        OpenCvCaptureHandle(native),
-        "rtsp://camera/live",
-        lambda: False,
-        open_timeout_ms=10000,
-    )
+    command = backend._command("rtsp://camera/live")
 
-    option_values = dict(zip(native.options[::2], native.options[1::2]))
-    assert option_values[cv2.CAP_PROP_OPEN_TIMEOUT_MSEC] == 10000
+    assert command[:5] == ["custom-ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"]
+    assert ["-rtsp_transport", "udp"] == command[command.index("-rtsp_transport") : command.index("-rtsp_transport") + 2]
+    assert "bmp" in command
+    assert any(str(item).startswith("fps=5,") for item in command)
+    assert command[-5:] == ["-f", "image2pipe", "-vcodec", "bmp", "pipe:1"]
 
 
-def test_opencv_backend_uses_configured_transport_for_rtsp(monkeypatch) -> None:
-    class NativeCapture:
-        def open(self, _source_url, _backend, _options) -> bool:
-            assert os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] == "rtsp_transport;udp"
-            return True
+def test_capture_bmp_decode_preserves_bgr_pixels() -> None:
+    # One bottom-up 1×1 24-bit BMP with BGR payload (20, 40, 200).
+    encoded = bytearray(58)
+    encoded[:2] = b"BM"
+    encoded[2:6] = (58).to_bytes(4, "little")
+    encoded[10:14] = (54).to_bytes(4, "little")
+    encoded[14:18] = (40).to_bytes(4, "little")
+    encoded[18:22] = (1).to_bytes(4, "little", signed=True)
+    encoded[22:26] = (1).to_bytes(4, "little", signed=True)
+    encoded[26:28] = (1).to_bytes(2, "little")
+    encoded[28:30] = (24).to_bytes(2, "little")
+    encoded[54:] = bytes((20, 40, 200, 0))
+    frame = _decode_capture_bmp(encoded)
 
-    monkeypatch.delenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", raising=False)
-    backend = OpenCvFfmpegCaptureBackend(
-        CaptureOpenLimiter(1), OpenCvCaptureOptions(rtsp_transport="udp")
-    )
-
-    assert backend.open(OpenCvCaptureHandle(NativeCapture()), "rtsp://camera/live", lambda: False)
-    assert "OPENCV_FFMPEG_CAPTURE_OPTIONS" not in os.environ
+    assert frame.shape == (1, 1, 3)
+    assert frame[0, 0].tolist() == [20, 40, 200]
 
 
 def test_close_rejects_active_capture_thread() -> None:

@@ -11,8 +11,8 @@ from pathlib import Path
 from .camera import CameraWorker
 from .camera_capture import (
     CaptureOpenLimiter,
-    OpenCvCaptureOptions,
-    OpenCvFfmpegCaptureBackend,
+    FfmpegCaptureOptions,
+    FfmpegCaptureBackend,
 )
 from .camera_control import CameraControlService
 from .camera_fleet import CameraFleetLifecycle, CameraFleetOperationError
@@ -309,14 +309,21 @@ class AppManager:
         # lifecycle/reconfiguration ownership lives in ``self.recording``.
         self.recorder = self.recording.recorder
         self.go2rtc = Go2RtcAdapter()
-        # Camera startup pacing is an internal safety policy. Keep native
-        # OpenCV admission and the startup coordinator on the same fixed cap.
+        # Camera startup pacing is an internal safety policy. Keep external
+        # FFmpeg admission and the startup coordinator on the same fixed cap.
         self._capture_open_limiter = CaptureOpenLimiter(
             CAMERA_STARTUP_MAX_CONCURRENCY
         )
-        self.capture_backend = OpenCvFfmpegCaptureBackend(
+        self.capture_backend = FfmpegCaptureBackend(
             self._capture_open_limiter,
-            OpenCvCaptureOptions(rtsp_transport=config.capture_rtsp_transport),
+            FfmpegCaptureOptions(
+                ffmpeg_path=config.ffmpeg_path,
+                rtsp_transport=config.capture_rtsp_transport,
+                frame_rate=lambda: max(
+                    self.config.motion_qualification.sample_fps,
+                    self.config.detector.tracking.sample_fps,
+                ),
+            ),
         )
         self.state_events = StateEventBroker()
         try:

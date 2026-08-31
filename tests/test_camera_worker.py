@@ -718,36 +718,6 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(stage_metrics["preprocess"]["calls"], 1)
         self.assertEqual(worker.motion_pipeline.status()["stages"]["preprocess"]["calls"], 0)
 
-    def test_capture_limits_ffmpeg_decoder_threads(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        capture = Mock()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir))
-            worker._stop.clear()
-
-            def stop_after_open(*_args):
-                worker.capture._stop.set()
-                return False
-
-            capture.open.side_effect = stop_after_open
-            with worker.capture._lock:
-                worker.capture._stop.clear()
-            with patch("survng.app.camera_capture.cv2.VideoCapture", return_value=capture):
-                worker.capture._run_source("live", threading.Event())
-
-        _, backend, options = capture.open.call_args.args
-        self.assertEqual(backend, cv2.CAP_FFMPEG)
-        self.assertEqual(options[options.index(cv2.CAP_PROP_N_THREADS) + 1], 1)
-        self.assertEqual(
-            options[options.index(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC) + 1],
-            CAPTURE_OPEN_TIMEOUT_MS,
-        )
-        self.assertEqual(
-            options[options.index(cv2.CAP_PROP_READ_TIMEOUT_MSEC) + 1],
-            CAPTURE_READ_TIMEOUT_MS,
-        )
-        capture.release.assert_called_once()
-
     def test_capture_io_deadlines_fit_inside_shutdown_budget(self) -> None:
         shutdown_budget_ms = CAPTURE_STOP_TIMEOUT_SECONDS * 1000
 
@@ -2447,23 +2417,27 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_capture_does_not_publish_a_read_completed_after_stop(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        capture = Mock()
-        capture.open.return_value = True
-        capture.isOpened.return_value = True
         stop_event = threading.Event()
 
-        def stop_during_read():
-            stop_event.set()
-            return True, np.ones((10, 10, 3), dtype=np.uint8)
+        class Handle:
+            def is_opened(self): return True
+            def set_buffer_size(self, _size): pass
+            def read(self):
+                stop_event.set()
+                return True, np.ones((10, 10, 3), dtype=np.uint8)
+            def close(self): pass
 
-        capture.read.side_effect = stop_during_read
+        class Backend:
+            def create_handle(self): return Handle()
+            def open(self, _handle, _url, _cancelled, *, open_timeout_ms=None): return True
+
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
+            worker.capture.backend = Backend()
             worker._stop.clear()
             with worker.capture._lock:
                 worker.capture._stop.clear()
-            with patch("survng.app.camera_capture.cv2.VideoCapture", return_value=capture):
-                worker.capture._run_source("live", stop_event)
+            worker.capture._run_source("live", stop_event)
 
         with worker.capture._lock:
             self.assertNotIn("live", worker.capture._frames)

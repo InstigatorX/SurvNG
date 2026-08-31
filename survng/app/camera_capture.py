@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-import os
+import select
+import subprocess
 import threading
 import time
 from collections import deque
@@ -12,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Protocol
 
-import cv2
 import numpy as np
 
 from .security import redact_secret_text
@@ -21,13 +21,14 @@ from .security import redact_secret_text
 CAPTURE_OPEN_TIMEOUT_MS = 3000
 CAPTURE_RECONNECT_OPEN_TIMEOUT_MS = 10000
 CAPTURE_READ_TIMEOUT_MS = 5000
-CAPTURE_DECODER_THREADS = 1
 CAPTURE_OPEN_LOCK_POLL_SECONDS = 0.1
 CAPTURE_OPEN_CONCURRENCY = 2
 FRAME_STALE_SECONDS = 10.0
 MAIN_SOURCE_IDLE_SECONDS = 20.0
 CAPTURE_RETRY_INITIAL_SECONDS = 1.0
 CAPTURE_RETRY_MAX_SECONDS = 30.0
+CAPTURE_FRAME_MAX_BYTES = 64 * 1024 * 1024
+CAPTURE_PIPE_READ_CHUNK_BYTES = 64 * 1024
 
 LOGGER = logging.getLogger(__name__)
 
@@ -75,57 +76,193 @@ class CaptureOpenLimiter:
         self._semaphore.release()
 
 
-class OpenCvCaptureHandle:
-    """Small ownership wrapper around one OpenCV native capture handle."""
-
-    def __init__(self, capture: cv2.VideoCapture) -> None:
-        self._capture = capture
-
-    def is_opened(self) -> bool:
-        return bool(self._capture.isOpened())
-
-    def set_buffer_size(self, size: int) -> None:
-        self._capture.set(cv2.CAP_PROP_BUFFERSIZE, size)
-
-    def read(self) -> tuple[bool, np.ndarray | None]:
-        ok, frame = self._capture.read()
-        return bool(ok), frame
-
-    def close(self) -> None:
-        self._capture.release()
-
-    def open(self, source_url: str, options: list[int]) -> bool:
-        return bool(self._capture.open(source_url, cv2.CAP_FFMPEG, options))
-
-
 @dataclass(frozen=True, slots=True)
-class OpenCvCaptureOptions:
-    decoder_threads: int = CAPTURE_DECODER_THREADS
+class FfmpegCaptureOptions:
+    ffmpeg_path: str = "ffmpeg"
     open_timeout_ms: int = CAPTURE_OPEN_TIMEOUT_MS
     read_timeout_ms: int = CAPTURE_READ_TIMEOUT_MS
     admission_poll_seconds: float = CAPTURE_OPEN_LOCK_POLL_SECONDS
     rtsp_transport: str = "tcp"
+    frame_rate: Callable[[], float] | None = None
 
 
-class OpenCvFfmpegCaptureBackend:
-    """OpenCV capture backend using FFmpeg with bounded native I/O deadlines."""
+class FfmpegCaptureHandle:
+    """One external FFmpeg decoder whose stdout carries self-framed BMPs."""
+
+    def __init__(self, *, read_timeout_ms: int) -> None:
+        self._read_timeout_seconds = max(0.001, read_timeout_ms / 1000.0)
+        self._process: subprocess.Popen[bytes] | None = None
+        self._buffer = bytearray()
+        self._prefetched: np.ndarray | None = None
+        self._stderr = bytearray()
+        self._stderr_thread: threading.Thread | None = None
+
+    def is_opened(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def set_buffer_size(self, size: int) -> None:
+        # FFmpeg emits an ordered byte stream; CameraCaptureService already
+        # owns the single latest-frame buffer and drops superseded work.
+        del size
+
+    def start(self, command: list[str]) -> None:
+        self._process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            name="ffmpeg-capture-stderr",
+            daemon=True,
+        )
+        self._stderr_thread.start()
+
+    def prefetch(self, timeout_ms: int, cancelled: Callable[[], bool]) -> bool:
+        frame = self._next_frame(
+            max(0.001, timeout_ms / 1000.0),
+            cancelled=cancelled,
+        )
+        if frame is None:
+            return False
+        self._prefetched = frame
+        return True
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        if self._prefetched is not None:
+            frame, self._prefetched = self._prefetched, None
+            return True, frame
+        frame = self._next_frame(self._read_timeout_seconds)
+        return (frame is not None), frame
+
+    def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1.0)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=0.2)
+            self._stderr_thread = None
+
+    def error_detail(self) -> str:
+        return self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+
+    def _drain_stderr(self) -> None:
+        process = self._process
+        if process is None or process.stderr is None:
+            return
+        while True:
+            chunk = process.stderr.read(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            if not chunk:
+                return
+            self._stderr.extend(chunk)
+            if len(self._stderr) > 8192:
+                del self._stderr[:-8192]
+
+    def _next_frame(
+        self,
+        timeout_seconds: float,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> np.ndarray | None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return None
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if cancelled is not None and cancelled():
+                return None
+            frame_size = _bmp_frame_size(self._buffer)
+            if frame_size is not None and len(self._buffer) >= frame_size:
+                encoded = bytes(self._buffer[:frame_size])
+                del self._buffer[:frame_size]
+                return _decode_capture_bmp(encoded)
+            if len(self._buffer) > CAPTURE_FRAME_MAX_BYTES:
+                raise RuntimeError("FFmpeg capture frame exceeded 64 MiB")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            readable, _, _ = select.select(
+                [process.stdout], [], [], min(remaining, CAPTURE_OPEN_LOCK_POLL_SECONDS)
+            )
+            if not readable:
+                continue
+            chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            if not chunk:
+                return None
+            self._buffer.extend(chunk)
+
+
+def _bmp_frame_size(buffer: bytearray) -> int | None:
+    if len(buffer) < 14:
+        return None
+    if buffer[:2] != b"BM":
+        raise RuntimeError("FFmpeg capture emitted an invalid BMP header")
+    size = int.from_bytes(buffer[2:6], "little")
+    if size < 54 or size > CAPTURE_FRAME_MAX_BYTES:
+        raise RuntimeError("FFmpeg capture emitted an invalid BMP size")
+    return size
+
+
+def _decode_capture_bmp(encoded: bytes) -> np.ndarray:
+    """Decode FFmpeg's uncompressed BGR BMP without a video/image decoder."""
+    if len(encoded) < 54 or encoded[:2] != b"BM":
+        raise RuntimeError("FFmpeg capture emitted an invalid BMP frame")
+    offset = int.from_bytes(encoded[10:14], "little")
+    dib_size = int.from_bytes(encoded[14:18], "little")
+    width = int.from_bytes(encoded[18:22], "little", signed=True)
+    height = int.from_bytes(encoded[22:26], "little", signed=True)
+    planes = int.from_bytes(encoded[26:28], "little")
+    bits_per_pixel = int.from_bytes(encoded[28:30], "little")
+    compression = int.from_bytes(encoded[30:34], "little")
+    if (
+        dib_size < 40
+        or width <= 0
+        or height == 0
+        or planes != 1
+        or bits_per_pixel != 24
+        or compression != 0
+    ):
+        raise RuntimeError("FFmpeg capture emitted an unsupported BMP frame")
+    row_bytes = width * 3
+    row_stride = (row_bytes + 3) & ~3
+    rows = abs(height)
+    required = offset + row_stride * rows
+    if offset < 54 or required > len(encoded):
+        raise RuntimeError("FFmpeg capture emitted a truncated BMP frame")
+    pixels = np.frombuffer(encoded, dtype=np.uint8, count=row_stride * rows, offset=offset)
+    image = pixels.reshape(rows, row_stride)[:, :row_bytes].reshape(rows, width, 3)
+    if height > 0:
+        image = image[::-1]
+    return np.ascontiguousarray(image)
+
+
+class FfmpegCaptureBackend:
+    """External configured-FFmpeg capture with bounded process and pipe I/O."""
 
     def __init__(
         self,
         limiter: CaptureOpenLimiter,
-        options: OpenCvCaptureOptions | None = None,
+        options: FfmpegCaptureOptions | None = None,
     ) -> None:
         self.limiter = limiter
-        self.options = options or OpenCvCaptureOptions()
+        self.options = options or FfmpegCaptureOptions()
         if self.options.rtsp_transport not in {"tcp", "udp"}:
             raise ValueError("rtsp_transport must be tcp or udp")
-        # OpenCV reads FFmpeg capture options from the process environment at
-        # open time. Protect that process-global setting while each RTSP open
-        # is in progress so a concurrent camera cannot receive the wrong mode.
-        self._ffmpeg_option_lock = threading.Lock()
 
     def create_handle(self) -> CaptureHandle:
-        return OpenCvCaptureHandle(cv2.VideoCapture())
+        return FfmpegCaptureHandle(read_timeout_ms=self.options.read_timeout_ms)
 
     def open(
         self,
@@ -135,49 +272,76 @@ class OpenCvFfmpegCaptureBackend:
         *,
         open_timeout_ms: int | None = None,
     ) -> bool:
-        if not isinstance(handle, OpenCvCaptureHandle):
-            raise TypeError("OpenCvFfmpegCaptureBackend requires OpenCvCaptureHandle")
+        if not isinstance(handle, FfmpegCaptureHandle):
+            raise TypeError("FfmpegCaptureBackend requires FfmpegCaptureHandle")
         while not cancelled():
             if not self.limiter.acquire(self.options.admission_poll_seconds):
                 continue
             try:
                 if cancelled():
                     return False
-                capture_options = [
-                    cv2.CAP_PROP_N_THREADS,
-                    self.options.decoder_threads,
-                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
-                    max(
-                        1,
-                        int(
-                            self.options.open_timeout_ms
-                            if open_timeout_ms is None
-                            else open_timeout_ms
-                        ),
+                timeout_ms = max(
+                    1,
+                    int(
+                        self.options.open_timeout_ms
+                        if open_timeout_ms is None
+                        else open_timeout_ms
                     ),
-                    cv2.CAP_PROP_READ_TIMEOUT_MSEC,
-                    self.options.read_timeout_ms,
-                ]
-                if not source_url.lower().startswith(("rtsp://", "rtsps://")):
-                    return handle.open(source_url, capture_options)
-                with self._ffmpeg_option_lock:
-                    option_name = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
-                    existing = os.environ.get(option_name)
-                    # An explicitly supplied process setting remains the
-                    # advanced override. The saved application setting is the
-                    # safe default for ordinary RTSP camera deployments.
-                    if existing is not None:
-                        return handle.open(source_url, capture_options)
-                    os.environ[option_name] = (
-                        f"rtsp_transport;{self.options.rtsp_transport}"
-                    )
-                    try:
-                        return handle.open(source_url, capture_options)
-                    finally:
-                        os.environ.pop(option_name, None)
+                )
+                handle.start(self._command(source_url))
+                if cancelled():
+                    handle.close()
+                    return False
+                if not handle.prefetch(timeout_ms, cancelled):
+                    handle.close()
+                    return False
+                return True
             finally:
                 self.limiter.release()
         return False
+
+    def _command(self, source_url: str) -> list[str]:
+        requested_rate = (
+            self.options.frame_rate()
+            if self.options.frame_rate is not None
+            else 5.0
+        )
+        frame_rate = min(10.0, max(0.5, float(requested_rate)))
+        output_args = [
+            "-vf",
+            f"fps={frame_rate:g},format=bgr24",
+            "-c:v",
+            "bmp",
+            "-pix_fmt",
+            "bgr24",
+        ]
+        command = [
+            self.options.ffmpeg_path,
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "+genpts",
+            "-dts_error_threshold",
+            "10",
+        ]
+        if source_url.lower().startswith(("rtsp://", "rtsps://")):
+            command.extend(["-rtsp_transport", self.options.rtsp_transport])
+        return [
+            *command,
+            "-i",
+            source_url,
+            "-map",
+            "0:v:0",
+            "-an",
+            *output_args,
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "bmp",
+            "pipe:1",
+        ]
 
 
 @dataclass(frozen=True, slots=True)
