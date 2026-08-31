@@ -5,7 +5,11 @@ import time
 import unittest
 
 from survng.app.config import DetectorConfig
-from survng.app.motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
+from survng.app.motion_pipeline.object_detection import RecordedMotionObjectDetectorFactory
+from survng.app.motion_pipeline.recorded_decode_budget import (
+    RecordedDecodeBudget,
+    refinement_frame_count,
+)
 
 
 class RecordedDecodeBudgetTest(unittest.TestCase):
@@ -48,20 +52,20 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         recovered.release()
 
     def test_expanded_burst_scales_memory_capacity_per_decode_process(self) -> None:
-        """Each decoder admits one 14-frame full refinement workflow."""
+        """Each decoder admits one 16-frame full refinement workflow."""
         budget = RecordedDecodeBudget.from_detector_config(DetectorConfig())
-        first = budget.reserve_workflow(maximum_frames=14, incident_epoch=1.0)
-        second = budget.reserve_workflow(maximum_frames=14, incident_epoch=2.0)
+        first = budget.reserve_workflow(maximum_frames=16, incident_epoch=1.0)
+        second = budget.reserve_workflow(maximum_frames=16, incident_epoch=2.0)
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
-        self.assertEqual(budget.status()["reserved_bytes"], 224 << 20)
+        self.assertEqual(budget.status()["reserved_bytes"], 1152 << 20)
 
         admitted = threading.Event()
         released = threading.Event()
 
         def wait_for_capacity() -> None:
             lease = budget.reserve_workflow(
-                maximum_frames=14,
+                maximum_frames=16,
                 incident_epoch=3.0,
                 deadline=time.monotonic() + 1.0,
             )
@@ -89,40 +93,46 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
             DetectorConfig(recorded_decode_max_processes=3)
         )
         leases = [
-            budget.reserve_workflow(maximum_frames=14, incident_epoch=float(index))
+            budget.reserve_workflow(maximum_frames=16, incident_epoch=float(index))
             for index in range(3)
         ]
         self.assertTrue(all(lease is not None for lease in leases))
-        self.assertEqual(budget.status()["memory_budget_bytes"], 336 << 20)
-        self.assertEqual(budget.status()["reserved_bytes"], 336 << 20)
+        self.assertEqual(budget.status()["memory_budget_bytes"], 1728 << 20)
+        self.assertEqual(budget.status()["reserved_bytes"], 1728 << 20)
         for lease in leases:
             assert lease is not None
             lease.release()
 
-    def test_legacy_memory_budget_does_not_scale_with_process_count(self) -> None:
+    def test_configured_stages_and_frame_estimate_derive_per_process_budget(self) -> None:
         budget = RecordedDecodeBudget.from_detector_config(
             DetectorConfig(
                 recorded_decode_max_processes=3,
-                recorded_decode_memory_budget_mb=256,
-                recorded_decode_memory_per_process_mb=None,
+                recorded_decode_estimated_frame_mb=10,
+                event_refinement_stages=[[0.0, 0.5], [2.0]],
             )
         )
         status = budget.status()
-        self.assertEqual(status["memory_budget_bytes"], 256 << 20)
-        self.assertIsNone(status["memory_per_process_bytes"])
+        self.assertEqual(status["memory_per_process_bytes"], 30 << 20)
+        self.assertEqual(status["memory_budget_bytes"], 90 << 20)
 
-    def test_downscale_recharges_queued_workflow_to_the_current_ceiling(self) -> None:
+    def test_refinement_frame_count_keeps_pre_event_samples_distinct(self) -> None:
+        self.assertEqual(refinement_frame_count([[-1.0, -0.5, 0.0]]), 3)
+        self.assertEqual(refinement_frame_count(DetectorConfig().event_refinement_stages), 16)
+
+    def test_downscale_preserves_full_charge_for_queued_larger_workflow(self) -> None:
         budget = RecordedDecodeBudget(
             max_processes=3,
-            memory_budget_bytes=336 << 20,
+            memory_budget_bytes=384 << 20,
             estimated_frame_bytes=8 << 20,
         )
         active = [
-            budget.reserve_workflow(maximum_frames=14, incident_epoch=float(index))
+            budget.reserve_workflow(maximum_frames=16, incident_epoch=float(index))
             for index in range(3)
         ]
         self.assertTrue(all(lease is not None for lease in active))
         admitted = threading.Event()
+        release = threading.Event()
+        observed: list[int] = []
 
         def wait_for_downscaled_capacity() -> None:
             lease = budget.reserve_workflow(
@@ -131,7 +141,9 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
                 deadline=time.monotonic() + 1.0,
             )
             if lease is not None:
+                observed.append(budget.status()["reserved_bytes"])
                 admitted.set()
+                release.wait(0.5)
                 lease.release()
 
         waiter = threading.Thread(target=wait_for_downscaled_capacity)
@@ -141,16 +153,166 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
             time.sleep(0.01)
         budget.reconfigure(
             max_processes=1,
-            memory_budget_bytes=112 << 20,
+            memory_budget_bytes=128 << 20,
             estimated_frame_bytes=8 << 20,
         )
         for lease in active:
             assert lease is not None
             lease.release()
         self.assertTrue(admitted.wait(0.5))
+        self.assertEqual(observed, [256 << 20])
+        release.set()
         waiter.join(timeout=0.5)
+        self.assertEqual(budget.status()["reserved_bytes"], 0)
 
-    def test_oversized_workflow_charges_full_budget_alone(self) -> None:
+    def test_queued_workflow_uses_current_frame_estimate_on_hot_reconfigure(self) -> None:
+        budget = RecordedDecodeBudget.from_detector_config(
+            DetectorConfig(recorded_decode_max_processes=1)
+        )
+        holder = budget.reserve_workflow(maximum_frames=16, incident_epoch=1.0)
+        self.assertIsNotNone(holder)
+        admitted = threading.Event()
+        release = threading.Event()
+        observed: list[int] = []
+
+        def wait_for_capacity() -> None:
+            lease = budget.reserve_workflow(
+                maximum_frames=16,
+                incident_epoch=2.0,
+                deadline=time.monotonic() + 1.0,
+            )
+            if lease is not None:
+                observed.append(budget.status()["reserved_bytes"])
+                admitted.set()
+                release.wait(0.5)
+                lease.release()
+
+        waiter = threading.Thread(target=wait_for_capacity)
+        waiter.start()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and budget.status()["waiting"] < 1:
+            time.sleep(0.01)
+        budget.reconfigure_from_detector_config(
+            DetectorConfig(
+                recorded_decode_max_processes=1,
+                recorded_decode_estimated_frame_mb=16,
+            )
+        )
+        assert holder is not None
+        holder.release()
+        self.assertTrue(admitted.wait(0.5))
+        self.assertEqual(observed, [256 << 20])
+        release.set()
+        waiter.join(timeout=0.5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(budget.status()["reserved_bytes"], 0)
+
+    def test_queued_full_workflow_wakes_on_decode_process_upscale(self) -> None:
+        budget = RecordedDecodeBudget.from_detector_config(
+            DetectorConfig(recorded_decode_max_processes=1)
+        )
+        holder = budget.reserve_workflow(maximum_frames=16, incident_epoch=1.0)
+        self.assertIsNotNone(holder)
+        admitted = threading.Event()
+        release = threading.Event()
+
+        def wait_for_capacity() -> None:
+            lease = budget.reserve_workflow(
+                maximum_frames=16,
+                incident_epoch=2.0,
+                deadline=time.monotonic() + 1.0,
+            )
+            if lease is not None:
+                admitted.set()
+                release.wait(0.5)
+                lease.release()
+
+        waiter = threading.Thread(target=wait_for_capacity)
+        waiter.start()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and budget.status()["waiting"] < 1:
+            time.sleep(0.01)
+        self.assertEqual(budget.status()["waiting"], 1)
+        budget.reconfigure_from_detector_config(
+            DetectorConfig(recorded_decode_max_processes=2)
+        )
+        self.assertTrue(admitted.wait(0.5))
+        release.set()
+        waiter.join(timeout=0.5)
+        self.assertFalse(waiter.is_alive())
+        assert holder is not None
+        holder.release()
+        self.assertEqual(budget.status()["reserved_bytes"], 0)
+
+    def test_factory_hot_reconfigure_derives_all_capacity_inputs(self) -> None:
+        factory = RecordedMotionObjectDetectorFactory(None, None)
+        factory.reconfigure_decode_budget(
+            DetectorConfig(recorded_decode_max_processes=3)
+        )
+        status = factory.decode_budget.status()
+        self.assertEqual(status["memory_per_process_bytes"], 576 << 20)
+        self.assertEqual(status["memory_budget_bytes"], 1728 << 20)
+
+        factory.reconfigure_decode_budget(
+            DetectorConfig(
+                recorded_decode_max_processes=2,
+                recorded_decode_estimated_frame_mb=10,
+                event_refinement_stages=[[0.0, 0.5], [2.0]],
+            )
+        )
+        status = factory.decode_budget.status()
+        self.assertEqual(status["memory_per_process_bytes"], 30 << 20)
+        self.assertEqual(status["memory_budget_bytes"], 60 << 20)
+
+    def test_concurrent_reservations_drain_during_repeated_hot_scaling(self) -> None:
+        budget = RecordedDecodeBudget.from_detector_config(
+            DetectorConfig(recorded_decode_max_processes=3)
+        )
+        start = threading.Barrier(4)
+        failures: list[str] = []
+
+        def reserve_repeatedly(worker: int) -> None:
+            start.wait(1.0)
+            for iteration in range(12):
+                lease = budget.reserve_workflow(
+                    maximum_frames=16,
+                    incident_epoch=float(worker * 100 + iteration),
+                    deadline=time.monotonic() + 2.0,
+                )
+                if lease is None:
+                    failures.append(f"worker {worker} timed out")
+                    return
+                time.sleep(0.002)
+                lease.release()
+
+        workers = [
+            threading.Thread(target=reserve_repeatedly, args=(index,))
+            for index in range(3)
+        ]
+        for worker in workers:
+            worker.start()
+        start.wait(1.0)
+        plans = (
+            DetectorConfig(recorded_decode_max_processes=1),
+            DetectorConfig(
+                recorded_decode_max_processes=3,
+                recorded_decode_estimated_frame_mb=10,
+                event_refinement_stages=[[0.0, 0.5], [2.0]],
+            ),
+            DetectorConfig(recorded_decode_max_processes=3),
+        )
+        for iteration in range(24):
+            budget.reconfigure_from_detector_config(plans[iteration % len(plans)])
+            time.sleep(0.001)
+        for worker in workers:
+            worker.join(timeout=3.0)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        status = budget.status()
+        self.assertEqual(status["reserved_bytes"], 0)
+        self.assertEqual(status["active_processes"], 0)
+
+    def test_oversized_workflow_keeps_its_full_charge_alone(self) -> None:
         budget = RecordedDecodeBudget(
             max_processes=2,
             memory_budget_bytes=16 << 20,
@@ -159,7 +321,7 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         lease = budget.reserve_workflow(maximum_frames=8, incident_epoch=1.0)
         self.assertIsNotNone(lease)
         status = budget.status()
-        self.assertEqual(status["reserved_bytes"], 16 << 20)
+        self.assertEqual(status["reserved_bytes"], 64 << 20)
         assert lease is not None
         lease.release()
 
@@ -282,8 +444,8 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         budget = RecordedDecodeBudget.from_detector_config(DetectorConfig())
         status = budget.status()
         self.assertEqual(status["max_processes"], 2)
-        self.assertEqual(status["memory_budget_bytes"], 224 << 20)
-        self.assertEqual(status["estimated_frame_bytes"], 8 << 20)
+        self.assertEqual(status["memory_budget_bytes"], 1152 << 20)
+        self.assertEqual(status["estimated_frame_bytes"], 36 << 20)
 
     def test_wait_percentiles_and_ffmpeg_outcomes_are_reported(self) -> None:
         budget = RecordedDecodeBudget(max_processes=1, memory_budget_bytes=16 << 20)

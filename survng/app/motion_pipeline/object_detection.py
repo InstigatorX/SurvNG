@@ -21,7 +21,7 @@ from ..ffmpeg_hw import recorded_frame_hw_args
 from ..visual_quality import VisualQuality, image_quality
 from ..zones import apply_depth_zone_filters, apply_detection_zones, detection_threshold
 from .context import Frame
-from .recorded_decode_budget import RecordedDecodeBudget
+from .recorded_decode_budget import RecordedDecodeBudget, refinement_frame_count
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1389,11 +1389,7 @@ class RecordedMotionObjectDetector:
         memory_lease = None
         budget = self.decode_budget
         if budget is not None:
-            maximum_frames = len({
-                round(max(0.0, float(offset)), 3)
-                for stage in stages
-                for offset in stage
-            })
+            maximum_frames = refinement_frame_count(stages)
             budget_wait_started = time.monotonic()
             memory_lease = budget.reserve_workflow(
                 maximum_frames=maximum_frames,

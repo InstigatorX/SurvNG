@@ -8,6 +8,24 @@ from typing import Any, Callable
 from ..perf_samples import RollingLatencySamples
 
 
+def refinement_frame_count(stages: Any, *, fallback: int = 16) -> int:
+    """Return the worst-case distinct decoded samples for a refinement plan.
+
+    Offsets are event-relative here.  Negative offsets remain distinct: once
+    mapped onto a recording segment they refer to different frame timestamps.
+    Rounding matches the frame-reader cache precision.
+    """
+    try:
+        count = len({
+            round(float(offset), 3)
+            for stage in stages
+            for offset in stage
+        })
+    except (TypeError, ValueError):
+        return fallback
+    return max(1, count)
+
+
 class RecordedDecodeLease:
     """Exactly-once release wrapper for a recorded-decode budget reservation."""
 
@@ -37,6 +55,7 @@ class _Waiter:
     sequence: int
     kind: str
     amount: int = 0
+    frames: int = 0
 
 
 class RecordedDecodeBudget:
@@ -125,24 +144,15 @@ class RecordedDecodeBudget:
         )
 
     @staticmethod
-    def _config_limits(config: Any) -> tuple[int, int, int | None]:
+    def _config_limits(config: Any) -> tuple[int, int, int]:
         max_processes = int(
             getattr(config, "recorded_decode_max_processes", 2) or 2
         )
-        memory_per_process_mb = getattr(
-            config,
-            "recorded_decode_memory_per_process_mb",
-            None,
-        )
-        if memory_per_process_mb is None:
-            return (
-                max_processes,
-                int(getattr(config, "recorded_decode_memory_budget_mb", 256) or 256)
-                * 1024
-                * 1024,
-                None,
-            )
-        memory_per_process_bytes = int(memory_per_process_mb) * 1024 * 1024
+        stages = getattr(config, "event_refinement_stages", ()) or ()
+        frame_count = refinement_frame_count(stages)
+        memory_per_process_bytes = frame_count * int(
+            getattr(config, "recorded_decode_estimated_frame_mb", 8) or 8
+        ) * 1024 * 1024
         return (
             max_processes,
             max_processes * memory_per_process_bytes,
@@ -196,6 +206,7 @@ class RecordedDecodeBudget:
         return self._acquire(
             kind="memory",
             amount=requested,
+            frames=frames,
             incident_epoch=incident_epoch,
             deadline=deadline,
             cancelled=cancelled,
@@ -211,6 +222,7 @@ class RecordedDecodeBudget:
         return self._acquire(
             kind="process",
             amount=1,
+            frames=0,
             incident_epoch=incident_epoch,
             deadline=deadline,
             cancelled=cancelled,
@@ -221,6 +233,7 @@ class RecordedDecodeBudget:
         *,
         kind: str,
         amount: int,
+        frames: int,
         incident_epoch: float,
         deadline: float | None,
         cancelled: Callable[[], bool] | None,
@@ -233,6 +246,7 @@ class RecordedDecodeBudget:
                 sequence=self._sequence,
                 kind=kind,
                 amount=int(amount),
+                frames=int(frames),
             )
             waiters = self._waiters[kind]
             waiters.append(waiter)
@@ -276,16 +290,26 @@ class RecordedDecodeBudget:
     def _fits(self, waiter: _Waiter) -> bool:
         if waiter.kind == "process":
             return self._active_processes < self._max_processes
-        return self._reserved_bytes + min(
-            waiter.amount,
-            self._memory_budget_bytes,
-        ) <= self._memory_budget_bytes
+        charge = self._memory_charge(waiter)
+        # A workflow queued before a plan/estimate downscale may no longer fit
+        # the new ceiling.  Let it run only after the budget drains;
+        # retaining its full charge keeps status and release accounting honest.
+        return (
+            self._reserved_bytes == 0
+            if charge > self._memory_budget_bytes
+            else self._reserved_bytes + charge <= self._memory_budget_bytes
+        )
+
+    def _memory_charge(self, waiter: _Waiter) -> int:
+        return max(1, waiter.frames) * self._estimated_frame_bytes
 
     def _account(self, waiter: _Waiter) -> None:
         if waiter.kind == "process":
             self._active_processes += 1
         else:
-            waiter.amount = min(waiter.amount, self._memory_budget_bytes)
+            # A queued workflow is charged using the current frame estimate,
+            # then that charge is frozen in the lease for correct release.
+            waiter.amount = self._memory_charge(waiter)
             self._reserved_bytes += waiter.amount
 
     def _release(self, waiter: _Waiter) -> None:

@@ -714,15 +714,8 @@ class DetectorConfig(BaseModel):
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
     recorded_adaptive_sampling: bool = True
     recorded_decode_max_processes: int = Field(default=2, ge=1, le=16)
-    # Legacy aggregate ceiling. Preserve its meaning for saved configurations
-    # that predate the per-process setting below.
-    recorded_decode_memory_budget_mb: int = Field(default=256, ge=32, le=8192)
-    recorded_decode_memory_per_process_mb: int | None = Field(
-        default=112,
-        ge=32,
-        le=8192,
-    )
-    recorded_decode_estimated_frame_mb: int = Field(default=8, ge=1, le=64)
+    # Conservative default for high-resolution decoded BGR frames.
+    recorded_decode_estimated_frame_mb: int = Field(default=36, ge=1, le=64)
     model_path: str = ""
     model_xml: str = ""
     coreml_model_path: str = ""
@@ -780,20 +773,6 @@ class DetectorConfig(BaseModel):
     labels: list[str] = Field(default_factory=list)
     depth: DepthConfig = Field(default_factory=DepthConfig)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
-
-    @model_validator(mode="before")
-    @classmethod
-    def preserve_legacy_decode_memory_budget(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        if (
-            "recorded_decode_memory_budget_mb" in value
-            and "recorded_decode_memory_per_process_mb" not in value
-        ):
-            normalized = dict(value)
-            normalized["recorded_decode_memory_per_process_mb"] = None
-            return normalized
-        return value
 
     @field_validator("event_refinement_stages", mode="before")
     @classmethod
