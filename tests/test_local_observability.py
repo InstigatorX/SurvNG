@@ -60,7 +60,9 @@ def _manager(secret: str = "must-not-leak") -> SimpleNamespace:
             "recorded_decode": {
                 "max_processes": 3,
                 "active_processes": 1,
+                "active_workflows": 1,
                 "memory_per_process_bytes": 112 << 20,
+                "observed_frame_bytes": 8 << 20,
                 "memory_budget_bytes": 336 << 20,
                 "reserved_bytes": 112 << 20,
                 "waiting": 2,
@@ -133,7 +135,9 @@ def test_runtime_status_is_effective_and_strictly_allowlisted() -> None:
     assert payload["detector"]["recorded_decode"] == {
         "configured_processes": 3,
         "active_processes": 1,
+        "active_workflows": 1,
         "memory_per_process_bytes": 112 << 20,
+        "observed_frame_bytes": 8 << 20,
         "memory_budget_bytes": 336 << 20,
         "reserved_bytes": 112 << 20,
         "waiting": 2,

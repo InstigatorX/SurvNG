@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from ..perf_samples import RollingLatencySamples
 
+RECORDED_DECODE_FALLBACK_FRAME_BYTES = 36 * 1024 * 1024
 
 def refinement_frame_count(stages: Any, *, fallback: int = 16) -> int:
     """Return the worst-case distinct decoded samples for a refinement plan.
@@ -56,6 +57,7 @@ class _Waiter:
     kind: str
     amount: int = 0
     frames: int = 0
+    frame_bytes: int = 0
 
 
 class RecordedDecodeBudget:
@@ -67,7 +69,7 @@ class RecordedDecodeBudget:
         max_processes: int = 2,
         memory_budget_bytes: int = 256 * 1024 * 1024,
         memory_per_process_bytes: int | None = None,
-        estimated_frame_bytes: int = 8 * 1024 * 1024,
+        estimated_frame_bytes: int = RECORDED_DECODE_FALLBACK_FRAME_BYTES,
     ) -> None:
         self._condition = threading.Condition()
         self._max_processes = max(1, int(max_processes))
@@ -78,13 +80,19 @@ class RecordedDecodeBudget:
             else None
         )
         self._estimated_frame_bytes = max(1, int(estimated_frame_bytes))
+        self._geometry_frame_count: int | None = None
+        self._fallback_frame_bytes = self._estimated_frame_bytes
+        self._largest_observed_frame_bytes: int | None = None
         self._active_processes = 0
         self._reserved_bytes = 0
         self._sequence = 0
         # Process slots and workflow-memory reservations are independent
         # resources.  Keep independent ordered queues so an unfittable memory
         # request cannot idle an available FFmpeg process slot (or vice versa).
-        self._waiters: dict[str, list[_Waiter]] = {"process": [], "memory": []}
+        self._waiters: dict[str, list[_Waiter]] = {
+            "workflow": [], "process": [], "memory": []
+        }
+        self._active_workflows = 0
         self._admitted_processes = 0
         self._admitted_workflows = 0
         self._process_wait_ms = 0.0
@@ -100,16 +108,14 @@ class RecordedDecodeBudget:
     @classmethod
     def from_detector_config(cls, config: Any) -> RecordedDecodeBudget:
         max_processes, memory_budget_bytes, memory_per_process_bytes = cls._config_limits(config)
-        return cls(
+        budget = cls(
             max_processes=max_processes,
             memory_budget_bytes=memory_budget_bytes,
             memory_per_process_bytes=memory_per_process_bytes,
-            estimated_frame_bytes=int(
-                getattr(config, "recorded_decode_estimated_frame_mb", 8) or 8
-            )
-            * 1024
-            * 1024,
+            estimated_frame_bytes=RECORDED_DECODE_FALLBACK_FRAME_BYTES,
         )
+        budget.configure_geometry(config)
+        return budget
 
     def reconfigure(
         self,
@@ -131,17 +137,45 @@ class RecordedDecodeBudget:
             self._condition.notify_all()
 
     def reconfigure_from_detector_config(self, config: Any) -> None:
+        self.configure_geometry(config)
+
+    def configure_geometry(self, config: Any) -> None:
         max_processes, memory_budget_bytes, memory_per_process_bytes = self._config_limits(config)
-        self.reconfigure(
-            max_processes=max_processes,
-            memory_budget_bytes=memory_budget_bytes,
-            memory_per_process_bytes=memory_per_process_bytes,
-            estimated_frame_bytes=int(
-                getattr(config, "recorded_decode_estimated_frame_mb", 8) or 8
+        fallback_frame_bytes = RECORDED_DECODE_FALLBACK_FRAME_BYTES
+        with self._condition:
+            self._max_processes = max(1, int(max_processes))
+            self._geometry_frame_count = refinement_frame_count(
+                getattr(config, "event_refinement_stages", ()) or ()
             )
-            * 1024
-            * 1024,
-        )
+            self._fallback_frame_bytes = max(1, fallback_frame_bytes)
+            if self._largest_observed_frame_bytes is None:
+                self._memory_budget_bytes = max(1, int(memory_budget_bytes))
+                self._memory_per_process_bytes = max(1, int(memory_per_process_bytes))
+                self._estimated_frame_bytes = self._fallback_frame_bytes
+            else:
+                self._apply_geometry_limits_locked()
+            self._condition.notify_all()
+
+    def observe_frame_bytes(self, frame_bytes: int) -> None:
+        """Raise the shared ceiling to cover a newly observed recording geometry."""
+        safe_frame_bytes = max(1, int(frame_bytes))
+        with self._condition:
+            if (
+                self._largest_observed_frame_bytes is not None
+                and safe_frame_bytes <= self._largest_observed_frame_bytes
+            ):
+                return
+            self._largest_observed_frame_bytes = safe_frame_bytes
+            if self._geometry_frame_count is not None:
+                self._apply_geometry_limits_locked()
+            self._condition.notify_all()
+
+    def _apply_geometry_limits_locked(self) -> None:
+        frame_bytes = self._largest_observed_frame_bytes or self._fallback_frame_bytes
+        frame_count = self._geometry_frame_count or 1
+        self._estimated_frame_bytes = frame_bytes
+        self._memory_per_process_bytes = frame_count * frame_bytes
+        self._memory_budget_bytes = self._max_processes * self._memory_per_process_bytes
 
     @staticmethod
     def _config_limits(config: Any) -> tuple[int, int, int]:
@@ -150,9 +184,7 @@ class RecordedDecodeBudget:
         )
         stages = getattr(config, "event_refinement_stages", ()) or ()
         frame_count = refinement_frame_count(stages)
-        memory_per_process_bytes = frame_count * int(
-            getattr(config, "recorded_decode_estimated_frame_mb", 8) or 8
-        ) * 1024 * 1024
+        memory_per_process_bytes = frame_count * RECORDED_DECODE_FALLBACK_FRAME_BYTES
         return (
             max_processes,
             max_processes * memory_per_process_bytes,
@@ -164,10 +196,12 @@ class RecordedDecodeBudget:
             return {
                 "max_processes": self._max_processes,
                 "active_processes": self._active_processes,
+                "active_workflows": self._active_workflows,
                 "memory_budget_bytes": self._memory_budget_bytes,
                 "memory_per_process_bytes": self._memory_per_process_bytes,
                 "reserved_bytes": self._reserved_bytes,
                 "estimated_frame_bytes": self._estimated_frame_bytes,
+                "observed_frame_bytes": self._largest_observed_frame_bytes,
                 "waiting": sum(len(waiters) for waiters in self._waiters.values()),
                 "admitted_processes": self._admitted_processes,
                 "admitted_workflows": self._admitted_workflows,
@@ -197,19 +231,41 @@ class RecordedDecodeBudget:
         self,
         *,
         maximum_frames: int,
+        frame_bytes: int | None = None,
         incident_epoch: float,
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> RecordedDecodeLease | None:
         frames = max(1, int(maximum_frames))
-        requested = frames * self._estimated_frame_bytes
-        return self._acquire(
-            kind="memory",
-            amount=requested,
-            frames=frames,
+        sample_bytes = max(1, int(frame_bytes)) if frame_bytes is not None else 0
+        workflow = self._acquire(
+            kind="workflow",
+            amount=1,
+            frames=0,
+            frame_bytes=0,
             incident_epoch=incident_epoch,
             deadline=deadline,
             cancelled=cancelled,
+        )
+        if workflow is None:
+            return None
+        requested = frames * (
+            sample_bytes or max(self._fallback_frame_bytes, self._estimated_frame_bytes)
+        )
+        memory = self._acquire(
+            kind="memory",
+            amount=requested,
+            frames=frames,
+            frame_bytes=sample_bytes,
+            incident_epoch=incident_epoch,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if memory is None:
+            workflow.release()
+            return None
+        return RecordedDecodeLease(
+            lambda: (memory.release(), workflow.release())
         )
 
     def acquire_process(
@@ -223,6 +279,7 @@ class RecordedDecodeBudget:
             kind="process",
             amount=1,
             frames=0,
+            frame_bytes=0,
             incident_epoch=incident_epoch,
             deadline=deadline,
             cancelled=cancelled,
@@ -234,6 +291,7 @@ class RecordedDecodeBudget:
         kind: str,
         amount: int,
         frames: int,
+        frame_bytes: int,
         incident_epoch: float,
         deadline: float | None,
         cancelled: Callable[[], bool] | None,
@@ -247,6 +305,7 @@ class RecordedDecodeBudget:
                 kind=kind,
                 amount=int(amount),
                 frames=int(frames),
+                frame_bytes=int(frame_bytes),
             )
             waiters = self._waiters[kind]
             waiters.append(waiter)
@@ -264,7 +323,7 @@ class RecordedDecodeBudget:
                             self._process_wait_ms += wait_ms
                             self._process_wait_samples.add(wait_ms)
                             self._admitted_processes += 1
-                        else:
+                        elif kind == "memory":
                             self._memory_wait_ms += wait_ms
                             self._memory_wait_samples.add(wait_ms)
                             self._admitted_workflows += 1
@@ -276,7 +335,7 @@ class RecordedDecodeBudget:
                     if remaining is not None and remaining <= 0:
                         if kind == "process":
                             self._process_timeouts += 1
-                        else:
+                        elif kind == "memory":
                             self._memory_timeouts += 1
                         return None
                     self._condition.wait(
@@ -288,6 +347,8 @@ class RecordedDecodeBudget:
                     self._condition.notify_all()
 
     def _fits(self, waiter: _Waiter) -> bool:
+        if waiter.kind == "workflow":
+            return self._active_workflows < self._max_processes
         if waiter.kind == "process":
             return self._active_processes < self._max_processes
         charge = self._memory_charge(waiter)
@@ -301,10 +362,15 @@ class RecordedDecodeBudget:
         )
 
     def _memory_charge(self, waiter: _Waiter) -> int:
-        return max(1, waiter.frames) * self._estimated_frame_bytes
+        return max(1, waiter.frames) * (
+            waiter.frame_bytes
+            or max(self._fallback_frame_bytes, self._estimated_frame_bytes)
+        )
 
     def _account(self, waiter: _Waiter) -> None:
-        if waiter.kind == "process":
+        if waiter.kind == "workflow":
+            self._active_workflows += 1
+        elif waiter.kind == "process":
             self._active_processes += 1
         else:
             # A queued workflow is charged using the current frame estimate,
@@ -314,7 +380,11 @@ class RecordedDecodeBudget:
 
     def _release(self, waiter: _Waiter) -> None:
         with self._condition:
-            if waiter.kind == "process":
+            if waiter.kind == "workflow":
+                if self._active_workflows <= 0:
+                    raise ValueError("recorded decode workflow lease released too many times")
+                self._active_workflows -= 1
+            elif waiter.kind == "process":
                 if self._active_processes <= 0:
                     raise ValueError("recorded decode process lease released too many times")
                 self._active_processes -= 1

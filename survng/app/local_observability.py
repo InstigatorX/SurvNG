@@ -156,8 +156,14 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
             "active_processes": int(
                 _number(recorded_decode.get("active_processes"))
             ),
+            "active_workflows": int(
+                _number(recorded_decode.get("active_workflows"))
+            ),
             "memory_per_process_bytes": _optional_number(
                 recorded_decode.get("memory_per_process_bytes")
+            ),
+            "observed_frame_bytes": _optional_number(
+                recorded_decode.get("observed_frame_bytes")
             ),
             "memory_budget_bytes": int(
                 _number(recorded_decode.get("memory_budget_bytes"))

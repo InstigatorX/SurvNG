@@ -48,6 +48,20 @@ def sample(offset: float, objects: list[dict]) -> _RecordedDetectionSample:
 
 
 class RecordedObjectConsensusTest(unittest.TestCase):
+    def test_recording_geometry_uses_largest_prefetched_segment(self) -> None:
+        rows = [
+            {"path": "/recordings/low.mp4"},
+            {"path": "/recordings/high.mp4"},
+        ]
+        with patch(
+            "survng.app.motion_pipeline.object_detection.mp4_video_dimensions",
+            side_effect=[(1920, 1080), (4512, 2512)],
+        ):
+            self.assertEqual(
+                RecordedMotionObjectDetector._frame_bytes_for_rows(rows),
+                4512 * 2512 * 3,
+            )
+
     def test_semantic_tiers_respect_candidate_rescue_and_standard_boundaries(self) -> None:
         expected = (
             (0.4849, "evidence", False),

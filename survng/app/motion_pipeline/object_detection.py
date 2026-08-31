@@ -18,6 +18,7 @@ import numpy as np
 from ..config import CameraConfig
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
+from ..recording_media import mp4_video_dimensions
 from ..visual_quality import VisualQuality, image_quality
 from ..zones import apply_depth_zone_filters, apply_detection_zones, detection_threshold
 from .context import Frame
@@ -1386,13 +1387,22 @@ class RecordedMotionObjectDetector:
             timing["temporal_confirmation_wait_ms"] += slept * 1000.0
 
         deadline = time.monotonic() + max(0.0, retry_seconds)
+        prefetched_rows = self._prefetch_recording_rows(
+            event_epoch=event_epoch,
+            planned_offsets=planned_offsets,
+            timing=timing,
+        )
         memory_lease = None
         budget = self.decode_budget
         if budget is not None:
             maximum_frames = refinement_frame_count(stages)
+            frame_bytes = self._frame_bytes_for_rows(prefetched_rows)
+            if frame_bytes:
+                budget.observe_frame_bytes(frame_bytes)
             budget_wait_started = time.monotonic()
             memory_lease = budget.reserve_workflow(
                 maximum_frames=maximum_frames,
+                frame_bytes=frame_bytes or None,
                 incident_epoch=event_epoch,
                 deadline=deadline,
                 cancelled=self.stop_requested,
@@ -1434,10 +1444,56 @@ class RecordedMotionObjectDetector:
                 event_epoch=event_epoch,
                 deadline=deadline,
                 planned_offsets=planned_offsets,
+                prefetched_rows=prefetched_rows,
             )
         finally:
             if memory_lease is not None:
                 memory_lease.release()
+
+    def _prefetch_recording_rows(
+        self,
+        *,
+        event_epoch: float,
+        planned_offsets: tuple[float, ...],
+        timing: dict[str, float],
+    ) -> list[dict[str, Any]]:
+        rows_between = getattr(self.recorder, "recording_rows_between", None)
+        if not callable(rows_between):
+            return []
+        lookup_started = time.monotonic()
+        try:
+            return list(rows_between(
+                self.camera.id,
+                event_epoch + min(planned_offsets) - 1.0,
+                event_epoch + max(planned_offsets) + 1.0,
+                "main",
+                discover_missing=False,
+            ))
+        except Exception:
+            LOGGER.debug(
+                "recording range prefetch unavailable for %s",
+                self.camera.id,
+                exc_info=True,
+            )
+            return []
+        finally:
+            timing["recording_wait_ms"] += (
+                time.monotonic() - lookup_started
+            ) * 1000.0
+
+    @staticmethod
+    def _frame_bytes_for_rows(rows: list[dict[str, Any]]) -> int:
+        frame_bytes = 0
+        for row in rows:
+            path_value = str(row.get("path") or "")
+            if not path_value:
+                continue
+            dimensions = mp4_video_dimensions(Path(path_value))
+            if dimensions is None:
+                continue
+            width, height = dimensions
+            frame_bytes = max(frame_bytes, width * height * 3)
+        return frame_bytes
 
     def _detect_with_budget(
         self,
@@ -1452,6 +1508,7 @@ class RecordedMotionObjectDetector:
         event_epoch: float,
         deadline: float,
         planned_offsets: tuple[float, ...],
+        prefetched_rows: list[dict[str, Any]],
         settle_seconds: float = RECORDED_EVENT_SETTLE_SECONDS,
         retry_interval_seconds: float = RECORDED_EVENT_RETRY_INTERVAL_SECONDS,
         representative_timeout_seconds: float = RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
@@ -1475,7 +1532,6 @@ class RecordedMotionObjectDetector:
                 getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}
             ).items()
         }
-        prefetched_rows: list[dict[str, Any]] = []
         # Cover-image recovery needs a later, settled view.  The early bridge
         # improves temporal confirmation but must not replace that recovery
         # pass when its subject is still clipped or obscured.
@@ -1490,27 +1546,6 @@ class RecordedMotionObjectDetector:
         if representative_stage_index is None and len(stages) > 1:
             representative_stage_index = 1
         representative_refinement_requested = False
-        rows_between = getattr(self.recorder, "recording_rows_between", None)
-        if callable(rows_between):
-            lookup_started = time.monotonic()
-            try:
-                prefetched_rows = list(rows_between(
-                    self.camera.id,
-                    event_epoch + min(planned_offsets) - 1.0,
-                    event_epoch + max(planned_offsets) + 1.0,
-                    "main",
-                    discover_missing=False,
-                ))
-            except Exception:
-                LOGGER.debug(
-                    "recording range prefetch unavailable for %s",
-                    self.camera.id,
-                    exc_info=True,
-                )
-            timing["recording_wait_ms"] += (
-                time.monotonic() - lookup_started
-            ) * 1000.0
-
         def frame_reader(
             path: Path,
             offset_seconds: float,
@@ -1623,6 +1658,11 @@ class RecordedMotionObjectDetector:
                     if stage_consensus:
                         timing["refinement_early_exit_skipped"] += float(len(pending))
                         continue
+                    if self.decode_budget is not None:
+                        dimensions = mp4_video_dimensions(path)
+                        if dimensions is not None:
+                            width, height = dimensions
+                            self.decode_budget.observe_frame_bytes(width * height * 3)
                     decode_started = time.monotonic()
                     frames, batch_processes, fallback_count = sampler.frames_at(
                         path,

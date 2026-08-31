@@ -228,6 +228,43 @@ def _track_stream_descriptor(data: bytes, payload: int, box_end: int) -> bytes:
     return handler + timescale + sample_description
 
 
+def _track_video_dimensions(data: bytes, payload: int, box_end: int) -> tuple[int, int] | None:
+    handler = b""
+    sample_description_box: tuple[int, int] | None = None
+    for box_type, _, child_payload, child_end in _boxes(data, payload, box_end):
+        if box_type != b"mdia":
+            continue
+        for mdia_type, _, mdia_payload, mdia_end in _boxes(
+            data, child_payload, child_end
+        ):
+            if mdia_type == b"hdlr" and mdia_payload + 12 <= mdia_end:
+                handler = data[mdia_payload + 8:mdia_payload + 12]
+            elif mdia_type == b"minf":
+                for minf_type, _, minf_payload, minf_end in _boxes(
+                    data, mdia_payload, mdia_end
+                ):
+                    if minf_type != b"stbl":
+                        continue
+                    for stbl_type, stbl_start, _, stbl_end in _boxes(
+                        data, minf_payload, minf_end
+                    ):
+                        if stbl_type == b"stsd":
+                            sample_description_box = (stbl_start + 8, stbl_end)
+                            break
+    if handler != b"vide" or sample_description_box is None:
+        return None
+    stsd_payload, stsd_end = sample_description_box
+    for _entry_type, _, entry_payload, entry_end in _boxes(
+        data, stsd_payload + 8, stsd_end
+    ):
+        if entry_payload + 28 > entry_end:
+            continue
+        width, height = struct.unpack_from(">HH", data, entry_payload + 24)
+        if width > 0 and height > 0:
+            return width, height
+    return None
+
+
 @lru_cache(maxsize=4096)
 def _cached_stream_fingerprint(path_value: str, modified_ns: int, size: int) -> str:
     del modified_ns, size
@@ -262,6 +299,39 @@ def mp4_stream_fingerprint(path: Path) -> str:
     except OSError:
         return ""
     return _cached_stream_fingerprint(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=4096)
+def _cached_mp4_video_dimensions(
+    path_value: str,
+    modified_ns: int,
+    size: int,
+) -> tuple[int, int] | None:
+    del modified_ns, size
+    moov = _read_mp4_box(Path(path_value), b"moov")
+    if not moov:
+        return None
+    for box_type, _, payload, box_end in _boxes(moov):
+        if box_type != b"moov":
+            continue
+        for child_type, _, child_payload, child_end in _boxes(moov, payload, box_end):
+            if child_type != b"trak":
+                continue
+            dimensions = _track_video_dimensions(moov, child_payload, child_end)
+            if dimensions is not None:
+                return dimensions
+    return None
+
+
+def mp4_video_dimensions(path: Path) -> tuple[int, int] | None:
+    """Return cached video dimensions from a finalized MP4, if available."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return _cached_mp4_video_dimensions(
+        str(path.resolve()), stat.st_mtime_ns, stat.st_size
+    )
 
 
 def resolve_stream_fingerprints(values: list[str | None]) -> list[str]:

@@ -714,8 +714,6 @@ class DetectorConfig(BaseModel):
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
     recorded_adaptive_sampling: bool = True
     recorded_decode_max_processes: int = Field(default=2, ge=1, le=16)
-    # Conservative default for high-resolution decoded BGR frames.
-    recorded_decode_estimated_frame_mb: int = Field(default=36, ge=1, le=64)
     model_path: str = ""
     model_xml: str = ""
     coreml_model_path: str = ""

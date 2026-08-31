@@ -9,6 +9,7 @@ from survng.app.recording_media import (
     concatenated_clip_timing,
     event_clip_window,
     hls_map_transition,
+    mp4_video_dimensions,
     mp4_stream_fingerprint,
     playback_segment_duration,
     resolve_stream_fingerprints,
@@ -113,6 +114,26 @@ class RecordingMediaTest(unittest.TestCase):
             self.assertTrue(base_fingerprint)
             self.assertNotEqual(base_fingerprint, mp4_stream_fingerprint(resized))
             self.assertNotEqual(base_fingerprint, mp4_stream_fingerprint(audio))
+
+    def test_mp4_video_dimensions_reads_and_invalidates_cached_geometry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recording = Path(tmpdir) / "recording.mp4"
+            recording.write_bytes(recording_file(
+                video_entry(b"avc1", b"config", dimensions=struct.pack(">HH", 1920, 1080))
+            ))
+            self.assertEqual(mp4_video_dimensions(recording), (1920, 1080))
+
+            recording.write_bytes(recording_file(
+                video_entry(b"avc1", b"config", dimensions=struct.pack(">HH", 4512, 2512)),
+                noise=b"resized",
+            ))
+            self.assertEqual(mp4_video_dimensions(recording), (4512, 2512))
+
+    def test_mp4_video_dimensions_rejects_invalid_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recording = Path(tmpdir) / "invalid.mp4"
+            recording.write_bytes(b"not an mp4")
+            self.assertIsNone(mp4_video_dimensions(recording))
 
     def test_map_transition_only_emits_discontinuity_after_first_map(self) -> None:
         first_lines, previous = hls_map_transition(None, "video-a", "day/0/init.mp4")
