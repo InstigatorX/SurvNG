@@ -96,7 +96,7 @@ Camera
   |                                                          v
   |                                                  OpenVINO detection
   |                                                          |
-  +-- live/substream --> OpenCV capture --> grayscale ring    |
+  +-- live/substream --> FFmpeg capture --> grayscale ring    |
   |                            |                    |          |
   |                            |             motion qualifier  |
   |                            |                    |          |
@@ -137,7 +137,7 @@ URLs are normalized by configuration before workers start (`video_backend` is
 always URL-backed).
 
 Process startup uses a camera-level admission coordinator instead of launching
-every OpenCV capture, ONVIF listener, and recorder at once. By default, two
+every FFmpeg capture, ONVIF listener, and recorder at once. By default, two
 cameras enter startup concurrently. Each camera gets a bounded first-frame
 window; a camera that misses it is marked degraded and keeps reconnecting in
 its capture worker while the coordinator advances to the next camera. Capture,
@@ -152,7 +152,7 @@ through core service construction and persistence, then expose the same
 progressive camera admission rather than blocking the configuration request on
 unavailable feeds.
 
-The configured camera concurrency is also the shared native OpenCV-open limit,
+The configured camera concurrency is also the shared external FFmpeg-open limit,
 so a simultaneous reconnect after a network interruption cannot bypass startup
 admission and create a second connection storm. Before admission begins,
 orphaned recorder processes are terminated concurrently within one cleanup
@@ -173,7 +173,7 @@ paths.
 
 ## 2. Live Capture And Browser Delivery
 
-`CameraCaptureService` keeps the live source open through OpenCV/FFmpeg. A successful
+`CameraCaptureService` keeps the live source open through external FFmpeg. A successful
 capture read transfers exclusive ownership of its NumPy buffer to the capture
 service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
 motion observers share that buffer; only consumers that explicitly request a
@@ -195,7 +195,7 @@ without polling or blocking preprocessing; its grant evaluates the latest
 coherent window. Capture sequence provides processing order, while wall-clock
 time remains event metadata. A backward camera-clock discontinuity resets the
 affected temporal runtime instead of suspending motion analysis. Main-source
-OpenCV capture is demand-driven and stops after an idle
+FFmpeg capture is demand-driven and stops after an idle
 period; continuous main recording is handled by its own FFmpeg process.
 
 Live capture reconnects with exponential backoff when a stream read or open
@@ -210,7 +210,7 @@ Browser live-view modes currently include:
 
 - Automatic motion mode: snapshot while idle, WebRTC while camera motion is
   active.
-- MJPEG: frames served by SurvNG from the latest OpenCV capture.
+- MJPEG: frames served by SurvNG from the latest FFmpeg capture.
 - WebRTC: SurvNG relays go2rtc signaling; media remains a shared go2rtc stream.
 - MSE: if WebRTC fails, SurvNG relays go2rtc fragmented MP4 over the existing
   WebSocket connection before falling back to MJPEG. This keeps go2rtc's API
@@ -312,7 +312,7 @@ Each ONVIF trigger retains both the camera-provided event time and SurvNG's
 local receipt time. Because decoded RTSP frames can arrive later than the ONVIF
 message, the qualifier evaluates overlapping windows until
 `post_trigger_seconds` has elapsed and keeps the strongest result. This avoids
-assuming that camera event timestamps and OpenCV frame-receipt timestamps share
+assuming that camera event timestamps and FFmpeg frame-receipt timestamps share
 the same media latency.
 
 If every usable window has an all-zero foreground score, the result is marked

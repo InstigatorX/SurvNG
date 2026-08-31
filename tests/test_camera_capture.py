@@ -8,12 +8,14 @@ import numpy as np
 import pytest
 
 from survng.app.camera_capture import (
+    CAPTURE_FRAME_MAX_BYTES,
     CameraCaptureService,
     CaptureHandle,
     CaptureOpenLimiter,
     CapturedFrame,
     FfmpegCaptureOptions,
     FfmpegCaptureBackend,
+    _bmp_frame_size,
     _decode_capture_bmp,
 )
 
@@ -672,9 +674,43 @@ def test_ffmpeg_backend_uses_configured_transport_and_policy_rate() -> None:
 
     assert command[:5] == ["custom-ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"]
     assert ["-rtsp_transport", "udp"] == command[command.index("-rtsp_transport") : command.index("-rtsp_transport") + 2]
+    assert command[command.index("-threads:v") + 1] == "1"
     assert "bmp" in command
-    assert any(str(item).startswith("fps=5,") for item in command)
+    capture_filter = command[command.index("-vf") + 1]
+    assert "prev_selected_t" in capture_filter
+    assert "0.200000" in capture_filter
+    assert command[command.index("-fps_mode") + 1] == "vfr"
     assert command[-5:] == ["-f", "image2pipe", "-vcodec", "bmp", "pipe:1"]
+
+
+def test_ffmpeg_backend_warns_once_without_logging_url_credentials(caplog) -> None:
+    backend = FfmpegCaptureBackend(CaptureOpenLimiter(1))
+
+    backend._command("rtsp://admin:first-secret@camera/live")
+    backend._command("rtsp://admin:second-secret@camera/main")
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "process arguments" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "camera" in warnings[0]
+    assert "admin" not in warnings[0]
+    assert "secret" not in warnings[0]
+
+
+def test_capture_bmp_limit_accepts_8k_frames_but_remains_bounded() -> None:
+    header = bytearray(14)
+    header[:2] = b"BM"
+    eight_k_frame_size = 7680 * 4320 * 3 + 54
+    header[2:6] = eight_k_frame_size.to_bytes(4, "little")
+
+    assert _bmp_frame_size(header) == eight_k_frame_size
+
+    header[2:6] = (CAPTURE_FRAME_MAX_BYTES + 1).to_bytes(4, "little")
+    with pytest.raises(RuntimeError, match="invalid BMP size"):
+        _bmp_frame_size(header)
 
 
 def test_capture_bmp_decode_preserves_bgr_pixels() -> None:
@@ -693,6 +729,24 @@ def test_capture_bmp_decode_preserves_bgr_pixels() -> None:
 
     assert frame.shape == (1, 1, 3)
     assert frame[0, 0].tolist() == [20, 40, 200]
+
+
+def test_capture_failure_includes_redacted_ffmpeg_detail() -> None:
+    class FailedHandle(FakeHandle):
+        def error_detail(self) -> str:
+            return (
+                "FFmpeg exited from signal 11: "
+                "rtsp://admin:secret@camera/live failed"
+            )
+
+    reason = CameraCaptureService._capture_failure_reason(
+        "stream read failed",
+        FailedHandle(),
+    )
+
+    assert "signal 11" in reason
+    assert "secret" not in reason
+    assert "rtsp://admin:***@camera/live" in reason
 
 
 def test_close_rejects_active_capture_thread() -> None:

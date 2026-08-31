@@ -796,7 +796,7 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["object_inference"])
         self.assertFalse(result["camera_workers_restarted"])
 
-    def test_tracking_session_change_rebuilds_only_tracking_sessions(self) -> None:
+    def test_tracking_sample_rate_change_reloads_capture_processes(self) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
@@ -804,6 +804,29 @@ class ConfigReloadTest(unittest.TestCase):
         main.manager = active
         incoming = current.model_copy(deep=True)
         incoming.detector.tracking.sample_fps = 3.0
+
+        with (
+            patch(
+                "survng.app.main.reload_manager",
+                return_value=incoming,
+            ) as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        active.reconfigure_object_tracking.assert_not_called()
+        self.assertIs(effective, incoming)
+        self.assertEqual(result["apply_mode"], "manager_reload")
+        self.assertTrue(result["camera_workers_restarted"])
+
+    def test_other_tracking_session_changes_rebuild_only_tracking_sessions(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
         incoming.detector.tracking.max_active_cameras = 4
 
         with (

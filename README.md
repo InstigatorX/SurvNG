@@ -31,7 +31,7 @@ document synchronized with changes to any video-processing stage.
 
 ## What SurvNG 1.0 Does
 
-- Connects to RTSP, RTMP, HTTP, or file streams through OpenCV/FFmpeg.
+- Connects to RTSP, HTTP, or HTTPS camera streams through external FFmpeg.
 - Records streams to segmented MP4 files with FFmpeg.
 - Listens for ONVIF pull-point events when the camera supports them, with explicit camera-triggered or adaptive visual-triggered operation.
 - Runs an OpenVINO detection pass on the latest frame when motion is reported.

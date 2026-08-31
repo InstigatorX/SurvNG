@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import select
 import subprocess
 import threading
@@ -12,11 +11,12 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Callable, Protocol
+from urllib.parse import urlsplit
 
 import numpy as np
 
+from .ffmpeg_process import named_ffmpeg_executable
 from .security import redact_secret_text
 
 
@@ -29,7 +29,7 @@ FRAME_STALE_SECONDS = 10.0
 MAIN_SOURCE_IDLE_SECONDS = 20.0
 CAPTURE_RETRY_INITIAL_SECONDS = 1.0
 CAPTURE_RETRY_MAX_SECONDS = 30.0
-CAPTURE_FRAME_MAX_BYTES = 64 * 1024 * 1024
+CAPTURE_FRAME_MAX_BYTES = 256 * 1024 * 1024
 CAPTURE_PIPE_READ_CHUNK_BYTES = 64 * 1024
 
 LOGGER = logging.getLogger(__name__)
@@ -81,6 +81,7 @@ class CaptureOpenLimiter:
 @dataclass(frozen=True, slots=True)
 class FfmpegCaptureOptions:
     ffmpeg_path: str = "ffmpeg"
+    decoder_threads: int = 1
     open_timeout_ms: int = CAPTURE_OPEN_TIMEOUT_MS
     read_timeout_ms: int = CAPTURE_READ_TIMEOUT_MS
     admission_poll_seconds: float = CAPTURE_OPEN_LOCK_POLL_SECONDS
@@ -125,17 +126,7 @@ class FfmpegCaptureHandle:
         self._stderr_thread.start()
 
     def _named_executable(self) -> str:
-        target = os.path.abspath(self._command_path)
-        runtime_dir = Path("/run/survng")
-        link = runtime_dir / "survng-capture"
-        try:
-            runtime_dir.mkdir(parents=True, exist_ok=True)
-            if not link.is_symlink() or os.path.realpath(link) != target:
-                link.unlink(missing_ok=True)
-                link.symlink_to(target)
-            return str(link)
-        except OSError:
-            return self._command_path
+        return named_ffmpeg_executable(self._command_path, "survng-capture")
 
     def prefetch(self, timeout_ms: int, cancelled: Callable[[], bool]) -> bool:
         frame = self._next_frame(
@@ -173,7 +164,17 @@ class FfmpegCaptureHandle:
             self._stderr_thread = None
 
     def error_detail(self) -> str:
-        return self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+        process = self._process
+        return_code = process.poll() if process is not None else None
+        detail = self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+        if return_code is None:
+            return detail
+        outcome = (
+            f"FFmpeg exited from signal {-return_code}"
+            if return_code < 0
+            else f"FFmpeg exited with status {return_code}"
+        )
+        return f"{outcome}: {detail}" if detail else outcome
 
     def _drain_stderr(self) -> None:
         process = self._process
@@ -206,7 +207,7 @@ class FfmpegCaptureHandle:
                 del self._buffer[:frame_size]
                 return _decode_capture_bmp(encoded)
             if len(self._buffer) > CAPTURE_FRAME_MAX_BYTES:
-                raise RuntimeError("FFmpeg capture frame exceeded 64 MiB")
+                raise RuntimeError("FFmpeg capture frame exceeded 256 MiB")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
@@ -277,6 +278,8 @@ class FfmpegCaptureBackend:
         self.options = options or FfmpegCaptureOptions()
         if self.options.rtsp_transport not in {"tcp", "udp"}:
             raise ValueError("rtsp_transport must be tcp or udp")
+        self._credential_warning_lock = threading.Lock()
+        self._credential_warning_hosts: set[str] = set()
 
     def create_handle(self) -> CaptureHandle:
         return FfmpegCaptureHandle(read_timeout_ms=self.options.read_timeout_ms)
@@ -318,15 +321,22 @@ class FfmpegCaptureBackend:
         return False
 
     def _command(self, source_url: str) -> list[str]:
+        self._warn_credentialed_process_url(source_url)
         requested_rate = (
             self.options.frame_rate()
             if self.options.frame_rate is not None
             else 5.0
         )
         frame_rate = min(10.0, max(0.5, float(requested_rate)))
+        minimum_interval = 1.0 / frame_rate
         output_args = [
             "-vf",
-            f"fps={frame_rate:g},format=bgr24",
+            (
+                "select='isnan(prev_selected_t)+"
+                f"gte(t-prev_selected_t,{minimum_interval:.6f})',format=bgr24"
+            ),
+            "-fps_mode",
+            "vfr",
             "-c:v",
             "bmp",
             "-pix_fmt",
@@ -342,6 +352,8 @@ class FfmpegCaptureBackend:
             "+genpts",
             "-dts_error_threshold",
             "10",
+            "-threads:v",
+            str(max(1, int(self.options.decoder_threads))),
         ]
         if source_url.lower().startswith(("rtsp://", "rtsps://")):
             command.extend(["-rtsp_transport", self.options.rtsp_transport])
@@ -359,6 +371,25 @@ class FfmpegCaptureBackend:
             "bmp",
             "pipe:1",
         ]
+
+    def _warn_credentialed_process_url(self, source_url: str) -> None:
+        try:
+            parsed = urlsplit(source_url)
+        except ValueError:
+            return
+        if parsed.username is None and parsed.password is None:
+            return
+        host = parsed.hostname or "unknown"
+        with self._credential_warning_lock:
+            if host in self._credential_warning_hosts:
+                return
+            self._credential_warning_hosts.add(host)
+        LOGGER.warning(
+            "camera capture URL for host %s contains credentials that external "
+            "FFmpeg exposes in its process arguments; route the camera through "
+            "a credential-free go2rtc restream",
+            host,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -950,7 +981,10 @@ class CameraCaptureService:
                         return
                     if not opened or not handle.is_opened():
                         consecutive_open_failures += 1
-                        failure_reason = "failed to open stream"
+                        failure_reason = self._capture_failure_reason(
+                            "failed to open stream",
+                            handle,
+                        )
                         self._increment(source, "open_failures")
                         self._set_error(source, failure_reason)
                     else:
@@ -970,7 +1004,10 @@ class CameraCaptureService:
                                     break
                                 if not session_received_frame:
                                     consecutive_open_failures += 1
-                                failure_reason = "stream read failed"
+                                failure_reason = self._capture_failure_reason(
+                                    "stream read failed",
+                                    handle,
+                                )
                                 self._increment(source, "read_failures")
                                 self._set_error(source, failure_reason)
                                 break
@@ -1042,6 +1079,20 @@ class CameraCaptureService:
 
     def _cancelled(self, stop_event: threading.Event) -> bool:
         return self._stop.is_set() or stop_event.is_set()
+
+    @staticmethod
+    def _capture_failure_reason(summary: str, handle: CaptureHandle) -> str:
+        error_detail = getattr(handle, "error_detail", None)
+        if not callable(error_detail):
+            return summary
+        try:
+            raw_detail = error_detail()
+        except Exception:
+            return summary
+        if not isinstance(raw_detail, str):
+            return summary
+        detail = redact_secret_text(raw_detail).strip()
+        return f"{summary}: {detail[:400]}" if detail else summary
 
     def _publish_frame(
         self,

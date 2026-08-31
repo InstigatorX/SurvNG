@@ -167,7 +167,10 @@ sudo systemctl --no-pager --full status go2rtc.service
 ```
 
 Edit `/var/lib/survng/go2rtc.yaml` to add streams, then point SurvNG cameras at
-`rtsp://127.0.0.1:8554/<stream_name>`.
+`rtsp://127.0.0.1:8554/<stream_name>`. Keep camera credentials in the
+owner-readable go2rtc configuration rather than the SurvNG stream URL: external
+FFmpeg receives its input URL in process arguments, which privileged process
+inspection can read.
 
 ## 7. Optional: detection models
 
