@@ -19,6 +19,7 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `compose.lxc.yaml` | Explicit AppArmor compatibility override for nested Docker |
 | `.env.example` | Non-secret host path, identity, timezone, and GPU group settings |
 | `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
+| `scripts/docker-publish-image.sh` | GHCR publish helper: `--cache-from` the moving tip, keep it locally |
 | `scripts/install-docker-models.sh` | Download detector/ReID/Smart Search models and patch `config.json` (uses `survng-model-installer` container by default) |
 | `Dockerfile.model-installer` | One-shot installer image published as `ghcr.io/.../survng:v1.2-model-installer` |
 | `.github/workflows/docker-publish.yml` | Build and push image targets to GHCR on release-branch commits and `v*` tags; `gstreamer` publishes only `runtime-intel` |
