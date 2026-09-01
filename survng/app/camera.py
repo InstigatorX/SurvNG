@@ -112,6 +112,7 @@ class CameraWorker:
             live_frame_provider=lambda: self._get_latest_frame(),
             timestamped_live_frame_provider=self._get_latest_detection_frame,
             timestamped_evidence_frame_provider=self._get_evidence_detection_frame,
+            live_detections_provider=lambda: self.capture.latest_detections("live"),
             stop_requested=lambda: (
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED

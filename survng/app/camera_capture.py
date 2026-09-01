@@ -267,6 +267,7 @@ class CameraCaptureService:
         ] = {}
         self._frames: dict[str, CapturedFrame] = {}
         self._detections: dict[str, list[dict[str, object]]] = {}
+        self._pipeline_status: dict[str, dict[str, object]] = {}
         self._last_access: dict[str, float] = {}
         self._errors: dict[str, str] = {}
         self._last_live_error = ""
@@ -588,6 +589,7 @@ class CameraCaptureService:
                 "live_detections": [
                     dict(item) for item in self._detections.get("live", ())
                 ],
+                "live_pipeline": dict(self._pipeline_status.get("live") or {}),
                 "capture_stats": capture_stats,
             }
 
@@ -703,7 +705,7 @@ class CameraCaptureService:
                             consecutive_open_failures = 0
                             retry_delay = self.retry_initial_seconds
                             self._publish_frame(source, image, stop_event)
-                            self._store_detections(source, handle)
+                            self._store_sidecar_state(source, handle)
                 except Exception as exc:
                     if not session_received_frame:
                         consecutive_open_failures += 1
@@ -785,6 +787,20 @@ class CameraCaptureService:
         source = self._normalize_source(source)
         with self._lock:
             return [dict(item) for item in self._detections.get(source, ())]
+
+    def _store_sidecar_state(self, source: str, handle: CaptureHandle) -> None:
+        self._store_detections(source, handle)
+        status = getattr(handle, "pipeline_status", None)
+        if not callable(status):
+            return
+        try:
+            payload = status()
+        except Exception:
+            return
+        if not isinstance(payload, dict) or not payload:
+            return
+        with self._lock:
+            self._pipeline_status[source] = dict(payload)
 
     def _store_detections(self, source: str, handle: CaptureHandle) -> None:
         pop = getattr(handle, "pop_detections", None)

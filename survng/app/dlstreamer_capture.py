@@ -36,6 +36,20 @@ from .dlstreamer_protocol import (
 LOGGER = logging.getLogger(__name__)
 
 
+def adjacent_model_proc(model_path: str) -> str:
+    path = Path(model_path)
+    if not path.name:
+        return ""
+    for candidate in (
+        path.with_name(f"{path.stem}.json"),
+        path.with_name(f"{path.stem}_proc.json"),
+        path.parent / "model-proc.json",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class DlStreamerCaptureOptions:
     python_executable: str = ""
@@ -46,6 +60,8 @@ class DlStreamerCaptureOptions:
     rtsp_transport: str = "tcp"
     frame_rate: Callable[[], float] | None = None
     model_path: str = ""
+    labels_path: str = ""
+    model_proc_path: str = ""
     inference_device: str = "GPU"
     detect_enabled: bool = False
 
@@ -129,6 +145,9 @@ class DlStreamerCaptureHandle:
         if frame is not None:
             self._harvest_available_messages()
         return (frame is not None), frame
+
+    def pipeline_status(self) -> dict[str, object]:
+        return dict(self._status)
 
     def pop_detections(self) -> list[dict[str, object]]:
         with self._detections_lock:
@@ -338,6 +357,15 @@ class DlStreamerCaptureBackend:
         model_path = self.options.model_path.strip()
         if self.options.detect_enabled and model_path:
             command.extend(["--model", model_path])
+            labels_path = self.options.labels_path.strip()
+            if labels_path:
+                command.extend(["--labels", labels_path])
+            model_proc = (
+                self.options.model_proc_path.strip()
+                or adjacent_model_proc(model_path)
+            )
+            if model_proc:
+                command.extend(["--model-proc", model_proc])
         else:
             command.append("--no-detect")
         return command

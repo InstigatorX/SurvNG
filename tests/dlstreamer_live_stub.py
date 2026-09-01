@@ -17,7 +17,19 @@ def main() -> int:
     sys.stdin.readline()
     pixels = bytes((20, 40, 200)) * 4
     stdout = sys.stdout.buffer
-    stdout.write(encode_json(TYPE_STATUS, {"ok": True, "decoder_elements": ["avdec_h264"]}))
+    stdout.write(
+        encode_json(
+            TYPE_STATUS,
+            {
+                "ok": True,
+                "detect": True,
+                "decoder_elements": ["avdec_h264"],
+                "hardware_decoder_selected": False,
+                "preprocess_backend": "opencv",
+                "first_frame_ms": 12.5,
+            },
+        )
+    )
     stdout.write(
         encode_frame(width=2, height=2, sequence=1, pts=0.05, pixels=pixels)
     )

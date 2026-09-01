@@ -665,6 +665,14 @@ def test_capture_stores_sidecar_detections() -> None:
                 }
             ]
 
+        def pipeline_status(self):
+            return {
+                "ok": True,
+                "hardware_decoder_selected": True,
+                "preprocess_backend": "va",
+                "first_frame_ms": 18.0,
+            }
+
     class DetectingBackend(FakeBackend):
         def create_handle(self) -> CaptureHandle:
             handle = DetectingHandle([np.zeros((2, 2, 3), dtype=np.uint8)])
@@ -675,9 +683,12 @@ def test_capture_stores_sidecar_detections() -> None:
     assert service.start()
     _wait_until(lambda: service.status()["capture_stats"]["live"]["frames_received"] >= 1)
     detections = service.latest_detections("live")
+    status = service.status()
     service.request_stop()
     assert service.wait_stopped(1.0) == {}
     assert detections[0]["label"] == "person"
+    assert status["live_pipeline"]["preprocess_backend"] == "va"
+    assert status["live_pipeline"]["hardware_decoder_selected"] is True
 
 
 def test_capture_failure_includes_redacted_live_detail() -> None:

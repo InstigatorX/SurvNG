@@ -167,7 +167,7 @@ paths.
 | Camera tiles | `live` | Faster startup and lower browser/network cost |
 | Full-screen live view | `main` | Highest available detail |
 | Motion qualification | `live` | Low-cost temporal analysis |
-| Object detection | Recorded `main` | High-resolution evidence near event time |
+| Object detection | Live GVA boxes, then recorded `main` | Fast admission from the capture sidecar; high-resolution evidence near event time |
 | Main recording | `main` | Archival quality |
 | Optional sub recording | `live` | Fast mobile playback and alternate view |
 
@@ -180,8 +180,13 @@ OpenVINO model are available (`pre-process-backend=va` on Intel), and tees a
 drop-only BGR appsink at `sample_fps` for motion qualification, MJPEG, and
 snapshots. The camera URL is written to the child's stdin so it does not appear
 in process arguments. There is no FFmpeg live-capture fallback: if the child
-exits, that camera reconnects the same pipeline. Recording, exports, and
-recorded evidence frames remain FFmpeg. A successful
+exits, that camera reconnects the same pipeline. The child's latest boxes are
+stored on `CameraCaptureService.latest_detections()` and used as the live
+fast-path detector for incident admission. When those sidecar boxes are present,
+`detect_initial` skips a second OpenVINO pass on the live frame and still
+applies zone and confidence filters. A pinned evidence-frame check and recorded
+refinement continue to decode FFmpeg evidence with OpenVINO. Recording, exports,
+and recorded evidence frames remain FFmpeg. A successful
 capture read transfers exclusive ownership of its NumPy buffer to the capture
 service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
 motion observers share that buffer; only consumers that explicitly request a
@@ -400,8 +405,13 @@ control and restrict its filesystem permissions.
 
 ## 6. High-Resolution Object Detection
 
-An accepted motion burst uses finalized main recording fragments rather than
-the low-resolution qualification frames. By default SurvNG samples five target
+Live incident admission prefers the GStreamer `gvadetect` boxes already
+produced on the capture pipeline. `RecordedMotionObjectDetector.detect_initial`
+uses those sidecar detections when the latest live frame is fresh and labeled
+boxes are present. Zone filters, candidate thresholds, and provisional
+admission rules still run in Python. Recorded refinement is unchanged: an
+accepted motion burst uses finalized main recording fragments rather than the
+low-resolution qualification frames. By default SurvNG samples five target
 times around the ONVIF event:
 
 ```text
