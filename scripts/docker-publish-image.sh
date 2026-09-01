@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build one Dockerfile target, reuse the moving GHCR tip as --cache-from, push
-# tags, and keep the tip image locally for the next sequential matrix job.
+# Build one Dockerfile target, push tags, and keep the moving tip locally so
+# the next sequential matrix job can reuse layers. Do not pass --cache-from:
+# the legacy builder crashes on this multi-stage Dockerfile when restoring a
+# pulled GHCR image ("failed to read diff archive: InvalidArgument").
 # Required environment: GITHUB_REPOSITORY, GIT_SHA, REF_TYPE, REF_NAME, TARGET,
 # DOCKERFILE. Optional: SUFFIX.
 
@@ -21,14 +23,10 @@ if [ "${ref_type}" != "tag" ]; then
 fi
 primary="${tags[0]}"
 
-echo "Pulling cache source ${primary}"
-docker pull "${primary}" || true
-
 echo "Building ${target} as ${primary}"
 docker build \
   --file "${dockerfile}" \
   --target "${target}" \
-  --cache-from "${primary}" \
   --build-arg "SURVNG_GIT_SHA=${GIT_SHA}" \
   --tag "${primary}" \
   .
