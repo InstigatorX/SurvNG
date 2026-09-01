@@ -49,11 +49,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Free runner disk space
-        run: scripts/github-runner-cleanup.sh --standard
+      - name: Reclaim dangling Docker state
+        run: scripts/github-runner-cleanup.sh --publish
 
       # Self-hosted runners may lack docker-buildx. Keep the default (legacy)
       # builder; the Dockerfile avoids BuildKit-only features like COPY --chmod.
+      # Layer cache is the previous GHCR tip (--cache-from) plus local images
+      # left by sequential matrix jobs. Nightly runner-maintenance wipes cache.
       - name: Build and push
         env:
           REF_TYPE: ${{ github.ref_type }}
@@ -62,36 +64,7 @@ jobs:
           SUFFIX: ${{ matrix.suffix }}
           GIT_SHA: ${{ github.sha }}
           DOCKERFILE: ${{ matrix.dockerfile }}
-        run: |
-          set -euo pipefail
-          image="ghcr.io/$(printf '%s' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
-          short_sha="$(printf '%.7s' "${GIT_SHA}")"
-          tags=()
-          if [ "${REF_TYPE}" = "tag" ]; then
-            tags+=("${image}:${REF_NAME}${SUFFIX}")
-          else
-            # Moving tip for the release line, plus an immutable commit pin.
-            tags+=("${image}:${REF_NAME}${SUFFIX}")
-            tags+=("${image}:sha-${short_sha}${SUFFIX}")
-          fi
-
-          primary="${tags[0]}"
-          echo "Building ${TARGET} as ${primary}"
-          docker build \
-            --file "${DOCKERFILE}" \
-            --target "${TARGET}" \
-            --build-arg "SURVNG_GIT_SHA=${GIT_SHA}" \
-            --tag "${primary}" \
-            .
-          for tag in "${tags[@]:1}"; do
-            docker tag "${primary}" "${tag}"
-          done
-          for tag in "${tags[@]}"; do
-            docker push "${tag}"
-            echo "Pushed ${tag}"
-          done
-          docker rmi "${primary}" $(printf ' %s' "${tags[@]:1}") 2>/dev/null || true
-          scripts/github-runner-cleanup.sh --standard
+        run: scripts/docker-publish-image.sh
 
   publish-gstreamer-intel:
     if: github.ref_name == 'gstreamer'
@@ -107,8 +80,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Free runner disk space
-        run: scripts/github-runner-cleanup.sh --standard
+      - name: Reclaim dangling Docker state
+        run: scripts/github-runner-cleanup.sh --publish
 
       - name: Build and push Intel image
         env:
@@ -118,28 +91,4 @@ jobs:
           SUFFIX: "-intel"
           GIT_SHA: ${{ github.sha }}
           DOCKERFILE: Dockerfile
-        run: |
-          set -euo pipefail
-          image="ghcr.io/$(printf '%s' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
-          short_sha="$(printf '%.7s' "${GIT_SHA}")"
-          tags=()
-          tags+=("${image}:${REF_NAME}${SUFFIX}")
-          tags+=("${image}:sha-${short_sha}${SUFFIX}")
-
-          primary="${tags[0]}"
-          echo "Building ${TARGET} as ${primary}"
-          docker build \
-            --file "${DOCKERFILE}" \
-            --target "${TARGET}" \
-            --build-arg "SURVNG_GIT_SHA=${GIT_SHA}" \
-            --tag "${primary}" \
-            .
-          for tag in "${tags[@]:1}"; do
-            docker tag "${primary}" "${tag}"
-          done
-          for tag in "${tags[@]}"; do
-            docker push "${tag}"
-            echo "Pushed ${tag}"
-          done
-          docker rmi "${primary}" $(printf ' %s' "${tags[@]:1}") 2>/dev/null || true
-          scripts/github-runner-cleanup.sh --standard
+        run: scripts/docker-publish-image.sh
