@@ -117,10 +117,10 @@ SurvNG automates cleanup in four layers:
 
 1. **Per publish job** — `scripts/github-runner-cleanup.sh --publish` reclaims
    dangling images and containers only. It does not wipe the Docker build
-   cache. The job then `docker pull`s the moving GHCR tip and builds with
-   `--cache-from` so apt, pip, and Intel DL Streamer layers survive from the
-   previous image. Sequential `v1.2` matrix targets keep that tip locally so
-   `runtime-intel` can reuse `runtime-base`.
+   cache. Sequential `v1.2` matrix targets keep the moving tip locally so
+   `runtime-intel` can reuse `runtime-base`. Do not `--cache-from` a pulled
+   GHCR image on the legacy builder; that restore fails on this multi-stage
+   Dockerfile.
 2. **Per CI test job** — `--light` cleanup before/after focused tests.
 3. **Nightly** — `.github/workflows/runner-maintenance.yml` runs at 05:00 UTC
    with `--standard` cleanup (build cache, images older than 24h, npm/pip cache).

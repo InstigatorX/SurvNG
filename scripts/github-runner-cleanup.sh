@@ -63,8 +63,8 @@ maybe_escalate_mode() {
 }
 
 cleanup_docker_publish() {
-  # Reclaim dangling images and stopped containers. Do not wipe builder cache;
-  # the next GHCR publish reuses those layers via --cache-from.
+  # Keep layer cache. Do not builder prune -af. The next GHCR publish reuses
+  # local layers from the moving tip left on the runner.
   command -v docker >/dev/null 2>&1 || return 0
   docker image prune -f || true
   docker container prune -f || true

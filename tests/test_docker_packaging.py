@@ -133,8 +133,8 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("scripts/docker-publish-image.sh", workflow)
         self.assertIn("github-runner-cleanup.sh --publish", workflow)
         self.assertNotIn("github-runner-cleanup.sh --standard", workflow)
-        self.assertIn("--cache-from", script)
-        self.assertIn('docker pull "${primary}"', script)
+        self.assertNotIn("  --cache-from", script)
+        self.assertNotIn("docker pull", script)
         self.assertNotIn('docker rmi "${primary}"', script)
         self.assertTrue(os.access(ROOT / "scripts" / "docker-publish-image.sh", os.X_OK))
 

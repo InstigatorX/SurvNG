@@ -54,8 +54,9 @@ jobs:
 
       # Self-hosted runners may lack docker-buildx. Keep the default (legacy)
       # builder; the Dockerfile avoids BuildKit-only features like COPY --chmod.
-      # Layer cache is the previous GHCR tip (--cache-from) plus local images
-      # left by sequential matrix jobs. Nightly runner-maintenance wipes cache.
+      # Layer cache is local images left on the runner (do not --cache-from a
+      # pulled GHCR tip: the legacy builder rejects that restore). Nightly
+      # runner-maintenance still wipes unused cache.
       - name: Build and push
         env:
           REF_TYPE: ${{ github.ref_type }}
