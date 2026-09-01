@@ -885,10 +885,12 @@ class DetectorConfig(BaseModel):
         """Keep a dedicated object worker when tracking shares the accelerator.
 
         Tracking reuses the object detector. With one worker, an in-flight
-        tracking frame can occupy the only lane long enough for a new live
-        incident check to miss its admission window. A second OpenVINO worker
-        is the protected incident lane already assumed by the supervisor.
-        The stored default is therefore 2 whenever tracking is enabled.
+        tracking frame can occupy the only lane long enough for recorded
+        evidence refinement to wait on the accelerator. A second OpenVINO
+        worker is the protected evidence lane already assumed by the
+        supervisor. The stored default is therefore 2 whenever tracking is
+        enabled. Live incident admission uses GStreamer boxes and does not
+        consume this pool.
         """
         if (
             self.backend == "openvino"

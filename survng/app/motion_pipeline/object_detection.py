@@ -1213,6 +1213,10 @@ class RecordedMotionObjectDetector:
         initial security path must not wait for that boundary. A stale or
         unavailable live frame therefore produces a provisional no-frame result
         rather than cancelling the authoritative recorded refinement.
+
+        Live admission uses GStreamer ``gvadetect`` boxes already produced on
+        the capture pipeline. OpenVINO stays on recorded evidence frames so
+        the live GPU is not a second detector.
         """
         workflow_started = time.monotonic()
         timing = {
@@ -1312,11 +1316,11 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=True,
             )
-        sidecar_objects: list[dict[str, Any]] | None = None
+        sidecar_objects: list[dict[str, Any]] = []
         if not has_evidence_token and self.live_detections_provider is not None:
             sidecar_objects = _labeled_sidecar_objects(
                 self.live_detections_provider()
-            ) or None
+            )
         objects = self._detect_objects(
             frame,
             timing=timing,
@@ -2106,6 +2110,8 @@ class RecordedMotionObjectDetector:
             )),
         )
         detector_started = time.monotonic()
+        if workload == "initial" and precomputed is None:
+            precomputed = []
         if precomputed is not None:
             objects = []
             for item in precomputed:
@@ -2117,7 +2123,7 @@ class RecordedMotionObjectDetector:
         else:
             detector_method = getattr(
                 self.detector,
-                "detect_initial" if workload == "initial" else "detect_refinement",
+                "detect_refinement",
                 self.detector.detect,
             )
             objects = detector_method(
