@@ -117,13 +117,17 @@ class DlStreamerCaptureHandle:
         if frame is None:
             return False
         self._prefetched = frame
+        self._harvest_available_messages()
         return True
 
     def read(self) -> tuple[bool, np.ndarray | None]:
         if self._prefetched is not None:
             frame, self._prefetched = self._prefetched, None
+            self._harvest_available_messages()
             return True, frame
         frame = self._next_frame(self._read_timeout_seconds)
+        if frame is not None:
+            self._harvest_available_messages()
         return (frame is not None), frame
 
     def pop_detections(self) -> list[dict[str, object]]:
@@ -211,6 +215,23 @@ class DlStreamerCaptureHandle:
             chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return None
+            self._reader.feed(chunk)
+
+    def _harvest_available_messages(self) -> None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return
+        while True:
+            popped = self._reader.pop()
+            if popped is not None:
+                self._apply_message(*popped)
+                continue
+            readable, _, _ = select.select([process.stdout], [], [], 0)
+            if not readable:
+                return
+            chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            if not chunk:
+                return
             self._reader.feed(chunk)
 
     def _apply_message(self, message_type: int, payload: bytes) -> np.ndarray | None:
