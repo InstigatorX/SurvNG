@@ -8,16 +8,9 @@ import numpy as np
 import pytest
 
 from survng.app.camera_capture import (
-    CAPTURE_FRAME_MAX_BYTES,
     CameraCaptureService,
     CaptureHandle,
-    CaptureOpenLimiter,
     CapturedFrame,
-    FfmpegCaptureOptions,
-    FfmpegCaptureBackend,
-    FfmpegCaptureHandle,
-    _bmp_frame_size,
-    _decode_capture_bmp,
 )
 
 
@@ -661,132 +654,37 @@ def test_live_recovers_after_relay_restart_without_a_persistent_consumer() -> No
     assert status["open_timeout_escalations"] >= 1
 
 
-def test_ffmpeg_backend_uses_configured_transport_and_policy_rate() -> None:
-    backend = FfmpegCaptureBackend(
-        CaptureOpenLimiter(1),
-        FfmpegCaptureOptions(
-            ffmpeg_path="custom-ffmpeg",
-            rtsp_transport="udp",
-            frame_rate=lambda: 5.0,
-        ),
-    )
+def test_capture_stores_sidecar_detections() -> None:
+    class DetectingHandle(FakeHandle):
+        def pop_detections(self):
+            return [
+                {
+                    "label": "person",
+                    "confidence": 0.9,
+                    "box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+                }
+            ]
 
-    command = backend._command("rtsp://camera/live")
+    class DetectingBackend(FakeBackend):
+        def create_handle(self) -> CaptureHandle:
+            handle = DetectingHandle([np.zeros((2, 2, 3), dtype=np.uint8)])
+            self.handles.append(handle)
+            return handle
 
-    assert command[:5] == ["custom-ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"]
-    assert ["-rtsp_transport", "udp"] == command[command.index("-rtsp_transport") : command.index("-rtsp_transport") + 2]
-    assert command[command.index("-threads:v") + 1] == "1"
-    assert "bmp" in command
-    capture_filter = command[command.index("-vf") + 1]
-    assert "prev_selected_t" in capture_filter
-    assert "0.200000" in capture_filter
-    assert command[command.index("-fps_mode") + 1] == "vfr"
-    assert command[-5:] == ["-f", "image2pipe", "-vcodec", "bmp", "pipe:1"]
-
-
-def test_ffmpeg_backend_warns_once_without_logging_url_credentials(caplog) -> None:
-    backend = FfmpegCaptureBackend(CaptureOpenLimiter(1))
-
-    backend._command("rtsp://admin:first-secret@camera/live")
-    backend._command("rtsp://admin:second-secret@camera/main")
-
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if "process arguments" in record.getMessage()
-    ]
-    assert len(warnings) == 1
-    assert "camera" in warnings[0]
-    assert "admin" not in warnings[0]
-    assert "secret" not in warnings[0]
+    service = _service(DetectingBackend())
+    assert service.start()
+    _wait_until(lambda: service.status()["capture_stats"]["live"]["frames_received"] >= 1)
+    detections = service.latest_detections("live")
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+    assert detections[0]["label"] == "person"
 
 
-def test_ffmpeg_capture_close_waits_for_stderr_drain_before_closing_stream() -> None:
-    class Stream:
-        def __init__(self) -> None:
-            self.eof = threading.Event()
-            self.read_started = threading.Event()
-            self.reader_finished = threading.Event()
-            self.closed = False
-
-        def read(self, _size: int) -> bytes:
-            self.read_started.set()
-            assert self.eof.wait(1.0)
-            self.reader_finished.set()
-            return b""
-
-        def close(self) -> None:
-            assert self.reader_finished.is_set()
-            self.closed = True
-
-    class Process:
-        def __init__(self, stderr: Stream) -> None:
-            self.stderr = stderr
-            self.stdout = Stream()
-            self.returncode: int | None = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def terminate(self) -> None:
-            self.returncode = 0
-
-        def wait(self, timeout: float | None = None) -> int:
-            del timeout
-            self.stderr.eof.set()
-            self.stdout.reader_finished.set()
-            return 0
-
-    handle = FfmpegCaptureHandle(read_timeout_ms=1000)
-    stderr = Stream()
-    process = Process(stderr)
-    handle._process = process  # type: ignore[assignment]
-    handle._stderr_thread = threading.Thread(target=handle._drain_stderr)
-    handle._stderr_thread.start()
-    assert stderr.read_started.wait(1.0)
-
-    handle.close()
-
-    assert stderr.closed
-    assert process.stdout.closed
-
-
-def test_capture_bmp_limit_accepts_8k_frames_but_remains_bounded() -> None:
-    header = bytearray(14)
-    header[:2] = b"BM"
-    eight_k_frame_size = 7680 * 4320 * 3 + 54
-    header[2:6] = eight_k_frame_size.to_bytes(4, "little")
-
-    assert _bmp_frame_size(header) == eight_k_frame_size
-
-    header[2:6] = (CAPTURE_FRAME_MAX_BYTES + 1).to_bytes(4, "little")
-    with pytest.raises(RuntimeError, match="invalid BMP size"):
-        _bmp_frame_size(header)
-
-
-def test_capture_bmp_decode_preserves_bgr_pixels() -> None:
-    # One bottom-up 1×1 24-bit BMP with BGR payload (20, 40, 200).
-    encoded = bytearray(58)
-    encoded[:2] = b"BM"
-    encoded[2:6] = (58).to_bytes(4, "little")
-    encoded[10:14] = (54).to_bytes(4, "little")
-    encoded[14:18] = (40).to_bytes(4, "little")
-    encoded[18:22] = (1).to_bytes(4, "little", signed=True)
-    encoded[22:26] = (1).to_bytes(4, "little", signed=True)
-    encoded[26:28] = (1).to_bytes(2, "little")
-    encoded[28:30] = (24).to_bytes(2, "little")
-    encoded[54:] = bytes((20, 40, 200, 0))
-    frame = _decode_capture_bmp(encoded)
-
-    assert frame.shape == (1, 1, 3)
-    assert frame[0, 0].tolist() == [20, 40, 200]
-
-
-def test_capture_failure_includes_redacted_ffmpeg_detail() -> None:
+def test_capture_failure_includes_redacted_live_detail() -> None:
     class FailedHandle(FakeHandle):
         def error_detail(self) -> str:
             return (
-                "FFmpeg exited from signal 11: "
+                "DL Streamer exited from signal 11: "
                 "rtsp://admin:secret@camera/live failed"
             )
 

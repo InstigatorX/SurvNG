@@ -124,6 +124,12 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("ppa:kobuk-team/intel-graphics", dockerfile)
         self.assertIn('"libze-intel-gpu1=${INTEL_COMPUTE_VERSION}"', dockerfile)
         self.assertIn('"intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}"', dockerfile)
+        self.assertIn("gstreamer1.0-libav", dockerfile)
+        self.assertIn("gstreamer1.0-plugins-bad", dockerfile)
+        self.assertIn("gir1.2-gstreamer-1.0", dockerfile)
+        self.assertIn("python3-gi", dockerfile)
+        self.assertIn("intel-dlstreamer", dockerfile)
+        self.assertIn("apt.repos.intel.com/edgeai/dlstreamer/ubuntu24", dockerfile)
         self.assertNotIn("intel-media-va-driver \\", dockerfile)
         # Legacy docker builders reject COPY --chmod (BuildKit-only).
         self.assertNotIn("COPY --chmod=", dockerfile)

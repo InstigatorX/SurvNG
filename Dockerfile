@@ -35,9 +35,17 @@ RUN chmod 755 /usr/local/bin/add-apt-ppa-retry \
         openssl \
         procps \
         python3 \
+        python3-gi \
         python3-venv \
         software-properties-common \
         tini \
+        gir1.2-gst-plugins-base-1.0 \
+        gir1.2-gstreamer-1.0 \
+        gstreamer1.0-libav \
+        gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-tools \
     && /usr/local/bin/add-apt-ppa-retry ppa:ubuntuhandbook1/ffmpeg8 \
     && apt-get update \
     && apt-get install -y --no-install-recommends "ffmpeg=${FFMPEG_VERSION}" \
@@ -96,6 +104,8 @@ ARG INTEL_GMMLIB_VERSION=22.10.0-1~24.04~ppa1
 ARG INTEL_LEVEL_ZERO_VERSION=1.32.0-1~24.04~ppa1
 ARG INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1
 ARG INTEL_VPL_VERSION=1:2.16.0-1~24.04~ppa1
+ENV LIBVA_DRIVER_NAME=iHD \
+    GST_VA_ALL_DRIVERS=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         software-properties-common \
@@ -112,6 +122,8 @@ RUN apt-get update \
         "libze-intel-gpu1=${INTEL_COMPUTE_VERSION}" \
         "libze1=${INTEL_LEVEL_ZERO_VERSION}" \
         ocl-icd-libopencl1 \
+        curl \
+        gnupg \
     && apt-mark hold \
         intel-media-va-driver-non-free \
         intel-opencl-icd \
@@ -122,7 +134,19 @@ RUN apt-get update \
         libvpl2 \
         libze-intel-gpu1 \
         libze1 \
-    && apt-get purge -y --auto-remove software-properties-common \
+    && curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+        | gpg --dearmor > /usr/share/keyrings/intel-gpg-archive-keyring.gpg \
+    && curl -fsSL https://apt.repos.intel.com/edgeai/dlstreamer/GPG-PUB-KEY-INTEL-DLS.gpg \
+        > /usr/share/keyrings/dls-archive-keyring.gpg \
+    && printf '%s\n' \
+        "deb [signed-by=/usr/share/keyrings/dls-archive-keyring.gpg] https://apt.repos.intel.com/edgeai/dlstreamer/ubuntu24 ubuntu24 main" \
+        > /etc/apt/sources.list.d/intel-dlstreamer.list \
+    && printf '%s\n' \
+        "deb [signed-by=/usr/share/keyrings/intel-gpg-archive-keyring.gpg] https://apt.repos.intel.com/openvino ubuntu24 main" \
+        > /etc/apt/sources.list.d/intel-openvino.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends intel-dlstreamer \
+    && apt-get purge -y --auto-remove software-properties-common curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 FROM runtime-base AS runtime

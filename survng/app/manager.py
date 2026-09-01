@@ -9,11 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .camera import CameraWorker
-from .camera_capture import (
-    CaptureOpenLimiter,
-    FfmpegCaptureOptions,
-    FfmpegCaptureBackend,
-)
+from .camera_capture import CaptureOpenLimiter
+from .dlstreamer_capture import DlStreamerCaptureBackend, DlStreamerCaptureOptions
 from .camera_control import CameraControlService
 from .camera_fleet import CameraFleetLifecycle, CameraFleetOperationError
 from .camera_startup import (
@@ -309,19 +306,24 @@ class AppManager:
         # lifecycle/reconfiguration ownership lives in ``self.recording``.
         self.recorder = self.recording.recorder
         self.go2rtc = Go2RtcAdapter()
-        # Camera startup pacing is an internal safety policy. Keep external
-        # FFmpeg admission and the startup coordinator on the same fixed cap.
+        # Camera startup pacing is an internal safety policy. Keep live
+        # DL Streamer admission and the startup coordinator on the same cap.
         self._capture_open_limiter = CaptureOpenLimiter(
             CAMERA_STARTUP_MAX_CONCURRENCY
         )
-        self.capture_backend = FfmpegCaptureBackend(
+        detector = config.detector
+        self.capture_backend = DlStreamerCaptureBackend(
             self._capture_open_limiter,
-            FfmpegCaptureOptions(
-                ffmpeg_path=config.ffmpeg_path,
+            DlStreamerCaptureOptions(
                 rtsp_transport=config.capture_rtsp_transport,
                 frame_rate=lambda: max(
                     self.config.motion_qualification.sample_fps,
                     self.config.detector.tracking.sample_fps,
+                ),
+                model_path=detector.resolved_model_path(),
+                inference_device=detector.device,
+                detect_enabled=(
+                    detector.enabled and detector.backend == "openvino"
                 ),
             ),
         )

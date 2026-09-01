@@ -5,7 +5,7 @@ describes the implementation currently in the repository, not an aspirational
 design. Update it whenever ingest, recording, motion qualification, inference,
 incident generation, media storage, or browser playback behavior changes.
 
-Last reviewed: 2026-08-24
+Last reviewed: 2026-09-01
 
 ## Motion Pipeline Migration
 
@@ -96,7 +96,7 @@ Camera
   |                                                          v
   |                                                  OpenVINO detection
   |                                                          |
-  +-- live/substream --> FFmpeg capture --> grayscale ring    |
+  +-- live/substream --> DL Streamer live --> grayscale ring  |
   |                            |                    |          |
   |                            |             motion qualifier  |
   |                            |                    |          |
@@ -137,7 +137,7 @@ URLs are normalized by configuration before workers start (`video_backend` is
 always URL-backed).
 
 Process startup uses a camera-level admission coordinator instead of launching
-every FFmpeg capture, ONVIF listener, and recorder at once. By default, two
+every live capture process, ONVIF listener, and recorder at once. By default, two
 cameras enter startup concurrently. Each camera gets a bounded first-frame
 window; a camera that misses it is marked degraded and keeps reconnecting in
 its capture worker while the coordinator advances to the next camera. Capture,
@@ -152,7 +152,7 @@ through core service construction and persistence, then expose the same
 progressive camera admission rather than blocking the configuration request on
 unavailable feeds.
 
-The configured camera concurrency is also the shared external FFmpeg-open limit,
+The configured camera concurrency is also the shared live-capture open limit,
 so a simultaneous reconnect after a network interruption cannot bypass startup
 admission and create a second connection storm. Before admission begins,
 orphaned recorder processes are terminated concurrently within one cleanup
@@ -173,7 +173,15 @@ paths.
 
 ## 2. Live Capture And Browser Delivery
 
-`CameraCaptureService` keeps the live source open through external FFmpeg. A successful
+`CameraCaptureService` keeps the live source open through an isolated
+GStreamer / Intel DL Streamer child (`survng-dls`). The child prefers
+`vah264dec` / `vah265dec`, keeps detect on `VAMemory` when `gvadetect` and an
+OpenVINO model are available (`pre-process-backend=va` on Intel), and tees a
+drop-only BGR appsink at `sample_fps` for motion qualification, MJPEG, and
+snapshots. The camera URL is written to the child's stdin so it does not appear
+in process arguments. There is no FFmpeg live-capture fallback: if the child
+exits, that camera reconnects the same pipeline. Recording, exports, and
+recorded evidence frames remain FFmpeg. A successful
 capture read transfers exclusive ownership of its NumPy buffer to the capture
 service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
 motion observers share that buffer; only consumers that explicitly request a
@@ -195,8 +203,8 @@ without polling or blocking preprocessing; its grant evaluates the latest
 coherent window. Capture sequence provides processing order, while wall-clock
 time remains event metadata. A backward camera-clock discontinuity resets the
 affected temporal runtime instead of suspending motion analysis. Main-source
-FFmpeg capture is demand-driven and stops after an idle
-period; continuous main recording is handled by its own FFmpeg process.
+live capture is demand-driven and stops after an idle period; continuous main
+recording is handled by its own FFmpeg process.
 
 Live capture reconnects with exponential backoff when a stream read or open
 fails. After the first failure on a live source, the open deadline escalates to
@@ -210,7 +218,7 @@ Browser live-view modes currently include:
 
 - Automatic motion mode: snapshot while idle, WebRTC while camera motion is
   active.
-- MJPEG: frames served by SurvNG from the latest FFmpeg capture.
+- MJPEG: frames served by SurvNG from the latest live-capture tee.
 - WebRTC: SurvNG relays go2rtc signaling; media remains a shared go2rtc stream.
 - MSE: if WebRTC fails, SurvNG relays go2rtc fragmented MP4 over the existing
   WebSocket connection before falling back to MJPEG. This keeps go2rtc's API

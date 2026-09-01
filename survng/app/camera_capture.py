@@ -4,19 +4,15 @@ from __future__ import annotations
 
 import logging
 import math
-import select
-import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Protocol
-from urllib.parse import urlsplit
 
 import numpy as np
 
-from .ffmpeg_process import named_ffmpeg_executable
 from .security import redact_secret_text
 
 
@@ -76,322 +72,6 @@ class CaptureOpenLimiter:
 
     def release(self) -> None:
         self._semaphore.release()
-
-
-@dataclass(frozen=True, slots=True)
-class FfmpegCaptureOptions:
-    ffmpeg_path: str = "ffmpeg"
-    decoder_threads: int = 1
-    open_timeout_ms: int = CAPTURE_OPEN_TIMEOUT_MS
-    read_timeout_ms: int = CAPTURE_READ_TIMEOUT_MS
-    admission_poll_seconds: float = CAPTURE_OPEN_LOCK_POLL_SECONDS
-    rtsp_transport: str = "tcp"
-    frame_rate: Callable[[], float] | None = None
-
-
-class FfmpegCaptureHandle:
-    """One external FFmpeg decoder whose stdout carries self-framed BMPs."""
-
-    def __init__(self, *, read_timeout_ms: int) -> None:
-        self._read_timeout_seconds = max(0.001, read_timeout_ms / 1000.0)
-        self._process: subprocess.Popen[bytes] | None = None
-        self._buffer = bytearray()
-        self._prefetched: np.ndarray | None = None
-        self._stderr = bytearray()
-        self._stderr_thread: threading.Thread | None = None
-
-    def is_opened(self) -> bool:
-        return self._process is not None and self._process.poll() is None
-
-    def set_buffer_size(self, size: int) -> None:
-        # FFmpeg emits an ordered byte stream; CameraCaptureService already
-        # owns the single latest-frame buffer and drops superseded work.
-        del size
-
-    def start(self, command: list[str]) -> None:
-        self._command_path = command[0]
-        executable = self._named_executable()
-        self._process = subprocess.Popen(
-            [executable, *command[1:]],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        self._stderr_thread = threading.Thread(
-            target=self._drain_stderr,
-            name="ffmpeg-capture-stderr",
-            daemon=True,
-        )
-        self._stderr_thread.start()
-
-    def _named_executable(self) -> str:
-        return named_ffmpeg_executable(self._command_path, "survng-capture")
-
-    def prefetch(self, timeout_ms: int, cancelled: Callable[[], bool]) -> bool:
-        frame = self._next_frame(
-            max(0.001, timeout_ms / 1000.0),
-            cancelled=cancelled,
-        )
-        if frame is None:
-            return False
-        self._prefetched = frame
-        return True
-
-    def read(self) -> tuple[bool, np.ndarray | None]:
-        if self._prefetched is not None:
-            frame, self._prefetched = self._prefetched, None
-            return True, frame
-        frame = self._next_frame(self._read_timeout_seconds)
-        return (frame is not None), frame
-
-    def close(self) -> None:
-        process, self._process = self._process, None
-        if process is None:
-            return
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=1.0)
-        # Wait for the stderr reader to observe EOF before closing its file
-        # object. Closing it first races a blocking read in _drain_stderr.
-        stderr_thread, self._stderr_thread = self._stderr_thread, None
-        if stderr_thread is not None:
-            stderr_thread.join()
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                stream.close()
-
-    def error_detail(self) -> str:
-        process = self._process
-        return_code = process.poll() if process is not None else None
-        detail = self._stderr.decode("utf-8", errors="replace").strip()[-400:]
-        if return_code is None:
-            return detail
-        outcome = (
-            f"FFmpeg exited from signal {-return_code}"
-            if return_code < 0
-            else f"FFmpeg exited with status {return_code}"
-        )
-        return f"{outcome}: {detail}" if detail else outcome
-
-    def _drain_stderr(self) -> None:
-        process = self._process
-        if process is None or process.stderr is None:
-            return
-        while True:
-            chunk = process.stderr.read(CAPTURE_PIPE_READ_CHUNK_BYTES)
-            if not chunk:
-                return
-            self._stderr.extend(chunk)
-            if len(self._stderr) > 8192:
-                del self._stderr[:-8192]
-
-    def _next_frame(
-        self,
-        timeout_seconds: float,
-        *,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> np.ndarray | None:
-        process = self._process
-        if process is None or process.stdout is None:
-            return None
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            if cancelled is not None and cancelled():
-                return None
-            frame_size = _bmp_frame_size(self._buffer)
-            if frame_size is not None and len(self._buffer) >= frame_size:
-                encoded = bytes(self._buffer[:frame_size])
-                del self._buffer[:frame_size]
-                return _decode_capture_bmp(encoded)
-            if len(self._buffer) > CAPTURE_FRAME_MAX_BYTES:
-                raise RuntimeError("FFmpeg capture frame exceeded 256 MiB")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            readable, _, _ = select.select(
-                [process.stdout], [], [], min(remaining, CAPTURE_OPEN_LOCK_POLL_SECONDS)
-            )
-            if not readable:
-                continue
-            chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
-            if not chunk:
-                return None
-            self._buffer.extend(chunk)
-
-
-def _bmp_frame_size(buffer: bytearray) -> int | None:
-    if len(buffer) < 14:
-        return None
-    if buffer[:2] != b"BM":
-        raise RuntimeError("FFmpeg capture emitted an invalid BMP header")
-    size = int.from_bytes(buffer[2:6], "little")
-    if size < 54 or size > CAPTURE_FRAME_MAX_BYTES:
-        raise RuntimeError("FFmpeg capture emitted an invalid BMP size")
-    return size
-
-
-def _decode_capture_bmp(encoded: bytes) -> np.ndarray:
-    """Decode FFmpeg's uncompressed BGR BMP without a video/image decoder."""
-    if len(encoded) < 54 or encoded[:2] != b"BM":
-        raise RuntimeError("FFmpeg capture emitted an invalid BMP frame")
-    offset = int.from_bytes(encoded[10:14], "little")
-    dib_size = int.from_bytes(encoded[14:18], "little")
-    width = int.from_bytes(encoded[18:22], "little", signed=True)
-    height = int.from_bytes(encoded[22:26], "little", signed=True)
-    planes = int.from_bytes(encoded[26:28], "little")
-    bits_per_pixel = int.from_bytes(encoded[28:30], "little")
-    compression = int.from_bytes(encoded[30:34], "little")
-    if (
-        dib_size < 40
-        or width <= 0
-        or height == 0
-        or planes != 1
-        or bits_per_pixel != 24
-        or compression != 0
-    ):
-        raise RuntimeError("FFmpeg capture emitted an unsupported BMP frame")
-    row_bytes = width * 3
-    row_stride = (row_bytes + 3) & ~3
-    rows = abs(height)
-    required = offset + row_stride * rows
-    if offset < 54 or required > len(encoded):
-        raise RuntimeError("FFmpeg capture emitted a truncated BMP frame")
-    pixels = np.frombuffer(encoded, dtype=np.uint8, count=row_stride * rows, offset=offset)
-    image = pixels.reshape(rows, row_stride)[:, :row_bytes].reshape(rows, width, 3)
-    if height > 0:
-        image = image[::-1]
-    return np.ascontiguousarray(image)
-
-
-class FfmpegCaptureBackend:
-    """External configured-FFmpeg capture with bounded process and pipe I/O."""
-
-    def __init__(
-        self,
-        limiter: CaptureOpenLimiter,
-        options: FfmpegCaptureOptions | None = None,
-    ) -> None:
-        self.limiter = limiter
-        self.options = options or FfmpegCaptureOptions()
-        if self.options.rtsp_transport not in {"tcp", "udp"}:
-            raise ValueError("rtsp_transport must be tcp or udp")
-        self._credential_warning_lock = threading.Lock()
-        self._credential_warning_hosts: set[str] = set()
-
-    def create_handle(self) -> CaptureHandle:
-        return FfmpegCaptureHandle(read_timeout_ms=self.options.read_timeout_ms)
-
-    def open(
-        self,
-        handle: CaptureHandle,
-        source_url: str,
-        cancelled: Callable[[], bool],
-        *,
-        open_timeout_ms: int | None = None,
-    ) -> bool:
-        if not isinstance(handle, FfmpegCaptureHandle):
-            raise TypeError("FfmpegCaptureBackend requires FfmpegCaptureHandle")
-        while not cancelled():
-            if not self.limiter.acquire(self.options.admission_poll_seconds):
-                continue
-            try:
-                if cancelled():
-                    return False
-                timeout_ms = max(
-                    1,
-                    int(
-                        self.options.open_timeout_ms
-                        if open_timeout_ms is None
-                        else open_timeout_ms
-                    ),
-                )
-                handle.start(self._command(source_url))
-                if cancelled():
-                    handle.close()
-                    return False
-                if not handle.prefetch(timeout_ms, cancelled):
-                    handle.close()
-                    return False
-                return True
-            finally:
-                self.limiter.release()
-        return False
-
-    def _command(self, source_url: str) -> list[str]:
-        self._warn_credentialed_process_url(source_url)
-        requested_rate = (
-            self.options.frame_rate()
-            if self.options.frame_rate is not None
-            else 5.0
-        )
-        frame_rate = min(10.0, max(0.5, float(requested_rate)))
-        minimum_interval = 1.0 / frame_rate
-        output_args = [
-            "-vf",
-            (
-                "select='isnan(prev_selected_t)+"
-                f"gte(t-prev_selected_t,{minimum_interval:.6f})',format=bgr24"
-            ),
-            "-fps_mode",
-            "vfr",
-            "-c:v",
-            "bmp",
-            "-pix_fmt",
-            "bgr24",
-        ]
-        command = [
-            self.options.ffmpeg_path,
-            "-hide_banner",
-            "-nostdin",
-            "-loglevel",
-            "error",
-            "-fflags",
-            "+genpts",
-            "-dts_error_threshold",
-            "10",
-            "-threads:v",
-            str(max(1, int(self.options.decoder_threads))),
-        ]
-        if source_url.lower().startswith(("rtsp://", "rtsps://")):
-            command.extend(["-rtsp_transport", self.options.rtsp_transport])
-        return [
-            *command,
-            "-i",
-            source_url,
-            "-map",
-            "0:v:0",
-            "-an",
-            *output_args,
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "bmp",
-            "pipe:1",
-        ]
-
-    def _warn_credentialed_process_url(self, source_url: str) -> None:
-        try:
-            parsed = urlsplit(source_url)
-        except ValueError:
-            return
-        if parsed.username is None and parsed.password is None:
-            return
-        host = parsed.hostname or "unknown"
-        with self._credential_warning_lock:
-            if host in self._credential_warning_hosts:
-                return
-            self._credential_warning_hosts.add(host)
-        LOGGER.warning(
-            "camera capture URL for host %s contains credentials that external "
-            "FFmpeg exposes in its process arguments; route the camera through "
-            "a credential-free go2rtc restream",
-            host,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +266,7 @@ class CameraCaptureService:
             tuple[str, threading.Event],
         ] = {}
         self._frames: dict[str, CapturedFrame] = {}
+        self._detections: dict[str, list[dict[str, object]]] = {}
         self._last_access: dict[str, float] = {}
         self._errors: dict[str, str] = {}
         self._last_live_error = ""
@@ -904,6 +585,9 @@ class CameraCaptureService:
                     source: dict(dimensions)
                     for source, dimensions in self._dimensions.items()
                 },
+                "live_detections": [
+                    dict(item) for item in self._detections.get("live", ())
+                ],
                 "capture_stats": capture_stats,
             }
 
@@ -1019,6 +703,7 @@ class CameraCaptureService:
                             consecutive_open_failures = 0
                             retry_delay = self.retry_initial_seconds
                             self._publish_frame(source, image, stop_event)
+                            self._store_detections(source, handle)
                 except Exception as exc:
                     if not session_received_frame:
                         consecutive_open_failures += 1
@@ -1095,6 +780,27 @@ class CameraCaptureService:
             return summary
         detail = redact_secret_text(raw_detail).strip()
         return f"{summary}: {detail[:400]}" if detail else summary
+
+    def latest_detections(self, source: str = "live") -> list[dict[str, object]]:
+        source = self._normalize_source(source)
+        with self._lock:
+            return [dict(item) for item in self._detections.get(source, ())]
+
+    def _store_detections(self, source: str, handle: CaptureHandle) -> None:
+        pop = getattr(handle, "pop_detections", None)
+        if not callable(pop):
+            return
+        try:
+            detections = pop()
+        except Exception:
+            return
+        if not isinstance(detections, list):
+            return
+        stored = [dict(item) for item in detections if isinstance(item, dict)]
+        if not stored:
+            return
+        with self._lock:
+            self._detections[source] = stored
 
     def _publish_frame(
         self,

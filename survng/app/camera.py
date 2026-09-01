@@ -12,8 +12,8 @@ from .camera_capture import (
     CameraCaptureService,
     CapturedFrame,
     CaptureOpenLimiter,
-    FfmpegCaptureBackend,
 )
+from .dlstreamer_capture import DlStreamerCaptureBackend
 from .camera_status import CameraStatusService
 from .camera_media import CameraMediaService
 from .camera_lifecycle import (
@@ -103,7 +103,7 @@ class CameraWorker:
         self._stop = self.runtime_state.stop_event
         self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
-        effective_capture_backend = capture_backend or FfmpegCaptureBackend(
+        effective_capture_backend = capture_backend or DlStreamerCaptureBackend(
             CaptureOpenLimiter()
         )
         self.motion_debug = MotionDebugSnapshotStore()

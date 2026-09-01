@@ -123,12 +123,28 @@ is not privileged.
 Both image targets install FFmpeg **8.1.2** from `ppa:ubuntuhandbook1/ffmpeg8`
 (`ffmpeg=10:8.1.2-0build1~ubuntu24.04`), held so apt cannot silently roll back
 to Noble's 6.1 package. Override `FFMPEG_VERSION` at build time only when
-intentionally qualifying a new build.
+intentionally qualifying a new build. FFmpeg remains the recorder, exporter,
+and recorded-evidence decoder. Live camera capture does not use it.
 
 ```bash
 docker exec survng ffmpeg -version | head -1
 docker exec survng ffmpeg -hide_banner -hwaccels
 ```
+
+### Live capture (GStreamer / DL Streamer)
+
+Live tiles, motion qualification, MJPEG, and tracking frames come from an
+isolated `python -m survng.dlstreamer_live` child. The camera URL is passed on
+stdin. Both image targets include GStreamer; the Intel target also installs
+`intel-dlstreamer` so `gvadetect` can run on VAMemory with `pre-process-backend=va`.
+
+```bash
+docker exec survng gst-inspect-1.0 vah264dec
+docker exec survng gst-inspect-1.0 gvadetect
+```
+
+There is no FFmpeg live-capture fallback. If the child dies, that camera
+reconnects the same pipeline.
 
 ### go2rtc
 
