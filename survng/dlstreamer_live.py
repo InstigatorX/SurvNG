@@ -87,31 +87,65 @@ def _disable_core_dumps() -> None:
         pass
 
 
+_SYSTEM_GST_PLUGINS = "/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
+_URI_SOURCE_FACTORIES = ("uridecodebin3", "uridecodebin")
+
+
+def _colon_path(*groups: str) -> str:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for group in groups:
+        for part in group.split(":"):
+            if not part or part in seen:
+                continue
+            seen.add(part)
+            ordered.append(part)
+    return ":".join(ordered)
+
+
+def _existing_dirs(*paths: Path | str) -> tuple[str, ...]:
+    found: list[str] = []
+    for path in paths:
+        resolved = Path(path)
+        if resolved.is_dir():
+            found.append(str(resolved))
+    return tuple(found)
+
+
 def _apply_dlstreamer_env() -> None:
-    root = Path("/opt/intel/dlstreamer")
-    if not root.is_dir():
-        return
-    plugin_dirs = [
-        str(root / "lib"),
-        str(root / "gstreamer/lib/gstreamer-1.0"),
-        str(root / "gstreamer/lib"),
-        "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
-    ]
-    current = os.environ.get("GST_PLUGIN_PATH", "")
-    os.environ["GST_PLUGIN_PATH"] = ":".join(
-        part for part in (*plugin_dirs, current) if part
-    )
-    lib_dirs = [
-        str(root / "gstreamer/lib"),
-        str(root / "lib"),
-        str(root / "lib/gstreamer-1.0"),
-    ]
-    current_ld = os.environ.get("LD_LIBRARY_PATH", "")
-    os.environ["LD_LIBRARY_PATH"] = ":".join(
-        part for part in (*lib_dirs, current_ld) if part
+    """Expose gvadetect without hiding Ubuntu's uridecodebin3.
+
+    Intel DL Streamer's bundled libgstreamer compiles in a private system
+    plugin path. Prepending that tree via LD_LIBRARY_PATH makes python3-gi
+    load Intel's Gst, which then misses Ubuntu playback plugins. Keep the
+    distro plugin dir on GST_PLUGIN_SYSTEM_PATH, and put Intel GStreamer
+    libs after the process default search.
+    """
+    os.environ["GST_PLUGIN_SYSTEM_PATH"] = _colon_path(
+        _SYSTEM_GST_PLUGINS,
+        os.environ.get("GST_PLUGIN_SYSTEM_PATH", ""),
     )
     os.environ.setdefault("LIBVA_DRIVER_NAME", "iHD")
     os.environ.setdefault("GST_VA_ALL_DRIVERS", "1")
+    root = Path("/opt/intel/dlstreamer")
+    if not root.is_dir():
+        return
+    os.environ["GST_PLUGIN_PATH"] = _colon_path(
+        *_existing_dirs(
+            root / "lib",
+            root / "gstreamer/lib/gstreamer-1.0",
+            Path(_SYSTEM_GST_PLUGINS),
+        ),
+        os.environ.get("GST_PLUGIN_PATH", ""),
+    )
+    os.environ["LD_LIBRARY_PATH"] = _colon_path(
+        os.environ.get("LD_LIBRARY_PATH", ""),
+        *_existing_dirs(
+            root / "lib",
+            root / "lib/gstreamer-1.0",
+            root / "gstreamer/lib",
+        ),
+    )
 
 
 def _load_gstreamer():
@@ -142,6 +176,19 @@ def _element(Gst, factory: str, name: str):
 
 def _factory_available(Gst, name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
+
+
+def _uri_source_factory(Gst, *, test_source: bool) -> str:
+    if test_source:
+        if not _factory_available(Gst, "videotestsrc"):
+            raise RuntimeError(
+                "required GStreamer element is unavailable: videotestsrc"
+            )
+        return "videotestsrc"
+    for name in _URI_SOURCE_FACTORIES:
+        if _factory_available(Gst, name):
+            return name
+    raise RuntimeError("required GStreamer element is unavailable: uridecodebin3")
 
 
 def _link_tee(Gst, tee, sink) -> None:
@@ -237,11 +284,8 @@ def run(argv: list[str] | None = None) -> int:
     if pipeline is None:
         raise RuntimeError("could not create GStreamer pipeline")
 
-    source = _element(
-        Gst,
-        "videotestsrc" if args.test_source else "uridecodebin3",
-        "source",
-    )
+    source_factory = _uri_source_factory(Gst, test_source=args.test_source)
+    source = _element(Gst, source_factory, "source")
     if args.test_source:
         source.set_property("is-live", True)
         source.set_property("pattern", "ball")
@@ -453,6 +497,7 @@ def run(argv: list[str] | None = None) -> int:
                             "ok": True,
                             "detect": detect,
                             "decoder_elements": sorted(decoder_elements),
+                            "source_element": source_factory,
                         },
                     ),
                 )

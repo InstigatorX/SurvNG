@@ -178,7 +178,10 @@ GStreamer / Intel DL Streamer child (`survng-dls`). The child prefers
 `vah264dec` / `vah265dec`, keeps detect on `VAMemory` when `gvadetect` and an
 OpenVINO model are available (`pre-process-backend=va` on Intel), and tees a
 drop-only BGR appsink at `sample_fps` for motion qualification, MJPEG, and
-snapshots. The camera URL is written to the child's stdin so it does not appear
+snapshots. Decode uses `uridecodebin3` when the factory is registered, otherwise
+`uridecodebin`. The child keeps Ubuntu's GStreamer plugin directory on
+`GST_PLUGIN_SYSTEM_PATH` so Intel DL Streamer's bundled libgstreamer cannot hide
+playback elements. The camera URL is written to the child's stdin so it does not appear
 in process arguments. The child runs system ``/usr/bin/python3`` so GStreamer
 GI plugins resolve; it does not import the SurvNG venv or pydantic. There is no
 FFmpeg live-capture fallback: if the child exits, that camera reconnects the

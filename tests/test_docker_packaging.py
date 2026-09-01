@@ -136,6 +136,7 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn('"intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}"', dockerfile)
         self.assertIn("gstreamer1.0-libav", dockerfile)
         self.assertIn("gstreamer1.0-plugins-bad", dockerfile)
+        self.assertIn("gstreamer1.0-plugins-base", dockerfile)
         self.assertIn("gir1.2-gstreamer-1.0", dockerfile)
         self.assertIn("python3-gi", dockerfile)
         self.assertIn("intel-dlstreamer", dockerfile)
