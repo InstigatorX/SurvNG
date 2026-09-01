@@ -243,3 +243,65 @@ def test_generated_source_emits_frames() -> None:
     finally:
         process.terminate()
         process.wait(timeout=2.0)
+
+
+def test_live_child_does_not_import_pydantic_config_stack() -> None:
+    live_source = (ROOT / "survng" / "dlstreamer_live.py").read_text(encoding="utf-8")
+    redact_source = (ROOT / "survng" / "app" / "redact.py").read_text(encoding="utf-8")
+
+    assert "survng.app.security" not in live_source
+    assert "survng.app.redact" in live_source
+    assert "pydantic" not in redact_source
+    assert "from .config" not in redact_source
+    assert "from survng.app.config" not in redact_source
+
+
+def test_system_python_can_import_live_child_without_pydantic() -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(ROOT), env.get("PYTHONPATH", "")) if part
+    )
+    result = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-c",
+            "from survng.dlstreamer_live import main; from survng.app.redact import redact_secret_text",
+        ],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pydantic" not in result.stderr
+
+
+def test_system_python_live_main_redacts_errors_without_pydantic() -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(ROOT), env.get("PYTHONPATH", "")) if part
+    )
+    result = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-c",
+            (
+                "from survng import dlstreamer_live\n"
+                "def boom(argv=None):\n"
+                "    raise RuntimeError('rtsp://admin:secret@camera/live failed')\n"
+                "dlstreamer_live.run = boom\n"
+                "raise SystemExit(dlstreamer_live.main([]))\n"
+            ),
+        ],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "secret" not in combined
+    assert "pydantic" not in combined
+    assert "rtsp://admin:***@camera/live" in combined
