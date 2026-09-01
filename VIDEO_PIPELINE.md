@@ -179,8 +179,10 @@ GStreamer / Intel DL Streamer child (`survng-dls`). The child prefers
 OpenVINO model are available (`pre-process-backend=va` on Intel), and tees a
 drop-only BGR appsink at `sample_fps` for motion qualification, MJPEG, and
 snapshots. The camera URL is written to the child's stdin so it does not appear
-in process arguments. There is no FFmpeg live-capture fallback: if the child
-exits, that camera reconnects the same pipeline. Recording, exports, and
+in process arguments. The child runs system ``/usr/bin/python3`` so GStreamer
+GI plugins resolve; it does not import the SurvNG venv or pydantic. There is no
+FFmpeg live-capture fallback: if the child exits, that camera reconnects the
+same pipeline. Recording, exports, and
 recorded evidence frames remain FFmpeg. A successful
 capture read transfers exclusive ownership of its NumPy buffer to the capture
 service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
