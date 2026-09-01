@@ -78,13 +78,15 @@ with an ad-hoc Dockerfile or `docker commit`.
 
 Pushing to a release branch (`v1.0`, `v1.1`, or `v1.2`) or a version tag such as
 `v1.2.0` runs `.github/workflows/docker-publish.yml` on the self-hosted runner
-and publishes all Dockerfile targets to GHCR:
+and publishes all Dockerfile targets to GHCR. Pushing to `gstreamer` publishes
+only the Intel runtime.
 
 | Image | When | Target |
 | --- | --- | --- |
 | `ghcr.io/instigatorx/survng:v1.2` | Every push to `v1.2` | `runtime` (CPU tip) |
 | `ghcr.io/instigatorx/survng:v1.2-intel` | Every push to `v1.2` | `runtime-intel` tip |
 | `ghcr.io/instigatorx/survng:v1.2-model-installer` | Every push to `v1.2` | `model-installer` tip |
+| `ghcr.io/instigatorx/survng:gstreamer-intel` | Every push to `gstreamer` | `runtime-intel` tip |
 | `ghcr.io/instigatorx/survng:sha-<7chars>` | Every push to a release branch | Immutable CPU commit |
 | `ghcr.io/instigatorx/survng:sha-<7chars>-intel` | Every push to a release branch | Immutable Intel commit |
 | `ghcr.io/instigatorx/survng:sha-<7chars>-model-installer` | Every push to a release branch | Immutable model-installer commit |

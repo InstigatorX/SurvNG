@@ -105,6 +105,17 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("--aggressive", result.stdout)
         self.assertTrue((ROOT / ".github/workflows/runner-maintenance.yml").is_file())
 
+    def test_docker_publish_builds_intel_image_for_gstreamer_branch(self) -> None:
+        workflow = (ROOT / ".github/workflows/docker-publish.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- gstreamer", workflow)
+        self.assertIn("runtime-intel", workflow)
+        self.assertIn(
+            "github.ref_name != 'gstreamer' || matrix.target == 'runtime-intel'",
+            workflow,
+        )
+
     def test_lxc_override_is_explicit_and_not_part_of_default_compose(self) -> None:
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
         lxc_override = (ROOT / "compose.lxc.yaml").read_text(encoding="utf-8")
