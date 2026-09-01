@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref_name != 'gstreamer' || matrix.target == 'runtime-intel'
+    if: github.ref_name != 'gstreamer'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 90
     strategy:
@@ -74,6 +74,57 @@ jobs:
             tags+=("${image}:${REF_NAME}${SUFFIX}")
             tags+=("${image}:sha-${short_sha}${SUFFIX}")
           fi
+
+          primary="${tags[0]}"
+          echo "Building ${TARGET} as ${primary}"
+          docker build \
+            --file "${DOCKERFILE}" \
+            --target "${TARGET}" \
+            --build-arg "SURVNG_GIT_SHA=${GIT_SHA}" \
+            --tag "${primary}" \
+            .
+          for tag in "${tags[@]:1}"; do
+            docker tag "${primary}" "${tag}"
+          done
+          for tag in "${tags[@]}"; do
+            docker push "${tag}"
+            echo "Pushed ${tag}"
+          done
+          docker rmi "${primary}" $(printf ' %s' "${tags[@]:1}") 2>/dev/null || true
+          scripts/github-runner-cleanup.sh --standard
+
+  publish-gstreamer-intel:
+    if: github.ref_name == 'gstreamer'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Free runner disk space
+        run: scripts/github-runner-cleanup.sh --standard
+
+      - name: Build and push Intel image
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: runtime-intel
+          SUFFIX: "-intel"
+          GIT_SHA: ${{ github.sha }}
+          DOCKERFILE: Dockerfile
+        run: |
+          set -euo pipefail
+          image="ghcr.io/$(printf '%s' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          short_sha="$(printf '%.7s' "${GIT_SHA}")"
+          tags=()
+          tags+=("${image}:${REF_NAME}${SUFFIX}")
+          tags+=("${image}:sha-${short_sha}${SUFFIX}")
 
           primary="${tags[0]}"
           echo "Building ${TARGET} as ${primary}"

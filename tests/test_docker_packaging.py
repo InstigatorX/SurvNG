@@ -111,10 +111,9 @@ class DockerPackagingTest(unittest.TestCase):
         )
         self.assertIn("- gstreamer", workflow)
         self.assertIn("runtime-intel", workflow)
-        self.assertIn(
-            "github.ref_name != 'gstreamer' || matrix.target == 'runtime-intel'",
-            workflow,
-        )
+        self.assertIn("github.ref_name != 'gstreamer'", workflow)
+        self.assertIn("github.ref_name == 'gstreamer'", workflow)
+        self.assertIn("publish-gstreamer-intel", workflow)
 
     def test_lxc_override_is_explicit_and_not_part_of_default_compose(self) -> None:
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
