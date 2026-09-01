@@ -523,7 +523,7 @@ def run(argv: list[str] | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     from survng.app.dlstreamer_protocol import TYPE_STATUS, encode_json
-    from survng.app.security import redact_secret_text
+    from survng.app.redact import redact_secret_text
 
     try:
         return run(argv)

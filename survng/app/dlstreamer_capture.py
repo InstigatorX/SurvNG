@@ -67,6 +67,12 @@ class DlStreamerCaptureOptions:
 
 
 def live_python_executable(preferred: str = "") -> str:
+    """Prefer system Python so GStreamer GI plugins resolve.
+
+    Isolated live capture runs under ``/usr/bin/python3``, where ``python3-gi``
+    is installed. The SurvNG venv has pydantic and the rest of the app stack;
+    the child must not import that.
+    """
     candidates = [
         preferred,
         os.environ.get("SURVNG_DLSTREAMER_PYTHON", ""),
