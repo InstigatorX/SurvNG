@@ -1154,6 +1154,72 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(availability["segment_count"], 1)
         self.assertLessEqual(availability["ranges"][0]["end_epoch"], starts[-1])
 
+    def test_index_discovery_does_not_require_writable_media_location(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            media = root / "media"
+            media.mkdir()
+            registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(
+                    id="primary",
+                    path=str(media),
+                    roles=["recordings"],
+                    reserve_percent=0,
+                ),
+            ]))
+            recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
+            now = datetime.now()
+            hour_dir = (
+                media / "recordings" / "new-camera" / "main"
+                / now.strftime("%Y-%m-%d") / now.strftime("%H")
+            )
+            hour_dir.mkdir(parents=True)
+            clip = hour_dir / datetime.fromtimestamp(now.timestamp() - 20).strftime(
+                "%Y%m%d-%H%M%S.mp4"
+            )
+            clip.write_bytes(b"x" * 2048)
+            self._age_file(clip, 30)
+            camera = CameraConfig(id="new-camera", name="New", stream_url="rtsp://cam")
+
+            def refuse_writable(*_args, **_kwargs):
+                raise OSError("no writable media location supports recordings (primary: directory is full)")
+
+            with patch.object(registry, "choose", side_effect=refuse_writable):
+                recorder.refresh_recording_index(
+                    {camera.id: camera},
+                    full=False,
+                    run_maintenance=False,
+                )
+                indexed = recorder.refresh_recording_edge(
+                    camera.id,
+                    "main",
+                    now.timestamp() - 10,
+                )
+
+            rows = recorder.recording_rows(camera.id, limit=10)
+            self.assertGreaterEqual(indexed, 1)
+            self.assertEqual({row["path"] for row in rows}, {str(clip)})
+
+    def test_index_exception_logs_are_rate_limited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            with patch("survng.app.recording_process.index.LOGGER") as logger:
+                recorder._log_index_exception(
+                    "edge:new-camera:main",
+                    "Near-live recording index discovery failed for %s/%s",
+                    "new-camera",
+                    "main",
+                )
+                recorder._log_index_exception(
+                    "edge:new-camera:main",
+                    "Near-live recording index discovery failed for %s/%s",
+                    "new-camera",
+                    "main",
+                )
+
+        logger.exception.assert_called_once()
+        logger.debug.assert_called_once()
+
     def test_index_loop_starts_with_recent_discovery_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
