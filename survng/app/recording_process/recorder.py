@@ -92,6 +92,7 @@ class Recorder(RecordingIndexMixin):
         self._index_maintenance_thread: threading.Thread | None = None
         self._edge_refresh_lock = threading.Lock()
         self._edge_refresh_requests: dict[RecorderKey, float] = {}
+        self._index_error_log_at: dict[str, float] = {}
         self._prune_cursor = 0
         self._fingerprint_pending: deque[str] = deque()
         self._fingerprint_pending_set: set[str] = set()
