@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import threading
+import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 import numpy as np
+import cv2
 
 from .camera_capture import (
     CaptureBackend,
@@ -51,6 +54,106 @@ from .motion_pipeline.object_detection import TimestampedLiveFrame
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
+
+
+class _AutoStreamAlignment:
+    """Bounded, fail-closed live-to-main registration for one camera."""
+
+    def __init__(self, camera: CameraConfig) -> None:
+        self.enabled = (
+            camera.motion_qualification.spatial_alignment.mode == "auto"
+            and camera.live_url() != camera.stream_url
+        )
+        self._frames: dict[str, CapturedFrame] = {}
+        self._samples: deque[tuple[float, float, float, float]] = deque(maxlen=4)
+        self._last_attempt = 0.0
+        self._failures = 0
+
+    def status(self, alignment: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **alignment,
+            "stable_samples": len(self._samples),
+            "failed_samples": self._failures,
+            "last_attempt_seconds_ago": round(max(0.0, time.monotonic() - self._last_attempt), 3)
+            if self._last_attempt else None,
+        }
+
+    def observe(self, frame: CapturedFrame) -> dict[str, Any] | None:
+        if not self.enabled or frame.source not in {"main", "live"}:
+            return None
+        self._frames[frame.source] = frame
+        main, live = self._frames.get("main"), self._frames.get("live")
+        now = time.monotonic()
+        if (
+            main is None or live is None or now - self._last_attempt < 3.0
+            or abs(main.captured_at_epoch - live.captured_at_epoch) > 0.75
+        ):
+            return None
+        self._last_attempt = now
+        estimate = self._estimate(live.image, main.image)
+        if estimate is None:
+            self._samples.clear()
+            self._failures += 1
+            if self._failures >= 3:
+                return {"mode": "untrusted", "reliable": False, "confidence": 0.0,
+                        "scale_x": 1.0, "scale_y": 1.0, "offset_x": 0.0, "offset_y": 0.0}
+            return None
+        self._failures = 0
+        self._samples.append(estimate)
+        if len(self._samples) < 3:
+            return None
+        values = np.asarray(self._samples, dtype=np.float64)
+        median = np.median(values, axis=0)
+        # A stable same-camera view has negligible normalized drift between
+        # independent live/main decoder pairs.
+        if float(np.max(np.ptp(values, axis=0))) > 0.025:
+            self._samples.clear()
+            return None
+        return {
+            "mode": "affine",
+            "reliable": True,
+            "confidence": 0.9,
+            "scale_x": round(float(median[0]), 5),
+            "scale_y": round(float(median[1]), 5),
+            "offset_x": round(float(median[2]), 5),
+            "offset_y": round(float(median[3]), 5),
+        }
+
+    @staticmethod
+    def _estimate(live: np.ndarray, main: np.ndarray) -> tuple[float, float, float, float] | None:
+        if live.size == 0 or main.size == 0:
+            return None
+        def gray(image: np.ndarray) -> np.ndarray:
+            height, width = image.shape[:2]
+            scale = min(1.0, 640.0 / max(height, width))
+            return cv2.cvtColor(cv2.resize(image, (round(width * scale), round(height * scale))), cv2.COLOR_BGR2GRAY)
+        live_gray, main_gray = gray(live), gray(main)
+        orb = cv2.ORB_create(nfeatures=600)
+        live_keypoints, live_descriptors = orb.detectAndCompute(live_gray, None)
+        main_keypoints, main_descriptors = orb.detectAndCompute(main_gray, None)
+        if live_descriptors is None or main_descriptors is None:
+            return None
+        matches = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(live_descriptors, main_descriptors)
+        matches = sorted(matches, key=lambda item: item.distance)[:80]
+        if len(matches) < 18:
+            return None
+        source = np.float32([live_keypoints[item.queryIdx].pt for item in matches])
+        target = np.float32([main_keypoints[item.trainIdx].pt for item in matches])
+        matrix, inliers = cv2.estimateAffinePartial2D(source, target, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+        if matrix is None or inliers is None or int(inliers.sum()) < 18:
+            return None
+        # Only accept scale/translation: this configuration model deliberately
+        # does not represent rotation, shear, or a changed perspective.
+        if abs(float(matrix[0, 1])) > 0.02 or abs(float(matrix[1, 0])) > 0.02:
+            return None
+        live_h, live_w = live_gray.shape[:2]
+        main_h, main_w = main_gray.shape[:2]
+        return (
+            float(matrix[0, 0]) * live_w / main_w,
+            float(matrix[1, 1]) * live_h / main_h,
+            float(matrix[0, 2]) / main_w,
+            float(matrix[1, 2]) / main_h,
+        )
 
 
 class CameraWorker:
@@ -103,6 +206,8 @@ class CameraWorker:
         self._stop = self.runtime_state.stop_event
         self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
+        self._stream_alignment = _AutoStreamAlignment(camera)
+        self._effective_spatial_alignment = self._motion_spatial_alignment(camera)
         effective_capture_backend = capture_backend or FfmpegCaptureBackend(
             CaptureOpenLimiter()
         )
@@ -183,7 +288,7 @@ class CameraWorker:
                     else camera.motion_qualification.stationary_object_tolerance
                 ),
             ),
-            spatial_alignment=self._motion_spatial_alignment(camera),
+            spatial_alignment=self._effective_spatial_alignment,
             route_admission_callback=route_target_admitted,
         )
         self.motion_incidents = MotionIncidentService(
@@ -341,6 +446,9 @@ class CameraWorker:
             object_tracking=self.tracking_lifecycle,
             incidents=self.motion_incidents,
             lifecycle=self.lifecycle,
+            spatial_alignment=lambda: self._stream_alignment.status(
+                dict(self._effective_spatial_alignment)
+            ),
         )
 
     @staticmethod
@@ -495,6 +603,10 @@ class CameraWorker:
         return self.motion_qualification.debug_image(layer)
 
     def _capture_frame(self, frame: CapturedFrame) -> None:
+        calibrated = self._stream_alignment.observe(frame)
+        if calibrated is not None:
+            self._effective_spatial_alignment = calibrated
+            self.motion_decision_handler.spatial_alignment = dict(calibrated)
         if frame.source == "live":
             with self.runtime_state.lock:
                 lifecycle_generation = self.runtime_state.generation
@@ -540,7 +652,7 @@ class CameraWorker:
             return None
         with self.runtime_state.lock:
             generation = self.runtime_state.generation
-        alignment = self._motion_spatial_alignment(self.camera)
+        alignment = self._effective_spatial_alignment
         height, width = frame.image.shape[:2]
         return TimestampedLiveFrame(
             frame=frame.image,
@@ -582,7 +694,7 @@ class CameraWorker:
         if selected is None:
             return None
         height, width = selected.image.shape[:2]
-        alignment = self._motion_spatial_alignment(self.camera)
+        alignment = self._effective_spatial_alignment
         return TimestampedLiveFrame(
             frame=selected.image,
             captured_at_epoch=selected.captured_at_epoch,

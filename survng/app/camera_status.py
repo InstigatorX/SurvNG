@@ -90,6 +90,7 @@ class CameraStatusService:
         object_tracking: CameraStatusProvider,
         incidents: CameraStatusProvider,
         lifecycle: CameraLifecycleStatusProvider,
+        spatial_alignment: Callable[[], dict[str, Any]] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.camera = camera
@@ -110,6 +111,7 @@ class CameraStatusService:
         self.object_tracking = object_tracking
         self.incidents = incidents
         self.lifecycle = lifecycle
+        self.spatial_alignment = spatial_alignment
         self.monotonic = monotonic
 
     def snapshot(self) -> dict[str, Any]:
@@ -188,6 +190,7 @@ class CameraStatusService:
             capture_running=capture_running,
         )
         live_stats = dict((capture.get("capture_stats") or {}).get("live") or {})
+        alignment = self.spatial_alignment() if self.spatial_alignment is not None else {}
         return {
             "id": self.camera.id,
             "name": self.camera.name,
@@ -214,6 +217,7 @@ class CameraStatusService:
             "onvif_last_event_at": self.onvif.last_event_at,
             "onvif_last_camera_event_at": self.onvif.last_camera_event_at,
             "onvif_last_motion_event_at": self.onvif.last_motion_event_at,
+            "spatial_alignment": alignment,
             "last_motion_at": last_motion_at,
             "detection_enabled": detection_enabled,
             "object_tracking": {
