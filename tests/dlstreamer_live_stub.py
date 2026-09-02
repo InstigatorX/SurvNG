@@ -17,7 +17,16 @@ def main() -> int:
     sys.stdin.readline()
     pixels = bytes((20, 40, 200)) * 4
     stdout = sys.stdout.buffer
-    stdout.write(encode_json(TYPE_STATUS, {"ok": True, "decoder_elements": ["avdec_h264"]}))
+    stdout.write(
+        encode_json(
+            TYPE_STATUS,
+            {
+                "ok": True,
+                "decoder_elements": ["avdec_h264"],
+                "source_element": "uridecodebin3",
+            },
+        )
+    )
     stdout.write(
         encode_frame(width=2, height=2, sequence=1, pts=0.05, pixels=pixels)
     )

@@ -108,6 +108,10 @@ def test_handle_reads_stub_child_frames() -> None:
         assert frame[0, 0].tolist() == [20, 40, 200]
         detections = handle.pop_detections()
         assert detections[0]["label"] == "person"
+        status = handle.pipeline_status()
+        assert status["ok"] is True
+        assert status["source_element"] == "uridecodebin3"
+        assert status["decoder_elements"] == ["avdec_h264"]
     finally:
         handle.close()
 

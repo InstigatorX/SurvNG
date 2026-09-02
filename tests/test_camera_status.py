@@ -21,6 +21,7 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
         "main_error": "",
         "capture_stats": {"live": {"fps": 20.0}},
         "stream_dimensions": {"live": {"width": 640, "height": 480}},
+        "live_pipeline": {"ok": True, "source_element": "uridecodebin3"},
     }
     analysis = Mock()
     analysis.status.return_value = {
@@ -149,6 +150,7 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
         "handoff_failures": 0,
     }
     assert status["lifecycle"]["active_worker_count"] == 4
+    assert status["live_pipeline"]["source_element"] == "uridecodebin3"
     assert status["onvif_poll_timeouts"] == 2
     assert status["onvif_subscription_lifetime_seconds"] == 3600.0
     assert status["onvif_signal_effectiveness_status"] == "degraded"

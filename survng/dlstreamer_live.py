@@ -308,6 +308,7 @@ def run(argv: list[str] | None = None) -> int:
         raise RuntimeError("could not create GStreamer pipeline")
 
     source, source_factory = _make_live_source(Gst, test_source=args.test_source)
+    print(f"survng-dls source_element={source_factory}", file=sys.stderr, flush=True)
     if args.test_source:
         source.set_property("is-live", True)
         source.set_property("pattern", "ball")

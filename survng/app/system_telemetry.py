@@ -600,6 +600,7 @@ class SystemTelemetryService:
                 "last_handoff_failure": tracking.get("last_handoff_failure"),
             },
             "capture": dict(status.get("capture_stats") or {}),
+            "live_pipeline": dict(status.get("live_pipeline") or {}),
             "lifecycle": dict(status.get("lifecycle") or {}),
             "activity": per_camera_activity.get(
                 camera_id,
