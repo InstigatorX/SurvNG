@@ -136,6 +136,9 @@ class DlStreamerCaptureHandle:
             self._harvest_available_messages()
         return (frame is not None), frame
 
+    def pipeline_status(self) -> dict[str, object]:
+        return dict(self._status)
+
     def pop_detections(self) -> list[dict[str, object]]:
         with self._detections_lock:
             detections = list(self._detections)
