@@ -34,16 +34,19 @@ ONVIF/manual notice or qualified EMA episode
   -> optionally promote a later identity-verified tracking cover
 ```
 
-The live check reduces time to first inference. The recorded pass supplies the
-stronger evidence. A fast negative, missing frame, stale frame, or invalid frame
-never cancels the recorded pass.
+The live check reduces time to first object evidence. It uses boxes already
+produced by GStreamer `gvadetect` on the capture pipeline rather than a second
+OpenVINO pass on the live GPU. The recorded pass supplies the stronger
+evidence. A fast negative, missing frame, stale frame, invalid frame, or empty
+sidecar never cancels the recorded pass.
 
 ## Why the live/substream frame is used
 
 At the live edge, the applicable main recording segment may still be open and
 cannot yet be decoded reliably. The live capture frame is already available in
-memory, so SurvNG can run an initial inference without waiting for segment
-finalization.
+memory, and `gvadetect` boxes for that stream are stored beside it, so SurvNG
+can admit a provisional object without waiting for segment finalization or
+starting a second GPU detector.
 
 The source is the camera's live capture:
 

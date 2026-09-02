@@ -1204,7 +1204,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
             def detect(self, frame, confidence_threshold=None):
                 observed.append(int(frame[0, 0, 0]))
-                return []
+                raise AssertionError("live admission must not run OpenVINO")
 
         backend = RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
@@ -1242,8 +1242,9 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(observed, [17])
+        self.assertEqual(observed, [])
         self.assertIs(result.frame, evidence)
+        self.assertEqual(result.objects, [])
         self.assertEqual(result.frame_captured_at_epoch, event_epoch)
         self.assertTrue(result.refinement_pending)
 
@@ -1409,7 +1410,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(result.objects[0]["provisional_detection"])
         self.assertTrue(result.refinement_pending)
 
-    def test_initial_detection_falls_back_to_openvino_when_sidecar_empty(self) -> None:
+    def test_initial_detection_does_not_use_openvino_when_sidecar_empty(self) -> None:
         event_epoch = 1_800_000_000.0
         frame = np.zeros((20, 20, 3), dtype=np.uint8)
 
@@ -1427,7 +1428,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
             def detect(self, _frame, confidence_threshold=None):
                 self.calls += 1
-                return [detected("car", 0.9, (1, 1, 8, 8))]
+                raise AssertionError("empty sidecar must not fall back to live OpenVINO")
 
         detector = Detector()
         backend = RecordedMotionObjectDetector(
@@ -1453,9 +1454,10 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 datetime.fromtimestamp(event_epoch, timezone.utc)
             )
 
-        self.assertEqual(detector.calls, 1)
-        self.assertEqual(result.objects[0]["label"], "car")
-        self.assertNotEqual(result.objects[0].get("detection_source"), "gvadetect")
+        self.assertEqual(detector.calls, 0)
+        self.assertEqual(result.objects, [])
+        self.assertIs(result.frame, frame)
+        self.assertTrue(result.refinement_pending)
 
     def test_initial_detection_ignores_sidecar_for_evidence_frame(self) -> None:
         event_epoch = 1_800_000_000.0
@@ -1477,7 +1479,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             def detect(self, frame, confidence_threshold=None):
                 self.calls += 1
                 self.seen = int(frame[0, 0, 0])
-                return [detected("car", 0.9, (1, 1, 8, 8))]
+                raise AssertionError("pinned evidence frames must not run live OpenVINO")
 
         detector = Detector()
         backend = RecordedMotionObjectDetector(
@@ -1523,10 +1525,10 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(detector.calls, 1)
-        self.assertEqual(detector.seen, 17)
-        self.assertEqual(result.objects[0]["label"], "car")
-        self.assertNotEqual(result.objects[0].get("detection_source"), "gvadetect")
+        self.assertEqual(detector.calls, 0)
+        self.assertIs(result.frame, evidence)
+        self.assertEqual(result.objects, [])
+        self.assertTrue(result.refinement_pending)
 
     def test_untrusted_live_geometry_cannot_admit_zone_object_provisionally(self) -> None:
         class Detector:
@@ -1540,11 +1542,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             )
 
             def detect_initial(self, _frame, confidence_threshold=None):
-                return [{
-                    "label": "person",
-                    "confidence": 0.9,
-                    "box": {"x1": 5, "y1": 5, "x2": 15, "y2": 15},
-                }]
+                raise AssertionError("live admission must not run OpenVINO")
 
             detect = detect_initial
 
@@ -1576,6 +1574,11 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 capture_generation=3,
                 geometry_trusted=False,
             ),
+            live_detections_provider=lambda: [{
+                "label": "person",
+                "confidence": 0.9,
+                "box": {"x1": 5, "y1": 5, "x2": 15, "y2": 15},
+            }],
         )
 
         result = backend.detect_initial(datetime.now(timezone.utc))
@@ -1585,7 +1588,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(result.objects[0]["provisional_zone_eligible"])
         self.assertTrue(result.objects[0]["fast_geometry_untrusted"])
 
-    def test_initial_and_refinement_use_distinct_inference_workloads(self) -> None:
+    def test_initial_skips_openvino_and_refinement_uses_recorded_workload(self) -> None:
         event_epoch = 1_800_000_000.0
         calls: list[str] = []
 
@@ -1623,7 +1626,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             backend.detect_initial(datetime.fromtimestamp(event_epoch, timezone.utc))
         backend._detect_objects(frame, workload="refinement")
 
-        self.assertEqual(calls, ["initial", "refinement"])
+        self.assertEqual(calls, ["refinement"])
 
     def test_refinement_rejects_live_frame_outside_event_time_window(self) -> None:
         event_epoch = 1_800_000_000.0

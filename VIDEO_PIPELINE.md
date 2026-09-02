@@ -189,11 +189,11 @@ GI plugins resolve; it does not import the SurvNG venv or pydantic. There is no
 FFmpeg live-capture fallback: if the child exits, that camera reconnects the
 same pipeline. The child's latest boxes are
 stored on `CameraCaptureService.latest_detections()` and used as the live
-fast-path detector for incident admission. When those sidecar boxes are present,
-`detect_initial` skips a second OpenVINO pass on the live frame and still
-applies zone and confidence filters. A pinned evidence-frame check and recorded
-refinement continue to decode FFmpeg evidence with OpenVINO. Recording, exports,
-and recorded evidence frames remain FFmpeg. A successful
+fast-path detector for incident admission. `detect_initial` never runs a second
+OpenVINO pass on a live or pinned evidence frame. Zone and confidence filters
+still apply to sidecar boxes. Recorded refinement remains the OpenVINO evidence
+path: FFmpeg decodes finalized main recordings, then the object worker runs.
+Recording, exports, and recorded evidence frames remain FFmpeg. A successful
 capture read transfers exclusive ownership of its NumPy buffer to the capture
 service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
 motion observers share that buffer; only consumers that explicitly request a
@@ -412,14 +412,13 @@ control and restrict its filesystem permissions.
 
 ## 6. High-Resolution Object Detection
 
-Live incident admission prefers the GStreamer `gvadetect` boxes already
-produced on the capture pipeline. `RecordedMotionObjectDetector.detect_initial`
-uses those sidecar detections when the latest live frame is fresh and labeled
-boxes are present. Zone filters, candidate thresholds, and provisional
-admission rules still run in Python. Recorded refinement is unchanged: an
-accepted motion burst uses finalized main recording fragments rather than the
-low-resolution qualification frames. By default SurvNG samples five target
-times around the ONVIF event:
+Live incident admission uses GStreamer `gvadetect` boxes from the capture
+pipeline. `RecordedMotionObjectDetector.detect_initial` never calls the
+OpenVINO object worker: labeled sidecar boxes are filtered in Python, and an
+empty sidecar or pinned evidence frame stays provisional until recorded
+refinement. Recorded OpenVINO is evidence-only. An accepted motion burst uses
+finalized main recording fragments rather than the low-resolution qualification
+frames. By default SurvNG samples five target times around the ONVIF event:
 
 ```text
 -1.0s, -0.5s, event time, +0.5s, +1.0s
