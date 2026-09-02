@@ -957,7 +957,7 @@ def test_worker_captures_motion_debug_while_analysis_slot_is_busy() -> None:
         worker = threading.Thread(target=service.run, args=(stop_event,))
         worker.start()
         service.submit_frame(
-            np.zeros((90, 160), dtype=np.uint8),
+            np.zeros((90, 160, 3), dtype=np.uint8),
             12.0,
             stop_event,
             102.0,
