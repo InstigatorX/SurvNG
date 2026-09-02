@@ -22,8 +22,12 @@ def main() -> int:
             TYPE_STATUS,
             {
                 "ok": True,
+                "detect": True,
                 "decoder_elements": ["avdec_h264"],
                 "source_element": "uridecodebin3",
+                "hardware_decoder_selected": False,
+                "preprocess_backend": "opencv",
+                "first_frame_ms": 12.5,
             },
         )
     )

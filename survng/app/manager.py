@@ -10,7 +10,11 @@ from pathlib import Path
 
 from .camera import CameraWorker
 from .camera_capture import CaptureOpenLimiter
-from .dlstreamer_capture import DlStreamerCaptureBackend, DlStreamerCaptureOptions
+from .dlstreamer_capture import (
+    DlStreamerCaptureBackend,
+    DlStreamerCaptureOptions,
+    adjacent_model_proc,
+)
 from .camera_control import CameraControlService
 from .camera_fleet import CameraFleetLifecycle, CameraFleetOperationError
 from .camera_startup import (
@@ -325,6 +329,8 @@ class AppManager:
                 detect_enabled=(
                     detector.enabled and detector.backend == "openvino"
                 ),
+                labels_path=detector.labels_path,
+                model_proc_path=adjacent_model_proc(detector.resolved_model_path()),
             ),
         )
         self.state_events = StateEventBroker()

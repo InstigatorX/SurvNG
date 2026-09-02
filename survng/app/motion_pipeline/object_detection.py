@@ -304,6 +304,25 @@ def _box(detected: dict[str, Any]) -> tuple[float, float, float, float] | None:
     return x1, y1, x2, y2
 
 
+def _labeled_sidecar_objects(raw: object) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    objects: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        if not label or _box(item) is None:
+            continue
+        copied = dict(item)
+        copied["label"] = label
+        box = item.get("box")
+        if isinstance(box, dict):
+            copied["box"] = dict(box)
+        objects.append(copied)
+    return objects
+
+
 def _temporal_association_score(
     previous: dict[str, Any],
     detected: dict[str, Any],
@@ -1007,6 +1026,7 @@ TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | tuple[Frame, 
 TimestampedEvidenceFrameProvider = Callable[
     [dict[str, Any]], TimestampedLiveFrame | tuple[Frame, float] | None
 ]
+LiveDetectionsProvider = Callable[[], list[dict[str, Any]] | None]
 StopRequested = Callable[[], bool]
 
 
@@ -1145,6 +1165,7 @@ class RecordedMotionObjectDetector:
         live_frame_provider: LiveFrameProvider,
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
+        live_detections_provider: LiveDetectionsProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         decode_budget: RecordedDecodeBudget | None = None,
         motion_evidence: Any | None = None,
@@ -1155,6 +1176,7 @@ class RecordedMotionObjectDetector:
         self.live_frame_provider = live_frame_provider
         self.timestamped_live_frame_provider = timestamped_live_frame_provider
         self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
+        self.live_detections_provider = live_detections_provider
         self.stop_requested = stop_requested
         self.decode_budget = decode_budget
         # Compatibility-only: refinement depth no longer publishes rolling
@@ -1290,11 +1312,17 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=True,
             )
+        sidecar_objects: list[dict[str, Any]] | None = None
+        if not has_evidence_token and self.live_detections_provider is not None:
+            sidecar_objects = _labeled_sidecar_objects(
+                self.live_detections_provider()
+            ) or None
         objects = self._detect_objects(
             frame,
             timing=timing,
             enrich_faces=False,
             workload="initial",
+            precomputed=sidecar_objects,
         )
         zone_geometry_required = any(
             zone.enabled
@@ -2052,6 +2080,7 @@ class RecordedMotionObjectDetector:
         timing: dict[str, float] | None = None,
         enrich_faces: bool = True,
         workload: str = "refinement",
+        precomputed: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
@@ -2077,15 +2106,24 @@ class RecordedMotionObjectDetector:
             )),
         )
         detector_started = time.monotonic()
-        detector_method = getattr(
-            self.detector,
-            "detect_initial" if workload == "initial" else "detect_refinement",
-            self.detector.detect,
-        )
-        objects = detector_method(
-            frame,
-            confidence_threshold=candidate_threshold,
-        )
+        if precomputed is not None:
+            objects = []
+            for item in precomputed:
+                if not isinstance(item, dict):
+                    continue
+                detected = dict(item)
+                detected.setdefault("detection_source", "gvadetect")
+                objects.append(detected)
+        else:
+            detector_method = getattr(
+                self.detector,
+                "detect_initial" if workload == "initial" else "detect_refinement",
+                self.detector.detect,
+            )
+            objects = detector_method(
+                frame,
+                confidence_threshold=candidate_threshold,
+            )
         detector_ms = (time.monotonic() - detector_started) * 1000.0
         if timing is not None:
             timing["detector_request_ms"] += detector_ms
@@ -2778,6 +2816,7 @@ class RecordedMotionObjectDetectorFactory:
         live_frame_provider: LiveFrameProvider,
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
+        live_detections_provider: LiveDetectionsProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         motion_evidence: Any | None = None,
     ) -> RecordedMotionObjectDetector:
@@ -2788,6 +2827,7 @@ class RecordedMotionObjectDetectorFactory:
             live_frame_provider=live_frame_provider,
             timestamped_live_frame_provider=timestamped_live_frame_provider,
             timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
+            live_detections_provider=live_detections_provider,
             stop_requested=stop_requested,
             decode_budget=self.decode_budget,
             motion_evidence=motion_evidence,

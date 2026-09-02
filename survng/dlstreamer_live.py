@@ -36,6 +36,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rtsp-transport", choices=("tcp", "udp"), default="tcp")
     parser.add_argument("--decoder", choices=("auto", "va"), default="va")
     parser.add_argument("--model", default="", help="OpenVINO IR XML for gvadetect")
+    parser.add_argument("--model-proc", default="", help="optional gvadetect model-proc JSON")
+    parser.add_argument("--labels", default="", help="optional gvadetect labels file")
     parser.add_argument("--device", default="GPU")
     parser.add_argument(
         "--no-detect",
@@ -350,18 +352,39 @@ def run(argv: list[str] | None = None) -> int:
     detect_queue = None
     detector = None
     meta_convert = None
+    va_caps = None
+    preprocess = ""
     if detect:
         detect_queue = _element(Gst, "queue", "detect-queue")
         detect_queue.set_property("max-size-buffers", 2)
         detector = _element(Gst, "gvadetect", "detect")
         detector.set_property("model", str(model_path))
         detector.set_property("device", args.device)
-        preprocess = "va" if args.decoder == "va" else "opencv"
+        preprocess = "va" if args.decoder == "va" and not args.test_source else "opencv"
         try:
             detector.set_property("pre-process-backend", preprocess)
         except Exception:
             pass
+        if args.model_proc:
+            try:
+                detector.set_property("model-proc", args.model_proc)
+            except Exception:
+                pass
+        if args.labels:
+            for property_name in ("labels", "labels-file"):
+                try:
+                    detector.set_property(property_name, args.labels)
+                    break
+                except Exception:
+                    continue
         elements.extend([detect_queue, detector])
+        if preprocess == "va":
+            va_caps = _element(Gst, "capsfilter", "detect-va-memory")
+            va_caps.set_property(
+                "caps",
+                Gst.Caps.from_string("video/x-raw(memory:VAMemory)"),
+            )
+            elements.append(va_caps)
         if _factory_available(Gst, "gvametaconvert"):
             meta_convert = _element(Gst, "gvametaconvert", "detect-meta")
             try:
@@ -393,9 +416,11 @@ def run(argv: list[str] | None = None) -> int:
                 f"could not link {left.get_name()} to {right.get_name()}"
             )
     if detect and detect_queue is not None and detector is not None:
-        if not detect_queue.link(detector):
+        if va_caps is not None:
+            if not detect_queue.link(va_caps) or not va_caps.link(detector):
+                raise RuntimeError("could not link VAMemory detect caps")
+        elif not detect_queue.link(detector):
             raise RuntimeError("could not link detect queue")
-        tail = detector
         if meta_convert is not None and meta_sink is not None:
             if not detector.link(meta_convert) or not meta_convert.link(meta_sink):
                 raise RuntimeError("could not link detection metadata branch")
@@ -512,6 +537,7 @@ def run(argv: list[str] | None = None) -> int:
             pixels = pixels[:expected]
             if first_frame_at is None:
                 first_frame_at = time.monotonic()
+                selected = sorted(decoder_elements)
                 _write(
                     stdout,
                     encode_json(
@@ -519,8 +545,16 @@ def run(argv: list[str] | None = None) -> int:
                         {
                             "ok": True,
                             "detect": detect,
-                            "decoder_elements": sorted(decoder_elements),
+                            "decoder_elements": selected,
                             "source_element": source_factory,
+                            "hardware_decoder_selected": any(
+                                name.startswith("va") for name in selected
+                            ),
+                            "preprocess_backend": preprocess,
+                            "first_frame_ms": round(
+                                (first_frame_at - started) * 1000.0,
+                                3,
+                            ),
                         },
                     ),
                 )

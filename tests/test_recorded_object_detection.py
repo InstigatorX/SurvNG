@@ -1349,6 +1349,185 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             "fast_frame_invalid_provenance",
         )
 
+    def test_initial_detection_uses_sidecar_boxes_instead_of_openvino(self) -> None:
+        event_epoch = 1_800_000_000.0
+        frame = np.zeros((20, 20, 3), dtype=np.uint8)
+
+        class Detector:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.config = SimpleNamespace(
+                    confidence_threshold=0.5,
+                    require_incident_zone=False,
+                    event_confirmation_frames=1,
+                    event_class_confirmation_frames={},
+                    event_class_confidence_thresholds={},
+                    event_candidate_confidence_threshold=0.5,
+                )
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                raise AssertionError("sidecar boxes must skip live OpenVINO")
+
+        detector = Detector()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector,
+            SimpleNamespace(),
+            lambda: None,
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=frame,
+                captured_at_epoch=event_epoch + 0.2,
+                captured_at_monotonic=1.0,
+                sequence=3,
+                camera_generation=1,
+                capture_generation=2,
+            ),
+            live_detections_provider=lambda: [
+                {
+                    "label": "person",
+                    "confidence": 0.88,
+                    "box": {"x1": 2, "y1": 2, "x2": 10, "y2": 10},
+                }
+            ],
+        )
+        with patch(
+            "survng.app.motion_pipeline.object_detection.time.time",
+            return_value=event_epoch + 0.4,
+        ):
+            result = backend.detect_initial(
+                datetime.fromtimestamp(event_epoch, timezone.utc)
+            )
+
+        self.assertEqual(detector.calls, 0)
+        self.assertEqual(result.objects[0]["label"], "person")
+        self.assertEqual(result.objects[0]["detection_source"], "gvadetect")
+        self.assertEqual(
+            result.objects[0]["box"],
+            {"x1": 2, "y1": 2, "x2": 10, "y2": 10},
+        )
+        self.assertTrue(result.objects[0]["provisional_detection"])
+        self.assertTrue(result.refinement_pending)
+
+    def test_initial_detection_falls_back_to_openvino_when_sidecar_empty(self) -> None:
+        event_epoch = 1_800_000_000.0
+        frame = np.zeros((20, 20, 3), dtype=np.uint8)
+
+        class Detector:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.config = SimpleNamespace(
+                    confidence_threshold=0.5,
+                    require_incident_zone=False,
+                    event_confirmation_frames=1,
+                    event_class_confirmation_frames={},
+                    event_class_confidence_thresholds={},
+                    event_candidate_confidence_threshold=0.5,
+                )
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                return [detected("car", 0.9, (1, 1, 8, 8))]
+
+        detector = Detector()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector,
+            SimpleNamespace(),
+            lambda: None,
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=frame,
+                captured_at_epoch=event_epoch + 0.2,
+                captured_at_monotonic=1.0,
+                sequence=3,
+                camera_generation=1,
+                capture_generation=2,
+            ),
+            live_detections_provider=lambda: [],
+        )
+        with patch(
+            "survng.app.motion_pipeline.object_detection.time.time",
+            return_value=event_epoch + 0.4,
+        ):
+            result = backend.detect_initial(
+                datetime.fromtimestamp(event_epoch, timezone.utc)
+            )
+
+        self.assertEqual(detector.calls, 1)
+        self.assertEqual(result.objects[0]["label"], "car")
+        self.assertNotEqual(result.objects[0].get("detection_source"), "gvadetect")
+
+    def test_initial_detection_ignores_sidecar_for_evidence_frame(self) -> None:
+        event_epoch = 1_800_000_000.0
+        latest = np.full((20, 20, 3), 99, dtype=np.uint8)
+        evidence = np.full((20, 20, 3), 17, dtype=np.uint8)
+
+        class Detector:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.config = SimpleNamespace(
+                    confidence_threshold=0.5,
+                    require_incident_zone=False,
+                    event_confirmation_frames=1,
+                    event_class_confirmation_frames={},
+                    event_class_confidence_thresholds={},
+                    event_candidate_confidence_threshold=0.5,
+                )
+
+            def detect(self, frame, confidence_threshold=None):
+                self.calls += 1
+                self.seen = int(frame[0, 0, 0])
+                return [detected("car", 0.9, (1, 1, 8, 8))]
+
+        detector = Detector()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector,
+            SimpleNamespace(),
+            lambda: None,
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=latest,
+                captured_at_epoch=event_epoch + 1.0,
+                captured_at_monotonic=1.0,
+                sequence=9,
+                camera_generation=4,
+                capture_generation=8,
+            ),
+            timestamped_evidence_frame_provider=lambda token: TimestampedLiveFrame(
+                frame=evidence,
+                captured_at_epoch=float(token["evidence_frame_at_epoch"]),
+                captured_at_monotonic=0.5,
+                sequence=int(token["evidence_frame_sequence"]),
+                camera_generation=int(token["evidence_lifecycle_generation"]),
+                capture_generation=int(token["evidence_capture_generation"]),
+            ),
+            live_detections_provider=lambda: [
+                {
+                    "label": "person",
+                    "confidence": 0.99,
+                    "box": {"x1": 2, "y1": 2, "x2": 10, "y2": 10},
+                }
+            ],
+        )
+        with patch(
+            "survng.app.motion_pipeline.object_detection.time.time",
+            return_value=event_epoch + 0.5,
+        ):
+            result = backend.detect_initial(
+                datetime.fromtimestamp(event_epoch, timezone.utc),
+                {
+                    "evidence_frame_at_epoch": event_epoch,
+                    "evidence_frame_sequence": 7,
+                    "evidence_capture_generation": 8,
+                    "evidence_lifecycle_generation": 4,
+                },
+            )
+
+        self.assertEqual(detector.calls, 1)
+        self.assertEqual(detector.seen, 17)
+        self.assertEqual(result.objects[0]["label"], "car")
+        self.assertNotEqual(result.objects[0].get("detection_source"), "gvadetect")
+
     def test_untrusted_live_geometry_cannot_admit_zone_object_provisionally(self) -> None:
         class Detector:
             config = SimpleNamespace(

@@ -14,6 +14,7 @@ from survng.app.dlstreamer_capture import (
     DlStreamerCaptureBackend,
     DlStreamerCaptureHandle,
     DlStreamerCaptureOptions,
+    adjacent_model_proc,
 )
 from survng.dlstreamer_live import (
     _SYSTEM_GST_PLUGINS,
@@ -22,6 +23,7 @@ from survng.dlstreamer_live import (
     _drop_paths,
     _make_live_source,
     _normalize_gva_objects,
+    _parser,
 )
 
 
@@ -68,6 +70,47 @@ def test_backend_includes_model_when_detect_enabled() -> None:
     assert "--no-detect" not in command
 
 
+def test_backend_passes_labels_and_adjacent_model_proc(tmp_path: Path) -> None:
+    model = tmp_path / "yolo.xml"
+    model.write_text("<net/>", encoding="utf-8")
+    labels = tmp_path / "classes.txt"
+    labels.write_text("person\n", encoding="utf-8")
+    proc = tmp_path / "yolo.json"
+    proc.write_text("{}", encoding="utf-8")
+    backend = DlStreamerCaptureBackend(
+        CaptureOpenLimiter(1),
+        DlStreamerCaptureOptions(
+            python_executable=sys.executable,
+            detect_enabled=True,
+            model_path=str(model),
+            labels_path=str(labels),
+        ),
+    )
+
+    command = backend.command()
+
+    assert command[command.index("--labels") + 1] == str(labels)
+    assert command[command.index("--model-proc") + 1] == str(proc)
+
+
+def test_adjacent_model_proc_finds_json_next_to_ir(tmp_path: Path) -> None:
+    model = tmp_path / "yolo.xml"
+    model.write_text("<net/>", encoding="utf-8")
+    proc = tmp_path / "yolo_proc.json"
+    proc.write_text("{}", encoding="utf-8")
+
+    assert adjacent_model_proc(str(model)) == str(proc)
+
+
+def test_live_parser_accepts_model_proc_and_labels() -> None:
+    args = _parser().parse_args(
+        ["--model-proc", "/tmp/p.json", "--labels", "/tmp/l.txt", "--no-detect"]
+    )
+
+    assert args.model_proc == "/tmp/p.json"
+    assert args.labels == "/tmp/l.txt"
+
+
 def test_backend_warns_once_without_logging_url_credentials(caplog) -> None:
     backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1))
 
@@ -110,6 +153,8 @@ def test_handle_reads_stub_child_frames() -> None:
         assert detections[0]["label"] == "person"
         status = handle.pipeline_status()
         assert status["ok"] is True
+        assert status["hardware_decoder_selected"] is False
+        assert status["preprocess_backend"] == "opencv"
         assert status["source_element"] == "uridecodebin3"
         assert status["decoder_elements"] == ["avdec_h264"]
     finally:
