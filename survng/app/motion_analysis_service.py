@@ -200,7 +200,6 @@ class MotionAnalysisService:
         self._pending_analysis_at = 0.0
         self._analysis_request_deferred = False
         self.last_continuous_result: MotionQualificationResult | None = None
-        self.debug_last_run_clock = 0.0
         self._visual_lock = threading.Lock()
         self._visual_nonpromotion_episode: _VisualBackupNonpromotionEpisode | None = None
         self._onvif_effectiveness_observer: (
@@ -909,11 +908,7 @@ class MotionAnalysisService:
                 ):
                     self._pending_analysis_at = captured_at
                     self._try_execute_pending_analysis()
-                elif (
-                    self.debug_store.enabled()
-                    and time.monotonic() - self.debug_last_run_clock >= 1.0
-                ):
-                    self.debug_last_run_clock = time.monotonic()
+                if self.debug_store.capture_due():
                     self.capture_debug(captured_at)
             except Exception:
                 self.state.increment_stat("analysis_worker_errors", 1)
@@ -1734,6 +1729,7 @@ class MotionAnalysisService:
         frames = [frame for _timestamp, frame in samples]
         if len(frames) < 2:
             return
+        self.debug_store.mark_attempt()
         _mode, sensitivity, _frame_width = self.qualification.settings()
         try:
             self.qualification.run_pipeline(
@@ -1745,11 +1741,12 @@ class MotionAnalysisService:
                 capture_debug=True,
             )
         except Exception as error:
-            LOGGER.debug(
+            LOGGER.warning(
                 "motion debug capture failed for %s: %s",
                 self.camera_id,
                 error,
             )
+            self.debug_store.note_error(error)
 
     def _record_continuous_stats(self, result: MotionQualificationResult) -> None:
         self.state.increment_stat("continuous_frames", 1)
