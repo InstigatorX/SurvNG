@@ -4876,7 +4876,7 @@ export function MotionDebugViewer({ cameraId, timeZone }) {
     } finally {
       motionDebugInFlightRef.current = false;
     }
-  }, 2000, Boolean(status?.enabled), { immediate: false, restartKey: cameraId });
+  }, 2000, Boolean(status?.enabled), { immediate: true, restartKey: cameraId });
 
   async function setEnabled(enabled) {
     setBusy(true);
@@ -4915,6 +4915,7 @@ export function MotionDebugViewer({ cameraId, timeZone }) {
         </button>
       </div>
       {error ? <div className="motion-analysis-warning">{error}</div> : null}
+      {status?.last_error ? <div className="motion-analysis-warning">{status.last_error}</div> : null}
       {status?.enabled && !snapshot ? <div className="motion-debug-waiting"><RefreshCcw className="spin" size={16} /> Collecting the first diagnostic frame...</div> : null}
       {snapshot ? (
         <div className="motion-debug-content">

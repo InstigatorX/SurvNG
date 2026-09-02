@@ -936,6 +936,57 @@ def test_temporal_filter_skips_stable_scene() -> None:
     assert service.primary_last_processed_at == 100.0
 
 
+def test_temporal_filter_leaves_motion_debug_capture_due() -> None:
+    service = _service(_hooks(trigger_mode="adaptive"))
+    service.debug_store.set_enabled(True)
+    frame = np.full((90, 160, 3), 45, dtype=np.uint8)
+    gray = np.full((90, 160), 45, dtype=np.uint8)
+    with service.frame_lock:
+        service.color_frames.extend([(99.5, frame), (100.0, frame.copy())])
+        service.frames.extend([(99.5, gray), (100.0, gray.copy())])
+
+    service.analyze_continuous(100.0)
+
+    assert service.telemetry_snapshot()["temporal_filter_skips"] == 1
+    assert service.debug_store.status()["snapshot"] is None
+    assert service.debug_store.capture_due()
+    service.qualification.run_pipeline.assert_not_called()
+
+
+def test_worker_captures_motion_debug_while_analysis_slot_is_busy() -> None:
+    accepted = MotionQualificationResult(False, 0.1, 0.48, "quiet", 2, {})
+    run_pipeline = Mock(return_value=accepted)
+    limiter = FairMotionAnalysisLimiter(1)
+    stop_event = threading.Event()
+    service = _service(_hooks(run_pipeline=run_pipeline))
+    service.limiter = limiter
+    gray = np.zeros((90, 160), dtype=np.uint8)
+    gray.setflags(write=False)
+    with service.frame_lock:
+        service.frames.extend([(99.0, gray), (100.0, gray)])
+    service.debug_store.set_enabled(True)
+
+    with limiter.acquire("blocker"):
+        worker = threading.Thread(target=service.run, args=(stop_event,))
+        worker.start()
+        service.submit_frame(
+            np.zeros((90, 160), dtype=np.uint8),
+            12.0,
+            stop_event,
+            102.0,
+        )
+        deadline = time.monotonic() + 2.0
+        while not run_pipeline.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stop_event.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    run_pipeline.assert_called()
+    assert run_pipeline.call_args.kwargs.get("capture_debug") is True
+    assert run_pipeline.call_args.kwargs.get("isolated") is True
+
+
 def test_temporal_filter_warms_visual_backup_during_quiet_scene() -> None:
     run_pipeline = Mock()
     service = _service(_hooks(run_pipeline=run_pipeline, trigger_mode="camera_rescue"))
