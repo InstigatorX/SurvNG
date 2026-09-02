@@ -643,6 +643,107 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             [0.5, 1.5],
         )
 
+    def test_live_ticks_use_sidecar_boxes_instead_of_openvino(self) -> None:
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                return [detection("person", 0.4, (1, 1, 8, 8))]
+
+        detector = Detector()
+        sidecar = [detection("person", 0.9, (12, 10, 42, 80))]
+        session = ObjectTrackingSession(
+            camera=CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            config=ObjectTrackingConfig(),
+            detector=detector,
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            live_detections_provider=lambda: sidecar,
+        )
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+
+        live = session._tracking_detections_for_frame(frame, catchup=False)
+        catchup = session._tracking_detections_for_frame(frame, catchup=True)
+
+        self.assertEqual(detector.calls, 1)
+        self.assertEqual(live[0]["box"]["x1"], 12)
+        self.assertEqual(catchup[0]["box"]["x1"], 1)
+        sidecar[0]["box"]["x1"] = 99
+        self.assertEqual(live[0]["box"]["x1"], 12)
+
+    def test_empty_live_sidecar_skips_openvino(self) -> None:
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                return [detection("person", 0.9, (12, 10, 42, 80))]
+
+        detector = Detector()
+        session = ObjectTrackingSession(
+            camera=CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            config=ObjectTrackingConfig(),
+            detector=detector,
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            live_detections_provider=lambda: [],
+        )
+
+        objects = session._tracking_detections_for_frame(
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            catchup=False,
+        )
+
+        self.assertEqual(objects, [])
+        self.assertEqual(detector.calls, 0)
+
+    def test_live_ticks_without_sidecar_provider_still_call_detector(self) -> None:
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detection("person", 0.8, (12, 10, 42, 80))]
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            config=ObjectTrackingConfig(),
+            detector=Detector(),
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+
+        objects = session._tracking_detections_for_frame(
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            catchup=False,
+        )
+
+        self.assertEqual(objects[0]["label"], "person")
+
     def test_adaptive_sampling_slows_stable_tracks_and_boosts_uncertainty(self) -> None:
         config = ObjectTrackingConfig(
             sample_fps=3.0,

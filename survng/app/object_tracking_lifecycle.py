@@ -43,6 +43,7 @@ class ObjectTrackingLifecycle:
         lifecycle_lock: threading.RLock,
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
+        live_detections_provider: Callable[[], list[dict[str, Any]] | None] | None = None,
     ) -> None:
         self.camera = camera
         self.frame_provider = frame_provider
@@ -53,6 +54,7 @@ class ObjectTrackingLifecycle:
         self.lifecycle_lock = lifecycle_lock
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
+        self.live_detections_provider = live_detections_provider
         self._session = self.create(factory)
 
     def current(self) -> ObjectTrackingSession:
@@ -77,6 +79,7 @@ class ObjectTrackingLifecycle:
             catchup_frame_provider=self.catchup_frame_provider,
             cover_frame_provider=self.cover_frame_provider,
             snapshot_writer=self.snapshot_writer,
+            live_detections_provider=self.live_detections_provider,
         )
 
     def prewarm(self) -> FrameSample | None:

@@ -61,6 +61,31 @@ def test_factory_creation_and_prewarm_keep_frame_dependencies_injected() -> None
     assert callable(factory.create.call_args.kwargs["catchup_frame_provider"])
 
 
+def test_live_detections_provider_is_injected_into_sessions() -> None:
+    initial = _session()
+    camera = CameraConfig(
+        id="gate",
+        name="Gate",
+        stream_url="rtsp://example.invalid/main",
+    )
+    factory = Mock()
+    factory.create.return_value = initial
+    provider = lambda: []
+    ObjectTrackingLifecycle(
+        camera=camera,
+        factory=factory,
+        frame_provider=Mock(return_value=None),
+        catchup_frame_provider=Mock(return_value=[]),
+        prewarm_frame_provider=Mock(return_value=None),
+        history=lambda: Mock(),
+        accepting=lambda: True,
+        lifecycle_lock=threading.RLock(),
+        live_detections_provider=provider,
+    )
+
+    assert factory.create.call_args.kwargs["live_detections_provider"] is provider
+
+
 def test_accepting_state_is_evaluated_when_session_is_resumed() -> None:
     state = [False]
     initial = _session()

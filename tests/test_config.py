@@ -16,9 +16,12 @@ from survng.app.config import (
     CameraConfig,
     CameraTransitionRoute,
     DetectionZone,
+    DetectorConfig,
+    DepthConfig,
     MqttConfig,
     ObjectTrackingConfig,
     MotionQualificationConfig,
+    auxiliary_openvino_device,
     load_config,
     normalize_config,
     save_config,
@@ -564,6 +567,37 @@ class AppConfigTest(unittest.TestCase):
 
         self.assertEqual(payload["base_path"], "/original")
         self.assertEqual(temporary_files, [])
+
+
+class AuxiliaryOpenvinoDeviceTest(unittest.TestCase):
+    def test_auto_compiles_as_cpu_and_explicit_gpu_is_kept(self) -> None:
+        self.assertEqual(auxiliary_openvino_device("AUTO"), "CPU")
+        self.assertEqual(auxiliary_openvino_device("auto"), "CPU")
+        self.assertEqual(auxiliary_openvino_device(""), "CPU")
+        self.assertEqual(auxiliary_openvino_device("GPU"), "GPU")
+        self.assertEqual(auxiliary_openvino_device("CPU"), "CPU")
+
+    def test_auxiliary_model_defaults_are_cpu(self) -> None:
+        detector = DetectorConfig()
+        self.assertEqual(detector.face_recognition_device, "CPU")
+        self.assertEqual(detector.resolved_face_recognition_device(), "CPU")
+        self.assertEqual(detector.depth.device, "CPU")
+        self.assertEqual(detector.tracking.reid_device, "CPU")
+        self.assertEqual(detector.tracking.vehicle_reid_device, "CPU")
+
+    def test_saved_auto_resolves_to_cpu(self) -> None:
+        detector = DetectorConfig(
+            face_recognition_device="AUTO",
+            depth=DepthConfig(device="AUTO"),
+            tracking=ObjectTrackingConfig(
+                reid_device="AUTO",
+                vehicle_reid_device="GPU",
+            ),
+        )
+        self.assertEqual(detector.resolved_face_recognition_device(), "CPU")
+        self.assertEqual(detector.depth.resolved_device(), "CPU")
+        self.assertEqual(detector.tracking.resolved_reid_device(), "CPU")
+        self.assertEqual(detector.tracking.resolved_vehicle_reid_device(), "GPU")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ describes the implementation currently in the repository, not an aspirational
 design. Update it whenever ingest, recording, motion qualification, inference,
 incident generation, media storage, or browser playback behavior changes.
 
-Last reviewed: 2026-09-01
+Last reviewed: 2026-09-02
 
 ## Motion Pipeline Migration
 
@@ -446,9 +446,11 @@ zone-specific threshold. Ignore zones always take precedence in both modes.
 
 Object detection and face embedding execute in two independent spawned
 inference processes. The object worker owns the configured detector and uses
-the latency-focused GPU device. The face worker owns the embedding and landmark
-models and uses the independently configured CPU or AUTO device. Face backlog
-therefore cannot queue ahead of a motion-triggered object request.
+the latency-focused GPU device for recorded evidence. The face worker owns the
+embedding and landmark models and defaults to CPU so it does not compete with
+live GStreamer `gvadetect` on Intel iGPU. Saved `AUTO` is treated as CPU at
+compile time; explicit GPU remains available. Face backlog therefore cannot
+queue ahead of a motion-triggered object request.
 
 Each worker has its own reusable 64 MB shared-memory frame buffer and duplex IPC
 connection. Uvicorn sends only request metadata and compact results, preserving
@@ -473,10 +475,12 @@ latest live frame and marks that source in event metadata.
 
 ### Monocular depth enrichment
 
-When `detector.depth.enabled` and a model path are configured, the object worker
-runs depth estimation on the representative recorded frame after object
-detection. It records each object's median and bounded depth statistics in
-meters. The global `max_incident_distance_m` policy and per-zone
+When `detector.depth.enabled` and a model path are configured, the isolated
+depth worker runs depth estimation on the representative recorded frame after
+object detection. Depth defaults to CPU; `AUTO` compiles as CPU so live
+`gvadetect` keeps the Intel GPU. It records each object's median and bounded
+depth statistics in meters. The global `max_incident_distance_m` policy and
+per-zone
 `min_depth_m`/`max_depth_m` policies can mark recorded objects ineligible;
 ordinary confidence, temporal, and zone checks still apply.
 
@@ -492,10 +496,12 @@ When the selected event frame contains an incident-eligible object and
 `detector.tracking.enabled` is true, SurvNG starts a bounded per-camera
 tracking session **after recorded refinement has finished** (or after live
 evidence if refinement cannot run). Tracking is identification and cover
-enrichment; it does not admit the incident. The existing OpenVINO detector
-remains responsible for frame-level boxes, classes, and confidence. A
-separate ByteTrack-style tracking-by-detection stage associates those boxes
-over time and assigns camera-local track IDs.
+enrichment; it does not admit the incident. Live tracking ticks reuse the
+same GStreamer `gvadetect` sidecar boxes used for incident admission. An
+empty sidecar skips OpenVINO and lets tracks coast until the lost timeout.
+Recorded catch-up frames and cover verification still call the OpenVINO
+object worker. A separate ByteTrack-style tracking-by-detection stage
+associates those boxes over time and assigns camera-local track IDs.
 
 The initial incident-eligible detections are confirmed immediately, including
 per-camera detections admitted by a threshold lower than the global default.
@@ -509,8 +515,10 @@ not carry across a service restart or between cameras.
 Association first uses predicted overlap, then a conservative center-distance
 and containment fallback for rapidly changing boxes. Optional person and
 vehicle ReID can reconnect a recently lost track using whole-object appearance
-embeddings. ReID runs in its own isolated inference worker and is disabled
-unless the corresponding feature and compatible OpenVINO model are configured.
+embeddings. ReID runs in its own isolated inference worker, defaults to CPU,
+and is disabled unless the corresponding feature and compatible OpenVINO model
+are configured. Saved `AUTO` compiles as CPU so live `gvadetect` keeps the
+Intel GPU; explicit GPU remains available.
 Face-recognition embedding models are not interchangeable with person ReID.
 
 The default SurvNG Hybrid tracker computes embeddings on demand: once when a
@@ -708,9 +716,11 @@ worker joins run without holding the state lock. Status and health reads
 therefore remain available while a camera connection is slow to open or close,
 and failures retain their last lifecycle error for diagnosis.
 
-The object process owns its OpenVINO `Core`, compiled detector, and GPU context.
-The face process separately owns the embedding and landmark models on its
-configured CPU or AUTO device. Uvicorn does not perform OpenVINO device or
+The object process owns its OpenVINO `Core`, compiled detector, and GPU context
+for recorded evidence. The face, ReID, and depth processes default to CPU so
+they do not compete with live GStreamer `gvadetect` on Intel iGPU. Saved
+`AUTO` for those auxiliary models compiles as CPU. Uvicorn does not perform
+OpenVINO device or
 model probes directly. A native OpenVINO, OpenCL, or IGC fault therefore
 terminates only the affected inference child; the other inference workload,
 live view, recording, ONVIF, MQTT, and HTTP control plane remain available.
@@ -778,7 +788,7 @@ Object inference and optional depth enrichment:
     "depth": {
       "enabled": false,
       "model_path": "",
-      "device": "AUTO",
+      "device": "CPU",
       "input_size": 768,
       "min_distance_m": 0.05,
       "max_distance_m": 150.0,

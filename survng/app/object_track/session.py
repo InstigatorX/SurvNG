@@ -24,6 +24,7 @@ from .geometry import (
     _encoder_supports_label,
     _inference_deferred,
     _iou,
+    _labeled_tracking_objects,
     _rescale_detection_boxes,
 )
 from .registry import ObjectTrackerRegistry, build_builtin_object_tracker_registry
@@ -39,6 +40,7 @@ from .types import (
     TrackingPublisher,
     TrackingSnapshotWriter,
     TrackingUpdate,
+    LiveDetectionsProvider,
 )
 
 LOGGER = logging.getLogger("survng.app.object_tracking")
@@ -132,6 +134,7 @@ class ObjectTrackingSession:
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
         cover_promoter: TrackingCoverPromoter | None = None,
+        live_detections_provider: LiveDetectionsProvider | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -147,6 +150,7 @@ class ObjectTrackingSession:
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
         self.cover_promoter = cover_promoter
+        self.live_detections_provider = live_detections_provider
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -251,6 +255,21 @@ class ObjectTrackingSession:
         )
         apply_depth_zone_filters(self.camera, enriched)
         return enriched
+
+    def _tracking_detections_for_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        catchup: bool,
+    ) -> list[dict[str, Any]]:
+        """Live ticks use gvadetect sidecar boxes; catch-up still runs OpenVINO."""
+        if not catchup and self.live_detections_provider is not None:
+            return _labeled_tracking_objects(self.live_detections_provider())
+        return _detect_tracking_objects(
+            self.detector,
+            frame,
+            self.config.low_confidence_threshold,
+        )
 
     def start(
         self,
@@ -923,11 +942,7 @@ class ObjectTrackingSession:
                 if self._frame_width <= 0 or self._frame_height <= 0:
                     self._frame_width = source_width
                     self._frame_height = source_height
-                objects = _detect_tracking_objects(
-                    self.detector,
-                    frame,
-                    self.config.low_confidence_threshold,
-                )
+                objects = self._tracking_detections_for_frame(frame, catchup=catchup)
                 if _inference_deferred(objects):
                     return False
                 failure = detection_failure(objects)
@@ -1726,6 +1741,7 @@ class ObjectTrackingSessionFactory:
         catchup_frame_provider: CatchupFrameProvider | None = None,
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
+        live_detections_provider: LiveDetectionsProvider | None = None,
     ) -> ObjectTrackingSession:
         return ObjectTrackingSession(
             camera=camera,
@@ -1742,4 +1758,5 @@ class ObjectTrackingSessionFactory:
             cover_frame_provider=cover_frame_provider,
             snapshot_writer=snapshot_writer,
             cover_promoter=self.cover_promoter,
+            live_detections_provider=live_detections_provider,
         )

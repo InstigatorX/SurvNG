@@ -9,7 +9,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .config import DepthConfig, DetectorConfig
+from .config import DepthConfig, DetectorConfig, auxiliary_openvino_device
 
 LOGGER = logging.getLogger(__name__)
 
@@ -215,7 +215,7 @@ class OpenVinoDepthEstimator:
                     self.input_shape = (shape[3], shape[2])
                 elif shape[-1] == 3:
                     self.input_shape = (shape[2], shape[1])
-            device = self.depth_config.device or "AUTO"
+            device = auxiliary_openvino_device(self.depth_config.device)
             compile_config = {"PERFORMANCE_HINT": "LATENCY"}
             if device.upper() != "AUTO":
                 compile_config["NUM_STREAMS"] = "1"
@@ -407,7 +407,7 @@ class OpenVinoDepthEstimator:
             "enabled": self.enabled,
             "ready": self.ready,
             "error": self.error,
-            "configured_device": self.depth_config.device,
+            "configured_device": self.depth_config.resolved_device(),
             "loaded_device": self.loaded_device,
             "model_path": self.depth_config.resolved_model_path(),
             "input_shape": list(self.input_shape),

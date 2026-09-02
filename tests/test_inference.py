@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 from pydantic import ValidationError
 
-from survng.app.config import DetectorConfig
+from survng.app.config import DepthConfig, DetectorConfig, ObjectTrackingConfig
 from survng.app.inference import (
     InferenceRollbackIncomplete,
     InferenceWorkload,
@@ -64,6 +64,33 @@ class InferenceSupervisorTest(unittest.TestCase):
                 {},
                 start_enabled=True,
             )
+
+    def test_auxiliary_workers_treat_auto_as_cpu(self) -> None:
+        config = DetectorConfig(
+            enabled=False,
+            face_recognition_device="AUTO",
+            depth=DepthConfig(device="AUTO"),
+            tracking=ObjectTrackingConfig(
+                reid_enabled=True,
+                reid_model_path="/tmp/person-reid.xml",
+                reid_device="AUTO",
+                vehicle_reid_enabled=True,
+                vehicle_reid_model_path="/tmp/vehicle-reid.xml",
+                vehicle_reid_device="GPU",
+            ),
+        )
+        face = _InferenceWorker(config, "face", {}, start_enabled=False)
+        depth = _InferenceWorker(config, "depth", {}, start_enabled=False)
+        reid = _InferenceWorker(config, "reid", {}, start_enabled=False)
+
+        self.assertEqual(face.configured_device, "CPU")
+        self.assertEqual(depth.configured_device, "CPU")
+        self.assertEqual(reid.configured_device, "CPU")
+        payload = face._active_config_payload()
+        self.assertEqual(payload["face_recognition_device"], "CPU")
+        self.assertEqual(payload["depth"]["device"], "CPU")
+        self.assertEqual(payload["tracking"]["reid_device"], "CPU")
+        self.assertEqual(payload["tracking"]["vehicle_reid_device"], "GPU")
 
     def test_detector_threshold_configuration_is_bounded(self) -> None:
         with self.assertRaises(ValidationError):
@@ -682,7 +709,7 @@ class InferenceSupervisorTest(unittest.TestCase):
 
         self.assertFalse(proxy.ready)
         self.assertFalse(proxy.enabled)
-        self.assertEqual(proxy.status()["device"], "AUTO")
+        self.assertEqual(proxy.status()["device"], "CPU")
         self.assertFalse(proxy.status()["isolation"]["enabled"])
 
     def test_reid_proxy_only_supports_labels_with_a_ready_model(self) -> None:
@@ -765,7 +792,7 @@ class InferenceSupervisorTest(unittest.TestCase):
 
         self.assertFalse(proxy.ready)
         self.assertFalse(proxy.enabled)
-        self.assertEqual(proxy.status()["device"], "AUTO")
+        self.assertEqual(proxy.status()["device"], "CPU")
         self.assertFalse(proxy.status()["isolation"]["enabled"])
         self.assertEqual(
             proxy.status()["isolation"]["request_timeout_seconds"],

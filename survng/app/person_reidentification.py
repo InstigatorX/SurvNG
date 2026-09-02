@@ -10,7 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .config import DetectorConfig
+from .config import DetectorConfig, auxiliary_openvino_device
 
 
 LOGGER = logging.getLogger(__name__)
@@ -38,7 +38,9 @@ class OpenVinoPersonReidentifier:
         self.configured_model_path = (
             tracking.reid_model_path if model_path is None else model_path
         )
-        self.configured_device = tracking.reid_device if device is None else device
+        self.configured_device = auxiliary_openvino_device(
+            tracking.reid_device if device is None else device
+        )
         self.match_threshold = (
             tracking.reid_match_threshold
             if match_threshold is None
@@ -85,7 +87,7 @@ class OpenVinoPersonReidentifier:
                 width, height = self.input_shape
                 model.reshape({model.input(0).any_name: [1, 3, height, width]})
             self.input_layout, self.input_shape = self._image_input(model.input(0).shape)
-            device = self.configured_device or "AUTO"
+            device = auxiliary_openvino_device(self.configured_device)
             compile_config = {"PERFORMANCE_HINT": "LATENCY"}
             if device.upper() != "AUTO":
                 compile_config["NUM_STREAMS"] = "1"

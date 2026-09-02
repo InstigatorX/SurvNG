@@ -18,6 +18,18 @@ CONFIG_PATH_ENV = "SURVNG_CONFIG_PATH"
 ApiScope = Literal["read", "camera:control", "admin"]
 
 
+def auxiliary_openvino_device(requested: str, *, default: str = "CPU") -> str:
+    """Keep face, ReID, and depth off the live Intel GPU.
+
+    ``AUTO`` previously selected GPU on iGPU hosts and competed with
+    GStreamer ``gvadetect``. Explicit GPU remains available.
+    """
+    normalized = str(requested or default).strip().upper() or default
+    if normalized == "AUTO":
+        return "CPU"
+    return normalized
+
+
 class ApiTokenConfig(BaseModel):
     id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
     name: str = Field(min_length=1, max_length=128)
@@ -568,7 +580,7 @@ class DepthConfig(BaseModel):
 
     enabled: bool = False
     model_path: str = Field(default="", max_length=4096)
-    device: str = Field(default="AUTO", min_length=1, max_length=64)
+    device: str = Field(default="CPU", min_length=1, max_length=64)
     input_size: int = Field(default=768, ge=320, le=1280)
     min_distance_m: float = Field(default=0.05, ge=0.01, le=500.0)
     max_distance_m: float = Field(default=150.0, ge=1.0, le=500.0)
@@ -594,10 +606,13 @@ class DepthConfig(BaseModel):
     @field_validator("device", mode="before")
     @classmethod
     def normalize_device(cls, value: object) -> str:
-        return str(value or "AUTO").strip().upper() or "AUTO"
+        return str(value or "CPU").strip().upper() or "CPU"
 
     def resolved_model_path(self) -> str:
         return str(self.model_path or "").strip()
+
+    def resolved_device(self) -> str:
+        return auxiliary_openvino_device(self.device)
 
 
 class ObjectTrackingConfig(BaseModel):
@@ -632,14 +647,14 @@ class ObjectTrackingConfig(BaseModel):
     max_tracks_per_session: int = Field(default=100, ge=1, le=1000)
     reid_enabled: bool = False
     reid_model_path: str = Field(default="", max_length=4096)
-    reid_device: str = Field(default="AUTO", min_length=1, max_length=64)
+    reid_device: str = Field(default="CPU", min_length=1, max_length=64)
     reid_match_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     reid_max_age_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     reid_max_embeddings_per_frame: int = Field(default=8, ge=1, le=64)
     reid_refresh_interval_frames: int = Field(default=8, ge=1, le=120)
     vehicle_reid_enabled: bool = False
     vehicle_reid_model_path: str = Field(default="", max_length=4096)
-    vehicle_reid_device: str = Field(default="AUTO", min_length=1, max_length=64)
+    vehicle_reid_device: str = Field(default="CPU", min_length=1, max_length=64)
     vehicle_reid_match_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
     vehicle_reid_labels: list[str] = Field(
         default_factory=lambda: ["car", "truck", "bus", "motorcycle"],
@@ -706,6 +721,12 @@ class ObjectTrackingConfig(BaseModel):
             else self.vehicle_reid_match_threshold
         )
 
+    def resolved_reid_device(self) -> str:
+        return auxiliary_openvino_device(self.reid_device)
+
+    def resolved_vehicle_reid_device(self) -> str:
+        return auxiliary_openvino_device(self.vehicle_reid_device)
+
 
 class DetectorConfig(BaseModel):
     enabled: bool = False
@@ -727,7 +748,7 @@ class DetectorConfig(BaseModel):
     face_embedding_model_path: str = Field(default="", max_length=4096)
     face_landmark_model_path: str = Field(default="", max_length=4096)
     face_detection_model_path: str = Field(default="", max_length=4096)
-    face_recognition_device: str = Field(default="AUTO", min_length=1, max_length=64)
+    face_recognition_device: str = Field(default="CPU", min_length=1, max_length=64)
     face_detection_threshold: float = Field(default=0.60, ge=0.01, le=0.99)
     face_enrich_max_people: int = Field(default=4, ge=1, le=16)
     face_match_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
@@ -884,13 +905,13 @@ class DetectorConfig(BaseModel):
     def ensure_tracking_protected_incident_lane(self) -> "DetectorConfig":
         """Keep a dedicated object worker when tracking shares the accelerator.
 
-        Tracking reuses the object detector. With one worker, an in-flight
-        tracking frame can occupy the only lane long enough for recorded
-        evidence refinement to wait on the accelerator. A second OpenVINO
-        worker is the protected evidence lane already assumed by the
-        supervisor. The stored default is therefore 2 whenever tracking is
-        enabled. Live incident admission uses GStreamer boxes and does not
-        consume this pool.
+        Tracking catch-up and cover verification still reuse the object
+        detector. With one worker, an in-flight tracking frame can occupy the
+        only lane long enough for recorded evidence refinement to wait on the
+        accelerator. A second OpenVINO worker is the protected evidence lane
+        already assumed by the supervisor. The stored default is therefore 2
+        whenever tracking is enabled. Live incident admission and live tracking
+        ticks use GStreamer boxes and do not consume this pool.
         """
         if (
             self.backend == "openvino"
@@ -913,6 +934,9 @@ class DetectorConfig(BaseModel):
 
     def resolved_coreml_model_path(self) -> str:
         return self.coreml_model_path
+
+    def resolved_face_recognition_device(self) -> str:
+        return auxiliary_openvino_device(self.face_recognition_device)
 
 
 class AppConfig(BaseModel):
