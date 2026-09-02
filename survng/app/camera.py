@@ -151,6 +151,7 @@ class CameraWorker:
                 frame,
                 event_at,
             ),
+            live_detections_provider=lambda: self.capture.latest_detections("live"),
         )
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,

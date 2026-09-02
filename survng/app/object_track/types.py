@@ -25,6 +25,7 @@ TrackingCoverFrameProvider = Callable[
 ]
 TrackingSnapshotWriter = Callable[[np.ndarray, datetime], str]
 TrackingCoverPromoter = Callable[..., dict[str, Any] | None]
+LiveDetectionsProvider = Callable[[], list[dict[str, Any]] | None]
 
 
 class ObjectDetectorBackend(Protocol):

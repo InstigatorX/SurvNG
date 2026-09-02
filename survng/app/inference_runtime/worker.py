@@ -10,7 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ..config import DetectorConfig
+from ..config import DetectorConfig, auxiliary_openvino_device
 from ..perf_samples import RollingLatencySamples
 from .process import _inference_worker_main
 from .types import (
@@ -91,19 +91,19 @@ class _InferenceWorker:
     @property
     def configured_device(self) -> str:
         if self.role == "face":
-            return self.config.face_recognition_device
+            return self.config.resolved_face_recognition_device()
         if self.role == "depth":
-            return self.config.depth.device
+            return self.config.depth.resolved_device()
         if self.role == "reid":
             devices = {
-                self.config.tracking.reid_device
+                self.config.tracking.resolved_reid_device()
                 if self.config.tracking.reid_enabled
                 else "",
-                self.config.tracking.vehicle_reid_device
+                self.config.tracking.resolved_vehicle_reid_device()
                 if self.config.tracking.vehicle_reid_enabled
                 else "",
             } - {""}
-            return next(iter(devices)) if len(devices) == 1 else "AUTO"
+            return next(iter(devices)) if len(devices) == 1 else "CPU"
         return self.config.device
 
     def update_config_reference(self, config: DetectorConfig) -> None:
@@ -231,6 +231,16 @@ class _InferenceWorker:
 
     def _active_config_payload(self) -> dict[str, Any]:
         payload = self.config.model_dump(mode="json")
+        payload["face_recognition_device"] = auxiliary_openvino_device(
+            payload.get("face_recognition_device")
+        )
+        tracking = payload.setdefault("tracking", {})
+        tracking["reid_device"] = auxiliary_openvino_device(tracking.get("reid_device"))
+        tracking["vehicle_reid_device"] = auxiliary_openvino_device(
+            tracking.get("vehicle_reid_device")
+        )
+        depth = payload.setdefault("depth", {})
+        depth["device"] = auxiliary_openvino_device(depth.get("device"))
         if self.role == "object":
             payload["face_recognition_enabled"] = False
             if time.monotonic() < self._fallback_until:
@@ -239,6 +249,11 @@ class _InferenceWorker:
             payload["enabled"] = False
             if time.monotonic() < self._fallback_until:
                 payload["face_recognition_device"] = "CPU"
+        elif self.role == "depth":
+            payload["enabled"] = False
+            payload["face_recognition_enabled"] = False
+            if time.monotonic() < self._fallback_until:
+                payload["depth"]["device"] = "CPU"
         else:
             payload["enabled"] = False
             payload["face_recognition_enabled"] = False
