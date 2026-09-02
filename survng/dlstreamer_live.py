@@ -34,6 +34,12 @@ def _parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--fps", type=float, default=5.0)
+    parser.add_argument(
+        "--detect-fps",
+        type=float,
+        default=5.0,
+        help="maximum gvadetect input rate; independent from EMA qualification FPS",
+    )
     parser.add_argument("--open-timeout", type=float, default=3.0)
     parser.add_argument("--rtsp-transport", choices=("tcp", "udp"), default="tcp")
     parser.add_argument("--decoder", choices=("auto", "va"), default="va")
@@ -369,6 +375,7 @@ def run(argv: list[str] | None = None) -> int:
     _apply_dlstreamer_env()
     args = _parser().parse_args(argv)
     rate = _frame_rate(args.fps)
+    detect_rate = _frame_rate(args.detect_fps)
     qualifier_width = _qualifier_width(args.frame_width)
     jpeg_rate = _frame_rate(args.jpeg_fps) if args.jpeg_fps > 0 else None
     open_timeout = _positive_seconds(args.open_timeout, "open timeout")
@@ -396,6 +403,7 @@ def run(argv: list[str] | None = None) -> int:
             model_path=model_path,
             instance_id=instance_id,
             rate=rate,
+            detect_rate=detect_rate,
             qualifier_width=qualifier_width,
             jpeg_rate=jpeg_rate,
             open_timeout=open_timeout,
@@ -411,6 +419,7 @@ def run(argv: list[str] | None = None) -> int:
         model_path=model_path,
         instance_id=instance_id,
         rate=rate,
+        detect_rate=detect_rate,
         qualifier_width=qualifier_width,
         jpeg_rate=jpeg_rate,
         open_timeout=open_timeout,
@@ -433,6 +442,7 @@ def _run_supervisor(
     model_path: Path | None,
     instance_id: str,
     rate: Fraction,
+    detect_rate: Fraction,
     qualifier_width: int,
     jpeg_rate: Fraction | None,
     open_timeout: float,
@@ -492,6 +502,7 @@ def _run_supervisor(
                     model_path=model_path,
                     instance_id=instance_id,
                     rate=rate,
+                    detect_rate=detect_rate,
                     qualifier_width=qualifier_width,
                     jpeg_rate=jpeg_rate,
                     open_timeout=open_timeout,
@@ -583,6 +594,7 @@ def _pump_pipeline(
     model_path: Path | None,
     instance_id: str,
     rate: Fraction,
+    detect_rate: Fraction,
     qualifier_width: int,
     jpeg_rate: Fraction | None,
     open_timeout: float,
@@ -683,16 +695,35 @@ def _pump_pipeline(
         )
     meta_sink = None
     detect_queue = None
+    detect_rate_el = None
+    detect_rate_caps = None
     detector = None
+    detect_output_queue = None
     meta_convert = None
     va_caps = None
     preprocess = ""
     if detect:
         detect_queue = _element(Gst, "queue", "detect-queue")
-        detect_queue.set_property("max-size-buffers", 2)
+        detect_queue.set_property("max-size-buffers", 1)
+        detect_queue.set_property("max-size-bytes", 0)
+        detect_queue.set_property("max-size-time", 0)
+        detect_queue.set_property("leaky", 2)
+        detect_rate_el = _element(Gst, "videorate", "detect-rate")
+        detect_rate_el.set_property("drop-only", True)
+        detect_rate_caps = _element(Gst, "capsfilter", "detect-rate-caps")
+        detect_rate_caps.set_property(
+            "caps",
+            Gst.Caps.from_string(
+                "video/x-raw"
+                + ("(memory:VAMemory)" if args.decoder == "va" and not use_test_source else "")
+                + ",framerate="
+                f"{detect_rate.numerator}/{detect_rate.denominator}"
+            ),
+        )
         detector = _element(Gst, "gvadetect", "detect")
         detector.set_property("model", str(model_path))
         detector.set_property("device", args.device)
+        detector.set_property("inference-interval", 1)
         preprocess = "va" if args.decoder == "va" and not use_test_source else "opencv"
         _set_optional_property(detector, "pre-process-backend", preprocess)
         if instance_id:
@@ -707,7 +738,12 @@ def _pump_pipeline(
                     break
                 except Exception:
                     continue
-        elements.extend([detect_queue, detector])
+        detect_output_queue = _element(Gst, "queue", "detect-output-queue")
+        detect_output_queue.set_property("max-size-buffers", 1)
+        detect_output_queue.set_property("max-size-bytes", 0)
+        detect_output_queue.set_property("max-size-time", 0)
+        detect_output_queue.set_property("leaky", 2)
+        elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])
         if preprocess == "va":
             va_caps = _element(Gst, "capsfilter", "detect-va-memory")
             va_caps.set_property(
@@ -769,16 +805,31 @@ def _pump_pipeline(
                 )
     if detect and detect_queue is not None and detector is not None:
         if va_caps is not None:
-            if not detect_queue.link(va_caps) or not va_caps.link(detector):
+            if (
+                detect_rate_el is None
+                or detect_rate_caps is None
+                or not detect_queue.link(detect_rate_el)
+                or not detect_rate_el.link(detect_rate_caps)
+                or not detect_rate_caps.link(va_caps)
+                or not va_caps.link(detector)
+            ):
                 raise RuntimeError("could not link VAMemory detect caps")
-        elif not detect_queue.link(detector):
+        elif (
+            detect_rate_el is None
+            or detect_rate_caps is None
+            or not detect_queue.link(detect_rate_el)
+            or not detect_rate_el.link(detect_rate_caps)
+            or not detect_rate_caps.link(detector)
+        ):
             raise RuntimeError("could not link detect queue")
+        if detect_output_queue is None or not detector.link(detect_output_queue):
+            raise RuntimeError("could not link gvadetect output queue")
         if meta_convert is not None and meta_sink is not None:
-            if not detector.link(meta_convert) or not meta_convert.link(meta_sink):
+            if not detect_output_queue.link(meta_convert) or not meta_convert.link(meta_sink):
                 raise RuntimeError("could not link detection metadata branch")
         else:
             fake = pipeline.get_by_name("detect-sink")
-            if fake is None or not detector.link(fake):
+            if fake is None or not detect_output_queue.link(fake):
                 raise RuntimeError("could not link detection sink")
 
     linked = False
@@ -928,6 +979,8 @@ def _pump_pipeline(
                             ),
                             "qualifier_format": "GRAY8",
                             "qualifier_width": qualifier_width,
+                            "detect_fps": float(detect_rate),
+                            "inference_interval": 1,
                             "jpeg_preview": jpeg_sink is not None,
                             "model_instance_id": instance_id,
                             "shared_detect": bool(instance_id and stream_id),

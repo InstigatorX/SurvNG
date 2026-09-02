@@ -59,6 +59,7 @@ def test_backend_command_keeps_url_and_uses_configured_policy() -> None:
     assert command[:3] == ["/usr/bin/python3", "-m", "survng.dlstreamer_live"]
     assert command[command.index("--rtsp-transport") + 1] == "udp"
     assert command[command.index("--fps") + 1] == "5.000000"
+    assert command[command.index("--detect-fps") + 1] == "5.000000"
     assert command[command.index("--decoder") + 1] == "va"
     assert command[command.index("--frame-width") + 1] == "320"
     assert command[command.index("--jpeg-fps") + 1] == "1.000000"
@@ -129,11 +130,12 @@ def test_live_parser_accepts_model_proc_and_labels() -> None:
 
 def test_live_parser_accepts_qualifier_and_jpeg_rate() -> None:
     args = _parser().parse_args(
-        ["--frame-width", "480", "--jpeg-fps", "0", "--no-detect"]
+        ["--frame-width", "480", "--jpeg-fps", "0", "--detect-fps", "2.5", "--no-detect"]
     )
 
     assert args.frame_width == 480
     assert args.jpeg_fps == 0.0
+    assert args.detect_fps == 2.5
 
 
 def test_live_parser_accepts_supervisor_and_model_instance_id() -> None:
