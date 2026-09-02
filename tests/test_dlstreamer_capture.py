@@ -19,8 +19,9 @@ from survng.dlstreamer_live import (
     _SYSTEM_GST_PLUGINS,
     _apply_dlstreamer_env,
     _colon_path,
+    _drop_paths,
+    _make_live_source,
     _normalize_gva_objects,
-    _uri_source_factory,
 )
 
 
@@ -119,32 +120,61 @@ def test_colon_path_keeps_order_and_drops_duplicates() -> None:
 
 def test_apply_dlstreamer_env_keeps_ubuntu_playback_plugins(monkeypatch) -> None:
     monkeypatch.delenv("GST_PLUGIN_SYSTEM_PATH", raising=False)
+    monkeypatch.delenv("GST_PLUGIN_SYSTEM_PATH_1_0", raising=False)
     _apply_dlstreamer_env()
     assert os.environ["GST_PLUGIN_SYSTEM_PATH"].split(":")[0] == _SYSTEM_GST_PLUGINS
+    assert os.environ["GST_PLUGIN_SYSTEM_PATH_1_0"].split(":")[0] == _SYSTEM_GST_PLUGINS
+
+
+def test_drop_paths_moves_intel_gstreamer_lib_out() -> None:
+    assert _drop_paths(
+        "/opt/intel/dlstreamer/gstreamer/lib:/usr/lib:/opt/intel/dlstreamer/lib",
+        "/opt/intel/dlstreamer/gstreamer/lib",
+    ) == "/usr/lib:/opt/intel/dlstreamer/lib"
 
 
 class _FactoryGst:
-    def __init__(self, available: set[str]) -> None:
+    def __init__(self, available: set[str], *, makeable: set[str] | None = None) -> None:
+        makeable = available if makeable is None else makeable
         self.ElementFactory = type(
             "ElementFactory",
             (),
-            {"find": staticmethod(lambda name, _available=available: object() if name in _available else None)},
+            {
+                "find": staticmethod(
+                    lambda name, _available=available: object() if name in _available else None
+                ),
+                "make": staticmethod(
+                    lambda name, _el, _makeable=makeable: object() if name in _makeable else None
+                ),
+            },
         )
 
 
-def test_uri_source_prefers_uridecodebin3() -> None:
-    assert _uri_source_factory(_FactoryGst({"uridecodebin3", "uridecodebin"}), test_source=False) == (
-        "uridecodebin3"
+def test_live_source_prefers_uridecodebin3() -> None:
+    source, factory = _make_live_source(
+        _FactoryGst({"uridecodebin3", "uridecodebin"}),
+        test_source=False,
     )
+    assert factory == "uridecodebin3"
+    assert source is not None
 
 
-def test_uri_source_falls_back_to_uridecodebin() -> None:
-    assert _uri_source_factory(_FactoryGst({"uridecodebin"}), test_source=False) == "uridecodebin"
+def test_live_source_falls_back_to_uridecodebin() -> None:
+    _source, factory = _make_live_source(_FactoryGst({"uridecodebin"}), test_source=False)
+    assert factory == "uridecodebin"
 
 
-def test_uri_source_errors_when_no_uri_decoder_exists() -> None:
-    with pytest.raises(RuntimeError, match="uridecodebin3"):
-        _uri_source_factory(_FactoryGst({"videotestsrc"}), test_source=False)
+def test_live_source_falls_back_when_uridecodebin3_cannot_instantiate() -> None:
+    _source, factory = _make_live_source(
+        _FactoryGst({"uridecodebin3", "uridecodebin"}, makeable={"uridecodebin"}),
+        test_source=False,
+    )
+    assert factory == "uridecodebin"
+
+
+def test_live_source_errors_when_no_uri_decoder_exists() -> None:
+    with pytest.raises(RuntimeError, match="uridecodebin3 or uridecodebin"):
+        _make_live_source(_FactoryGst({"videotestsrc"}), test_source=False)
 
 
 def test_capture_close_waits_for_stderr_drain_before_closing_stream() -> None:
