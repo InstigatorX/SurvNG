@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -655,7 +656,7 @@ def test_live_recovers_after_relay_restart_without_a_persistent_consumer() -> No
     assert status["open_timeout_escalations"] >= 1
 
 
-def test_capture_stores_sidecar_detections() -> None:
+def test_capture_stores_sidecar_detections(caplog) -> None:
     class DetectingHandle(FakeHandle):
         def pop_detections(self):
             return [
@@ -672,6 +673,7 @@ def test_capture_stores_sidecar_detections() -> None:
                 "hardware_decoder_selected": True,
                 "preprocess_backend": "va",
                 "first_frame_ms": 18.0,
+                "source_element": "uridecodebin3",
             }
 
     class DetectingBackend(FakeBackend):
@@ -681,15 +683,24 @@ def test_capture_stores_sidecar_detections() -> None:
             return handle
 
     service = _service(DetectingBackend())
-    assert service.start()
-    _wait_until(lambda: service.status()["capture_stats"]["live"]["frames_received"] >= 1)
-    detections = service.latest_detections("live")
-    status = service.status()
-    service.request_stop()
-    assert service.wait_stopped(1.0) == {}
+    with caplog.at_level(logging.INFO, logger="survng.app.camera_capture"):
+        assert service.start()
+        _wait_until(
+            lambda: service.status().get("live_pipeline", {}).get("source_element")
+            == "uridecodebin3"
+        )
+        detections = service.latest_detections("live")
+        status = service.status()
+        service.request_stop()
+        assert service.wait_stopped(1.0) == {}
     assert detections[0]["label"] == "person"
     assert status["live_pipeline"]["preprocess_backend"] == "va"
     assert status["live_pipeline"]["hardware_decoder_selected"] is True
+    assert status["live_pipeline"]["source_element"] == "uridecodebin3"
+    assert any(
+        "live capture for gate/live uses uridecodebin3" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_capture_stores_jpeg_preview() -> None:

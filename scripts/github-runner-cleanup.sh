@@ -9,10 +9,12 @@ MIN_FREE_PCT="${RUNNER_MIN_FREE_PCT:-15}"
 
 usage() {
   cat <<'EOF'
-Usage: github-runner-cleanup.sh [--light | --standard | --aggressive]
+Usage: github-runner-cleanup.sh [--light | --publish | --standard | --aggressive]
 
 Modes:
   --light       Dangling Docker layers only; no age-based image deletion.
+  --publish     Dangling images/containers only. Keeps the Docker build cache
+                used by GHCR publish. Never escalates to a cache wipe.
   --standard    Default. Prune build cache and images older than 24h.
   --aggressive  Prune all unused Docker images, stale runner temp dirs, tool caches.
 
@@ -43,6 +45,12 @@ report_disk() {
 
 maybe_escalate_mode() {
   local free_pct="$1"
+  if [[ "$MODE" == "publish" ]]; then
+    if (( free_pct < MIN_FREE_PCT )); then
+      log "Free space ${free_pct}% < ${MIN_FREE_PCT}% during publish; keeping build cache"
+    fi
+    return
+  fi
   if (( free_pct < MIN_FREE_PCT )); then
     case "$MODE" in
       light) MODE="standard"; log "Free space ${free_pct}% < ${MIN_FREE_PCT}%; escalating to standard" ;;
@@ -52,6 +60,14 @@ maybe_escalate_mode() {
     MODE="standard"
     log "Free space ${free_pct}% is low; escalating to standard"
   fi
+}
+
+cleanup_docker_publish() {
+  # Keep layer cache. Do not builder prune -af. The next GHCR publish reuses
+  # local layers from the moving tip left on the runner.
+  command -v docker >/dev/null 2>&1 || return 0
+  docker image prune -f || true
+  docker container prune -f || true
 }
 
 cleanup_docker_light() {
@@ -99,6 +115,9 @@ run_mode() {
     light)
       cleanup_docker_light
       ;;
+    publish)
+      cleanup_docker_publish
+      ;;
     standard)
       cleanup_docker_standard
       cleanup_tool_caches
@@ -118,6 +137,7 @@ run_mode() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --light) MODE="light"; shift ;;
+    --publish) MODE="publish"; shift ;;
     --standard) MODE="standard"; shift ;;
     --aggressive) MODE="aggressive"; shift ;;
     -h|--help) usage; exit 0 ;;

@@ -65,8 +65,6 @@ RUN chmod 755 /usr/local/bin/add-apt-ppa-retry \
     && python3 -m venv /opt/survng-venv
 
 WORKDIR /app
-ARG SURVNG_GIT_SHA=
-ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
@@ -80,6 +78,9 @@ COPY docker/entrypoint.sh /usr/local/bin/survng-entrypoint
 COPY docker/healthcheck.py /usr/local/bin/survng-healthcheck
 RUN chmod 755 /usr/local/bin/survng-entrypoint /usr/local/bin/survng-healthcheck
 COPY --from=frontend /build/survng/static/ ./survng/static/
+# Declare the commit SHA after apt/pip/COPY so a new commit does not bust those layers.
+ARG SURVNG_GIT_SHA=
+ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA
 RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi
 
 RUN mkdir -p /config /data /models \
