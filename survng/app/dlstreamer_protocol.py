@@ -10,11 +10,13 @@ from typing import Any, BinaryIO, Iterable
 MAGIC = b"NGDS"
 MESSAGE_HEADER = struct.Struct("!4sBI")
 FRAME_HEADER = struct.Struct("!IIId")
+STREAM_ID_HEADER = struct.Struct("!H")
 TYPE_FRAME = 1
 TYPE_DETECTIONS = 2
 TYPE_STATUS = 3
 TYPE_JPEG = 4
 MAX_MESSAGE_BYTES = 256 * 1024 * 1024
+MAX_STREAM_ID_BYTES = 65535
 _MESSAGE_TYPES = {TYPE_FRAME, TYPE_DETECTIONS, TYPE_STATUS, TYPE_JPEG}
 
 
@@ -30,6 +32,36 @@ def encode_message(message_type: int, payload: bytes) -> bytes:
     return MESSAGE_HEADER.pack(MAGIC, message_type, len(payload)) + payload
 
 
+def encode_stream_payload(stream_id: str, payload: bytes) -> bytes:
+    encoded = stream_id.encode("utf-8")
+    if not encoded:
+        raise ProtocolError("live-capture stream id is empty")
+    if len(encoded) > MAX_STREAM_ID_BYTES:
+        raise ProtocolError("live-capture stream id exceeded 65535 bytes")
+    return STREAM_ID_HEADER.pack(len(encoded)) + encoded + payload
+
+
+def decode_stream_payload(payload: bytes) -> tuple[str, bytes]:
+    if len(payload) < STREAM_ID_HEADER.size:
+        raise ProtocolError("truncated live-capture stream id")
+    (length,) = STREAM_ID_HEADER.unpack_from(payload)
+    start = STREAM_ID_HEADER.size
+    end = start + length
+    if length < 1 or end > len(payload):
+        raise ProtocolError("truncated live-capture stream id")
+    try:
+        stream_id = payload[start:end].decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProtocolError("live-capture stream id is invalid") from error
+    if not stream_id:
+        raise ProtocolError("live-capture stream id is empty")
+    return stream_id, payload[end:]
+
+
+def _payload(payload: bytes, stream_id: str) -> bytes:
+    return encode_stream_payload(stream_id, payload) if stream_id else payload
+
+
 def encode_frame(
     *,
     width: int,
@@ -37,13 +69,14 @@ def encode_frame(
     sequence: int,
     pts: float,
     pixels: bytes,
+    stream_id: str = "",
 ) -> bytes:
     pixel_count = width * height
     if width <= 0 or height <= 0 or len(pixels) not in {pixel_count, pixel_count * 3}:
         raise ProtocolError("live-capture frame payload does not match gray or BGR dimensions")
     return encode_message(
         TYPE_FRAME,
-        FRAME_HEADER.pack(width, height, sequence, float(pts)) + pixels,
+        _payload(FRAME_HEADER.pack(width, height, sequence, float(pts)) + pixels, stream_id),
     )
 
 
@@ -54,19 +87,28 @@ def encode_jpeg(
     sequence: int,
     pts: float,
     jpeg: bytes,
+    stream_id: str = "",
 ) -> bytes:
     if width <= 0 or height <= 0 or not jpeg:
         raise ProtocolError("live-capture JPEG payload is empty")
     return encode_message(
         TYPE_JPEG,
-        FRAME_HEADER.pack(width, height, sequence, float(pts)) + jpeg,
+        _payload(FRAME_HEADER.pack(width, height, sequence, float(pts)) + jpeg, stream_id),
     )
 
 
-def encode_json(message_type: int, payload: dict[str, Any]) -> bytes:
+def encode_json(
+    message_type: int,
+    payload: dict[str, Any],
+    *,
+    stream_id: str = "",
+) -> bytes:
     return encode_message(
         message_type,
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+        _payload(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+            stream_id,
+        ),
     )
 
 

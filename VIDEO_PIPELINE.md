@@ -173,20 +173,22 @@ paths.
 
 ## 2. Live Capture And Browser Delivery
 
-`CameraCaptureService` keeps the live source open through an isolated
-GStreamer / Intel DL Streamer child (`survng-dls`). The child prefers
+`CameraCaptureService` keeps live sources open through one shared
+GStreamer / Intel DL Streamer child (`survng-dls`). Cameras are added and
+removed over stdin JSON; URLs never appear in process arguments. Every
+`gvadetect` element uses the same `model-instance-id` so OpenVINO loads the
+IR once per process (`scheduling-policy=latency`). The child prefers
 `vah264dec` / `vah265dec`, keeps detect on `VAMemory` when `gvadetect` and an
 OpenVINO model are available (`pre-process-backend=va` on Intel), and tees a
-drop-only BGR appsink at `sample_fps` for motion qualification, MJPEG, and
-snapshots. Decode uses `uridecodebin3` when that factory can be instantiated, otherwise
+drop-only GRAY8 appsink at `sample_fps` for motion qualification plus a ~1 fps
+JPEG preview. Decode uses `uridecodebin3` when that factory can be instantiated, otherwise
 `uridecodebin`. Instantiation, not registry lookup, is the gate: a stale
 `uridecodebin3` factory that cannot `make()` still falls through. The child
 keeps Ubuntu's GStreamer plugin directory on `GST_PLUGIN_SYSTEM_PATH` and
 `GST_PLUGIN_SYSTEM_PATH_1_0`, and it removes Intel's nested `gstreamer/lib`
-from `LD_LIBRARY_PATH` so python3-gi loads distro libgstreamer. The camera URL is written to the child's stdin so it does not appear
-in process arguments. The child runs system ``/usr/bin/python3`` so GStreamer
+from `LD_LIBRARY_PATH` so python3-gi loads distro libgstreamer. The child runs system ``/usr/bin/python3`` so GStreamer
 GI plugins resolve; it does not import the SurvNG venv or pydantic. There is no
-FFmpeg live-capture fallback: if the child exits, that camera reconnects the
+FFmpeg live-capture fallback: if the supervisor exits, every camera reconnects the
 same pipeline. The child's latest boxes are
 stored on `CameraCaptureService.latest_detections()` and used as the live
 fast-path detector for incident admission. `detect_initial` never runs a second

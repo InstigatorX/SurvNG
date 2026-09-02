@@ -33,11 +33,13 @@ from survng.dlstreamer_live import (
     _normalize_gva_objects,
     _packed_gray,
     _parser,
+    model_instance_id,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STUB = ROOT / "tests" / "dlstreamer_live_stub.py"
+SUPERVISOR_STUB = ROOT / "tests" / "dlstreamer_supervisor_stub.py"
 
 
 def test_backend_command_keeps_url_and_uses_configured_policy() -> None:
@@ -60,6 +62,7 @@ def test_backend_command_keeps_url_and_uses_configured_policy() -> None:
     assert command[command.index("--decoder") + 1] == "va"
     assert command[command.index("--frame-width") + 1] == "320"
     assert command[command.index("--jpeg-fps") + 1] == "1.000000"
+    assert "--supervisor" in command
     assert "--no-detect" in command
     assert "rtsp://" not in " ".join(command)
 
@@ -78,6 +81,8 @@ def test_backend_includes_model_when_detect_enabled() -> None:
     command = backend.command()
 
     assert command[command.index("--model") + 1] == "/models/yolo.xml"
+    assert command[command.index("--model-instance-id") + 1] == "survng-yolo-GPU"
+    assert "--supervisor" in command
     assert "--no-detect" not in command
 
 
@@ -131,6 +136,21 @@ def test_live_parser_accepts_qualifier_and_jpeg_rate() -> None:
     assert args.jpeg_fps == 0.0
 
 
+def test_live_parser_accepts_supervisor_and_model_instance_id() -> None:
+    args = _parser().parse_args(
+        ["--supervisor", "--model-instance-id", "survng-yolo-GPU", "--no-detect"]
+    )
+
+    assert args.supervisor is True
+    assert args.model_instance_id == "survng-yolo-GPU"
+
+
+def test_model_instance_id_sanitizes_model_and_device() -> None:
+    assert model_instance_id("/models/yolo.xml", "GPU") == "survng-yolo-GPU"
+    assert model_instance_id("/models/yolo.xml", "GPU", "custom id!") == "custom-id"
+    assert model_instance_id("", "CPU") == "survng-detect-CPU"
+
+
 def test_backend_warns_once_without_logging_url_credentials(caplog) -> None:
     backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1))
 
@@ -182,7 +202,34 @@ def test_handle_reads_stub_child_frames() -> None:
         handle.close()
 
 
-def test_colon_path_keeps_order_and_drops_duplicates() -> None:
+def test_shared_supervisor_serves_two_handles_from_one_process() -> None:
+    class StubBackend(DlStreamerCaptureBackend):
+        def command(self) -> list[str]:
+            return [sys.executable, str(SUPERVISOR_STUB), "--supervisor"]
+
+    backend = StubBackend(CaptureOpenLimiter(2))
+    first = backend.create_handle()
+    second = backend.create_handle()
+    try:
+        assert backend.open(first, "rtsp://127.0.0.1:8554/porch_sub", lambda: False)
+        assert backend.open(second, "rtsp://127.0.0.1:8554/drive_sub", lambda: False)
+        shared = backend._shared
+        assert shared is not None
+        assert shared.is_running()
+        first_ok, first_frame = first.read()
+        second_ok, second_frame = second.read()
+        assert first_ok and first_frame is not None
+        assert second_ok and second_frame is not None
+        assert first.pipeline_status()["model_instance_id"] == "survng-yolo-GPU"
+        assert first.pipeline_status()["shared_detect"] is True
+        assert first.pop_jpeg() == b"\xff\xd8stub-jpeg\xff\xd9"
+        first.close()
+        assert second.is_opened()
+        assert shared.is_running()
+    finally:
+        first.close()
+        second.close()
+        backend.close()
     assert _colon_path("/usr/lib/gstreamer-1.0", "/opt/a:/usr/lib/gstreamer-1.0:/opt/b") == (
         "/usr/lib/gstreamer-1.0:/opt/a:/opt/b"
     )
