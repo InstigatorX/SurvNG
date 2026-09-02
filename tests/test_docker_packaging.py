@@ -70,6 +70,23 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA", dockerfile)
         self.assertIn("/app/SURVNG_GIT_SHA", dockerfile)
         self.assertIn("add-apt-ppa-retry", dockerfile)
+        pip_at = dockerfile.index("pip install --no-cache-dir -r requirements.txt")
+        sha_at = dockerfile.index("ARG SURVNG_GIT_SHA=")
+        self.assertGreater(
+            sha_at,
+            pip_at,
+            "SURVNG_GIT_SHA must be declared after pip so commits do not bust dependency layers",
+        )
+
+    def test_model_installer_git_sha_is_after_apt(self) -> None:
+        dockerfile = (ROOT / "Dockerfile.model-installer").read_text(encoding="utf-8")
+        apt_at = dockerfile.index("apt-get install -y --no-install-recommends")
+        sha_at = dockerfile.index("ARG SURVNG_GIT_SHA=")
+        self.assertGreater(
+            sha_at,
+            apt_at,
+            "SURVNG_GIT_SHA must be declared after apt so commits do not bust package layers",
+        )
 
     def test_runtime_image_includes_help_documentation_and_assets(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -103,7 +120,23 @@ class DockerPackagingTest(unittest.TestCase):
             text=True,
         )
         self.assertIn("--aggressive", result.stdout)
+        self.assertIn("--publish", result.stdout)
         self.assertTrue((ROOT / ".github/workflows/runner-maintenance.yml").is_file())
+
+    def test_docker_publish_reuses_ghcr_layer_cache(self) -> None:
+        workflow = (ROOT / ".github/workflows/docker-publish.yml").read_text(
+            encoding="utf-8"
+        )
+        script = (ROOT / "scripts" / "docker-publish-image.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scripts/docker-publish-image.sh", workflow)
+        self.assertIn("github-runner-cleanup.sh --publish", workflow)
+        self.assertNotIn("github-runner-cleanup.sh --standard", workflow)
+        self.assertNotIn("  --cache-from", script)
+        self.assertNotIn("docker pull", script)
+        self.assertNotIn('docker rmi "${primary}"', script)
+        self.assertTrue(os.access(ROOT / "scripts" / "docker-publish-image.sh", os.X_OK))
 
     def test_docker_publish_builds_intel_image_for_gstreamer_branch(self) -> None:
         workflow = (ROOT / ".github/workflows/docker-publish.yml").read_text(
@@ -136,6 +169,7 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn('"intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}"', dockerfile)
         self.assertIn("gstreamer1.0-libav", dockerfile)
         self.assertIn("gstreamer1.0-plugins-bad", dockerfile)
+        self.assertIn("gstreamer1.0-plugins-base", dockerfile)
         self.assertIn("gir1.2-gstreamer-1.0", dockerfile)
         self.assertIn("python3-gi", dockerfile)
         self.assertIn("intel-dlstreamer", dockerfile)
