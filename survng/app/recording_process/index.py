@@ -412,8 +412,7 @@ class RecordingIndexMixin:
         while current_date <= end_date:
             for camera_dir in self._recording_search_dirs(camera_id, source):
                 day_dir = camera_dir / current_date.isoformat()
-                if day_dir.exists():
-                    files.extend(day_dir.glob("??/*.mp4"))
+                files.extend(self._glob_mp4s(day_dir, "??/*.mp4"))
             current_date += timedelta(days=1)
         with self._index_connection() as connection:
             indexed_paths = {
@@ -438,9 +437,9 @@ class RecordingIndexMixin:
             recorder_active = active_item is not None and active_item[0].poll() is None
         if recorder_active and relevant_files:
             now = datetime.now()
-            current_hour = self._camera_dir(camera_id, source) / now.strftime("%Y-%m-%d") / now.strftime("%H")
+            current_hours = set(self._recording_hour_dirs(camera_id, source, now))
             active_tail = max(relevant_files, key=lambda path: self.recording_start_epoch(path) or 0.0)
-            if active_tail.parent == current_hour:
+            if active_tail.parent in current_hours:
                 relevant_files.remove(active_tail)
         if any(str(path) not in indexed_paths for path in relevant_files):
             discovered = [
@@ -617,6 +616,64 @@ class RecordingIndexMixin:
             }
         return result
 
+    def _log_index_exception(self, key: str, message: str, *args: object) -> None:
+        now = time.monotonic()
+        last = getattr(self, "_index_error_log_at", {}).get(key, 0.0)
+        if now - last < 60.0:
+            LOGGER.debug(message, *args, exc_info=True)
+            return
+        log_at = getattr(self, "_index_error_log_at", None)
+        if isinstance(log_at, dict):
+            log_at[key] = now
+        LOGGER.exception(message, *args)
+
+    @staticmethod
+    def _glob_mp4s(directory: Path, pattern: str) -> list[Path]:
+        try:
+            return list(directory.glob(pattern))
+        except OSError:
+            return []
+
+    def _recording_hour_dirs(
+        self,
+        camera_id: str,
+        source: str,
+        when: datetime,
+    ) -> list[Path]:
+        relative = Path(when.strftime("%Y-%m-%d")) / when.strftime("%H")
+        return [
+            search_dir / relative
+            for search_dir in self._recording_search_dirs(camera_id, source)
+        ]
+
+    def _recent_hour_recording_files(
+        self,
+        camera_id: str,
+        source: str,
+        *,
+        after_epoch: float | None = None,
+        hours_back: tuple[int, ...] = (1, 0),
+    ) -> list[Path]:
+        now = datetime.now()
+        files: list[Path] = []
+        seen: set[Path] = set()
+        for offset in hours_back:
+            for hour_dir in self._recording_hour_dirs(
+                camera_id,
+                source,
+                now - timedelta(hours=offset),
+            ):
+                for path in self._glob_mp4s(hour_dir, "*.mp4"):
+                    if path in seen:
+                        continue
+                    if after_epoch is not None and (
+                        self.recording_start_epoch(path) or 0.0
+                    ) < after_epoch:
+                        continue
+                    seen.add(path)
+                    files.append(path)
+        return files
+
     def refresh_recording_edge(
         self,
         camera_id: str,
@@ -626,17 +683,11 @@ class RecordingIndexMixin:
         """Index completed segments near a live playback edge without probing them."""
         source = "main" if source == "main" else "live"
         cutoff = after_epoch - max(5.0, self.segment_seconds * 2)
-        camera_dir = self._camera_dir(camera_id, source)
-        files: list[Path] = []
-        now = datetime.now()
-        for hours_back in (1, 0):
-            target = now - timedelta(hours=hours_back)
-            hour_dir = camera_dir / target.strftime("%Y-%m-%d") / target.strftime("%H")
-            if hour_dir.exists():
-                files.extend(
-                    path for path in hour_dir.glob("*.mp4")
-                    if (self.recording_start_epoch(path) or 0.0) >= cutoff
-                )
+        files = self._recent_hour_recording_files(
+            camera_id,
+            source,
+            after_epoch=cutoff,
+        )
         rows = self._recording_rows_for_files(camera_id, source, files)
         self._store_recording_rows(camera_id, source, rows)
         return len(rows)
@@ -869,7 +920,8 @@ class RecordingIndexMixin:
                 try:
                     self.refresh_recording_edge(camera_id, source, after_epoch)
                 except Exception:
-                    LOGGER.exception(
+                    self._log_index_exception(
+                        f"edge:{camera_id}:{source}",
                         "Near-live recording index discovery failed for %s/%s",
                         camera_id,
                         source,
@@ -879,7 +931,10 @@ class RecordingIndexMixin:
             try:
                 self.refresh_recording_index(camera_map, full=False, run_maintenance=False)
             except Exception:
-                LOGGER.exception("Recording index discovery failed")
+                self._log_index_exception(
+                    "index",
+                    "Recording index discovery failed",
+                )
             finally:
                 next_discovery = time.monotonic() + 10.0
 
@@ -1187,28 +1242,28 @@ class RecordingIndexMixin:
         full: bool = False,
         run_maintenance: bool = True,
     ) -> None:
-        now = datetime.now()
         wanted = self._wanted_keys(camera_map)
         for camera_id, source in wanted:
-            camera_dir = self._camera_dir(camera_id, source)
-            if full:
-                files = [
-                    path
-                    for search_dir in self._recording_search_dirs(camera_id, source)
-                    if search_dir.exists()
-                    for path in search_dir.glob("????-??-??/??/*.mp4")
-                ]
-            else:
-                files = []
-                for hours_back in (1, 0):
-                    target = now - timedelta(hours=hours_back)
-                    hour_dir = camera_dir / target.strftime("%Y-%m-%d") / target.strftime("%H")
-                    if hour_dir.exists():
-                        files.extend(hour_dir.glob("*.mp4"))
-            rows = self._recording_rows_for_files(camera_id, source, files)
-            self._store_recording_rows(camera_id, source, rows)
-            if full:
-                self._prune_recording_index(camera_id, source, files)
+            try:
+                if full:
+                    files = [
+                        path
+                        for search_dir in self._recording_search_dirs(camera_id, source)
+                        for path in self._glob_mp4s(search_dir, "????-??-??/??/*.mp4")
+                    ]
+                else:
+                    files = self._recent_hour_recording_files(camera_id, source)
+                rows = self._recording_rows_for_files(camera_id, source, files)
+                self._store_recording_rows(camera_id, source, rows)
+                if full:
+                    self._prune_recording_index(camera_id, source, files)
+            except Exception:
+                self._log_index_exception(
+                    f"discover:{camera_id}:{source}",
+                    "Recording index discovery failed for %s/%s",
+                    camera_id,
+                    source,
+                )
         if run_maintenance:
             self._prune_missing_index_rows()
             self._validate_index_batch()
