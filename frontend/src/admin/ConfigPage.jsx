@@ -736,6 +736,7 @@ export function TelemetryViewer({ data, cameraId, timeZone, config }) {
                     <div><dt>Lifecycle / workers</dt><dd>{camera.lifecycle?.phase || "unknown"} · {camera.lifecycle?.active_worker_count || 0} active</dd></div>
                     <div><dt>Live decoded FPS</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)}</dd></div>
                     <div><dt>Live source element</dt><dd>{camera.live_pipeline?.source_element || "Unknown"}</dd></div>
+                    <div><dt>Shared gvadetect</dt><dd>{camera.live_pipeline?.model_instance_id || "not reported yet"}</dd></div>
                     <div><dt>Recorded decode reservation</dt><dd>{camera.recorded_decode?.active_workflows ? `${formatBytes(camera.recorded_decode.reserved_bytes)} · ${formatBytes(camera.recorded_decode.frame_bytes)} × ${camera.recorded_decode.frames || 0} frames` : "None"}</dd></div>
                     <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
                     <div><dt>Read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
@@ -5023,7 +5024,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
       <span>Stream worker: {status.running ? "running" : "not running"}</span>
-      <span>Live source: {status.live_pipeline?.source_element || "not reported yet"}</span>
+      <span>Live source: {status.live_pipeline?.source_element || "not reported yet"}{status.live_pipeline?.model_instance_id ? ` · ${status.live_pipeline.model_instance_id}` : ""}</span>
       <span>Recording: {status.recording ? "running" : "stopped"}</span>
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF notification (any type): {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}

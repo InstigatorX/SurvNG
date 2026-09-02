@@ -13,6 +13,7 @@ from survng.app.dlstreamer_protocol import (
     decode_frame_payload,
     decode_jpeg_payload,
     decode_json_payload,
+    decode_stream_payload,
     encode_frame,
     encode_jpeg,
     encode_json,
@@ -97,3 +98,30 @@ def test_oversized_message_is_rejected() -> None:
     reader.feed(bytes(header))
     with pytest.raises(ProtocolError, match="256 MiB"):
         reader.pop()
+
+
+def test_stream_prefixed_messages_round_trip() -> None:
+    pixels = bytes((1, 2, 3, 4))
+    encoded = encode_frame(
+        width=2,
+        height=2,
+        sequence=1,
+        pts=0.1,
+        pixels=pixels,
+        stream_id="gate-live",
+    )
+    reader = MessageReader()
+    reader.feed(encoded)
+    message_type, payload = reader.pop() or (0, b"")
+    stream_id, inner = decode_stream_payload(payload)
+
+    assert message_type == TYPE_FRAME
+    assert stream_id == "gate-live"
+    assert decode_frame_payload(inner)[4] == pixels
+
+    status = encode_json(TYPE_STATUS, {"ok": True}, stream_id="cam-2")
+    reader.feed(status)
+    _type, payload = reader.pop() or (0, b"")
+    stream_id, inner = decode_stream_payload(payload)
+    assert stream_id == "cam-2"
+    assert decode_json_payload(inner) == {"ok": True}

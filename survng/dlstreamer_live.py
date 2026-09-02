@@ -1,4 +1,4 @@
-"""Isolated GStreamer / DL Streamer live pipeline. URL is read from stdin."""
+"""Isolated GStreamer / DL Streamer live pipelines. URLs are read from stdin."""
 
 from __future__ import annotations
 
@@ -26,10 +26,11 @@ DECODERS = {
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Decode a camera URL with GStreamer, optionally run gvadetect on "
+            "Decode camera URLs with GStreamer, optionally run gvadetect on "
             "VAMemory, and emit a 320-wide grayscale qualifier plus JPEG "
-            "preview frames. The URL is read from stdin so it never appears "
-            "in process arguments."
+            "preview frames. URLs are read from stdin so they never appear "
+            "in process arguments. Supervisor mode hosts every camera in one "
+            "process so gvadetect shares model-instance-id."
         )
     )
     parser.add_argument("--fps", type=float, default=5.0)
@@ -39,6 +40,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="", help="OpenVINO IR XML for gvadetect")
     parser.add_argument("--model-proc", default="", help="optional gvadetect model-proc JSON")
     parser.add_argument("--labels", default="", help="optional gvadetect labels file")
+    parser.add_argument(
+        "--model-instance-id",
+        default="",
+        help="gvadetect model-instance-id shared across supervisor streams",
+    )
+    parser.add_argument(
+        "--supervisor",
+        action="store_true",
+        help="host multiple camera pipelines and share gvadetect",
+    )
     parser.add_argument("--device", default="GPU")
     parser.add_argument(
         "--frame-width",
@@ -66,13 +77,39 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _read_camera_url(stdin: TextIO = sys.stdin) -> str:
-    value = stdin.readline().strip()
+    return _validate_camera_url(stdin.readline().strip())
+
+
+def _validate_camera_url(value: str) -> str:
     parsed = urlsplit(value)
     if parsed.scheme.lower() not in {"rtsp", "rtsps", "http", "https"}:
         raise ValueError("camera URL must use RTSP, RTSPS, HTTP, or HTTPS")
     if not parsed.hostname:
         raise ValueError("camera URL must include a host")
     return value
+
+
+def model_instance_id(model_path: str, device: str, explicit: str = "") -> str:
+    raw = str(explicit or "").strip()
+    if not raw:
+        stem = Path(model_path).stem if str(model_path or "").strip() else "detect"
+        raw = f"survng-{stem}-{device or 'GPU'}"
+    cleaned = "".join(
+        ch if ch.isalnum() or ch in "-_" else "-" for ch in raw
+    ).strip("-_")
+    return (cleaned or "survng-detect")[:96]
+
+
+def _pipeline_name(stream_id: str) -> str:
+    suffix = "".join(ch if ch.isalnum() else "-" for ch in stream_id).strip("-")
+    return f"survng-dls-{suffix[:24] or 'live'}"
+
+
+def _set_optional_property(element, name: str, value: object) -> None:
+    try:
+        element.set_property(name, value)
+    except Exception:
+        pass
 
 
 def _qualifier_width(value: int) -> int:
@@ -303,9 +340,19 @@ def _packed_gray(pixels: bytes, width: int, height: int) -> bytes:
     return b"".join(pixels[row * stride : row * stride + width] for row in range(height))
 
 
-def _write(stdout, message: bytes) -> None:
-    stdout.write(message)
-    stdout.flush()
+def _write(
+    stdout,
+    message: bytes,
+    *,
+    lock: threading.Lock | None = None,
+) -> None:
+    if lock is None:
+        stdout.write(message)
+        stdout.flush()
+        return
+    with lock:
+        stdout.write(message)
+        stdout.flush()
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -336,18 +383,237 @@ def run(argv: list[str] | None = None) -> int:
         and model_path.is_file()
         and _factory_available(Gst, "gvadetect")
     )
+    instance_id = (
+        model_instance_id(str(model_path or ""), args.device, args.model_instance_id)
+        if detect
+        else ""
+    )
+    if args.supervisor:
+        return _run_supervisor(
+            Gst,
+            args,
+            detect=detect,
+            model_path=model_path,
+            instance_id=instance_id,
+            rate=rate,
+            qualifier_width=qualifier_width,
+            jpeg_rate=jpeg_rate,
+            open_timeout=open_timeout,
+            stdout=stdout,
+        )
+    url = "" if args.test_source else _read_camera_url()
+    return _pump_pipeline(
+        Gst,
+        args,
+        url=url,
+        stream_id="",
+        detect=detect,
+        model_path=model_path,
+        instance_id=instance_id,
+        rate=rate,
+        qualifier_width=qualifier_width,
+        jpeg_rate=jpeg_rate,
+        open_timeout=open_timeout,
+        stdout=stdout,
+        stdout_lock=None,
+        stop_event=None,
+        encode_frame=encode_frame,
+        encode_jpeg=encode_jpeg,
+        encode_json=encode_json,
+        TYPE_DETECTIONS=TYPE_DETECTIONS,
+        TYPE_STATUS=TYPE_STATUS,
+    )
 
-    pipeline = Gst.Pipeline.new("survng-dlstreamer-live")
+
+def _run_supervisor(
+    Gst,
+    args,
+    *,
+    detect: bool,
+    model_path: Path | None,
+    instance_id: str,
+    rate: Fraction,
+    qualifier_width: int,
+    jpeg_rate: Fraction | None,
+    open_timeout: float,
+    stdout,
+) -> int:
+    from survng.app.dlstreamer_protocol import (
+        TYPE_DETECTIONS,
+        TYPE_STATUS,
+        encode_frame,
+        encode_jpeg,
+        encode_json,
+    )
+    from survng.app.redact import redact_secret_text
+
+    stdout_lock = threading.Lock()
+    stop_all = threading.Event()
+    workers: dict[str, tuple[threading.Event, threading.Thread]] = {}
+    workers_lock = threading.Lock()
+    print(
+        f"survng-dls supervisor model_instance_id={instance_id or 'none'}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    def request_stop(_signum=None, _frame=None) -> None:
+        stop_all.set()
+        with workers_lock:
+            for event, _thread in workers.values():
+                event.set()
+
+    previous_handlers = {
+        signum: signal.signal(signum, request_stop)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def stop_stream(stream_id: str) -> None:
+        with workers_lock:
+            worker = workers.pop(stream_id, None)
+        if worker is None:
+            return
+        event, thread = worker
+        event.set()
+        thread.join(timeout=2.0)
+
+    def start_stream(stream_id: str, url: str) -> None:
+        stop_stream(stream_id)
+        event = threading.Event()
+
+        def target() -> None:
+            try:
+                _pump_pipeline(
+                    Gst,
+                    args,
+                    url=url,
+                    stream_id=stream_id,
+                    detect=detect,
+                    model_path=model_path,
+                    instance_id=instance_id,
+                    rate=rate,
+                    qualifier_width=qualifier_width,
+                    jpeg_rate=jpeg_rate,
+                    open_timeout=open_timeout,
+                    stdout=stdout,
+                    stdout_lock=stdout_lock,
+                    stop_event=event,
+                    encode_frame=encode_frame,
+                    encode_jpeg=encode_jpeg,
+                    encode_json=encode_json,
+                    TYPE_DETECTIONS=TYPE_DETECTIONS,
+                    TYPE_STATUS=TYPE_STATUS,
+                    install_signals=False,
+                    test_source=False,
+                )
+            except Exception as exc:
+                _write(
+                    stdout,
+                    encode_json(
+                        TYPE_STATUS,
+                        {"ok": False, "error": redact_secret_text(exc)},
+                        stream_id=stream_id,
+                    ),
+                    lock=stdout_lock,
+                )
+
+        thread = threading.Thread(
+            target=target,
+            name=f"survng-dls-{stream_id[:16]}",
+            daemon=True,
+        )
+        with workers_lock:
+            workers[stream_id] = (event, thread)
+        thread.start()
+
+    try:
+        while not stop_all.is_set():
+            line = sys.stdin.buffer.readline()
+            if not line:
+                break
+            try:
+                command = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(command, dict):
+                continue
+            operation = str(command.get("op") or "").strip()
+            stream_id = str(command.get("stream_id") or "").strip()
+            if not stream_id:
+                continue
+            if operation == "remove":
+                stop_stream(stream_id)
+                continue
+            if operation != "add":
+                continue
+            try:
+                url = _validate_camera_url(str(command.get("url") or ""))
+            except ValueError as exc:
+                _write(
+                    stdout,
+                    encode_json(
+                        TYPE_STATUS,
+                        {"ok": False, "error": redact_secret_text(exc)},
+                        stream_id=stream_id,
+                    ),
+                    lock=stdout_lock,
+                )
+                continue
+            start_stream(stream_id, url)
+    finally:
+        request_stop()
+        with workers_lock:
+            remaining = list(workers.items())
+            workers.clear()
+        for _stream_id, (event, thread) in remaining:
+            event.set()
+            thread.join(timeout=2.0)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    return 0
+
+
+def _pump_pipeline(
+    Gst,
+    args,
+    *,
+    url: str,
+    stream_id: str,
+    detect: bool,
+    model_path: Path | None,
+    instance_id: str,
+    rate: Fraction,
+    qualifier_width: int,
+    jpeg_rate: Fraction | None,
+    open_timeout: float,
+    stdout,
+    stdout_lock: threading.Lock | None,
+    stop_event: threading.Event | None,
+    encode_frame,
+    encode_jpeg,
+    encode_json,
+    TYPE_DETECTIONS,
+    TYPE_STATUS,
+    install_signals: bool = True,
+    test_source: bool | None = None,
+) -> int:
+    use_test_source = args.test_source if test_source is None else test_source
+    pipeline = Gst.Pipeline.new(_pipeline_name(stream_id))
     if pipeline is None:
         raise RuntimeError("could not create GStreamer pipeline")
 
-    source, source_factory = _make_live_source(Gst, test_source=args.test_source)
-    print(f"survng-dls source_element={source_factory}", file=sys.stderr, flush=True)
-    if args.test_source:
+    source, source_factory = _make_live_source(Gst, test_source=use_test_source)
+    print(
+        f"survng-dls source_element={source_factory}"
+        + (f" stream_id={stream_id}" if stream_id else ""),
+        file=sys.stderr,
+        flush=True,
+    )
+    if use_test_source:
         source.set_property("is-live", True)
         source.set_property("pattern", "ball")
     else:
-        source.set_property("uri", _read_camera_url())
+        source.set_property("uri", url)
 
         def configure_rtsp(_bin, element) -> None:
             if element.find_property("protocols") is not None:
@@ -427,16 +693,13 @@ def run(argv: list[str] | None = None) -> int:
         detector = _element(Gst, "gvadetect", "detect")
         detector.set_property("model", str(model_path))
         detector.set_property("device", args.device)
-        preprocess = "va" if args.decoder == "va" and not args.test_source else "opencv"
-        try:
-            detector.set_property("pre-process-backend", preprocess)
-        except Exception:
-            pass
+        preprocess = "va" if args.decoder == "va" and not use_test_source else "opencv"
+        _set_optional_property(detector, "pre-process-backend", preprocess)
+        if instance_id:
+            _set_optional_property(detector, "model-instance-id", instance_id)
+            _set_optional_property(detector, "scheduling-policy", "latency")
         if args.model_proc:
-            try:
-                detector.set_property("model-proc", args.model_proc)
-            except Exception:
-                pass
+            _set_optional_property(detector, "model-proc", args.model_proc)
         if args.labels:
             for property_name in ("labels", "labels-file"):
                 try:
@@ -539,7 +802,7 @@ def run(argv: list[str] | None = None) -> int:
             _link_tee(Gst, tee, jpeg_queue)
         linked = True
 
-    if args.test_source:
+    if use_test_source:
         if not source.link(tee):
             raise RuntimeError("could not link generated source")
         _link_tee(Gst, tee, frame_queue)
@@ -563,16 +826,17 @@ def run(argv: list[str] | None = None) -> int:
 
     pipeline.connect("deep-element-added", remember_element)
     bus = pipeline.get_bus()
-    stop_requested = False
+    local_stop = stop_event or threading.Event()
+    previous_handlers: dict[int, object] = {}
 
     def request_stop(_signum, _frame) -> None:
-        nonlocal stop_requested
-        stop_requested = True
+        local_stop.set()
 
-    previous_handlers = {
-        signum: signal.signal(signum, request_stop)
-        for signum in (signal.SIGINT, signal.SIGTERM)
-    }
+    if install_signals:
+        previous_handlers = {
+            signum: signal.signal(signum, request_stop)
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        }
     latest_objects: list[dict[str, Any]] = []
     objects_lock = threading.Lock()
     started = time.monotonic()
@@ -581,7 +845,7 @@ def run(argv: list[str] | None = None) -> int:
     try:
         if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError("GStreamer pipeline failed to enter PLAYING state")
-        while not stop_requested:
+        while not local_stop.is_set():
             now = time.monotonic()
             if first_frame_at is None and now - started >= open_timeout:
                 raise TimeoutError("DL Streamer first frame timed out")
@@ -665,8 +929,12 @@ def run(argv: list[str] | None = None) -> int:
                             "qualifier_format": "GRAY8",
                             "qualifier_width": qualifier_width,
                             "jpeg_preview": jpeg_sink is not None,
+                            "model_instance_id": instance_id,
+                            "shared_detect": bool(instance_id and stream_id),
                         },
+                        stream_id=stream_id,
                     ),
+                    lock=stdout_lock,
                 )
             sequence += 1
             _write(
@@ -677,7 +945,9 @@ def run(argv: list[str] | None = None) -> int:
                     sequence=sequence,
                     pts=time.monotonic() - started,
                     pixels=pixels,
+                    stream_id=stream_id,
                 ),
+                lock=stdout_lock,
             )
             if jpeg_bytes:
                 _write(
@@ -688,7 +958,9 @@ def run(argv: list[str] | None = None) -> int:
                         sequence=sequence,
                         pts=time.monotonic() - started,
                         jpeg=jpeg_bytes,
+                        stream_id=stream_id,
                     ),
+                    lock=stdout_lock,
                 )
             with objects_lock:
                 objects = list(latest_objects)
@@ -701,7 +973,9 @@ def run(argv: list[str] | None = None) -> int:
                             "objects": objects,
                             "decoder_elements": sorted(decoder_elements),
                         },
+                        stream_id=stream_id,
                     ),
+                    lock=stdout_lock,
                 )
     finally:
         pipeline.set_state(Gst.State.NULL)

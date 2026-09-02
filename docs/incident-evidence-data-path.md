@@ -36,8 +36,9 @@ ONVIF/manual notice or qualified EMA episode
 
 The live check reduces time to first object evidence. It uses boxes already
 produced by GStreamer `gvadetect` on the capture pipeline rather than a second
-OpenVINO pass on the live GPU. The recorded pass supplies the stronger
-evidence. A fast negative, missing frame, stale frame, invalid frame, or empty
+OpenVINO pass on the live GPU. Cameras share that detector through one
+`survng-dls` process and `model-instance-id`. The recorded pass supplies the
+stronger evidence. A fast negative, missing frame, stale frame, invalid frame, or empty
 sidecar never cancels the recorded pass.
 
 ## Why the live/substream frame is used

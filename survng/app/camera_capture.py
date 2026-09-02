@@ -857,11 +857,15 @@ class CameraCaptureService:
             )
             self._pipeline_status[source] = dict(payload)
         if factory and factory != previous:
+            instance_id = str(payload.get("model_instance_id") or "").strip()
+            detail = factory
+            if instance_id:
+                detail = f"{factory} model-instance-id={instance_id}"
             LOGGER.info(
                 "live capture for %s/%s uses %s",
                 self.camera_id,
                 source,
-                factory,
+                detail,
             )
 
     def _store_detections(self, source: str, handle: CaptureHandle) -> None:
