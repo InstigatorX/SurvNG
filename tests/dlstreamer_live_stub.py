@@ -9,6 +9,7 @@ from survng.app.dlstreamer_protocol import (
     TYPE_DETECTIONS,
     TYPE_STATUS,
     encode_frame,
+    encode_jpeg,
     encode_json,
 )
 
@@ -27,11 +28,23 @@ def main() -> int:
                 "hardware_decoder_selected": False,
                 "preprocess_backend": "opencv",
                 "first_frame_ms": 12.5,
+                "qualifier_format": "BGR",
+                "qualifier_width": 2,
+                "jpeg_preview": True,
             },
         )
     )
     stdout.write(
         encode_frame(width=2, height=2, sequence=1, pts=0.05, pixels=pixels)
+    )
+    stdout.write(
+        encode_jpeg(
+            width=2,
+            height=2,
+            sequence=1,
+            pts=0.05,
+            jpeg=b"\xff\xd8stub-jpeg\xff\xd9",
+        )
     )
     stdout.write(
         encode_json(

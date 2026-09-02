@@ -6,12 +6,15 @@ from survng.app.dlstreamer_protocol import (
     MAX_MESSAGE_BYTES,
     TYPE_DETECTIONS,
     TYPE_FRAME,
+    TYPE_JPEG,
     TYPE_STATUS,
     MessageReader,
     ProtocolError,
     decode_frame_payload,
+    decode_jpeg_payload,
     decode_json_payload,
     encode_frame,
+    encode_jpeg,
     encode_json,
 )
 
@@ -27,6 +30,30 @@ def test_frame_round_trip_preserves_bgr_pixels() -> None:
     width, height, sequence, pts, decoded = decode_frame_payload(payload)
     assert (width, height, sequence, pts, decoded) == (1, 1, 7, 1.25, pixels)
     assert reader.pop() is None
+
+
+def test_frame_round_trip_preserves_gray_pixels() -> None:
+    pixels = bytes((9, 18, 27, 36))
+    encoded = encode_frame(width=2, height=2, sequence=3, pts=0.5, pixels=pixels)
+    reader = MessageReader()
+    reader.feed(encoded)
+    message_type, payload = reader.pop() or (0, b"")
+
+    assert message_type == TYPE_FRAME
+    width, height, sequence, pts, decoded = decode_frame_payload(payload)
+    assert (width, height, sequence, pts, decoded) == (2, 2, 3, 0.5, pixels)
+
+
+def test_jpeg_round_trip_preserves_bytes() -> None:
+    jpeg = b"\xff\xd8\xff\xd9payload"
+    encoded = encode_jpeg(width=8, height=4, sequence=2, pts=0.25, jpeg=jpeg)
+    reader = MessageReader()
+    reader.feed(encoded)
+    message_type, payload = reader.pop() or (0, b"")
+
+    assert message_type == TYPE_JPEG
+    width, height, sequence, pts, decoded = decode_jpeg_payload(payload)
+    assert (width, height, sequence, pts, decoded) == (8, 4, 2, 0.25, jpeg)
 
 
 def test_json_messages_round_trip() -> None:

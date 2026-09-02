@@ -24,6 +24,7 @@ def _service(
     random_value: float = 0.0,
     stopped: list[bool] | None = None,
     detector: Mock | None = None,
+    jpeg_provider=None,
 ) -> CameraMediaService:
     camera = CameraConfig(
         id="gate",
@@ -43,6 +44,7 @@ def _service(
         utc_now=lambda: datetime(2026, 8, 6, 12, tzinfo=timezone.utc),
         time_ns=lambda: 123456789,
         sleeper=lambda _delay: None,
+        jpeg_provider=jpeg_provider,
     )
 
 
@@ -59,6 +61,19 @@ def test_snapshot_returns_decodable_jpeg_without_persisting_it() -> None:
         decoded = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
         assert decoded is not None
         assert decoded.shape == (24, 32, 3)
+        assert list(service.snapshots_dir.iterdir()) == []
+
+
+def test_snapshot_prefers_pipeline_jpeg_when_provided() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        provided = b"\xff\xd8pipeline-jpeg\xff\xd9"
+        service = _service(
+            Path(tmpdir),
+            frame=np.full((24, 32, 3), 91, dtype=np.uint8),
+            jpeg_provider=lambda _source: provided,
+        )
+
+        assert service.snapshot("live") == provided
         assert list(service.snapshots_dir.iterdir()) == []
 
 

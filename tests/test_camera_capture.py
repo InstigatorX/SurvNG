@@ -4,6 +4,7 @@ import threading
 import time
 from collections import deque
 
+import cv2
 import numpy as np
 import pytest
 
@@ -689,6 +690,37 @@ def test_capture_stores_sidecar_detections() -> None:
     assert detections[0]["label"] == "person"
     assert status["live_pipeline"]["preprocess_backend"] == "va"
     assert status["live_pipeline"]["hardware_decoder_selected"] is True
+
+
+def test_capture_stores_jpeg_preview() -> None:
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        np.full((8, 12, 3), (20, 40, 200), dtype=np.uint8),
+    )
+    assert ok
+    jpeg = encoded.tobytes()
+
+    class PreviewHandle(FakeHandle):
+        def pop_jpeg(self):
+            return jpeg
+
+    class PreviewBackend(FakeBackend):
+        def create_handle(self) -> CaptureHandle:
+            handle = PreviewHandle([np.zeros((4, 6), dtype=np.uint8)])
+            self.handles.append(handle)
+            return handle
+
+    service = _service(PreviewBackend())
+    assert service.start()
+    _wait_until(lambda: service.latest_jpeg("live") is not None)
+    stored = service.latest_jpeg("live")
+    preview = service.latest_preview_image("live")
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+    assert stored == jpeg
+    assert preview is not None
+    assert preview.ndim == 3
+    assert preview.shape[2] == 3
 
 
 def test_capture_failure_includes_redacted_live_detail() -> None:

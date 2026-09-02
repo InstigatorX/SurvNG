@@ -27,8 +27,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Decode a camera URL with GStreamer, optionally run gvadetect on "
-            "VAMemory, and emit BGR frames for SurvNG. The URL is read from "
-            "stdin so it never appears in process arguments."
+            "VAMemory, and emit a 320-wide grayscale qualifier plus JPEG "
+            "preview frames. The URL is read from stdin so it never appears "
+            "in process arguments."
         )
     )
     parser.add_argument("--fps", type=float, default=5.0)
@@ -39,6 +40,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-proc", default="", help="optional gvadetect model-proc JSON")
     parser.add_argument("--labels", default="", help="optional gvadetect labels file")
     parser.add_argument("--device", default="GPU")
+    parser.add_argument(
+        "--frame-width",
+        type=int,
+        default=320,
+        help="grayscale qualifier width in pixels",
+    )
+    parser.add_argument(
+        "--jpeg-fps",
+        type=float,
+        default=1.0,
+        help="JPEG preview rate; 0 disables the JPEG branch",
+    )
     parser.add_argument(
         "--no-detect",
         action="store_true",
@@ -60,6 +73,10 @@ def _read_camera_url(stdin: TextIO = sys.stdin) -> str:
     if not parsed.hostname:
         raise ValueError("camera URL must include a host")
     return value
+
+
+def _qualifier_width(value: int) -> int:
+    return int(min(960, max(240, value)))
 
 
 def _frame_rate(value: float) -> Fraction:
@@ -204,6 +221,18 @@ def _normalize_gva_objects(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return objects
 
 
+def _packed_gray(pixels: bytes, width: int, height: int) -> bytes:
+    expected = width * height
+    if len(pixels) == expected:
+        return pixels
+    if height <= 0 or len(pixels) < expected:
+        raise RuntimeError("GStreamer grayscale frame was truncated")
+    stride = len(pixels) // height
+    if stride < width:
+        raise RuntimeError("GStreamer grayscale frame was truncated")
+    return b"".join(pixels[row * stride : row * stride + width] for row in range(height))
+
+
 def _write(stdout, message: bytes) -> None:
     stdout.write(message)
     stdout.flush()
@@ -214,6 +243,7 @@ def run(argv: list[str] | None = None) -> int:
         TYPE_DETECTIONS,
         TYPE_STATUS,
         encode_frame,
+        encode_jpeg,
         encode_json,
     )
 
@@ -222,6 +252,8 @@ def run(argv: list[str] | None = None) -> int:
     _apply_dlstreamer_env()
     args = _parser().parse_args(argv)
     rate = _frame_rate(args.fps)
+    qualifier_width = _qualifier_width(args.frame_width)
+    jpeg_rate = _frame_rate(args.jpeg_fps) if args.jpeg_fps > 0 else None
     open_timeout = _positive_seconds(args.open_timeout, "open timeout")
     stdout = sys.stdout.buffer
     Gst = _load_gstreamer()
@@ -266,12 +298,14 @@ def run(argv: list[str] | None = None) -> int:
     frame_queue.set_property("leaky", 2)
     videorate = _element(Gst, "videorate", "drop-only-rate")
     videorate.set_property("drop-only", True)
-    convert = _element(Gst, "videoconvert", "system-memory-bgr")
+    convert = _element(Gst, "videoconvert", "qualifier-gray")
+    scale = _element(Gst, "videoscale", "qualifier-scale")
     capsfilter = _element(Gst, "capsfilter", "frame-caps")
     capsfilter.set_property(
         "caps",
         Gst.Caps.from_string(
-            f"video/x-raw,format=BGR,framerate={rate.numerator}/{rate.denominator}"
+            "video/x-raw,format=GRAY8,width="
+            f"{qualifier_width},framerate={rate.numerator}/{rate.denominator}"
         ),
     )
     sink = _element(Gst, "appsink", "frame-sink")
@@ -280,7 +314,40 @@ def run(argv: list[str] | None = None) -> int:
     sink.set_property("drop", True)
     sink.set_property("sync", False)
 
-    elements = [source, tee, frame_queue, videorate, convert, capsfilter, sink]
+    elements = [source, tee, frame_queue, videorate, convert, scale, capsfilter, sink]
+    jpeg_queue = None
+    jpeg_rate_el = None
+    jpeg_convert = None
+    jpeg_encoder = None
+    jpeg_sink = None
+    if jpeg_rate is not None and _factory_available(Gst, "jpegenc"):
+        jpeg_queue = _element(Gst, "queue", "jpeg-queue")
+        jpeg_queue.set_property("max-size-buffers", 1)
+        jpeg_queue.set_property("leaky", 2)
+        jpeg_rate_el = _element(Gst, "videorate", "jpeg-rate")
+        jpeg_rate_el.set_property("drop-only", True)
+        jpeg_convert = _element(Gst, "videoconvert", "jpeg-convert")
+        jpeg_caps = _element(Gst, "capsfilter", "jpeg-caps")
+        jpeg_caps.set_property(
+            "caps",
+            Gst.Caps.from_string(
+                "video/x-raw,format=I420,framerate="
+                f"{jpeg_rate.numerator}/{jpeg_rate.denominator}"
+            ),
+        )
+        jpeg_encoder = _element(Gst, "jpegenc", "jpeg-preview")
+        try:
+            jpeg_encoder.set_property("quality", 80)
+        except Exception:
+            pass
+        jpeg_sink = _element(Gst, "appsink", "jpeg-sink")
+        jpeg_sink.set_property("emit-signals", False)
+        jpeg_sink.set_property("max-buffers", 1)
+        jpeg_sink.set_property("drop", True)
+        jpeg_sink.set_property("sync", False)
+        elements.extend(
+            [jpeg_queue, jpeg_rate_el, jpeg_convert, jpeg_caps, jpeg_encoder, jpeg_sink]
+        )
     meta_sink = None
     detect_queue = None
     detector = None
@@ -341,13 +408,35 @@ def run(argv: list[str] | None = None) -> int:
     for left, right in (
         (frame_queue, videorate),
         (videorate, convert),
-        (convert, capsfilter),
+        (convert, scale),
+        (scale, capsfilter),
         (capsfilter, sink),
     ):
         if not left.link(right):
             raise RuntimeError(
                 f"could not link {left.get_name()} to {right.get_name()}"
             )
+    if (
+        jpeg_queue is not None
+        and jpeg_rate_el is not None
+        and jpeg_convert is not None
+        and jpeg_encoder is not None
+        and jpeg_sink is not None
+    ):
+        jpeg_caps = pipeline.get_by_name("jpeg-caps")
+        if jpeg_caps is None:
+            raise RuntimeError("could not find JPEG caps")
+        for left, right in (
+            (jpeg_queue, jpeg_rate_el),
+            (jpeg_rate_el, jpeg_convert),
+            (jpeg_convert, jpeg_caps),
+            (jpeg_caps, jpeg_encoder),
+            (jpeg_encoder, jpeg_sink),
+        ):
+            if not left.link(right):
+                raise RuntimeError(
+                    f"could not link {left.get_name()} to {right.get_name()}"
+                )
     if detect and detect_queue is not None and detector is not None:
         if va_caps is not None:
             if not detect_queue.link(va_caps) or not va_caps.link(detector):
@@ -379,6 +468,8 @@ def run(argv: list[str] | None = None) -> int:
         _link_tee(Gst, tee, frame_queue)
         if detect_queue is not None:
             _link_tee(Gst, tee, detect_queue)
+        if jpeg_queue is not None:
+            _link_tee(Gst, tee, jpeg_queue)
         linked = True
 
     if args.test_source:
@@ -387,6 +478,8 @@ def run(argv: list[str] | None = None) -> int:
         _link_tee(Gst, tee, frame_queue)
         if detect_queue is not None:
             _link_tee(Gst, tee, detect_queue)
+        if jpeg_queue is not None:
+            _link_tee(Gst, tee, jpeg_queue)
         linked = True
     else:
         source.connect("pad-added", link_decoded_pad)
@@ -464,10 +557,24 @@ def run(argv: list[str] | None = None) -> int:
                 pixels = bytes(info.data)
             finally:
                 buffer.unmap(info)
-            expected = width * height * 3
-            if len(pixels) < expected:
-                raise RuntimeError("GStreamer frame was truncated")
-            pixels = pixels[:expected]
+            pixels = _packed_gray(pixels, width, height)
+            jpeg_bytes = b""
+            jpeg_width = 0
+            jpeg_height = 0
+            if jpeg_sink is not None:
+                jpeg_sample = jpeg_sink.emit("try-pull-sample", 0)
+                if jpeg_sample is not None:
+                    jpeg_buffer = jpeg_sample.get_buffer()
+                    jpeg_caps = jpeg_sample.get_caps()
+                    jpeg_structure = jpeg_caps.get_structure(0)
+                    jpeg_width = int(jpeg_structure.get_value("width") or 0)
+                    jpeg_height = int(jpeg_structure.get_value("height") or 0)
+                    mapped, info = jpeg_buffer.map(Gst.MapFlags.READ)
+                    if mapped:
+                        try:
+                            jpeg_bytes = bytes(info.data)
+                        finally:
+                            jpeg_buffer.unmap(info)
             if first_frame_at is None:
                 first_frame_at = time.monotonic()
                 selected = sorted(decoder_elements)
@@ -487,6 +594,9 @@ def run(argv: list[str] | None = None) -> int:
                                 (first_frame_at - started) * 1000.0,
                                 3,
                             ),
+                            "qualifier_format": "GRAY8",
+                            "qualifier_width": qualifier_width,
+                            "jpeg_preview": jpeg_sink is not None,
                         },
                     ),
                 )
@@ -501,6 +611,17 @@ def run(argv: list[str] | None = None) -> int:
                     pixels=pixels,
                 ),
             )
+            if jpeg_bytes:
+                _write(
+                    stdout,
+                    encode_jpeg(
+                        width=max(1, jpeg_width),
+                        height=max(1, jpeg_height),
+                        sequence=sequence,
+                        pts=time.monotonic() - started,
+                        jpeg=jpeg_bytes,
+                    ),
+                )
             with objects_lock:
                 objects = list(latest_objects)
             if objects:

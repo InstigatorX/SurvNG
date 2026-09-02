@@ -27,9 +27,11 @@ from .camera_capture import (
 from .dlstreamer_protocol import (
     TYPE_DETECTIONS,
     TYPE_FRAME,
+    TYPE_JPEG,
     TYPE_STATUS,
     MessageReader,
     decode_frame_payload,
+    decode_jpeg_payload,
     decode_json_payload,
 )
 
@@ -64,6 +66,8 @@ class DlStreamerCaptureOptions:
     model_proc_path: str = ""
     inference_device: str = "GPU"
     detect_enabled: bool = False
+    frame_width: int = 320
+    jpeg_fps: float = 1.0
 
 
 def live_python_executable(preferred: str = "") -> str:
@@ -86,7 +90,7 @@ def live_python_executable(preferred: str = "") -> str:
 
 
 class DlStreamerCaptureHandle:
-    """One isolated live pipeline whose stdout carries framed BGR messages."""
+    """One isolated live pipeline whose stdout carries gray frames and JPEG."""
 
     def __init__(self, *, read_timeout_ms: int) -> None:
         self._read_timeout_seconds = max(0.001, read_timeout_ms / 1000.0)
@@ -98,6 +102,7 @@ class DlStreamerCaptureHandle:
         self._status: dict[str, object] = {}
         self._detections: list[dict[str, object]] = []
         self._detections_lock = threading.Lock()
+        self._jpeg: bytes | None = None
 
     def is_opened(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -160,6 +165,11 @@ class DlStreamerCaptureHandle:
             detections = list(self._detections)
             self._detections = []
         return detections
+
+    def pop_jpeg(self) -> bytes | None:
+        with self._detections_lock:
+            jpeg, self._jpeg = self._jpeg, None
+            return jpeg
 
     def close(self) -> None:
         process, self._process = self._process, None
@@ -262,7 +272,15 @@ class DlStreamerCaptureHandle:
     def _apply_message(self, message_type: int, payload: bytes) -> np.ndarray | None:
         if message_type == TYPE_FRAME:
             width, height, _sequence, _pts, pixels = decode_frame_payload(payload)
+            pixel_count = width * height
+            if len(pixels) == pixel_count:
+                return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width).copy()
             return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 3).copy()
+        if message_type == TYPE_JPEG:
+            _width, _height, _sequence, _pts, jpeg = decode_jpeg_payload(payload)
+            with self._detections_lock:
+                self._jpeg = jpeg
+            return None
         if message_type == TYPE_DETECTIONS:
             decoded = decode_json_payload(payload)
             objects = decoded.get("objects")
@@ -359,6 +377,10 @@ class DlStreamerCaptureBackend:
             self.options.decoder,
             "--device",
             self.options.inference_device or "GPU",
+            "--frame-width",
+            str(max(240, min(960, int(self.options.frame_width or 320)))),
+            "--jpeg-fps",
+            f"{max(0.0, min(5.0, float(self.options.jpeg_fps))):.6f}",
         ]
         model_path = self.options.model_path.strip()
         if self.options.detect_enabled and model_path:

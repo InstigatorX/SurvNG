@@ -13,7 +13,9 @@ FRAME_HEADER = struct.Struct("!IIId")
 TYPE_FRAME = 1
 TYPE_DETECTIONS = 2
 TYPE_STATUS = 3
+TYPE_JPEG = 4
 MAX_MESSAGE_BYTES = 256 * 1024 * 1024
+_MESSAGE_TYPES = {TYPE_FRAME, TYPE_DETECTIONS, TYPE_STATUS, TYPE_JPEG}
 
 
 class ProtocolError(RuntimeError):
@@ -21,7 +23,7 @@ class ProtocolError(RuntimeError):
 
 
 def encode_message(message_type: int, payload: bytes) -> bytes:
-    if message_type not in {TYPE_FRAME, TYPE_DETECTIONS, TYPE_STATUS}:
+    if message_type not in _MESSAGE_TYPES:
         raise ProtocolError(f"unsupported live-capture message type {message_type}")
     if len(payload) > MAX_MESSAGE_BYTES:
         raise ProtocolError("live-capture message exceeded 256 MiB")
@@ -36,12 +38,28 @@ def encode_frame(
     pts: float,
     pixels: bytes,
 ) -> bytes:
-    expected = width * height * 3
-    if width <= 0 or height <= 0 or len(pixels) != expected:
-        raise ProtocolError("live-capture frame payload does not match BGR dimensions")
+    pixel_count = width * height
+    if width <= 0 or height <= 0 or len(pixels) not in {pixel_count, pixel_count * 3}:
+        raise ProtocolError("live-capture frame payload does not match gray or BGR dimensions")
     return encode_message(
         TYPE_FRAME,
         FRAME_HEADER.pack(width, height, sequence, float(pts)) + pixels,
+    )
+
+
+def encode_jpeg(
+    *,
+    width: int,
+    height: int,
+    sequence: int,
+    pts: float,
+    jpeg: bytes,
+) -> bytes:
+    if width <= 0 or height <= 0 or not jpeg:
+        raise ProtocolError("live-capture JPEG payload is empty")
+    return encode_message(
+        TYPE_JPEG,
+        FRAME_HEADER.pack(width, height, sequence, float(pts)) + jpeg,
     )
 
 
@@ -57,10 +75,20 @@ def decode_frame_payload(payload: bytes) -> tuple[int, int, int, float, bytes]:
         raise ProtocolError("truncated live-capture frame header")
     width, height, sequence, pts = FRAME_HEADER.unpack_from(payload)
     pixels = payload[FRAME_HEADER.size :]
-    expected = width * height * 3
-    if width <= 0 or height <= 0 or len(pixels) != expected:
-        raise ProtocolError("live-capture frame payload does not match BGR dimensions")
+    pixel_count = width * height
+    if width <= 0 or height <= 0 or len(pixels) not in {pixel_count, pixel_count * 3}:
+        raise ProtocolError("live-capture frame payload does not match gray or BGR dimensions")
     return width, height, sequence, float(pts), pixels
+
+
+def decode_jpeg_payload(payload: bytes) -> tuple[int, int, int, float, bytes]:
+    if len(payload) < FRAME_HEADER.size + 2:
+        raise ProtocolError("truncated live-capture JPEG header")
+    width, height, sequence, pts = FRAME_HEADER.unpack_from(payload)
+    jpeg = payload[FRAME_HEADER.size :]
+    if width <= 0 or height <= 0 or not jpeg:
+        raise ProtocolError("live-capture JPEG payload is empty")
+    return width, height, sequence, float(pts), jpeg
 
 
 def decode_json_payload(payload: bytes) -> dict[str, Any]:
@@ -92,7 +120,7 @@ class MessageReader:
         magic, message_type, length = MESSAGE_HEADER.unpack_from(self._buffer)
         if magic != MAGIC:
             raise ProtocolError("live-capture child emitted invalid framing")
-        if message_type not in {TYPE_FRAME, TYPE_DETECTIONS, TYPE_STATUS}:
+        if message_type not in _MESSAGE_TYPES:
             raise ProtocolError(f"unsupported live-capture message type {message_type}")
         if length > MAX_MESSAGE_BYTES:
             raise ProtocolError("live-capture message exceeded 256 MiB")

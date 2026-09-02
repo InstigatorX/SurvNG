@@ -127,6 +127,7 @@ class CameraWorker:
             rejected_sample_rate=lambda: self.motion_config.rejected_sample_rate,
             stop_requested=self._stop.is_set,
             media_storage=media_storage,
+            jpeg_provider=lambda source: self.capture.latest_jpeg(source),
         )
         self.tracking_lifecycle = ObjectTrackingLifecycle(
             camera=camera,
@@ -507,12 +508,13 @@ class CameraWorker:
                 capture_generation=frame.generation,
                 lifecycle_generation=lifecycle_generation,
             )
-            # Keep timestamped live history for bridging open main segments.
-            self._remember_tracking_frame(
-                frame.image,
-                frame.captured_at_epoch,
-                source="live",
-            )
+            preview = self.capture.latest_preview_image("live")
+            if preview is not None:
+                self._remember_tracking_frame(
+                    preview,
+                    frame.captured_at_epoch,
+                    source="live",
+                )
         elif frame.source == "main":
             self._remember_tracking_frame(
                 frame.image,
@@ -532,6 +534,9 @@ class CameraWorker:
         source = self.camera.normalized_source(source)
         if self._stop.is_set():
             return None
+        preview = self.capture.latest_preview_image(source)
+        if preview is not None:
+            return preview
         frame = self.capture.request_frame(source)
         return frame.image if frame is not None else None
 
