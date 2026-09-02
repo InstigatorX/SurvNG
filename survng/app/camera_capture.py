@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Callable, Protocol
 
 import numpy as np
+import cv2
 
 from .security import redact_secret_text
 
@@ -268,6 +269,8 @@ class CameraCaptureService:
         self._frames: dict[str, CapturedFrame] = {}
         self._detections: dict[str, list[dict[str, object]]] = {}
         self._pipeline_status: dict[str, dict[str, object]] = {}
+        self._jpegs: dict[str, bytes] = {}
+        self._preview: dict[str, np.ndarray] = {}
         self._last_access: dict[str, float] = {}
         self._errors: dict[str, str] = {}
         self._last_live_error = ""
@@ -492,6 +495,8 @@ class CameraCaptureService:
                     self._source_stops.pop(source, None)
             if not alive:
                 self._frames.clear()
+                self._jpegs.clear()
+                self._preview.clear()
                 self._last_access.clear()
                 self._errors.clear()
                 self._last_live_error = ""
@@ -704,8 +709,9 @@ class CameraCaptureService:
                             session_received_frame = True
                             consecutive_open_failures = 0
                             retry_delay = self.retry_initial_seconds
-                            self._publish_frame(source, image, stop_event)
                             self._store_sidecar_state(source, handle)
+                            self._store_preview(source, handle)
+                            self._publish_frame(source, image, stop_event)
                 except Exception as exc:
                     if not session_received_frame:
                         consecutive_open_failures += 1
@@ -787,6 +793,51 @@ class CameraCaptureService:
         source = self._normalize_source(source)
         with self._lock:
             return [dict(item) for item in self._detections.get(source, ())]
+
+    def latest_jpeg(self, source: str = "live") -> bytes | None:
+        source = self._normalize_source(source)
+        now = self._monotonic_clock()
+        with self._lock:
+            frame = self._frames.get(source)
+            payload = self._jpegs.get(source)
+            if (
+                frame is None
+                or not payload
+                or now - frame.captured_at_monotonic > self.stale_seconds
+            ):
+                return None
+            return bytes(payload)
+
+    def latest_preview_image(self, source: str = "live") -> np.ndarray | None:
+        source = self._normalize_source(source)
+        now = self._monotonic_clock()
+        with self._lock:
+            frame = self._frames.get(source)
+            preview = self._preview.get(source)
+            if (
+                frame is None
+                or now - frame.captured_at_monotonic > self.stale_seconds
+            ):
+                return None
+            return preview
+
+    def _store_preview(self, source: str, handle: CaptureHandle) -> None:
+        pop = getattr(handle, "pop_jpeg", None)
+        if not callable(pop):
+            return
+        try:
+            jpeg = pop()
+        except Exception:
+            return
+        if not isinstance(jpeg, (bytes, bytearray)) or not jpeg:
+            return
+        decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if decoded is None:
+            return
+        decoded.setflags(write=False)
+        with self._lock:
+            self._jpegs[source] = bytes(jpeg)
+            self._preview[source] = decoded
 
     def _store_sidecar_state(self, source: str, handle: CaptureHandle) -> None:
         self._store_detections(source, handle)

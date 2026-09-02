@@ -281,6 +281,19 @@ def test_unrecognized_preprocessor_does_not_create_gray_blur_cache() -> None:
     assert telemetry["derived_frame_bytes"] == 90 * 320 * 4
 
 
+def test_gray_qualifier_frames_skip_bgr_to_gray_conversion() -> None:
+    service = _service(_hooks(preprocessor_implementation="future_gpu"))
+    stop_event = threading.Event()
+    gray = np.full((90, 320), 77, dtype=np.uint8)
+
+    service.remember_frame(gray, 10.0, stop_event, 100.0)
+
+    assert service.frames[-1][1].shape == (90, 320)
+    assert service.frames[-1][1][0, 0] == 77
+    assert service.color_frames[-1][1].shape == (90, 320, 3)
+    assert service.color_frames[-1][1][0, 0].tolist() == [77, 77, 77]
+
+
 def test_raw_submission_defers_preprocessing_to_analysis_worker() -> None:
     stop_event = threading.Event()
     execute_continuous = Mock(side_effect=lambda _at: stop_event.set())

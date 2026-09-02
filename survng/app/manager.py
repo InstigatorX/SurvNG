@@ -331,6 +331,7 @@ class AppManager:
                 ),
                 labels_path=detector.labels_path,
                 model_proc_path=adjacent_model_proc(detector.resolved_model_path()),
+                frame_width=self.config.motion_qualification.frame_width,
             ),
         )
         self.state_events = StateEventBroker()

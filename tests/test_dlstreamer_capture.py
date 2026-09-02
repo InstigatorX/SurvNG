@@ -16,6 +16,14 @@ from survng.app.dlstreamer_capture import (
     DlStreamerCaptureOptions,
     adjacent_model_proc,
 )
+from survng.app.dlstreamer_protocol import (
+    TYPE_FRAME,
+    TYPE_JPEG,
+    TYPE_STATUS,
+    MessageReader,
+    decode_frame_payload,
+    decode_json_payload,
+)
 from survng.dlstreamer_live import (
     _SYSTEM_GST_PLUGINS,
     _apply_dlstreamer_env,
@@ -23,6 +31,7 @@ from survng.dlstreamer_live import (
     _drop_paths,
     _make_live_source,
     _normalize_gva_objects,
+    _packed_gray,
     _parser,
 )
 
@@ -49,6 +58,8 @@ def test_backend_command_keeps_url_and_uses_configured_policy() -> None:
     assert command[command.index("--rtsp-transport") + 1] == "udp"
     assert command[command.index("--fps") + 1] == "5.000000"
     assert command[command.index("--decoder") + 1] == "va"
+    assert command[command.index("--frame-width") + 1] == "320"
+    assert command[command.index("--jpeg-fps") + 1] == "1.000000"
     assert "--no-detect" in command
     assert "rtsp://" not in " ".join(command)
 
@@ -111,6 +122,15 @@ def test_live_parser_accepts_model_proc_and_labels() -> None:
     assert args.labels == "/tmp/l.txt"
 
 
+def test_live_parser_accepts_qualifier_and_jpeg_rate() -> None:
+    args = _parser().parse_args(
+        ["--frame-width", "480", "--jpeg-fps", "0", "--no-detect"]
+    )
+
+    assert args.frame_width == 480
+    assert args.jpeg_fps == 0.0
+
+
 def test_backend_warns_once_without_logging_url_credentials(caplog) -> None:
     backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1))
 
@@ -151,6 +171,7 @@ def test_handle_reads_stub_child_frames() -> None:
         assert frame[0, 0].tolist() == [20, 40, 200]
         detections = handle.pop_detections()
         assert detections[0]["label"] == "person"
+        assert handle.pop_jpeg() == b"\xff\xd8stub-jpeg\xff\xd9"
         status = handle.pipeline_status()
         assert status["ok"] is True
         assert status["hardware_decoder_selected"] is False
@@ -276,6 +297,29 @@ def test_capture_close_waits_for_stderr_drain_before_closing_stream() -> None:
     assert process.stdout.closed
 
 
+def test_handle_reshapes_gray_frames() -> None:
+    from survng.app.dlstreamer_protocol import encode_frame
+
+    handle = DlStreamerCaptureHandle(read_timeout_ms=1000)
+    pixels = bytes((1, 2, 3, 4, 5, 6))
+    encoded = encode_frame(width=3, height=2, sequence=1, pts=0.1, pixels=pixels)
+    from survng.app.dlstreamer_protocol import MessageReader
+
+    reader = MessageReader()
+    reader.feed(encoded)
+    message_type, payload = reader.pop() or (0, b"")
+    frame = handle._apply_message(message_type, payload)
+    assert frame is not None
+    assert frame.shape == (2, 3)
+    assert frame[0, 0] == 1
+    assert frame[1, 2] == 6
+
+
+def test_packed_gray_strips_row_stride() -> None:
+    pixels = bytes((1, 2, 9, 9, 3, 4, 9, 9))
+    assert _packed_gray(pixels, width=2, height=2) == bytes((1, 2, 3, 4))
+
+
 def test_normalize_gva_objects_maps_boxes() -> None:
     objects = _normalize_gva_objects(
         {
@@ -317,8 +361,6 @@ def _gstreamer_live_available() -> bool:
     reason="GStreamer videotestsrc is required for generated live capture",
 )
 def test_generated_source_emits_frames() -> None:
-    from survng.app.dlstreamer_protocol import TYPE_FRAME, MessageReader
-
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(ROOT), env.get("PYTHONPATH", "")) if part
@@ -346,6 +388,8 @@ def test_generated_source_emits_frames() -> None:
         reader = MessageReader()
         deadline = time.monotonic() + 5.0
         saw_frame = False
+        saw_jpeg = False
+        jpeg_preview = False
         while time.monotonic() < deadline:
             chunk = process.stdout.read1(65536)
             if chunk:
@@ -356,11 +400,24 @@ def test_generated_source_emits_frames() -> None:
                     break
                 time.sleep(0.02)
                 continue
-            message_type, _payload = popped
-            if message_type == TYPE_FRAME:
+            message_type, payload = popped
+            if message_type == TYPE_STATUS:
+                status = decode_json_payload(payload)
+                assert status["qualifier_format"] == "GRAY8"
+                assert status["qualifier_width"] == 320
+                jpeg_preview = bool(status.get("jpeg_preview"))
+            elif message_type == TYPE_FRAME:
+                width, height, _sequence, _pts, pixels = decode_frame_payload(payload)
+                assert len(pixels) == width * height
+                assert width == 320
                 saw_frame = True
+            elif message_type == TYPE_JPEG:
+                saw_jpeg = True
+            if saw_frame and (saw_jpeg or not jpeg_preview):
                 break
         assert saw_frame
+        if jpeg_preview:
+            assert saw_jpeg
     finally:
         process.terminate()
         process.wait(timeout=2.0)

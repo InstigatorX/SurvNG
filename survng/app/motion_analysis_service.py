@@ -500,17 +500,34 @@ class MotionAnalysisService:
         self._reset_for_clock_discontinuity(frame_epoch)
         preprocess_started = time.monotonic()
         try:
-            height, width = frame.shape[:2]
+            if frame.ndim == 2:
+                source_image = frame
+                is_gray = True
+            elif frame.ndim == 3 and frame.shape[-1] == 1:
+                source_image = frame[:, :, 0]
+                is_gray = True
+            else:
+                source_image = frame
+                is_gray = False
+            height, width = source_image.shape[:2]
             frame_width = self.qualification.settings()[2]
             scale = min(1.0, frame_width / max(1, width, height))
             target_width = max(1, round(width * scale))
             target_height = max(1, round(height * scale))
-            resized = cv2.resize(
-                frame,
-                (target_width, target_height),
-                interpolation=cv2.INTER_AREA,
-            )
-            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+            if target_width == width and target_height == height:
+                resized = source_image
+            else:
+                resized = cv2.resize(
+                    source_image,
+                    (target_width, target_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+            if is_gray:
+                gray = resized
+                color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            else:
+                gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+                color = resized
             processed = (
                 preprocess_motion_frame(gray)
                 if self.qualification.preprocessor_implementation()
@@ -519,7 +536,7 @@ class MotionAnalysisService:
             )
         except (cv2.error, ValueError):
             return None
-        resized.setflags(write=False)
+        color.setflags(write=False)
         gray.setflags(write=False)
         if processed is not None:
             processed.setflags(write=False)
@@ -529,15 +546,15 @@ class MotionAnalysisService:
             self._telemetry["frames_sampled"] += 1
             self._telemetry["derived_frame_count"] += 2 + int(processed is not None)
             self._telemetry["derived_frame_bytes"] += int(
-                resized.nbytes
+                color.nbytes
                 + gray.nbytes
                 + (processed.nbytes if processed is not None else 0)
             )
         with self.frame_lock:
             self.frames.append((frame_epoch, gray))
-            self.color_frames.append((frame_epoch, resized))
+            self.color_frames.append((frame_epoch, color))
             self.evidence_frames.append(MotionEvidenceFrame(
-                image=resized,
+                image=color,
                 captured_at_epoch=frame_epoch,
                 captured_at_monotonic=captured_at_monotonic,
                 sequence=capture_sequence,

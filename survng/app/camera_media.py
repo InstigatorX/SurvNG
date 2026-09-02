@@ -51,6 +51,7 @@ class CameraMediaService:
         time_ns: Callable[[], int] = time.time_ns,
         sleeper: Callable[[float], None] = time.sleep,
         media_storage: MediaStorageRegistry | None = None,
+        jpeg_provider: Callable[[str], bytes | None] | None = None,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -64,6 +65,7 @@ class CameraMediaService:
         self.time_ns = time_ns
         self.sleeper = sleeper
         self.media_storage = media_storage
+        self.jpeg_provider = jpeg_provider
         self.snapshots_dir = (
             media_storage.directory("snapshots", camera.id, camera.id)
             if media_storage is not None
@@ -72,6 +74,10 @@ class CameraMediaService:
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
 
     def snapshot(self, source: str = "live") -> bytes | None:
+        if self.jpeg_provider is not None:
+            encoded = self.jpeg_provider(source)
+            if encoded:
+                return encoded
         frame = self.frame_provider(source)
         if frame is None:
             return None
