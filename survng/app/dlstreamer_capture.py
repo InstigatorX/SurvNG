@@ -67,6 +67,7 @@ class DlStreamerCaptureOptions:
     admission_poll_seconds: float = CAPTURE_OPEN_LOCK_POLL_SECONDS
     rtsp_transport: str = "tcp"
     frame_rate: Callable[[], float] | None = None
+    detection_frame_rate: Callable[[], float] | None = None
     model_path: str = ""
     labels_path: str = ""
     model_proc_path: str = ""
@@ -715,6 +716,12 @@ class DlStreamerCaptureBackend:
             else 5.0
         )
         frame_rate = min(10.0, max(0.5, float(requested_rate)))
+        requested_detection_rate = (
+            self.options.detection_frame_rate()
+            if self.options.detection_frame_rate is not None
+            else frame_rate
+        )
+        detection_rate = min(10.0, max(0.5, float(requested_detection_rate)))
         open_timeout = max(0.001, self.options.open_timeout_ms / 1000.0)
         command = [
             live_python_executable(self.options.python_executable),
@@ -722,6 +729,8 @@ class DlStreamerCaptureBackend:
             "survng.dlstreamer_live",
             "--fps",
             f"{frame_rate:.6f}",
+            "--detect-fps",
+            f"{detection_rate:.6f}",
             "--open-timeout",
             f"{open_timeout:.3f}",
             "--rtsp-transport",
