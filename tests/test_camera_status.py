@@ -26,6 +26,7 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
             "hardware_decoder_selected": True,
             "preprocess_backend": "va",
             "first_frame_ms": 18.0,
+            "source_element": "uridecodebin3",
         },
         "live_detections": [{"label": "person", "confidence": 0.9}],
     }
@@ -157,6 +158,7 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
     }
     assert status["lifecycle"]["active_worker_count"] == 4
     assert status["live_pipeline"]["preprocess_backend"] == "va"
+    assert status["live_pipeline"]["source_element"] == "uridecodebin3"
     assert status["live_detections"][0]["label"] == "person"
     assert status["onvif_poll_timeouts"] == 2
     assert status["onvif_subscription_lifetime_seconds"] == 3600.0

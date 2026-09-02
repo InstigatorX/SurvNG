@@ -799,8 +799,19 @@ class CameraCaptureService:
             return
         if not isinstance(payload, dict) or not payload:
             return
+        factory = str(payload.get("source_element") or "").strip()
         with self._lock:
+            previous = str(
+                (self._pipeline_status.get(source) or {}).get("source_element") or ""
+            )
             self._pipeline_status[source] = dict(payload)
+        if factory and factory != previous:
+            LOGGER.info(
+                "live capture for %s/%s uses %s",
+                self.camera_id,
+                source,
+                factory,
+            )
 
     def _store_detections(self, source: str, handle: CaptureHandle) -> None:
         pop = getattr(handle, "pop_detections", None)
