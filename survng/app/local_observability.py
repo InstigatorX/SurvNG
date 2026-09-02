@@ -76,6 +76,8 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
     tracking = tracking if isinstance(tracking, dict) else {}
     lifecycle = raw.get("lifecycle")
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    alignment = raw.get("spatial_alignment")
+    alignment = alignment if isinstance(alignment, dict) else {}
     return {
         "id": str(raw.get("id") or ""),
         "name": str(raw.get("name") or ""),
@@ -88,6 +90,18 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "recording_enabled": bool(raw.get("recording_enabled", True)),
         "detection_enabled": bool(raw.get("detection_enabled")),
         "onvif_connected": bool(raw.get("onvif_connected")),
+        "spatial_alignment": {
+            "mode": str(alignment.get("mode") or "untrusted"),
+            "reliable": bool(alignment.get("reliable")),
+            "confidence": _number(alignment.get("confidence")),
+            "scale_x": _number(alignment.get("scale_x"), 1.0),
+            "scale_y": _number(alignment.get("scale_y"), 1.0),
+            "offset_x": _number(alignment.get("offset_x")),
+            "offset_y": _number(alignment.get("offset_y")),
+            "stable_samples": int(_number(alignment.get("stable_samples"))),
+            "failed_samples": int(_number(alignment.get("failed_samples"))),
+            "last_attempt_seconds_ago": _optional_number(alignment.get("last_attempt_seconds_ago")),
+        },
         "tracking": {
             "active": bool(tracking.get("active")),
             "running": bool(tracking.get("running")),
