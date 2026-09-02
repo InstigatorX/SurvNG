@@ -112,39 +112,58 @@ def _existing_dirs(*paths: Path | str) -> tuple[str, ...]:
     return tuple(found)
 
 
+def _drop_paths(value: str, *unwanted: str) -> str:
+    skip = {part for part in unwanted if part}
+    return _colon_path(*(part for part in value.split(":") if part and part not in skip))
+
+
+def _set_gst_search_path(name: str, value: str) -> None:
+    os.environ[name] = value
+    os.environ[f"{name}_1_0"] = value
+
+
 def _apply_dlstreamer_env() -> None:
     """Expose gvadetect without hiding Ubuntu's uridecodebin3.
 
     Intel DL Streamer's bundled libgstreamer compiles in a private system
-    plugin path. Prepending that tree via LD_LIBRARY_PATH makes python3-gi
-    load Intel's Gst, which then misses Ubuntu playback plugins. Keep the
-    distro plugin dir on GST_PLUGIN_SYSTEM_PATH, and put Intel GStreamer
-    libs after the process default search.
+    plugin path. If that tree is on LD_LIBRARY_PATH at all, python3-gi loads
+    Intel's Gst before /usr/lib and Ubuntu playback plugins never register.
+    Keep the distro plugin dir on GST_PLUGIN_SYSTEM_PATH, drop the nested
+    Intel GStreamer lib dir, and force the 1.0-suffixed search variables
+    that otherwise override the unsuffixed ones.
     """
-    os.environ["GST_PLUGIN_SYSTEM_PATH"] = _colon_path(
+    system_plugins = _colon_path(
         _SYSTEM_GST_PLUGINS,
+        os.environ.get("GST_PLUGIN_SYSTEM_PATH_1_0", ""),
         os.environ.get("GST_PLUGIN_SYSTEM_PATH", ""),
     )
+    _set_gst_search_path("GST_PLUGIN_SYSTEM_PATH", system_plugins)
+    for scanner in (
+        "/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner",
+        "/usr/libexec/gstreamer-1.0/gst-plugin-scanner",
+    ):
+        if Path(scanner).is_file():
+            os.environ["GST_PLUGIN_SCANNER"] = scanner
+            break
     os.environ.setdefault("LIBVA_DRIVER_NAME", "iHD")
     os.environ.setdefault("GST_VA_ALL_DRIVERS", "1")
     root = Path("/opt/intel/dlstreamer")
     if not root.is_dir():
         return
-    os.environ["GST_PLUGIN_PATH"] = _colon_path(
+    plugin_path = _colon_path(
         *_existing_dirs(
             root / "lib",
             root / "gstreamer/lib/gstreamer-1.0",
             Path(_SYSTEM_GST_PLUGINS),
         ),
+        os.environ.get("GST_PLUGIN_PATH_1_0", ""),
         os.environ.get("GST_PLUGIN_PATH", ""),
     )
+    _set_gst_search_path("GST_PLUGIN_PATH", plugin_path)
+    intel_gst_lib = str(root / "gstreamer/lib")
     os.environ["LD_LIBRARY_PATH"] = _colon_path(
-        os.environ.get("LD_LIBRARY_PATH", ""),
-        *_existing_dirs(
-            root / "lib",
-            root / "lib/gstreamer-1.0",
-            root / "gstreamer/lib",
-        ),
+        _drop_paths(os.environ.get("LD_LIBRARY_PATH", ""), intel_gst_lib),
+        *_existing_dirs(root / "lib", root / "lib/gstreamer-1.0"),
     )
 
 
@@ -155,6 +174,9 @@ def _load_gstreamer():
     from gi.repository import Gst
 
     Gst.init(None)
+    registry = Gst.Registry.get()
+    if Path(_SYSTEM_GST_PLUGINS).is_dir():
+        registry.scan_path(_SYSTEM_GST_PLUGINS)
     return Gst
 
 
@@ -178,17 +200,18 @@ def _factory_available(Gst, name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
 
 
-def _uri_source_factory(Gst, *, test_source: bool) -> str:
+def _make_live_source(Gst, *, test_source: bool):
     if test_source:
-        if not _factory_available(Gst, "videotestsrc"):
-            raise RuntimeError(
-                "required GStreamer element is unavailable: videotestsrc"
-            )
-        return "videotestsrc"
+        return _element(Gst, "videotestsrc", "source"), "videotestsrc"
+    missing: list[str] = []
     for name in _URI_SOURCE_FACTORIES:
-        if _factory_available(Gst, name):
-            return name
-    raise RuntimeError("required GStreamer element is unavailable: uridecodebin3")
+        element = Gst.ElementFactory.make(name, "source")
+        if element is not None:
+            return element, name
+        missing.append(name)
+    raise RuntimeError(
+        "required GStreamer element is unavailable: " + " or ".join(missing)
+    )
 
 
 def _link_tee(Gst, tee, sink) -> None:
@@ -284,8 +307,7 @@ def run(argv: list[str] | None = None) -> int:
     if pipeline is None:
         raise RuntimeError("could not create GStreamer pipeline")
 
-    source_factory = _uri_source_factory(Gst, test_source=args.test_source)
-    source = _element(Gst, source_factory, "source")
+    source, source_factory = _make_live_source(Gst, test_source=args.test_source)
     if args.test_source:
         source.set_property("is-live", True)
         source.set_property("pattern", "ball")
