@@ -760,7 +760,9 @@ class DetectorConfig(BaseModel):
         default_factory=lambda: [
             [-1.0, -0.5, 0.0, 0.5, 1.0],
             [1.5, 2.0, 2.5, 3.0],
-            [3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5],
+            [3.5, 4.0, 4.5, 5.0, 5.5, 6.0],
+            [6.5, 7.0, 7.5],
+            [8.0, 8.5],
             [12.0, 12.5],
         ]
     )
@@ -782,33 +784,31 @@ class DetectorConfig(BaseModel):
     depth: DepthConfig = Field(default_factory=DepthConfig)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
 
-    @field_validator("event_refinement_stages", mode="before")
-    @classmethod
-    def normalize_event_refinement_stages(cls, value: object) -> list[list[float]]:
+    @staticmethod
+    def _normalize_refinement_stages(
+        value: object,
+        *,
+        field_name: str,
+        default: list[list[float]],
+    ) -> list[list[float]]:
         if value in (None, ""):
-            return [
-                [-1.0, -0.5, 0.0, 0.5, 1.0],
-                [1.5, 2.0, 2.5, 3.0],
-                [3.5, 4.0, 4.5],
-                [8.0, 8.5],
-                [12.0, 12.5],
-            ]
+            return [list(stage) for stage in default]
         if not isinstance(value, (list, tuple)):
-            raise ValueError("event refinement stages must be a list of offset lists")
+            raise ValueError(f"{field_name} must be a list of offset lists")
         if not value:
-            raise ValueError("event refinement stages cannot be empty")
+            raise ValueError(f"{field_name} cannot be empty")
         if len(value) > 8:
-            raise ValueError("event refinement stages cannot exceed 8 stages")
+            raise ValueError(f"{field_name} cannot exceed 8 stages")
         normalized: list[list[float]] = []
         total_offsets = 0
         for stage_index, raw_stage in enumerate(value):
             if not isinstance(raw_stage, (list, tuple)) or not raw_stage:
                 raise ValueError(
-                    f"event refinement stage {stage_index} must be a non-empty list"
+                    f"{field_name} stage {stage_index} must be a non-empty list"
                 )
             if len(raw_stage) > 16:
                 raise ValueError(
-                    f"event refinement stage {stage_index} cannot exceed 16 offsets"
+                    f"{field_name} stage {stage_index} cannot exceed 16 offsets"
                 )
             stage: list[float] = []
             for raw_offset in raw_stage:
@@ -816,22 +816,53 @@ class DetectorConfig(BaseModel):
                     offset = float(raw_offset)
                 except (TypeError, ValueError) as exc:
                     raise ValueError(
-                        "event refinement offsets must be numbers"
+                        f"{field_name} offsets must be numbers"
                     ) from exc
                 if isinstance(raw_offset, bool) or not math.isfinite(offset):
                     raise ValueError(
-                        "event refinement offsets must be finite numbers"
+                        f"{field_name} offsets must be finite numbers"
                     )
                 if offset < -30.0 or offset > 60.0:
                     raise ValueError(
-                        "event refinement offsets must be between -30 and 60 seconds"
+                        f"{field_name} offsets must be between -30 and 60 seconds"
                     )
                 stage.append(offset)
             total_offsets += len(stage)
             if total_offsets > 32:
-                raise ValueError("event refinement stages cannot exceed 32 offsets")
+                raise ValueError(f"{field_name} cannot exceed 32 offsets")
             normalized.append(stage)
         return normalized
+
+    @field_validator("event_refinement_stages", mode="before")
+    @classmethod
+    def normalize_event_refinement_stages(cls, value: object) -> list[list[float]]:
+        return cls._normalize_refinement_stages(
+            value,
+            field_name="event_refinement_stages",
+            default=[
+                [-1.0, -0.5, 0.0, 0.5, 1.0],
+                [1.5, 2.0, 2.5, 3.0],
+                [3.5, 4.0, 4.5],
+                [8.0, 8.5],
+                [12.0, 12.5],
+            ],
+        )
+
+    @field_validator("event_route_refinement_stages", mode="before")
+    @classmethod
+    def normalize_event_route_refinement_stages(cls, value: object) -> list[list[float]]:
+        return cls._normalize_refinement_stages(
+            value,
+            field_name="event_route_refinement_stages",
+            default=[
+                [-1.0, -0.5, 0.0, 0.5, 1.0],
+                [1.5, 2.0, 2.5, 3.0],
+                [3.5, 4.0, 4.5, 5.0, 5.5, 6.0],
+                [6.5, 7.0, 7.5],
+                [8.0, 8.5],
+                [12.0, 12.5],
+            ],
+        )
 
     @field_validator("event_class_confirmation_frames", mode="before")
     @classmethod

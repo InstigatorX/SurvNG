@@ -68,6 +68,76 @@ class RecordedRefinementPlanTest(unittest.TestCase):
         )
         assert stages == RECORDED_EVENT_FRAME_STAGES
 
+    def test_route_refinement_deadline_is_a_bounded_24_second_workflow(self) -> None:
+        """A future route frame cannot extend work past the configured deadline."""
+        event_epoch = 1_800_000_000.0
+        deadline = 100.0 + 24.0
+        requested: list[float] = []
+
+        class Recorder:
+            def recording_at(self, _camera_id: str, epoch: float):
+                requested.append(epoch - event_epoch)
+                return {"path": "unused.mp4", "start_epoch": epoch}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.65,
+                event_candidate_confidence_threshold=0.25,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+                event_refinement_stages=[list(stage) for stage in RECORDED_EVENT_FRAME_STAGES],
+                event_route_refinement_stages=[list(stage) for stage in RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES],
+                recorded_adaptive_sampling=False,
+            )
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            Recorder(),
+            lambda: None,
+        )
+        timing = {
+            "recording_wait_ms": 0.0,
+            "frame_decode_ms": 0.0,
+            "detector_request_ms": 0.0,
+            "detection_enrichment_ms": 0.0,
+            "temporal_confirmation_wait_ms": 0.0,
+            "recording_batch_processes": 0.0,
+            "recording_fallback_samples": 0.0,
+            "recording_samples_requested": 0.0,
+            "recording_samples_decoded": 0.0,
+            "decode_budget_wait_ms": 0.0,
+            "refinement_early_exit_skipped": 0.0,
+            "refinement_route_dense_plan": 1.0,
+        }
+        with patch(
+            "survng.app.motion_pipeline.object_detection.time.monotonic",
+            return_value=deadline,
+        ):
+            result = backend._detect_with_budget(
+                datetime.fromtimestamp(event_epoch, timezone.utc),
+                stages=tuple(tuple(stage) for stage in RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES),
+                retry_seconds=24.0,
+                settle_seconds=0.0,
+                retry_interval_seconds=1.0,
+                representative_timeout_seconds=6.0,
+                allow_representative_refinement=False,
+                refinement_pending=False,
+                workflow_started=100.0,
+                timing=timing,
+                event_epoch=event_epoch,
+                deadline=deadline,
+                planned_offsets=tuple(
+                    offset
+                    for stage in RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES
+                    for offset in stage
+                ),
+                prefetched_rows=[],
+            )
+        self.assertEqual(deadline - 100.0, 24.0)
+        self.assertEqual(requested, [])
+        self.assertEqual(result.objects[0]["status"], "no_recorded_frame")
+
 
 def detected(
     label: str,
@@ -1898,6 +1968,74 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertIn(2.0, requested)
         self.assertIn(3.0, requested)
         self.assertNotIn(3.5, requested)
+        self.assertNotIn(8.0, requested)
+
+    def test_route_bridge_confirmation_skips_later_dense_stages(self) -> None:
+        event_epoch = 1_800_000_000.0
+        requested: list[float] = []
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                offset = round(epoch - event_epoch, 1)
+                requested.append(offset)
+                if offset == 4.0:
+                    return None
+                return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.65,
+                event_candidate_confidence_threshold=0.25,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+                event_refinement_stages=[list(stage) for stage in RECORDED_EVENT_FRAME_STAGES],
+                event_route_refinement_stages=[list(stage) for stage in RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES],
+                recorded_adaptive_sampling=False,
+            )
+
+            def detect(self, frame, confidence_threshold=None):
+                offset = float(frame[0, 0, 0]) / 10.0 - 2.0
+                if round(offset, 1) not in (5.0, 5.5):
+                    return []
+                return [detected("car", 0.9, (30, 35, 80, 85))]
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            Recorder(),
+            lambda: None,
+        )
+
+        def read_frame(path, _offset, **_kwargs):
+            offset = float(str(path).removeprefix("sample-").removesuffix(".mp4"))
+            frame = np.zeros((100, 100, 3), dtype=np.uint8)
+            frame[0, 0, :] = int(round((offset + 2.0) * 10.0))
+            return frame
+
+        qualification = {"features": {"security_verification_reason": "route_watch", "route_detection_watch": {
+            "target_camera_id": "gate", "source_event_id": 44,
+            "eligible_at": event_epoch - 1.0, "expires_at": event_epoch + 10.0,
+            "route_path": ["back-left", "gate"],
+        }}}
+        with (
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+            patch.object(backend, "_read_recorded_frame", side_effect=read_frame),
+        ):
+            _frame, objects, _path = backend.detect(
+                datetime.fromtimestamp(event_epoch, timezone.utc), qualification
+            )
+
+        car = next(item for item in objects if item.get("label") == "car")
+        self.assertGreaterEqual(car["temporal_incident_observations"], 2)
+        self.assertIn(5.0, requested)
+        self.assertIn(5.5, requested)
+        self.assertNotIn(6.5, requested)
+        self.assertNotIn(7.0, requested)
+        self.assertNotIn(7.5, requested)
         self.assertNotIn(8.0, requested)
 
 

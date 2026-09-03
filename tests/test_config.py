@@ -381,6 +381,50 @@ class AppConfigTest(unittest.TestCase):
                 "detector": {"event_refinement_stages": [[100.0]]},
             })
 
+    def test_detector_route_refinement_stages_have_distinct_default_and_validation(self) -> None:
+        config = AppConfig.model_validate({"detector": {}})
+        self.assertEqual(
+            sum(len(stage) for stage in config.detector.event_refinement_stages),
+            16,
+        )
+        self.assertEqual(
+            sum(len(stage) for stage in config.detector.event_route_refinement_stages),
+            22,
+        )
+        explicit_defaults = AppConfig.model_validate({
+            "detector": {
+                "event_refinement_stages": None,
+                "event_route_refinement_stages": "",
+            },
+        })
+        self.assertEqual(
+            explicit_defaults.detector.event_refinement_stages,
+            config.detector.event_refinement_stages,
+        )
+        self.assertEqual(
+            explicit_defaults.detector.event_route_refinement_stages,
+            config.detector.event_route_refinement_stages,
+        )
+
+        with self.assertRaisesRegex(ValidationError, "event_route_refinement_stages"):
+            AppConfig.model_validate({
+                "detector": {"event_route_refinement_stages": [[float("nan")]]},
+            })
+        invalid_route_plans = (
+            [["not-a-number"]],
+            [[0.0] * 17],
+            [[0.0] * 11, [1.0] * 11, [2.0] * 11],
+            [[60.1]],
+            [[-30.1]],
+        )
+        for invalid in invalid_route_plans:
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValidationError, "event_route_refinement_stages"
+            ):
+                AppConfig.model_validate({
+                    "detector": {"event_route_refinement_stages": invalid},
+                })
+
     def test_camera_identity_and_stream_urls_are_safe_for_runtime_paths(self) -> None:
         with self.assertRaises(ValidationError):
             CameraConfig(id="../gate", name="Gate", stream_url="rtsp://camera/main")

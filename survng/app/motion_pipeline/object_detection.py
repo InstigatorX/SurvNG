@@ -37,7 +37,9 @@ RECORDED_EVENT_FRAME_STAGES = (
 RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES = (
     (-1.0, -0.5, 0.0, 0.5, 1.0),
     (1.5, 2.0, 2.5, 3.0),
-    (3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5),
+    (3.5, 4.0, 4.5, 5.0, 5.5, 6.0),
+    (6.5, 7.0, 7.5),
+    (8.0, 8.5),
     (12.0, 12.5),
 )
 RECORDED_EVENT_FRAME_OFFSETS = tuple(
