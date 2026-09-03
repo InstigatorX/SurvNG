@@ -31,6 +31,8 @@ CAPTURE_RETRY_INITIAL_SECONDS = 1.0
 CAPTURE_RETRY_MAX_SECONDS = 30.0
 CAPTURE_FRAME_MAX_BYTES = 256 * 1024 * 1024
 CAPTURE_PIPE_READ_CHUNK_BYTES = 64 * 1024
+CAPTURE_SHUTDOWN_WAIT_SECONDS = 1.0
+CAPTURE_STDERR_JOIN_SECONDS = 1.0
 
 LOGGER = logging.getLogger(__name__)
 
@@ -152,16 +154,30 @@ class FfmpegCaptureHandle:
         if process.poll() is None:
             process.terminate()
             try:
-                process.wait(timeout=1.0)
+                process.wait(timeout=CAPTURE_SHUTDOWN_WAIT_SECONDS)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait(timeout=1.0)
+                try:
+                    process.wait(timeout=CAPTURE_SHUTDOWN_WAIT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    LOGGER.warning(
+                        "FFmpeg capture process did not exit after kill; "
+                        "continuing shutdown without waiting for it"
+                    )
         # Wait for the stderr reader to observe EOF before closing its file
         # object. Closing it first races a blocking read in _drain_stderr.
         stderr_thread, self._stderr_thread = self._stderr_thread, None
+        stderr_reader_stopped = True
         if stderr_thread is not None:
-            stderr_thread.join()
-        for stream in (process.stdout, process.stderr):
+            stderr_thread.join(timeout=CAPTURE_STDERR_JOIN_SECONDS)
+            stderr_reader_stopped = not stderr_thread.is_alive()
+            if not stderr_reader_stopped:
+                LOGGER.warning(
+                    "FFmpeg capture stderr reader did not stop during shutdown; "
+                    "leaving stderr open to avoid racing its blocking read"
+                )
+        streams = (process.stdout, process.stderr) if stderr_reader_stopped else (process.stdout,)
+        for stream in streams:
             if stream is not None:
                 stream.close()
 

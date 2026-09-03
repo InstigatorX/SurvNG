@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from collections import deque
@@ -749,6 +750,67 @@ def test_ffmpeg_capture_close_waits_for_stderr_drain_before_closing_stream() -> 
 
     assert stderr.closed
     assert process.stdout.closed
+
+
+def test_ffmpeg_capture_close_is_bounded_when_process_and_stderr_reader_hang(
+    monkeypatch, caplog
+) -> None:
+    class Stream:
+        def __init__(self) -> None:
+            self.release = threading.Event()
+            self.read_started = threading.Event()
+            self.closed = False
+
+        def read(self, _size: int) -> bytes:
+            self.read_started.set()
+            self.release.wait()
+            return b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Process:
+        def __init__(self, stderr: Stream) -> None:
+            self.stderr = stderr
+            self.stdout = Stream()
+            self.wait_calls = 0
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.wait_calls += 1
+            raise subprocess.TimeoutExpired("ffmpeg", 0)
+
+    monkeypatch.setattr("survng.app.camera_capture.CAPTURE_SHUTDOWN_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr("survng.app.camera_capture.CAPTURE_STDERR_JOIN_SECONDS", 0.01)
+    handle = FfmpegCaptureHandle(read_timeout_ms=1000)
+    stderr = Stream()
+    process = Process(stderr)
+    handle._process = process  # type: ignore[assignment]
+    handle._stderr_thread = threading.Thread(target=handle._drain_stderr, daemon=True)
+    handle._stderr_thread.start()
+    assert stderr.read_started.wait(1.0)
+
+    started = time.monotonic()
+    handle.close()
+
+    assert time.monotonic() - started < 0.2
+    assert process.wait_calls == 2
+    assert process.stdout.closed
+    assert not stderr.closed
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("did not exit after kill" in message for message in messages)
+    assert any("stderr reader did not stop" in message for message in messages)
+
+    stderr.release.set()
 
 
 def test_capture_bmp_limit_accepts_8k_frames_but_remains_bounded() -> None:

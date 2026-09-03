@@ -61,6 +61,41 @@ class RecorderTest(unittest.TestCase):
             self.assertEqual({row["path"] for row in rows}, {str(path) for path in paths})
             self.assertEqual({row["location_id"] for row in rows}, {"one", "two"})
 
+    def test_full_refresh_retains_index_when_a_recording_root_cannot_be_enumerated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"], reserve_percent=0),
+                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"], reserve_percent=0),
+            ]))
+            recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
+            first_clip = first / "recordings" / "gate" / "main" / "2026-08-13" / "00" / "20260813-000000+0000.mp4"
+            second_clip = second / "recordings" / "gate" / "main" / "2026-08-13" / "01" / "20260813-010000+0000.mp4"
+            for clip in (first_clip, second_clip):
+                clip.parent.mkdir(parents=True, exist_ok=True)
+                clip.write_bytes(b"recording")
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate")
+            recorder.refresh_recording_index({"gate": camera}, full=True)
+
+            unavailable_dir = second / "recordings" / "gate" / "main"
+            original_glob = Path.glob
+
+            def glob_with_unavailable_root(path: Path, pattern: str):
+                if path == unavailable_dir:
+                    raise OSError("temporarily unavailable")
+                return original_glob(path, pattern)
+
+            with patch.object(Path, "glob", autospec=True, side_effect=glob_with_unavailable_root):
+                recorder.refresh_recording_index({"gate": camera}, full=True)
+
+            rows = recorder.recording_rows("gate", limit=10)
+
+        self.assertEqual({row["path"] for row in rows}, {str(first_clip), str(second_clip)})
+
     def test_recording_location_backfill_is_bounded_and_resumable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

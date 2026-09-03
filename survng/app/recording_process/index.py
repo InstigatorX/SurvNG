@@ -634,6 +634,14 @@ class RecordingIndexMixin:
         except OSError:
             return []
 
+    @staticmethod
+    def _glob_mp4s_with_status(directory: Path, pattern: str) -> tuple[list[Path], bool]:
+        """Return matching files and whether the directory could be enumerated."""
+        try:
+            return list(directory.glob(pattern)), True
+        except OSError:
+            return [], False
+
     def _recording_hour_dirs(
         self,
         camera_id: str,
@@ -1246,16 +1254,19 @@ class RecordingIndexMixin:
         for camera_id, source in wanted:
             try:
                 if full:
-                    files = [
-                        path
-                        for search_dir in self._recording_search_dirs(camera_id, source)
-                        for path in self._glob_mp4s(search_dir, "????-??-??/??/*.mp4")
-                    ]
+                    files = []
+                    enumeration_complete = True
+                    for search_dir in self._recording_search_dirs(camera_id, source):
+                        discovered, complete = self._glob_mp4s_with_status(
+                            search_dir, "????-??-??/??/*.mp4"
+                        )
+                        files.extend(discovered)
+                        enumeration_complete = enumeration_complete and complete
                 else:
                     files = self._recent_hour_recording_files(camera_id, source)
                 rows = self._recording_rows_for_files(camera_id, source, files)
                 self._store_recording_rows(camera_id, source, rows)
-                if full:
+                if full and enumeration_complete:
                     self._prune_recording_index(camera_id, source, files)
             except Exception:
                 self._log_index_exception(
