@@ -93,6 +93,7 @@ class MotionFrameSubmission:
     capture_sequence: int = 0
     capture_generation: int = 0
     lifecycle_generation: int = 0
+    source_pts: float = float("nan")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,7 @@ class MotionEvidenceFrame:
     sequence: int
     capture_generation: int
     lifecycle_generation: int
+    source_pts: float = float("nan")
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +391,7 @@ class MotionAnalysisService:
         capture_sequence: int = 0,
         capture_generation: int = 0,
         lifecycle_generation: int = 0,
+        source_pts: float = float("nan"),
     ) -> None:
         """Hand a stable raw frame to the analysis worker without preprocessing."""
         if not self._admit_frame(frame_clock, stop_event):
@@ -413,6 +416,7 @@ class MotionAnalysisService:
                 capture_sequence=capture_sequence,
                 capture_generation=capture_generation,
                 lifecycle_generation=lifecycle_generation,
+                source_pts=source_pts,
             ),
             stop_event,
         )
@@ -495,6 +499,7 @@ class MotionAnalysisService:
         capture_sequence: int = 0,
         capture_generation: int = 0,
         lifecycle_generation: int = 0,
+        source_pts: float = float("nan"),
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
         self._reset_for_clock_discontinuity(frame_epoch)
         preprocess_started = time.monotonic()
@@ -559,6 +564,7 @@ class MotionAnalysisService:
                 sequence=capture_sequence,
                 capture_generation=capture_generation,
                 lifecycle_generation=lifecycle_generation,
+                source_pts=source_pts,
             ))
             if processed is not None:
                 self.processed_frames.append((frame_epoch, processed))
@@ -894,6 +900,7 @@ class MotionAnalysisService:
                         capture_sequence=work.capture_sequence,
                         capture_generation=work.capture_generation,
                         lifecycle_generation=work.lifecycle_generation,
+                        source_pts=work.source_pts,
                     )
                     if prepared is None:
                         continue
