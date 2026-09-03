@@ -88,6 +88,9 @@ class CapturedFrame:
     height: int
     sequence: int
     generation: int = 0
+    # Native stream PTS when the capture backend can provide it.  This is
+    # deliberately distinct from host receipt time.
+    source_pts: float = float("nan")
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +271,10 @@ class CameraCaptureService:
         ] = {}
         self._frames: dict[str, CapturedFrame] = {}
         self._detections: dict[str, list[dict[str, object]]] = {}
+        self._detection_snapshots: dict[str, deque[dict[str, object]]] = {
+            "live": deque(maxlen=32),
+            "main": deque(maxlen=32),
+        }
         self._pipeline_status: dict[str, dict[str, object]] = {}
         self._jpegs: dict[str, bytes] = {}
         self._preview: dict[str, np.ndarray] = {}
@@ -440,6 +447,7 @@ class CameraCaptureService:
             height=frame.height,
             sequence=frame.sequence,
             generation=frame.generation,
+            source_pts=frame.source_pts,
         )
 
     def request_stop(self) -> None:
@@ -711,7 +719,17 @@ class CameraCaptureService:
                             retry_delay = self.retry_initial_seconds
                             self._store_sidecar_state(source, handle)
                             self._store_preview(source, handle)
-                            self._publish_frame(source, image, stop_event)
+                            identity = getattr(handle, "pop_frame_identity", lambda: None)()
+                            source_pts = (
+                                float(identity[1])
+                                if isinstance(identity, tuple)
+                                and len(identity) == 2
+                                and isinstance(identity[1], (int, float))
+                                else float("nan")
+                            )
+                            self._publish_frame(
+                                source, image, source_pts=source_pts, stop_event=stop_event
+                            )
                 except Exception as exc:
                     if not session_received_frame:
                         consecutive_open_failures += 1
@@ -793,6 +811,40 @@ class CameraCaptureService:
         source = self._normalize_source(source)
         with self._lock:
             return [dict(item) for item in self._detections.get(source, ())]
+
+    def matched_detections(
+        self, source: str, *, source_pts: float, generation: int
+    ) -> list[dict[str, object]]:
+        """Return the newest detector result at or before this evidence PTS.
+
+        Detector snapshots are authoritative: an empty snapshot clears a
+        prior positive result.  PTS resets clear this bounded cache, so a
+        reconnect cannot lend boxes to the next capture session.
+        """
+        source = self._normalize_source(source)
+        if not math.isfinite(source_pts) or generation <= 0:
+            return []
+        with self._lock:
+            candidates = [
+                item for item in self._detection_snapshots[source]
+                if int(item.get("generation") or 0) == generation
+                and isinstance(item.get("source_pts"), (int, float))
+                and float(item["source_pts"]) <= source_pts
+            ]
+            if not candidates:
+                return []
+            snapshot = max(candidates, key=lambda item: float(item["source_pts"]))
+            # A snapshot may be no more than one 5 FPS detection period plus
+            # jitter behind the EMA evidence.  This is intentionally bounded.
+            if source_pts - float(snapshot["source_pts"]) > 0.25:
+                return []
+            width = int(snapshot.get("width") or 0)
+            height = int(snapshot.get("height") or 0)
+            return [
+                dict(item, _sidecar_width=width, _sidecar_height=height)
+                for item in snapshot.get("objects", ())
+                if isinstance(item, dict)
+            ]
 
     def latest_jpeg(self, source: str = "live") -> bytes | None:
         source = self._normalize_source(source)
@@ -879,15 +931,42 @@ class CameraCaptureService:
         if not isinstance(detections, list):
             return
         stored = [dict(item) for item in detections if isinstance(item, dict)]
-        if not stored:
+        if stored:
+            with self._lock:
+                self._detections[source] = stored
+
+        pop_snapshots = getattr(handle, "pop_detection_snapshots", None)
+        if not callable(pop_snapshots):
+            return
+        try:
+            snapshots = pop_snapshots()
+        except Exception:
+            return
+        if not isinstance(snapshots, list):
             return
         with self._lock:
-            self._detections[source] = stored
+            history = self._detection_snapshots[source]
+            for item in snapshots:
+                if not isinstance(item, dict):
+                    continue
+                pts = item.get("source_pts")
+                if not isinstance(pts, (int, float)) or not math.isfinite(float(pts)):
+                    continue
+                if history and float(pts) < float(history[-1].get("source_pts", pts)):
+                    history.clear()
+                history.append({
+                    "source_pts": float(pts),
+                    "generation": self._generation,
+                    "width": int(item.get("width") or 0),
+                    "height": int(item.get("height") or 0),
+                    "objects": [dict(obj) for obj in item.get("objects", ()) if isinstance(obj, dict)],
+                })
 
     def _publish_frame(
         self,
         source: str,
         image: np.ndarray,
+        source_pts: float = float("nan"),
         stop_event: threading.Event | None = None,
     ) -> bool:
         captured_at_epoch = self._wall_clock()
@@ -916,6 +995,7 @@ class CameraCaptureService:
                 height=int(image.shape[0]),
                 sequence=self._sequence,
                 generation=self._generation,
+                source_pts=source_pts,
             )
             self._frames[source] = frame
             self._dimensions[source] = {

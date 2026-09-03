@@ -217,7 +217,9 @@ class CameraWorker:
             live_frame_provider=lambda: self._get_latest_frame(),
             timestamped_live_frame_provider=self._get_latest_detection_frame,
             timestamped_evidence_frame_provider=self._get_evidence_detection_frame,
-            live_detections_provider=lambda: self.capture.latest_detections("live"),
+            live_detections_provider=lambda frame: self.capture.matched_detections(
+                "live", source_pts=frame.source_pts, generation=frame.capture_generation
+            ),
             stop_requested=lambda: (
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
@@ -620,6 +622,7 @@ class CameraWorker:
                 capture_sequence=frame.sequence,
                 capture_generation=frame.generation,
                 lifecycle_generation=lifecycle_generation,
+                source_pts=frame.source_pts,
             )
             preview = self.capture.latest_preview_image("live")
             if preview is not None:
@@ -672,6 +675,7 @@ class CameraWorker:
             geometry_trusted=bool(alignment.get("reliable", False)),
             width=width,
             height=height,
+            source_pts=frame.source_pts,
         )
 
     def _get_evidence_detection_frame(
@@ -713,6 +717,7 @@ class CameraWorker:
             geometry_trusted=bool(alignment.get("reliable", False)),
             width=width,
             height=height,
+            source_pts=selected.source_pts,
         )
 
     def _get_latest_tracking_frame(

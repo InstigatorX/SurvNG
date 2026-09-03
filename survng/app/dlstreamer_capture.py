@@ -103,19 +103,20 @@ class _StreamInbox:
         self.alive = True
         self.error = ""
         self.status: dict[str, object] = {}
-        self._frames: queue.Queue[np.ndarray] = queue.Queue(maxsize=2)
+        self._frames: queue.Queue[tuple[np.ndarray, int, float]] = queue.Queue(maxsize=2)
         self._detections: list[dict[str, object]] = []
+        self._detection_snapshots: list[dict[str, object]] = []
         self._jpeg: bytes | None = None
         self._lock = threading.Lock()
 
-    def put_frame(self, frame: np.ndarray) -> None:
+    def put_frame(self, frame: np.ndarray, sequence: int, pts: float) -> None:
         if self._frames.full():
             try:
                 self._frames.get_nowait()
             except queue.Empty:
                 pass
         try:
-            self._frames.put_nowait(frame)
+            self._frames.put_nowait((frame, sequence, pts))
         except queue.Full:
             pass
 
@@ -124,7 +125,7 @@ class _StreamInbox:
         timeout_seconds: float,
         *,
         cancelled: Callable[[], bool] | None = None,
-    ) -> np.ndarray | None:
+    ) -> tuple[np.ndarray, int, float] | None:
         deadline = time.monotonic() + timeout_seconds
         while True:
             if cancelled is not None and cancelled():
@@ -155,6 +156,15 @@ class _StreamInbox:
     def set_detections(self, objects: list[dict[str, object]]) -> None:
         with self._lock:
             self._detections = objects
+
+    def add_detection_snapshot(self, snapshot: dict[str, object]) -> None:
+        with self._lock:
+            self._detection_snapshots.append(snapshot)
+
+    def pop_detection_snapshots(self) -> list[dict[str, object]]:
+        with self._lock:
+            snapshots, self._detection_snapshots = self._detection_snapshots, []
+            return snapshots
 
     def set_jpeg(self, jpeg: bytes) -> None:
         with self._lock:
@@ -311,7 +321,7 @@ class _SharedLiveProcess:
         if inbox is None:
             return
         if message_type == TYPE_FRAME:
-            width, height, _sequence, _pts, pixels = decode_frame_payload(inner)
+            width, height, sequence, pts, pixels = decode_frame_payload(inner)
             pixel_count = width * height
             if len(pixels) == pixel_count:
                 frame = np.frombuffer(pixels, dtype=np.uint8).reshape(height, width).copy()
@@ -319,7 +329,7 @@ class _SharedLiveProcess:
                 frame = (
                     np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 3).copy()
                 )
-            inbox.put_frame(frame)
+            inbox.put_frame(frame, sequence, pts)
             return
         if message_type == TYPE_JPEG:
             _width, _height, _sequence, _pts, jpeg = decode_jpeg_payload(inner)
@@ -329,9 +339,16 @@ class _SharedLiveProcess:
             decoded = decode_json_payload(inner)
             objects = decoded.get("objects")
             if isinstance(objects, list):
-                inbox.set_detections(
-                    [item for item in objects if isinstance(item, dict)]
-                )
+                normalized = [item for item in objects if isinstance(item, dict)]
+                inbox.set_detections(normalized)
+                if all(key in decoded for key in ("source_pts", "inference_sequence", "width", "height")):
+                    inbox.add_detection_snapshot({
+                        "source_pts": decoded["source_pts"],
+                        "inference_sequence": decoded["inference_sequence"],
+                        "width": decoded["width"],
+                        "height": decoded["height"],
+                        "objects": normalized,
+                    })
             return
         if message_type == TYPE_STATUS:
             decoded = decode_json_payload(inner)
@@ -351,10 +368,13 @@ class DlStreamerCaptureHandle:
         self._process: subprocess.Popen[bytes] | None = None
         self._reader = MessageReader()
         self._prefetched: np.ndarray | None = None
+        self._prefetched_identity: tuple[int, float] | None = None
+        self._last_frame_identity: tuple[int, float] | None = None
         self._stderr = bytearray()
         self._stderr_thread: threading.Thread | None = None
         self._status: dict[str, object] = {}
         self._detections: list[dict[str, object]] = []
+        self._detection_snapshots: list[dict[str, object]] = []
         self._detections_lock = threading.Lock()
         self._jpeg: bytes | None = None
         self._shared: _SharedLiveProcess | None = None
@@ -417,17 +437,21 @@ class DlStreamerCaptureHandle:
         )
         if frame is None:
             return False
-        self._prefetched = frame
+        self._prefetched = frame[0]
+        self._prefetched_identity = (frame[1], frame[2])
         self._harvest_available_messages()
         return True
 
     def read(self) -> tuple[bool, np.ndarray | None]:
         if self._prefetched is not None:
             frame, self._prefetched = self._prefetched, None
+            self._last_frame_identity, self._prefetched_identity = self._prefetched_identity, None
             self._harvest_available_messages()
             return True, frame
-        frame = self._next_frame(self._read_timeout_seconds)
-        if frame is not None:
+        received = self._next_frame(self._read_timeout_seconds)
+        frame = None if received is None else received[0]
+        if received is not None:
+            self._last_frame_identity = (received[1], received[2])
             self._harvest_available_messages()
         return (frame is not None), frame
 
@@ -445,6 +469,18 @@ class DlStreamerCaptureHandle:
             detections = list(self._detections)
             self._detections = []
         return detections
+
+    def pop_detection_snapshots(self) -> list[dict[str, object]]:
+        inbox = self._inbox
+        if inbox is not None:
+            return inbox.pop_detection_snapshots()
+        with self._detections_lock:
+            snapshots, self._detection_snapshots = self._detection_snapshots, []
+            return snapshots
+
+    def pop_frame_identity(self) -> tuple[int, float] | None:
+        identity, self._last_frame_identity = self._last_frame_identity, None
+        return identity
 
     def pop_jpeg(self) -> bytes | None:
         inbox = self._inbox
@@ -525,7 +561,7 @@ class DlStreamerCaptureHandle:
         timeout_seconds: float,
         *,
         cancelled: Callable[[], bool] | None = None,
-    ) -> np.ndarray | None:
+    ) -> tuple[np.ndarray, int, float] | None:
         inbox = self._inbox
         if inbox is not None:
             return inbox.get_frame(timeout_seconds, cancelled=cancelled)
@@ -540,7 +576,8 @@ class DlStreamerCaptureHandle:
             if popped is not None:
                 frame = self._apply_message(*popped)
                 if frame is not None:
-                    return frame
+                    sequence, pts = self._last_frame_identity or (0, float("nan"))
+                    return frame, sequence, pts
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -579,7 +616,8 @@ class DlStreamerCaptureHandle:
 
     def _apply_message(self, message_type: int, payload: bytes) -> np.ndarray | None:
         if message_type == TYPE_FRAME:
-            width, height, _sequence, _pts, pixels = decode_frame_payload(payload)
+            width, height, sequence, pts, pixels = decode_frame_payload(payload)
+            self._last_frame_identity = (sequence, pts)
             pixel_count = width * height
             if len(pixels) == pixel_count:
                 return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width).copy()
@@ -594,7 +632,16 @@ class DlStreamerCaptureHandle:
             objects = decoded.get("objects")
             if isinstance(objects, list):
                 with self._detections_lock:
-                    self._detections = [item for item in objects if isinstance(item, dict)]
+                    normalized = [item for item in objects if isinstance(item, dict)]
+                    self._detections = normalized
+                    if all(key in decoded for key in ("source_pts", "inference_sequence", "width", "height")):
+                        self._detection_snapshots.append({
+                            "source_pts": decoded["source_pts"],
+                            "inference_sequence": decoded["inference_sequence"],
+                            "width": decoded["width"],
+                            "height": decoded["height"],
+                            "objects": normalized,
+                        })
             return None
         if message_type == TYPE_STATUS:
             decoded = decode_json_payload(payload)

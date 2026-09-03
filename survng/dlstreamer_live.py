@@ -888,8 +888,7 @@ def _pump_pipeline(
             signum: signal.signal(signum, request_stop)
             for signum in (signal.SIGINT, signal.SIGTERM)
         }
-    latest_objects: list[dict[str, Any]] = []
-    objects_lock = threading.Lock()
+    inference_sequence = 0
     started = time.monotonic()
     first_frame_at: float | None = None
     sequence = 0
@@ -918,8 +917,36 @@ def _pump_pipeline(
                         try:
                             payload = json.loads(bytes(info.data).decode("utf-8"))
                             if isinstance(payload, dict):
-                                with objects_lock:
-                                    latest_objects[:] = _normalize_gva_objects(payload)
+                                caps = meta_sample.get_caps()
+                                structure = caps.get_structure(0)
+                                width = int(structure.get_value("width") or 0)
+                                height = int(structure.get_value("height") or 0)
+                                pts = float(buffer.pts) / float(Gst.SECOND)
+                                if (
+                                    width > 0
+                                    and height > 0
+                                    and buffer.pts != Gst.CLOCK_TIME_NONE
+                                    and math.isfinite(pts)
+                                ):
+                                    inference_sequence += 1
+                                    _write(
+                                        stdout,
+                                        encode_json(
+                                            TYPE_DETECTIONS,
+                                            {
+                                                "schema_version": 1,
+                                                "source_pts": pts,
+                                                "inference_sequence": inference_sequence,
+                                                "width": width,
+                                                "height": height,
+                                                # Empty is authoritative; it must clear
+                                                # a preceding positive snapshot.
+                                                "objects": _normalize_gva_objects(payload),
+                                            },
+                                            stream_id=stream_id,
+                                        ),
+                                        lock=stdout_lock,
+                                    )
                         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                             pass
                         finally:
@@ -996,7 +1023,11 @@ def _pump_pipeline(
                     width=width,
                     height=height,
                     sequence=sequence,
-                    pts=time.monotonic() - started,
+                    pts=(
+                        float(buffer.pts) / float(Gst.SECOND)
+                        if buffer.pts != Gst.CLOCK_TIME_NONE
+                        else float("nan")
+                    ),
                     pixels=pixels,
                     stream_id=stream_id,
                 ),
@@ -1009,23 +1040,12 @@ def _pump_pipeline(
                         width=max(1, jpeg_width),
                         height=max(1, jpeg_height),
                         sequence=sequence,
-                        pts=time.monotonic() - started,
+                        pts=(
+                            float(jpeg_buffer.pts) / float(Gst.SECOND)
+                            if jpeg_buffer.pts != Gst.CLOCK_TIME_NONE
+                            else float("nan")
+                        ),
                         jpeg=jpeg_bytes,
-                        stream_id=stream_id,
-                    ),
-                    lock=stdout_lock,
-                )
-            with objects_lock:
-                objects = list(latest_objects)
-            if objects:
-                _write(
-                    stdout,
-                    encode_json(
-                        TYPE_DETECTIONS,
-                        {
-                            "objects": objects,
-                            "decoder_elements": sorted(decoder_elements),
-                        },
                         stream_id=stream_id,
                     ),
                     lock=stdout_lock,

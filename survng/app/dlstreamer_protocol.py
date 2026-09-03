@@ -112,6 +112,32 @@ def encode_json(
     )
 
 
+def encode_detection_snapshot(
+    *,
+    source_pts: float,
+    inference_sequence: int,
+    width: int,
+    height: int,
+    objects: list[dict[str, Any]],
+    stream_id: str = "",
+) -> bytes:
+    """Encode one authoritative detector result, including an empty result."""
+    if width <= 0 or height <= 0 or inference_sequence <= 0:
+        raise ProtocolError("invalid detection snapshot identity")
+    return encode_json(
+        TYPE_DETECTIONS,
+        {
+            "schema_version": 1,
+            "source_pts": float(source_pts),
+            "inference_sequence": inference_sequence,
+            "width": width,
+            "height": height,
+            "objects": objects,
+        },
+        stream_id=stream_id,
+    )
+
+
 def decode_frame_payload(payload: bytes) -> tuple[int, int, int, float, bytes]:
     if len(payload) < FRAME_HEADER.size:
         raise ProtocolError("truncated live-capture frame header")

@@ -173,6 +173,7 @@ class TimestampedLiveFrame:
     geometry_trusted: bool = True
     width: int = 0
     height: int = 0
+    source_pts: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -1026,7 +1027,7 @@ TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | tuple[Frame, 
 TimestampedEvidenceFrameProvider = Callable[
     [dict[str, Any]], TimestampedLiveFrame | tuple[Frame, float] | None
 ]
-LiveDetectionsProvider = Callable[[], list[dict[str, Any]] | None]
+LiveDetectionsProvider = Callable[[TimestampedLiveFrame], list[dict[str, Any]] | None]
 StopRequested = Callable[[], bool]
 
 
@@ -1317,10 +1318,31 @@ class RecordedMotionObjectDetector:
                 refinement_pending=True,
             )
         sidecar_objects: list[dict[str, Any]] = []
-        if not has_evidence_token and self.live_detections_provider is not None:
-            sidecar_objects = _labeled_sidecar_objects(
-                self.live_detections_provider()
-            )
+        if self.live_detections_provider is not None and isinstance(sample, TimestampedLiveFrame):
+            try:
+                raw_sidecar_objects = self.live_detections_provider(sample)
+            except TypeError:
+                # Pre-existing custom factories have a no-argument provider.
+                # They lack evidence identity, so keep their historical
+                # non-pinned-only behavior rather than admitting stale boxes.
+                raw_sidecar_objects = (
+                    self.live_detections_provider() if not has_evidence_token else []
+                )
+            sidecar_objects = _labeled_sidecar_objects(raw_sidecar_objects)
+            for detected in sidecar_objects:
+                detector_width = int(detected.pop("_sidecar_width", 0) or 0)
+                detector_height = int(detected.pop("_sidecar_height", 0) or 0)
+                if detector_width > 0 and detector_height > 0 and (
+                    detector_width != frame.shape[1] or detector_height != frame.shape[0]
+                ):
+                    box = detected.get("box")
+                    if isinstance(box, dict):
+                        for key in ("x1", "x2"):
+                            if isinstance(box.get(key), (int, float)):
+                                box[key] = float(box[key]) * frame.shape[1] / detector_width
+                        for key in ("y1", "y2"):
+                            if isinstance(box.get(key), (int, float)):
+                                box[key] = float(box[key]) * frame.shape[0] / detector_height
         objects = self._detect_objects(
             frame,
             timing=timing,
