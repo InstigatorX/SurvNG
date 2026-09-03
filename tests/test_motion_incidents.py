@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import time
@@ -11,8 +12,12 @@ import numpy as np
 import pytest
 
 from survng.app.events import EventStore
-from survng.app.event_store.jobs import DETECTION_JOB_MAXIMUM_AGE_SECONDS
+from survng.app.event_store.jobs import (
+    DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS,
+    DETECTION_JOB_MAXIMUM_AGE_SECONDS,
+)
 from survng.app.motion_incidents import (
+    REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS,
     REFINEMENT_MAX_QUEUE_AGE_SECONDS,
     MotionIncidentService,
     _MemoryDetectionJobStore,
@@ -488,6 +493,57 @@ def test_duplicate_refinement_for_same_episode_is_coalesced() -> None:
     assert service.wait_stopped(1.0)
 
 
+def test_admitted_route_event_owns_distinct_refinement_after_no_object_probe() -> None:
+    """An earlier route probe must not consume the admitted event's cover job."""
+    probe = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    admitted = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="live.webp",
+        object_detected=True,
+        detected_objects=({"label": "car", "incident_eligible": True},),
+        refinement_pending=True,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        service, decision, tracking, _prewarm, image_reader = _service(
+            probe,
+            refinement_store=store,
+        )
+        decision.handle.side_effect = [probe, admitted]
+        image_reader.return_value = np.ones((10, 10, 3), dtype=np.uint8)
+        tracking.start.return_value = True
+        route_intent = "route:lower-garage:upper-garage:62306"
+        event_at = datetime.now(timezone.utc)
+
+        service.process(
+            "adaptive/visual_backup",
+            "probe",
+            event_at,
+            {"detection_intent_id": route_intent},
+        )
+        service.process(
+            "adaptive/visual_backup",
+            "admitted",
+            event_at,
+            {"detection_intent_id": route_intent},
+        )
+
+        with store._connect_jobs() as connection:
+            jobs = connection.execute(
+                "select dedupe_key, payload_json from detection_jobs order by created_at"
+            ).fetchall()
+        assert [row["dedupe_key"] for row in jobs] == [
+            f"intent:{route_intent}",
+            "event:42",
+        ]
+        assert json.loads(jobs[1]["payload_json"])["existing_event_id"] == 42
+
+
 def test_coalesced_refinement_does_not_duplicate_initial_tracking_handoff() -> None:
     initial = MotionDecisionOutcome(
         event_id=42,
@@ -951,6 +1007,10 @@ def test_durable_completion_failure_retries_until_handler_succeeds() -> None:
 
 def test_refinement_age_constant_matches_detection_job_store() -> None:
     assert REFINEMENT_MAX_QUEUE_AGE_SECONDS == DETECTION_JOB_MAXIMUM_AGE_SECONDS
+    assert (
+        REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS
+        == DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS
+    )
 
 
 def test_memory_claim_expires_stale_expired_lease_before_fresh_job() -> None:

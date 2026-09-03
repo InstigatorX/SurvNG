@@ -257,7 +257,9 @@ class CameraWorker:
         )
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
-            detection_provider=lambda event_at: self._recorded_motion_frame(event_at),
+            detection_provider=lambda event_at, qualification=None: self._recorded_motion_frame(
+                event_at, qualification=qualification
+            ),
             initial_detection_provider=(
                 lambda event_at: self._recorded_motion_frame(event_at, initial=True)
             ),
@@ -750,10 +752,11 @@ class CameraWorker:
         *,
         initial: bool = False,
         evidence: dict[str, Any] | None = None,
+        qualification: dict[str, Any] | None = None,
     ) -> Any:
         if initial:
             return self.media.detect_initial_recorded_motion(event_at, evidence)
-        return self.media.detect_recorded_motion(event_at)
+        return self.media.detect_recorded_motion(event_at, qualification)
 
     def _write_snapshot(self, frame: Any, event_at: datetime | None = None) -> str:
         return self.media.write_snapshot(frame, event_at)

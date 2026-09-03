@@ -153,6 +153,12 @@ class RecordedDecodeBudget:
             self._geometry_frame_count = refinement_frame_count(
                 getattr(config, "event_refinement_stages", ()) or ()
             )
+            self._geometry_frame_count = max(
+                self._geometry_frame_count,
+                refinement_frame_count(
+                    getattr(config, "event_route_refinement_stages", ()) or ()
+                ),
+            )
             self._fallback_frame_bytes = max(1, fallback_frame_bytes)
             if self._largest_observed_frame_bytes is None:
                 self._memory_budget_bytes = max(1, int(memory_budget_bytes))
@@ -190,6 +196,12 @@ class RecordedDecodeBudget:
         )
         stages = getattr(config, "event_refinement_stages", ()) or ()
         frame_count = refinement_frame_count(stages)
+        frame_count = max(
+            frame_count,
+            refinement_frame_count(
+                getattr(config, "event_route_refinement_stages", ()) or ()
+            ),
+        )
         memory_per_process_bytes = frame_count * RECORDED_DECODE_FALLBACK_FRAME_BYTES
         return (
             max_processes,

@@ -17,11 +17,56 @@ from survng.app.motion_pipeline.object_detection import (
     _EventRecordedSampler,
     _RecordedDetectionSample,
     RecordedMotionObjectDetector,
+    RECORDED_EVENT_FRAME_STAGES,
+    RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES,
+    resolve_recorded_refinement_plan,
     TimestampedLiveFrame,
     _image_quality,
     _representative_needs_refinement,
     _temporal_consensus,
 )
+
+
+class RecordedRefinementPlanTest(unittest.TestCase):
+    def test_route_watch_selects_dense_plan_only_in_window_for_target(self) -> None:
+        event_at = datetime.fromtimestamp(1005.0, timezone.utc)
+        qualification = {"features": {"route_detection_watch": {
+            "target_camera_id": "gate", "source_event_id": 44,
+            "eligible_at": 1000.0, "expires_at": 1010.0,
+            "route_path": ["back-left", "gate"],
+        }, "security_verification_reason": "route_watch"}}
+        stages, *_ = resolve_recorded_refinement_plan(
+            SimpleNamespace(event_refinement_stages=[list(stage) for stage in RECORDED_EVENT_FRAME_STAGES]),
+            qualification=qualification, event_at=event_at, camera_id="gate",
+        )
+        assert stages == RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES
+        assert len({offset for stage in stages for offset in stage}) == 22
+
+    def test_invalid_route_watch_uses_standard_plan(self) -> None:
+        event_at = datetime.fromtimestamp(1005.0, timezone.utc)
+        qualification = {"features": {"route_detection_watch": {
+            "target_camera_id": "other", "source_event_id": 44,
+            "eligible_at": 1000.0, "expires_at": 1001.0,
+            "route_path": ["back-left", "other"],
+        }}}
+        stages, *_ = resolve_recorded_refinement_plan(
+            SimpleNamespace(event_refinement_stages=[list(stage) for stage in RECORDED_EVENT_FRAME_STAGES]),
+            qualification=qualification, event_at=event_at, camera_id="gate",
+        )
+        assert stages == RECORDED_EVENT_FRAME_STAGES
+
+    def test_route_watch_without_route_verification_reason_uses_standard_plan(self) -> None:
+        event_at = datetime.fromtimestamp(1005.0, timezone.utc)
+        qualification = {"features": {"route_detection_watch": {
+            "target_camera_id": "gate", "source_event_id": 44,
+            "eligible_at": 1000.0, "expires_at": 1010.0,
+            "route_path": ["back-left", "gate"],
+        }, "security_verification_reason": "onvif_degraded"}}
+        stages, *_ = resolve_recorded_refinement_plan(
+            SimpleNamespace(event_refinement_stages=[list(stage) for stage in RECORDED_EVENT_FRAME_STAGES]),
+            qualification=qualification, event_at=event_at, camera_id="gate",
+        )
+        assert stages == RECORDED_EVENT_FRAME_STAGES
 
 
 def detected(

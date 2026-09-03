@@ -16,6 +16,7 @@ import numpy as np
 
 from .durable_payload import durable_json_copy
 from .event_store.jobs import (
+    DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS,
     DETECTION_JOB_MAXIMUM_AGE_SECONDS,
     detection_job_occurrence_equivalent,
 )
@@ -52,6 +53,7 @@ class DetectionJobStore(Protocol):
     def claim_detection_job(
         self, camera_id: str, *, lease_seconds: float = 60.0, lease_owner: str = "",
         maximum_age_seconds: float = DETECTION_JOB_MAXIMUM_AGE_SECONDS,
+        event_maximum_age_seconds: float | None = None,
     ) -> dict[str, Any] | None: ...
     def complete_detection_job(self, job_id: str, event_id: int | None, *, lease_owner: str = "") -> None: ...
     def retry_detection_job(
@@ -61,6 +63,7 @@ class DetectionJobStore(Protocol):
     ) -> bool: ...
     def expire_stale_detection_jobs(
         self, camera_id: str, *, maximum_age_seconds: float,
+        event_maximum_age_seconds: float | None = None,
     ) -> int: ...
     def detection_job_status(self, camera_id: str) -> dict[str, int | float]: ...
 
@@ -88,6 +91,7 @@ TrackingStarter = Callable[
 RefinementCallback = Callable[[MotionDecisionOutcome], None]
 RefinementCompletionHandler = Callable[[MotionDecisionOutcome, dict[str, Any]], None]
 REFINEMENT_MAX_QUEUE_AGE_SECONDS = DETECTION_JOB_MAXIMUM_AGE_SECONDS
+REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS = DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS
 REFINEMENT_STALE_EXPIRY_INTERVAL_SECONDS = 5.0
 
 
@@ -121,11 +125,15 @@ class _RefinementJob:
     initial_outcome: MotionDecisionOutcome
 
     def key(self) -> tuple[str, str | int | float]:
+        # Once the fast path persists an incident, that canonical event—not the
+        # route probe that happened to discover it—owns recorded refinement.
+        # This keeps an earlier no-object attempt for the same route intent
+        # from coalescing with or colliding against the event's cover job.
+        if self.existing_event_id is not None:
+            return ("event", self.existing_event_id)
         intent_id = str(self.qualification.get("detection_intent_id") or "").strip()
         if intent_id:
             return ("intent", intent_id)
-        if self.existing_event_id is not None:
-            return ("event", self.existing_event_id)
         # Legacy/manual callers without a durable intent may still refine, but
         # a runtime-local episode sequence is never a safe durable identity.
         return ("time", round(self.event_at.timestamp(), 3))
@@ -185,6 +193,11 @@ class _RefinementJob:
                 refinement_pending=bool(initial.get("refinement_pending")),
                 processing_timing=initial.get("processing_timing"),
                 object_activity=initial.get("object_activity"),
+                refinement_event_id=(
+                    int(initial["refinement_event_id"])
+                    if initial.get("refinement_event_id") is not None
+                    else None
+                ),
             ),
         )
 
@@ -242,12 +255,14 @@ class _MemoryDetectionJobStore:
         lease_seconds=60.0,
         lease_owner="",
         maximum_age_seconds=DETECTION_JOB_MAXIMUM_AGE_SECONDS,
+        event_maximum_age_seconds=None,
     ):
         now = time.monotonic()
         with self._lock:
             self._expire_stale_detection_jobs_locked(
                 camera_id,
                 maximum_age_seconds=maximum_age_seconds,
+                event_maximum_age_seconds=event_maximum_age_seconds,
                 now=now,
             )
             reclaimable = [
@@ -274,15 +289,21 @@ class _MemoryDetectionJobStore:
                     ),
                 )
             else:
-                job = None
-                for candidate in self._jobs.values():
-                    if (
-                        candidate["camera_id"] == camera_id
-                        and candidate["state"] == "queued"
-                        and candidate["available_at"] <= now
-                    ):
-                        job = candidate
-                        break
+                queued = [
+                    candidate
+                    for candidate in self._jobs.values()
+                    if candidate["camera_id"] == camera_id
+                    and candidate["state"] == "queued"
+                    and candidate["available_at"] <= now
+                ]
+                job = next(
+                    (
+                        candidate
+                        for candidate in queued
+                        if candidate["payload"].get("existing_event_id") is not None
+                    ),
+                    queued[0] if queued else None,
+                )
                 if job is None:
                     return None
             job["state"] = "running"
@@ -291,11 +312,18 @@ class _MemoryDetectionJobStore:
             job["lease_expires_at"] = now + max(1.0, float(lease_seconds))
             return copy.deepcopy(job)
 
-    def expire_stale_detection_jobs(self, camera_id, *, maximum_age_seconds):
+    def expire_stale_detection_jobs(
+        self,
+        camera_id,
+        *,
+        maximum_age_seconds,
+        event_maximum_age_seconds=None,
+    ):
         with self._lock:
             return self._expire_stale_detection_jobs_locked(
                 camera_id,
                 maximum_age_seconds=maximum_age_seconds,
+                event_maximum_age_seconds=event_maximum_age_seconds,
                 now=time.monotonic(),
             )
 
@@ -304,11 +332,23 @@ class _MemoryDetectionJobStore:
         camera_id,
         *,
         maximum_age_seconds,
+        event_maximum_age_seconds,
         now,
     ):
-        cutoff = now - max(0.0, float(maximum_age_seconds))
+        probe_cutoff = now - max(0.0, float(maximum_age_seconds))
+        event_maximum_age = (
+            float(maximum_age_seconds)
+            if event_maximum_age_seconds is None
+            else max(0.0, float(event_maximum_age_seconds))
+        )
+        event_cutoff = now - event_maximum_age
         expired = 0
         for job in self._jobs.values():
+            cutoff = (
+                event_cutoff
+                if job["payload"].get("existing_event_id") is not None
+                else probe_cutoff
+            )
             if job["camera_id"] != camera_id or job["created_at_monotonic"] > cutoff:
                 continue
             lease_expires_at = job.get("lease_expires_at")
@@ -617,7 +657,11 @@ class MotionIncidentService:
                     message=message,
                     event_at=event_at,
                     qualification=_compact_refinement_qualification(qualification),
-                    existing_event_id=outcome.event_id,
+                    existing_event_id=(
+                        outcome.refinement_event_id
+                        if outcome.refinement_event_id is not None
+                        else outcome.event_id
+                    ),
                     require_eligible_object=require_eligible_object,
                     require_motion_correlation=require_motion_correlation,
                     callback=refinement_callback,
@@ -768,6 +812,9 @@ class MotionIncidentService:
                         expired = int(expire_stale(
                             self.camera_id,
                             maximum_age_seconds=REFINEMENT_MAX_QUEUE_AGE_SECONDS,
+                            event_maximum_age_seconds=(
+                                REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS
+                            ),
                         ))
                         if expired:
                             LOGGER.info(
@@ -784,6 +831,9 @@ class MotionIncidentService:
                 self.camera_id,
                 lease_owner=self._lease_owner,
                 maximum_age_seconds=REFINEMENT_MAX_QUEUE_AGE_SECONDS,
+                event_maximum_age_seconds=(
+                    REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS
+                ),
             )
             if claimed is None:
                 try:

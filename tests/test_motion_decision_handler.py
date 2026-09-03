@@ -129,6 +129,97 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         face_sink.assert_not_called()
         self.assertEqual(published, [])
 
+    def test_same_intent_route_replay_recovers_canonical_event_refinement(self) -> None:
+        events = Mock()
+        events.add_event.return_value = {
+            "id": 42,
+            "created": False,
+            "canonical_detection_intent_id": "route:gate:upper-garage:10",
+        }
+        published: list[tuple[str, dict]] = []
+        face_sink = Mock()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        result = RecordedDetectionResult(
+            frame=frame,
+            objects=[{"label": "car", "confidence": 0.9, "incident_eligible": True}],
+            recording_path="recording.mp4",
+            timings_ms={},
+            refinement_pending=True,
+        )
+        handler = MotionDecisionHandler(
+            camera_id="upper-garage",
+            events=events,
+            detection_provider=lambda _event_at: result,
+            snapshot_writer=lambda _frame, _at: "replayed.webp",
+            object_serializer=json.dumps,
+            event_callback=lambda kind, payload: published.append((kind, payload)),
+            face_candidate_sink=face_sink,
+        )
+        qualification = {
+            "detection_intent_id": "route:gate:upper-garage:10",
+            "features": {"route_detection_watch": {
+                "origin_camera_id": "gate",
+                "origin_event_id": 10,
+            }},
+        }
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 27, 21, 13, tzinfo=timezone.utc),
+            qualification,
+            require_eligible_object=True,
+        )
+
+        self.assertIsNone(outcome.event_id)
+        self.assertEqual(outcome.refinement_event_id, 42)
+        self.assertTrue(outcome.refinement_pending)
+        self.assertEqual(outcome.rejection_reason, "route_target_already_admitted")
+        face_sink.assert_not_called()
+        self.assertEqual(published, [])
+
+    def test_competing_route_duplicate_cannot_refine_winning_event(self) -> None:
+        events = Mock()
+        events.add_event.return_value = {
+            "id": 42,
+            "created": False,
+            "canonical_detection_intent_id": "route:gate:upper-garage:winner",
+        }
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        result = RecordedDetectionResult(
+            frame=frame,
+            objects=[{"label": "car", "confidence": 0.9, "incident_eligible": True}],
+            recording_path="recording.mp4",
+            timings_ms={},
+            refinement_pending=True,
+        )
+        handler = MotionDecisionHandler(
+            camera_id="upper-garage",
+            events=events,
+            detection_provider=lambda _event_at: result,
+            snapshot_writer=lambda _frame, _at: "alternate.webp",
+            object_serializer=json.dumps,
+        )
+        qualification = {
+            "detection_intent_id": "route:gate:upper-garage:alternate",
+            "features": {"route_detection_watch": {
+                "origin_camera_id": "gate",
+                "origin_event_id": 10,
+            }},
+        }
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 27, 21, 13, tzinfo=timezone.utc),
+            qualification,
+            require_eligible_object=True,
+        )
+
+        self.assertIsNone(outcome.event_id)
+        self.assertIsNone(outcome.refinement_event_id)
+        self.assertFalse(outcome.refinement_pending)
+
     def test_winning_route_event_can_still_receive_refined_evidence(self) -> None:
         events = Mock()
         published: list[tuple[str, dict]] = []
@@ -198,6 +289,44 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertEqual(outcome.rejection_reason, "refinement_unavailable_preserved")
         snapshot_writer.assert_not_called()
         events.refine_event_evidence.assert_not_called()
+
+    def test_empty_recorded_refinement_cannot_replace_existing_cover(self) -> None:
+        events = Mock()
+        promoter = Mock()
+        result = RecordedDetectionResult(
+            frame=np.zeros((1080, 1920, 3), dtype=np.uint8),
+            objects=[],
+            recording_path="main.mp4",
+            timings_ms={},
+            frame_captured_at_epoch=1004.0,
+            frame_source="recorded_main",
+            frame_timestamp_exact=True,
+        )
+        handler = MotionDecisionHandler(
+            camera_id="lower-garage",
+            events=events,
+            detection_provider=lambda _event_at: result,
+            snapshot_writer=lambda _frame, _at: "empty-main.webp",
+            object_serializer=json.dumps,
+            refinement_cover_promoter=promoter,
+        )
+
+        outcome = handler.refine(
+            "adaptive/visual_backup",
+            "backup",
+            datetime.fromtimestamp(1000.0, timezone.utc),
+            {"features": {"motion_regions": [[0.1, 0.1, 0.3, 0.3]]}},
+            existing_event_id=42,
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertFalse(outcome.object_detected)
+        self.assertEqual(outcome.rejection_reason, "no_eligible_object")
+        self.assertFalse(outcome.cover_promoted)
+        events.refine_event_evidence.assert_not_called()
+        promoter.assert_not_called()
 
     def test_uncorrelated_refinement_can_promote_compatible_cover_without_changing_decision(self) -> None:
         events = Mock()

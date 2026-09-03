@@ -82,7 +82,7 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         second = budget.reserve_workflow(maximum_frames=16, incident_epoch=2.0)
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
-        self.assertEqual(budget.status()["reserved_bytes"], 1152 << 20)
+        self.assertEqual(budget.status()["reserved_bytes"], 2 * 16 * 36 << 20)
 
         admitted = threading.Event()
         released = threading.Event()
@@ -121,8 +121,8 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
             for index in range(3)
         ]
         self.assertTrue(all(lease is not None for lease in leases))
-        self.assertEqual(budget.status()["memory_budget_bytes"], 1728 << 20)
-        self.assertEqual(budget.status()["reserved_bytes"], 1728 << 20)
+        self.assertEqual(budget.status()["memory_budget_bytes"], 3 * 22 * 36 << 20)
+        self.assertEqual(budget.status()["reserved_bytes"], 3 * 16 * 36 << 20)
         for lease in leases:
             assert lease is not None
             lease.release()
@@ -135,8 +135,8 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
             )
         )
         status = budget.status()
-        self.assertEqual(status["memory_per_process_bytes"], 108 << 20)
-        self.assertEqual(status["memory_budget_bytes"], 324 << 20)
+        self.assertEqual(status["memory_per_process_bytes"], 22 * 36 << 20)
+        self.assertEqual(status["memory_budget_bytes"], 3 * 22 * 36 << 20)
 
     def test_refinement_frame_count_keeps_pre_event_samples_distinct(self) -> None:
         self.assertEqual(refinement_frame_count([[-1.0, -0.5, 0.0]]), 3)
@@ -150,12 +150,12 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         budget.observe_frame_bytes(frame_bytes)
         status = budget.status()
         self.assertEqual(status["observed_frame_bytes"], frame_bytes)
-        self.assertEqual(status["memory_per_process_bytes"], 16 * frame_bytes)
-        self.assertEqual(status["memory_budget_bytes"], 3 * 16 * frame_bytes)
+        self.assertEqual(status["memory_per_process_bytes"], 22 * frame_bytes)
+        self.assertEqual(status["memory_budget_bytes"], 3 * 22 * frame_bytes)
 
         budget.observe_frame_bytes(4512 * 2512 * 3)
         self.assertEqual(
-            budget.status()["memory_per_process_bytes"], 16 * 4512 * 2512 * 3
+            budget.status()["memory_per_process_bytes"], 22 * 4512 * 2512 * 3
         )
 
     def test_unknown_geometry_keeps_conservative_fallback_after_low_observation(self) -> None:
@@ -165,7 +165,7 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         budget.observe_frame_bytes(1920 * 1080 * 3)
         lease = budget.reserve_workflow(maximum_frames=16, incident_epoch=1.0)
         self.assertIsNotNone(lease)
-        self.assertEqual(budget.status()["reserved_bytes"], 576 << 20)
+        self.assertEqual(budget.status()["reserved_bytes"], 16 * 36 << 20)
         assert lease is not None
         lease.release()
 
@@ -326,8 +326,8 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
             DetectorConfig(recorded_decode_max_processes=3)
         )
         status = factory.decode_budget.status()
-        self.assertEqual(status["memory_per_process_bytes"], 576 << 20)
-        self.assertEqual(status["memory_budget_bytes"], 1728 << 20)
+        self.assertEqual(status["memory_per_process_bytes"], 22 * 36 << 20)
+        self.assertEqual(status["memory_budget_bytes"], 3 * 22 * 36 << 20)
 
         factory.reconfigure_decode_budget(
             DetectorConfig(
@@ -336,8 +336,8 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
             )
         )
         status = factory.decode_budget.status()
-        self.assertEqual(status["memory_per_process_bytes"], 108 << 20)
-        self.assertEqual(status["memory_budget_bytes"], 216 << 20)
+        self.assertEqual(status["memory_per_process_bytes"], 22 * 36 << 20)
+        self.assertEqual(status["memory_budget_bytes"], 2 * 22 * 36 << 20)
 
     def test_concurrent_reservations_drain_during_repeated_hot_scaling(self) -> None:
         budget = RecordedDecodeBudget.from_detector_config(
@@ -520,7 +520,7 @@ class RecordedDecodeBudgetTest(unittest.TestCase):
         budget = RecordedDecodeBudget.from_detector_config(DetectorConfig())
         status = budget.status()
         self.assertEqual(status["max_processes"], 2)
-        self.assertEqual(status["memory_budget_bytes"], 1152 << 20)
+        self.assertEqual(status["memory_budget_bytes"], 2 * 22 * 36 << 20)
         self.assertEqual(status["estimated_frame_bytes"], 36 << 20)
 
     def test_wait_percentiles_and_ffmpeg_outcomes_are_reported(self) -> None:

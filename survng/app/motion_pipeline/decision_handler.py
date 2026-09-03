@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
 import math
+import inspect
 import time
 from typing import Any, Callable, Protocol
 
@@ -486,6 +487,10 @@ class MotionDecisionOutcome:
     depth_attribution: dict[str, Any] | None = None
     cover_promoted: bool = False
     cover_promotion_reason: str = ""
+    # A replay can lose the route-admission race after the canonical event was
+    # persisted but before its recorded job was admitted. Keep duplicate user
+    # side effects suppressed while still allowing that event to own recovery.
+    refinement_event_id: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -500,6 +505,7 @@ class MotionDecisionOutcome:
             "depth_attribution": self.depth_attribution,
             "cover_promoted": self.cover_promoted,
             "cover_promotion_reason": self.cover_promotion_reason,
+            "refinement_event_id": self.refinement_event_id,
         }
 
 
@@ -540,6 +546,27 @@ class MotionDecisionHandler:
         if self.activity_attributor is None:
             return {"mode": "off", "evaluated": 0}
         return self.activity_attributor.status()
+
+    @staticmethod
+    def _invoke_detection_provider(
+        provider: Callable[..., Any],
+        event_at: datetime,
+        qualification: dict[str, Any],
+    ) -> Any:
+        """Pass durable qualification to modern providers, preserving legacy mocks."""
+        try:
+            parameters = inspect.signature(provider).parameters.values()
+            accepts_two = any(
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                for parameter in parameters
+            ) or len(parameters) >= 2
+        except (TypeError, ValueError):
+            accepts_two = True
+        return (
+            provider(event_at, qualification)
+            if accepts_two
+            else provider(event_at)
+        )
 
     def reconfigure_activity_attribution(self, mode: AttributionMode) -> None:
         if self.activity_attributor is not None:
@@ -611,7 +638,7 @@ class MotionDecisionHandler:
         provider_result = (
             evidence_provider(event_at, qualification)
             if evidence_provider is not None
-            else provider(event_at)
+            else self._invoke_detection_provider(provider, event_at, qualification)
         )
         frame, objects, recording_path = provider_result
         frame_captured_at_epoch = getattr(
@@ -928,6 +955,17 @@ class MotionDecisionHandler:
             route_admission_duplicate = bool(
                 route_origin is not None and not event_created
             )
+            current_intent_id = str(
+                qualification.get("detection_intent_id") or ""
+            ).strip()
+            canonical_intent_id = str(
+                event.get("canonical_detection_intent_id") or ""
+            ).strip()
+            route_admission_replay = bool(
+                route_admission_duplicate
+                and current_intent_id
+                and current_intent_id == canonical_intent_id
+            )
         else:
             event_id = int(existing_event_id)
             event_created = False
@@ -964,10 +1002,14 @@ class MotionDecisionHandler:
                 detected_objects=(),
                 rejection_reason="route_target_already_admitted",
                 motion_correlation=correlation,
-                refinement_pending=False,
                 processing_timing=processing_timing,
                 object_activity=activity_summary,
                 depth_attribution=depth_attribution,
+                refinement_pending=bool(
+                    route_admission_replay
+                    and getattr(provider_result, "refinement_pending", False)
+                ),
+                refinement_event_id=(event_id if route_admission_replay else None),
             )
         self._persist_face_candidates(
             event_id,

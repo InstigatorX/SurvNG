@@ -484,6 +484,10 @@ class EventStoreTest(unittest.TestCase):
             )
 
             self.assertFalse(duplicate["created"])
+            self.assertEqual(
+                duplicate["canonical_detection_intent_id"],
+                "route-direct",
+            )
             self.assertFalse(snapshot.exists())
 
     def test_detection_job_lease_owner_prevents_stale_completion(self) -> None:
@@ -632,6 +636,59 @@ class EventStoreTest(unittest.TestCase):
                         "require_motion_correlation": False,
                     },
                 )
+
+    def test_event_refinement_is_prioritized_and_outlives_stale_route_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            now = datetime.now(timezone.utc)
+            old_created_at = (now - timedelta(seconds=30)).isoformat()
+            route_id = "route:lower-garage:upper-garage:62306"
+            probe = {
+                "event_at": now.isoformat(),
+                "existing_event_id": None,
+                "qualification": {"detection_intent_id": route_id},
+            }
+            event = {**probe, "existing_event_id": 62310}
+            store.enqueue_detection_job(
+                job_id="probe",
+                camera_id="lower-garage",
+                dedupe_key=f"intent:{route_id}",
+                payload=probe,
+            )
+            store.enqueue_detection_job(
+                job_id="event",
+                camera_id="lower-garage",
+                dedupe_key="event:62310",
+                payload=event,
+            )
+            with store._connect_jobs() as connection:
+                connection.execute(
+                    "update detection_jobs set created_at = ?",
+                    (old_created_at,),
+                )
+
+            expired = store.expire_stale_detection_jobs(
+                "lower-garage",
+                maximum_age_seconds=20.0,
+                event_maximum_age_seconds=60.0,
+            )
+            claimed = store.claim_detection_job(
+                "lower-garage",
+                maximum_age_seconds=20.0,
+                event_maximum_age_seconds=60.0,
+            )
+
+            self.assertEqual(expired, 1)
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed["id"], "event")
+            with store._connect_jobs() as connection:
+                probe_state = connection.execute(
+                    "select state, last_error from detection_jobs where id = 'probe'"
+                ).fetchone()
+            self.assertEqual(
+                (probe_state["state"], probe_state["last_error"]),
+                ("failed", "stale_refinement"),
+            )
 
     def test_detection_job_pruning_is_bounded_and_preserves_active_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

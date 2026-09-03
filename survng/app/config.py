@@ -754,6 +754,16 @@ class DetectorConfig(BaseModel):
             [12.0, 12.5],
         ]
     )
+    # Route-confirmed motion gets denser coverage during the likely transit
+    # window, while retaining the ordinary refinement plan for all other work.
+    event_route_refinement_stages: list[list[float]] = Field(
+        default_factory=lambda: [
+            [-1.0, -0.5, 0.0, 0.5, 1.0],
+            [1.5, 2.0, 2.5, 3.0],
+            [3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5],
+            [12.0, 12.5],
+        ]
+    )
     event_refinement_retry_seconds: float = Field(default=24.0, ge=0.0, le=120.0)
     event_refinement_settle_seconds: float = Field(default=0.75, ge=0.0, le=5.0)
     event_refinement_retry_interval_seconds: float = Field(

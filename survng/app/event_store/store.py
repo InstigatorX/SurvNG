@@ -283,6 +283,7 @@ class EventStore(
         route_admission = bool(route_origin_camera and route_origin_event > 0)
         discarded_snapshot_path = ""
         duplicate_route_admission: dict[str, Any] | None = None
+        canonical_detection_intent_id = str(detection_intent_id or "")
         with self._lock, self._connect() as conn:
             # A route admission is the authoritative identity for a routed
             # occurrence.  Resolve it before checking the intent ID: a
@@ -290,12 +291,18 @@ class EventStore(
             # ID while selecting a later camera timestamp for its event.
             if route_admission:
                 admitted = conn.execute(
-                    "select event_id from route_incident_admissions "
-                    "where origin_camera_id = ? and origin_event_id = ? "
-                    "and target_camera_id = ?",
+                    "select admission.event_id, event.detection_intent_id "
+                    "from route_incident_admissions as admission "
+                    "join events as event on event.id = admission.event_id "
+                    "where admission.origin_camera_id = ? "
+                    "and admission.origin_event_id = ? "
+                    "and admission.target_camera_id = ?",
                     (route_origin_camera, route_origin_event, camera_id),
                 ).fetchone()
                 if admitted is not None:
+                    canonical_detection_intent_id = str(
+                        admitted["detection_intent_id"] or ""
+                    )
                     duplicate_route_admission = {
                         "id": int(admitted["event_id"]),
                         "camera_id": camera_id,
@@ -308,6 +315,9 @@ class EventStore(
                         "objects_json": objects_json,
                         "created_at": created_at,
                         "detection_intent_id": detection_intent_id,
+                        "canonical_detection_intent_id": (
+                            canonical_detection_intent_id
+                        ),
                         "created": False,
                         "route_admission_created": False,
                     }
@@ -389,6 +399,13 @@ class EventStore(
                             discarded_snapshot_path = snapshot_path
                         event_id = admitted_event_id
                         created = False
+                        canonical = conn.execute(
+                            "select detection_intent_id from events where id = ?",
+                            (event_id,),
+                        ).fetchone()
+                        canonical_detection_intent_id = str(
+                            canonical["detection_intent_id"] or ""
+                        ) if canonical is not None else ""
         if duplicate_route_admission is not None:
             self._delete_snapshot_if_unreferenced(snapshot_path)
             return duplicate_route_admission
@@ -406,6 +423,7 @@ class EventStore(
             "objects_json": objects_json,
             "created_at": created_at,
             "detection_intent_id": detection_intent_id,
+            "canonical_detection_intent_id": canonical_detection_intent_id,
             "created": created,
             "route_admission_created": route_admission_created,
         }

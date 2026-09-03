@@ -9,6 +9,12 @@ from typing import Any
 from ..durable_payload import durable_json_dumps
 
 DETECTION_JOB_MAXIMUM_AGE_SECONDS = 20.0
+# A probe that has not admitted an incident becomes irrelevant quickly. Once a
+# live fast-path has persisted an event, however, recorded refinement is the
+# only path to its main-stream cover and remains useful while the recording is
+# durable. Give those event-bound jobs enough time to survive one busy 4K
+# decode ahead of them.
+DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS = 60.0
 
 
 def _detection_job_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
@@ -653,6 +659,7 @@ class EventStoreJobsMixin:
         lease_seconds: float = 60.0,
         lease_owner: str = "",
         maximum_age_seconds: float = DETECTION_JOB_MAXIMUM_AGE_SECONDS,
+        event_maximum_age_seconds: float | None = None,
     ) -> dict[str, Any] | None:
         """Claim one due job, reclaiming an expired worker lease atomically."""
         now = time.time()
@@ -680,6 +687,7 @@ class EventStoreJobsMixin:
                 conn,
                 camera_id,
                 maximum_age_seconds=maximum_age_seconds,
+                event_maximum_age_seconds=event_maximum_age_seconds,
                 now=now,
                 now_iso=now_iso,
             )
@@ -696,10 +704,15 @@ class EventStoreJobsMixin:
                 row = conn.execute(
                     "select * from detection_jobs where camera_id = ? and "
                     "state = 'queued' and available_at <= ? "
+                    # An admitted event owns user-visible evidence. Service it
+                    # before speculative probes, then retain LIFO freshness
+                    # within each class.
+                    "order by case when json_extract(payload_json, "
+                    "'$.existing_event_id') is not null then 0 else 1 end, "
                     # Refinement is time-sensitive evidence, not a FIFO batch.
                     # After restart, processing an old backlog before a current
                     # incident makes the current event unrecoverably stale.
-                    "order by created_at desc, id desc limit 1",
+                    "created_at desc, id desc limit 1",
                     (camera_id, now),
                 ).fetchone()
             if row is None:
@@ -724,6 +737,7 @@ class EventStoreJobsMixin:
         camera_id: str,
         *,
         maximum_age_seconds: float,
+        event_maximum_age_seconds: float | None = None,
     ) -> int:
         """Terminally mark stale queued or reclaimable evidence jobs."""
         now = time.time()
@@ -733,6 +747,7 @@ class EventStoreJobsMixin:
                 conn,
                 camera_id,
                 maximum_age_seconds=maximum_age_seconds,
+                event_maximum_age_seconds=event_maximum_age_seconds,
                 now=now,
                 now_iso=now_iso,
             )
@@ -743,19 +758,33 @@ class EventStoreJobsMixin:
         camera_id: str,
         *,
         maximum_age_seconds: float,
+        event_maximum_age_seconds: float | None,
         now: float,
         now_iso: str,
     ) -> int:
-        cutoff = datetime.fromtimestamp(
+        probe_cutoff = datetime.fromtimestamp(
             now - max(0.0, float(maximum_age_seconds)),
+            timezone.utc,
+        ).isoformat()
+        event_maximum_age = (
+            float(maximum_age_seconds)
+            if event_maximum_age_seconds is None
+            else max(0.0, float(event_maximum_age_seconds))
+        )
+        event_cutoff = datetime.fromtimestamp(
+            now - event_maximum_age,
             timezone.utc,
         ).isoformat()
         cursor = conn.execute(
             "update detection_jobs set state = 'failed', lease_expires_at = null, "
             "lease_owner = '', last_error = 'stale_refinement', updated_at = ? "
-            "where camera_id = ? and created_at <= ? and (state = 'queued' "
+            "where camera_id = ? and (("
+            "json_extract(payload_json, '$.existing_event_id') is null "
+            "and created_at <= ?) or ("
+            "json_extract(payload_json, '$.existing_event_id') is not null "
+            "and created_at <= ?)) and (state = 'queued' "
             "or (state = 'running' and lease_expires_at <= ?))",
-            (now_iso, camera_id, cutoff, now),
+            (now_iso, camera_id, probe_cutoff, event_cutoff, now),
         )
         return max(0, int(cursor.rowcount))
 

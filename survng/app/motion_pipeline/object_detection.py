@@ -34,6 +34,12 @@ RECORDED_EVENT_FRAME_STAGES = (
     (8.0, 8.5),
     (12.0, 12.5),
 )
+RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES = (
+    (-1.0, -0.5, 0.0, 0.5, 1.0),
+    (1.5, 2.0, 2.5, 3.0),
+    (3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5),
+    (12.0, 12.5),
+)
 RECORDED_EVENT_FRAME_OFFSETS = tuple(
     offset
     for stage in RECORDED_EVENT_FRAME_STAGES
@@ -97,11 +103,58 @@ def _refinement_budget(config: Any, name: str, default: float) -> float:
 
 def resolve_recorded_refinement_plan(
     config: Any = None,
+    *,
+    qualification: dict[str, Any] | None = None,
+    event_at: datetime | None = None,
+    camera_id: str | None = None,
 ) -> tuple[tuple[tuple[float, ...], ...], float, float, float, float]:
     """Resolve recorded refinement stages and occupancy budgets."""
     stages = _coerce_refinement_stages(
         getattr(config, "event_refinement_stages", None)
     ) or RECORDED_EVENT_FRAME_STAGES
+    watch = (
+        qualification.get("features", {}).get("route_detection_watch")
+        if isinstance(qualification, dict)
+        and isinstance(qualification.get("features"), dict)
+        else None
+    )
+    valid_route_watch = False
+    if isinstance(watch, dict) and event_at is not None:
+        try:
+            verification_reason = str(
+                (qualification or {}).get("features", {}).get(
+                    "security_verification_reason", ""
+                )
+            ).strip().lower()
+            target = str(watch.get("target_camera_id") or "").strip()
+            source_event_id = int(watch.get("source_event_id") or 0)
+            eligible_at = float(watch.get("eligible_at"))
+            expires_at = float(watch.get("expires_at"))
+            event_epoch = float(event_at.timestamp())
+            path = tuple(str(item).strip() for item in (watch.get("route_path") or ()))
+            valid_route_watch = bool(
+                target
+                and verification_reason == "route_watch"
+                and (camera_id is None or target == str(camera_id).strip())
+                and source_event_id > 0
+                and math.isfinite(eligible_at)
+                and math.isfinite(expires_at)
+                and eligible_at <= event_epoch <= expires_at
+                and path
+                and path[-1] == target
+                and len(path) == len(set(path))
+            )
+        except (TypeError, ValueError, OverflowError):
+            valid_route_watch = False
+    # Camera id is not part of DetectorConfig; callers may validate target
+    # separately by supplying it as a private compatibility attribute.
+    if valid_route_watch:
+        stages = (
+            _coerce_refinement_stages(
+                getattr(config, "event_route_refinement_stages", None)
+            )
+            or RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES
+        )
     return (
         stages,
         _refinement_budget(
@@ -1161,14 +1214,37 @@ class RecordedMotionObjectDetector:
         # motion evidence, so callers may keep passing this legacy argument.
         _ = motion_evidence
 
-    def detect(self, event_at: datetime) -> RecordedDetectionResult:
+    def detect(
+        self,
+        event_at: datetime,
+        qualification: dict[str, Any] | None = None,
+    ) -> RecordedDetectionResult:
         (
             stages,
             retry_seconds,
             settle_seconds,
             retry_interval_seconds,
             representative_timeout_seconds,
-        ) = resolve_recorded_refinement_plan(getattr(self.detector, "config", None))
+        ) = resolve_recorded_refinement_plan(
+            getattr(self.detector, "config", None),
+            qualification=qualification,
+            event_at=event_at,
+            camera_id=self.camera.id,
+        )
+        route_dense = bool(
+            qualification
+            and isinstance(qualification.get("features"), dict)
+            and isinstance(
+                qualification["features"].get("route_detection_watch"), dict
+            )
+            and len(_flatten_refinement_stages(stages))
+            > refinement_frame_count(
+                _coerce_refinement_stages(
+                    getattr(self.detector.config, "event_refinement_stages", None)
+                )
+                or RECORDED_EVENT_FRAME_STAGES
+            )
+        )
         return self._detect(
             event_at,
             stages=stages,
@@ -1178,6 +1254,7 @@ class RecordedMotionObjectDetector:
             representative_timeout_seconds=representative_timeout_seconds,
             allow_representative_refinement=True,
             refinement_pending=False,
+            route_dense=route_dense,
         )
 
     def detect_initial(
@@ -1346,6 +1423,7 @@ class RecordedMotionObjectDetector:
         retry_seconds: float,
         allow_representative_refinement: bool,
         refinement_pending: bool,
+        route_dense: bool = False,
         settle_seconds: float = RECORDED_EVENT_SETTLE_SECONDS,
         retry_interval_seconds: float = RECORDED_EVENT_RETRY_INTERVAL_SECONDS,
         representative_timeout_seconds: float = RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
@@ -1363,9 +1441,11 @@ class RecordedMotionObjectDetector:
             "recording_samples_decoded": 0.0,
             "decode_budget_wait_ms": 0.0,
             "refinement_early_exit_skipped": 0.0,
+            "refinement_route_dense_plan": float(route_dense),
         }
         event_epoch = event_at.timestamp()
         planned_offsets = _flatten_refinement_stages(stages)
+        timing["refinement_plan_samples"] = float(len(planned_offsets))
         initial_offsets = stages[0]
         adaptive_initial_offsets = tuple(
             offset for offset in (0.0, 0.5, -0.5) if offset in initial_offsets
