@@ -2458,6 +2458,54 @@ p {
   gap: 3px;
 }
 
+.camera-tile-status {
+  display: inline-flex;
+  min-width: 0;
+  height: 16px;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid rgba(218, 230, 233, .42);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .08);
+  color: #e7eff1;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 3px;
+  pointer-events: auto;
+  white-space: nowrap;
+}
+
+.camera-tile-status-symbol {
+  display: inline-grid;
+  width: 8px;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.camera-tile-status.on {
+  border-color: rgba(95, 211, 112, .72);
+  background: rgba(70, 200, 47, .2);
+  color: #e3ffd9;
+}
+
+.camera-tile-status.unavailable {
+  border-style: dashed;
+  color: #c4ced1;
+}
+
+.camera-tile-status.busy {
+  border-color: rgba(118, 211, 230, .8);
+  color: #d9f8ff;
+}
+
+.camera-tile-status.error {
+  border-color: rgba(255, 111, 111, .9);
+  background: rgba(164, 47, 47, .28);
+  color: #ffe3e3;
+}
+
 .camera-tile-menu {
   color: rgba(255, 255, 255, .78);
   font-size: 16px;
@@ -5418,7 +5466,7 @@ section.detection-settings-card {
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: var(--ink);
+  color: #e8f0f2;
   font-size: 11px;
   font-weight: 560;
   padding: 0 10px;
@@ -5429,7 +5477,7 @@ section.detection-settings-card {
 .camera-tile-control-menu .tile-control-button:focus-visible,
 .camera-tile-control-menu button.status-pill.hud-toggle:hover,
 .camera-tile-control-menu button.status-pill.hud-toggle:focus-visible {
-  background: var(--control-muted);
+  background: rgba(175, 209, 216, .16);
 }
 
 .camera-tile-control-menu .tile-control-button.danger {

@@ -205,6 +205,19 @@
     height: 28px !important;
   }
 
+  .live-camera-grid .camera-tile-status {
+    width: 24px;
+    min-width: 24px;
+    height: 18px;
+    justify-content: center;
+    gap: 1px;
+    padding: 0 1px;
+  }
+
+  .live-camera-grid .camera-tile-status-label {
+    display: none;
+  }
+
   .live-camera-grid .camera-tile-live-state {
     display: inline-flex !important;
     align-items: center !important;

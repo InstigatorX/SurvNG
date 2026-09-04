@@ -28,6 +28,7 @@ import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, m
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "../liveWorkspace.mjs";
 import { cameraCaptureConnectivity, cameraTileLiveState } from "../cameraConnectivity.mjs";
 import { liveFramingStyle } from "../liveFraming.mjs";
+import { detectionStatus, recordingStatus } from "../liveCameraStatus.mjs";
 import { createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident } from "../incidentNavigation.mjs";
 import { appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS, STREAM_MODES, STREAM_LABELS, MOTION_WEBRTC_HOLD_MS } from "../shared/constants.js";
@@ -59,6 +60,23 @@ export function mediaAspectRatio(aspect) {
     return 16 / 9;
   }
   return width / height;
+}
+
+function CameraTileStatus({ status }) {
+  const Icon = status.kind === "recording" ? Video : Radar;
+  return (
+    <span
+      className={`camera-tile-status ${status.kind} ${status.state}`}
+      data-status={status.state}
+      role="img"
+      aria-label={status.label}
+      title={status.title}
+    >
+      <Icon size={11} aria-hidden="true" />
+      <span className="camera-tile-status-label" aria-hidden="true">{status.shortLabel}</span>
+      {status.state === "busy" ? <RefreshCcw className="spin" size={10} aria-hidden="true" /> : <span className="camera-tile-status-symbol" aria-hidden="true">{status.symbol}</span>}
+    </span>
+  );
 }
 
 export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, onPreviewClose, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobileView = false, mobilePrimary = false }) {
@@ -99,6 +117,8 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   const shouldUseWebRtc = shouldUseLiveMedia && displayedTransport === "webrtc";
   const shouldUseMjpegStream = shouldUseLiveMedia && activeTransport === "mjpeg";
   const cameraConnectivity = cameraCaptureConnectivity(camera);
+  const currentRecordingStatus = recordingStatus(camera, { busy: recordingBusy, error: recordingError });
+  const currentDetectionStatus = detectionStatus(camera, { busy: detectionBusy, error: detectionError });
 
   useEffect(() => {
     onAspectChange?.(camera.id, mediaAspectRatio(aspect));
@@ -484,6 +504,8 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
           <span className="camera-tile-name"><i className={`${cameraConnectivity === "healthy" ? "online" : cameraConnectivity === "reconnecting" ? "reconnecting" : "offline"}`} aria-hidden="true" /><strong>{camera.name}</strong></span>
           <time className="camera-tile-time">{formatTimeOnly(Date.now() / 1000, timeZone)}</time>
           <span className="camera-tile-actions">
+            <CameraTileStatus status={currentRecordingStatus} />
+            <CameraTileStatus status={currentDetectionStatus} />
             <span className={`camera-tile-live-state ${cameraConnectivity === "reconnecting" ? "attention" : ""}`}>{cameraTileLiveState(camera)}</span>
             <button
               type="button"
