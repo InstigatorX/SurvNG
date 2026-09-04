@@ -22,7 +22,11 @@ from .incident_presenter import (
     _incident_row,
     _incident_rows,
 )
-from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_snapshot_path
+from .incident_utils import (
+    DEFAULT_INCIDENT_GAP_SECONDS,
+    event_epoch,
+    event_snapshot_path,
+)
 from .identity_projection import apply_incident_identities
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator, manager_generation_lease
@@ -104,6 +108,32 @@ def _filter_incidents_by_person(
     ]
 
 
+def _incident_page_boundary_is_closed(
+    incidents: list[dict[str, Any]],
+    needed: int,
+    oldest_event: dict[str, Any],
+    gap_seconds: int,
+) -> bool:
+    """Whether older event pages can no longer alter the requested incidents.
+
+    Events are fetched newest first while incident groups are ordered by their
+    first event.  The final incident needed for a page is safe only after the
+    scan passes its grouping gap: an older event at or within that gap could
+    still belong to the incident and move its start time.
+    """
+    if len(incidents) < needed:
+        return False
+    try:
+        start_epoch = float(incidents[needed - 1].get("start_epoch") or 0)
+    except (TypeError, ValueError):
+        start_epoch = event_epoch({"created_at": incidents[needed - 1].get("start_at")})
+    return (
+        math.isfinite(start_epoch)
+        and start_epoch > 0
+        and event_epoch(oldest_event) < start_epoch - gap_seconds
+    )
+
+
 class IncidentQueryService:
     """Read, group, hydrate, and present incidents for one manager generation."""
 
@@ -135,9 +165,13 @@ class IncidentQueryService:
                 return _incident_rows(compact_rows, gap_seconds)[:limit]
             compact_rows.extend(_event_row(row) for row in batch)
             summaries = _incident_rows(compact_rows, gap_seconds)
-            if len(summaries) > limit or len(batch) < batch_size:
+            if len(batch) < batch_size:
                 return summaries[:limit]
             oldest = batch[-1]
+            if _incident_page_boundary_is_closed(
+                summaries, limit, oldest, gap_seconds
+            ):
+                return summaries[:limit]
             before_created_at = str(oldest["created_at"])
             before_id = int(oldest["id"])
 
@@ -174,11 +208,17 @@ class IncidentQueryService:
             filtered = _filter_incident_summaries(
                 summaries, event_type, camera_id, object_label, zone
             )
-            if len(filtered) >= desired:
-                return filtered[offset : offset + limit], True, summaries
             if len(batch) < batch_size:
-                return filtered[offset : offset + limit], False, summaries
+                return (
+                    filtered[offset : offset + limit],
+                    len(filtered) >= desired,
+                    summaries,
+                )
             oldest = batch[-1]
+            if _incident_page_boundary_is_closed(
+                filtered, desired, oldest, gap_seconds
+            ):
+                return filtered[offset : offset + limit], True, summaries
             before_created_at = str(oldest["created_at"])
             before_id = int(oldest["id"])
 

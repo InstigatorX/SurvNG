@@ -189,14 +189,16 @@ assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "comp
 assert.equal(incidentThumbnailPageSize({ width: 0, height: 0, density: "compact" }), 12);
 
 const unorderedIncidents = [
-  { id: "old", last_epoch: 100 },
-  { id: "new", end_at: "2026-07-30T18:00:00Z" },
-  { id: "middle", start_epoch: 200 },
-  { id: "same-a", last_epoch: 150 },
-  { id: "same-b", last_epoch: 150 },
+  { id: "old-active", start_epoch: 100, last_epoch: 1_000 },
+  { id: "new", start_epoch: 200, last_epoch: 250 },
+  { id: "created-fallback", created_epoch: 175, last_epoch: 900 },
+  { id: "same-a", start_epoch: 150, last_epoch: 999 },
+  { id: "same-b", start_epoch: 150, last_epoch: 998 },
+  { id: "start-at", start_at: "2026-07-30T18:00:00Z", last_epoch: 1 },
+  { id: "invalid", last_epoch: 9_999 },
 ];
 const orderedIncidents = incidentsNewestFirst(unorderedIncidents);
-assert.deepEqual(orderedIncidents.map((incident) => incident.id), ["new", "middle", "same-a", "same-b", "old"]);
+assert.deepEqual(orderedIncidents.map((incident) => incident.id), ["start-at", "new", "created-fallback", "same-a", "same-b", "old-active", "invalid"]);
 assert.notEqual(orderedIncidents, unorderedIncidents);
 assert.deepEqual(incidentsNewestFirst(null), []);
 const retainedIncident = { id: 42, camera_id: "gate", detail: true };

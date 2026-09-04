@@ -55,6 +55,19 @@ class IncidentIdentityTest(unittest.TestCase):
         noisy_group = next(events for camera_id, events in groups if camera_id == "noisy-camera")
         self.assertEqual(len(noisy_group), 30)
 
+    def test_grouping_orders_incidents_by_start_not_latest_activity(self) -> None:
+        rows = [
+            {"id": 1, "camera_id": "older", "created_at": "2026-07-15T12:00:00+00:00"},
+            {"id": 2, "camera_id": "older", "created_at": "2026-07-15T12:00:30+00:00"},
+            {"id": 3, "camera_id": "older", "created_at": "2026-07-15T12:01:00+00:00"},
+            {"id": 4, "camera_id": "newer", "created_at": "2026-07-15T12:01:15+00:00"},
+            {"id": 5, "camera_id": "older", "created_at": "2026-07-15T12:01:30+00:00"},
+        ]
+
+        groups = incident_event_groups(rows, gap_seconds=45)
+
+        self.assertEqual([camera_id for camera_id, _ in groups], ["newer", "older"])
+
 
 class IncidentTimeTest(unittest.TestCase):
     def test_invalid_legacy_timestamp_sorts_as_oldest(self) -> None:

@@ -62,7 +62,9 @@ def incident_event_groups(
         if current:
             groups.append((camera_id, current))
 
-    groups.sort(key=lambda item: event_epoch(item[1][-1]), reverse=True)
+    # An incident remains anchored to when it began.  Later activity can extend
+    # its duration, but must not move an older incident ahead of a newer one.
+    groups.sort(key=lambda item: event_epoch(item[1][0]), reverse=True)
     return groups
 
 

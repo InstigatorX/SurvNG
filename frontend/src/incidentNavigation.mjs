@@ -47,11 +47,10 @@ export function incidentTrackingFrameSize(event, fallbackToDetection = true) {
   return fallbackToDetection ? incidentDetectionFrameSize(event) : null;
 }
 
-function incidentRecencyEpoch(incident) {
+function incidentStartEpoch(incident) {
   for (const value of [
-    incident?.last_epoch,
-    incident?.end_at,
     incident?.start_epoch,
+    incident?.start_at,
     incident?.created_epoch,
     incident?.created_at,
   ]) {
@@ -66,7 +65,7 @@ function incidentRecencyEpoch(incident) {
 export function incidentsNewestFirst(incidents) {
   if (!Array.isArray(incidents)) return [];
   return incidents
-    .map((incident, index) => ({ incident, index, epoch: incidentRecencyEpoch(incident) }))
+    .map((incident, index) => ({ incident, index, epoch: incidentStartEpoch(incident) }))
     .sort((left, right) => right.epoch - left.epoch || left.index - right.index)
     .map(({ incident }) => incident);
 }
