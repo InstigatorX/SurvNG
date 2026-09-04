@@ -111,6 +111,11 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             "capacity_wait_seconds_last": float(
                 _number(tracking.get("capacity_wait_seconds_last"))
             ),
+            "coverage_gap_count": int(_number(tracking.get("coverage_gap_count"))),
+            "coverage_interruption": tracking.get("coverage_interruption"),
+            "coverage_interruption_counts": dict(
+                tracking.get("coverage_interruption_counts") or {}
+            ),
         },
     }
 

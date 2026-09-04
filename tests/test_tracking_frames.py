@@ -391,3 +391,48 @@ def test_main_clear_preserves_live_bridge_history() -> None:
     service.clear("main")
     assert not service.frames
     assert [sample[0] for sample in service.live_frames] == [100.5]
+
+
+def test_live_capture_restart_is_a_tracking_continuity_boundary() -> None:
+    service = _service(sample_fps=2.0)
+    frame = np.zeros((10, 20, 3), dtype=np.uint8)
+    service.remember(frame, 100.0, source="main")
+    service.remember(frame, 100.5, source="live")
+    service.clear("live", captured_at=101.0)
+
+    batch = service.read_recorded_frames(100.0, 102.0, 2.0, 640)
+
+    assert [sample[0] for sample in batch] == [100.0, 100.5]
+    assert batch.covered_through == 100.5
+    assert batch.interruption == "capture_generation_changed"
+
+
+def test_main_capture_restart_does_not_interrupt_continuous_live_bridge() -> None:
+    service = _service(sample_fps=2.0)
+    frame = np.zeros((10, 20, 3), dtype=np.uint8)
+    service.remember(frame, 100.0, source="live")
+    service.clear("main", captured_at=100.5)
+    service.remember(frame, 101.0, source="live")
+
+    batch = service.read_recorded_frames(100.0, 101.0, 2.0, 640)
+
+    assert [sample[0] for sample in batch] == [100.0, 101.0]
+    assert batch.interruption is None
+
+
+def test_recorder_epoch_rollover_is_a_tracking_continuity_boundary() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    recorder.recording_rows_between.return_value = []
+    recorder.timestamp_health.return_value = {
+        ("gate", "main"): {"last_rollover_at": "1970-01-01T00:01:41+00:00"}
+    }
+    service = _service(recorder=recorder, sample_fps=2.0)
+    frame = np.zeros((10, 20, 3), dtype=np.uint8)
+    service.remember(frame, 100.0, source="live")
+    service.remember(frame, 100.5, source="live")
+
+    batch = service.read_recorded_frames(100.0, 102.0, 2.0, 640)
+
+    assert [sample[0] for sample in batch] == [100.0, 100.5]
+    assert batch.interruption == "recorder_epoch_changed"

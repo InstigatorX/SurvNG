@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
+from dataclasses import dataclass
+from datetime import datetime
 from heapq import merge
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
@@ -14,6 +17,7 @@ import numpy as np
 
 from .camera_capture import CameraCaptureService, CapturedFrame
 from .config import CameraConfig
+from .object_track.types import TrackingFrameBatch
 from .security import redact_secret_text
 from .tracking_comparison import sampled_video_frames, video_frame_at_reference
 from .video_frames import DecodedVideoFrame, VideoFrameReference
@@ -23,6 +27,13 @@ TRACKING_CATCHUP_SECONDS = 10.0
 TRACKING_CATCHUP_FRAME_WIDTH = 640
 # Bound for bridging an unfinalized main-segment tail from live history.
 TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS = 12.0
+
+
+@dataclass(frozen=True, slots=True)
+class _TimelineBoundary:
+    captured_at: float
+    reason: str
+    source: str
 
 
 class TrackingRecorder(Protocol):
@@ -70,6 +81,8 @@ class CameraFrameTimeline:
         self.live_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=size)
         self._last_main_sample_epoch = 0.0
         self._last_live_sample_epoch = 0.0
+        self._boundaries: deque[_TimelineBoundary] = deque(maxlen=16)
+        self._last_main_rollover_at: float | None = None
 
     @staticmethod
     def buffer_size(sample_fps: float) -> int:
@@ -85,17 +98,34 @@ class CameraFrameTimeline:
             + 2,
         )
 
-    def clear(self, source: str | None = None) -> None:
+    def clear(
+        self,
+        source: str | None = None,
+        *,
+        reason: str = "capture_generation_changed",
+        captured_at: float | None = None,
+    ) -> None:
         """Clear retained history for ``main``, ``live``, or both when omitted."""
+        boundary_at = time.time() if captured_at is None else captured_at
         with self._lock:
             if source in (None, "main"):
                 self._main_generation += 1
                 self.frames.clear()
                 self._last_main_sample_epoch = 0.0
+                self._boundaries.append(
+                    _TimelineBoundary(boundary_at, reason, "main")
+                )
             if source in (None, "live"):
                 self._live_generation += 1
-                self.live_frames.clear()
+                # A live restart is a boundary, not retroactive loss of the
+                # samples immediately before it. Retain that bounded prefix so
+                # an already-running session can finish truthfully at it.
+                if source is None:
+                    self.live_frames.clear()
                 self._last_live_sample_epoch = 0.0
+                self._boundaries.append(
+                    _TimelineBoundary(boundary_at, reason, "live")
+                )
 
     def resize(self, sample_fps: float) -> None:
         size = self.buffer_size(sample_fps)
@@ -180,20 +210,61 @@ class CameraFrameTimeline:
                     return
                 self.frames.append((captured_at, stored))
 
-    def recorded_frames(
+    def _refresh_recorder_boundary(self) -> None:
+        """Reflect a recorder timestamp epoch change in this camera's timeline."""
+        timestamp_health = getattr(self.recorder, "timestamp_health", None)
+        if not callable(timestamp_health):
+            return
+        try:
+            health = timestamp_health().get((self.camera.id, "main"), {})
+            raw_at = health.get("last_rollover_at")
+            if not raw_at:
+                return
+            rollover_at = datetime.fromisoformat(str(raw_at)).timestamp()
+        except (TypeError, ValueError, AttributeError):
+            return
+        with self._lock:
+            if self._last_main_rollover_at == rollover_at:
+                return
+            self._last_main_rollover_at = rollover_at
+            self._boundaries.append(
+                _TimelineBoundary(rollover_at, "recorder_epoch_changed", "main")
+            )
+
+    def read_recorded_frames(
         self,
         start_epoch: float,
         end_epoch: float,
         sample_fps: float,
         frame_width: int,
-    ) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
+    ) -> TrackingFrameBatch:
         if end_epoch <= start_epoch or frame_width <= 0:
-            return
+            return TrackingFrameBatch((), start_epoch)
+        self._refresh_recorder_boundary()
+        with self._lock:
+            boundary = next(
+                (
+                    item
+                    for item in sorted(
+                        self._boundaries,
+                        key=lambda candidate: candidate.captured_at,
+                    )
+                    if (
+                        start_epoch < item.captured_at <= end_epoch
+                        and (
+                            item.source == "live"
+                            or item.reason == "recorder_epoch_changed"
+                        )
+                    )
+                ),
+                None,
+            )
+        readable_end = boundary.captured_at if boundary is not None else end_epoch
         rows = sorted(
             self.recorder.recording_rows_between(
                 self.camera.id,
                 start_epoch,
-                end_epoch,
+                readable_end,
                 source="main",
             ),
             key=lambda row: (
@@ -205,7 +276,122 @@ class CameraFrameTimeline:
         interval = 1.0 / max(0.1, float(sample_fps))
         live_bridge_start = max(
             start_epoch,
-            end_epoch - TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS,
+            readable_end - TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS,
+        )
+        with self._lock:
+            main_buffered = tuple(
+                sorted(
+                    (
+                        (captured_at, frame)
+                        for captured_at, frame in self.frames
+                        if start_epoch <= captured_at <= end_epoch
+                    ),
+                    key=lambda sample: sample[0],
+                )
+            )
+            live_buffered = tuple(
+                sorted(
+                    (
+                        (captured_at, frame)
+                        for captured_at, frame in self.live_frames
+                        if live_bridge_start <= captured_at <= end_epoch
+                    ),
+                    key=lambda sample: sample[0],
+                )
+            )
+
+        def recorded_samples() -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
+            last_recorded_epoch = start_epoch - interval
+            for row in rows:
+                if self.stop_event.is_set():
+                    return
+                row_start = float(row.get("start_epoch") or 0.0)
+                row_end = float(row.get("end_epoch") or row_start)
+                sample_start = max(start_epoch, row_start)
+                sample_end = min(readable_end, row_end)
+                duration = sample_end - sample_start
+                if duration <= 0.0:
+                    continue
+                path = Path(str(row.get("path") or ""))
+                if not path.is_file():
+                    continue
+                try:
+                    for sample in sampled_video_frames(
+                        path,
+                        start_epoch=sample_start,
+                        sample_fps=sample_fps,
+                        duration_seconds=duration,
+                        ffmpeg_path=self.recorder.ffmpeg_path,
+                        maximum_width=frame_width,
+                        start_offset_seconds=max(0.0, sample_start - row_start),
+                        probe_path=path,
+                    ):
+                        captured_at, _frame = sample
+                        if self.stop_event.is_set():
+                            return
+                        if captured_at <= last_recorded_epoch + interval * 0.5:
+                            continue
+                        if captured_at > readable_end + 1e-6:
+                            break
+                        last_recorded_epoch = captured_at
+                        yield sample
+                except RuntimeError as error:
+                    LOGGER.warning(
+                        "recorded tracking catch-up skipped %s/%s: %s",
+                        self.camera.id,
+                        path.name,
+                        redact_secret_text(error),
+                    )
+
+        frames: list[tuple[float, np.ndarray] | DecodedVideoFrame] = []
+        last_epoch = start_epoch - interval
+        # Preference on near-ties: finalized recordings, then main history,
+        # then live history for the open-segment tail only.
+        for sample in merge(
+            recorded_samples(),
+            main_buffered,
+            live_buffered,
+            key=lambda sample: sample[0],
+        ):
+            captured_at, _frame = sample
+            if self.stop_event.is_set():
+                return TrackingFrameBatch(tuple(frames), last_epoch)
+            if captured_at <= last_epoch + interval * 0.5:
+                continue
+            if captured_at > readable_end + 1e-6:
+                break
+            last_epoch = captured_at
+            frames.append(sample)
+        covered_through = frames[-1][0] if frames else start_epoch
+        return TrackingFrameBatch(
+            tuple(frames),
+            covered_through,
+            boundary.reason if boundary is not None else None,
+        )
+
+    def recorded_frames(
+        self,
+        start_epoch: float,
+        end_epoch: float,
+        sample_fps: float,
+        frame_width: int,
+    ) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
+        """Stream samples for direct consumers without eager media decoding."""
+        if end_epoch <= start_epoch or frame_width <= 0:
+            return
+        rows = sorted(
+            self.recorder.recording_rows_between(
+                self.camera.id, start_epoch, end_epoch, source="main"
+            ),
+            key=lambda row: (
+                float(row.get("start_epoch") or 0.0),
+                float(row.get("end_epoch") or 0.0),
+                str(row.get("path") or ""),
+            ),
+        )
+        interval = 1.0 / max(0.1, float(sample_fps))
+        live_bridge_start = max(
+            start_epoch, end_epoch - TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS
         )
         with self._lock:
             main_buffered = tuple(
@@ -238,8 +424,7 @@ class CameraFrameTimeline:
                 row_end = float(row.get("end_epoch") or row_start)
                 sample_start = max(start_epoch, row_start)
                 sample_end = min(end_epoch, row_end)
-                duration = sample_end - sample_start
-                if duration <= 0.0:
+                if sample_end <= sample_start:
                     continue
                 path = Path(str(row.get("path") or ""))
                 if not path.is_file():
@@ -249,7 +434,7 @@ class CameraFrameTimeline:
                         path,
                         start_epoch=sample_start,
                         sample_fps=sample_fps,
-                        duration_seconds=duration,
+                        duration_seconds=sample_end - sample_start,
                         ffmpeg_path=self.recorder.ffmpeg_path,
                         maximum_width=frame_width,
                         start_offset_seconds=max(0.0, sample_start - row_start),
@@ -273,13 +458,8 @@ class CameraFrameTimeline:
                     )
 
         last_epoch = start_epoch - interval
-        # Preference on near-ties: finalized recordings, then main history,
-        # then live history for the open-segment tail only.
         for sample in merge(
-            recorded_samples(),
-            main_buffered,
-            live_buffered,
-            key=lambda sample: sample[0],
+            recorded_samples(), main_buffered, live_buffered, key=lambda sample: sample[0]
         ):
             captured_at, _frame = sample
             if self.stop_event.is_set():

@@ -39,6 +39,7 @@ from .types import (
     TrackingPublisher,
     TrackingSnapshotWriter,
     TrackingUpdate,
+    TrackingFrameBatch,
 )
 
 LOGGER = logging.getLogger("survng.app.object_tracking")
@@ -170,6 +171,7 @@ class ObjectTrackingSession:
         self._catchup_frames_processed = 0
         self._coverage_gap_count = 0
         self._maximum_coverage_gap_seconds = 0.0
+        self._coverage_interruption: str | None = None
         self._completion_reason = ""
         self._effective_sample_fps = config.sample_fps
         self._cover_baseline: _TrackingCoverCandidate | None = None
@@ -191,6 +193,8 @@ class ObjectTrackingSession:
             "maximum_coverage_gap_seconds": 0.0,
             "coverage_incomplete": False,
             "completion_reason": "",
+            "coverage_interruption": None,
+            "coverage_interruption_counts": {},
             "last_error": "",
             "reid_failures": 0,
             "reid_attempts": 0,
@@ -825,6 +829,7 @@ class ObjectTrackingSession:
             self._catchup_frames_processed = 0
             self._coverage_gap_count = 0
             self._maximum_coverage_gap_seconds = 0.0
+            self._coverage_interruption = None
             self._completion_reason = ""
             self._effective_sample_fps = self.config.sample_fps
             self._cover_baseline = None
@@ -1055,14 +1060,18 @@ class ObjectTrackingSession:
                     return False
                 advanced = False
                 persisted_before_batch = last_persisted_at
-                catchup_frames = iter(
-                    self.catchup_frame_provider(
-                        catchup_start,
-                        target_epoch,
-                        self.config.sample_fps,
-                        min(1280, int(initial_frame.shape[1])),
-                    )
+                catchup_batch = self.catchup_frame_provider(
+                    catchup_start,
+                    target_epoch,
+                    self.config.sample_fps,
+                    min(1280, int(initial_frame.shape[1])),
                 )
+                if isinstance(catchup_batch, TrackingFrameBatch):
+                    if catchup_batch.interruption is not None:
+                        self._record_coverage_interruption(
+                            catchup_batch.interruption
+                        )
+                catchup_frames = iter(catchup_batch)
                 try:
                     processed_this_tick = 0
                     for sample in catchup_frames:
@@ -1254,7 +1263,10 @@ class ObjectTrackingSession:
                             )
                             else LOGGER.info
                         )
-                        if coverage_gap <= TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS:
+                        if self._coverage_interruption is not None:
+                            gap_detail = self._coverage_interruption.replace("_", " ")
+                            reason = self._coverage_interruption
+                        elif coverage_gap <= TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS:
                             gap_detail = "open recording segment not bridged"
                             reason = "missing_media_while_object_active"
                         else:
@@ -1395,6 +1407,10 @@ class ObjectTrackingSession:
             ),
             "coverage_incomplete": self._coverage_gap_count > 0,
             "completion_reason": self._completion_reason,
+            "coverage_interruption": self._coverage_interruption,
+            "coverage_interruption_counts": dict(
+                self._status.get("coverage_interruption_counts") or {}
+            ),
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "tracks": tracks,
             "reid_diagnostics": {
@@ -1444,6 +1460,7 @@ class ObjectTrackingSession:
             ),
             coverage_incomplete=self._coverage_gap_count > 0,
             completion_reason=self._completion_reason,
+            coverage_interruption=self._coverage_interruption,
             reid_recoveries=(
                 self._reid_recovery_base + sum(recoveries_by_label.values())
             ),
@@ -1576,6 +1593,20 @@ class ObjectTrackingSession:
     def _set_status(self, **values: Any) -> None:
         with self._lock:
             self._status = {**self._status, **values}
+
+    def _record_coverage_interruption(self, reason: str) -> None:
+        """Count one media-continuity cause for the active tracking event."""
+        if self._coverage_interruption is not None:
+            return
+        self._coverage_interruption = reason
+        with self._lock:
+            counts = dict(self._status.get("coverage_interruption_counts") or {})
+            counts[reason] = int(counts.get(reason) or 0) + 1
+            self._status = {
+                **self._status,
+                "coverage_interruption": reason,
+                "coverage_interruption_counts": counts,
+            }
 
     def _annotate_appearances(
         self,

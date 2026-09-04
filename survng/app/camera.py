@@ -40,7 +40,7 @@ from .motion_runtime import CameraMotionState, MotionRuntimeService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .object_activity import AttributionMode, ObjectActivityAttributor
-from .tracking_frames import CameraFrameTimeline
+from .tracking_frames import CameraFrameTimeline, TrackingFrameBatch
 from .video_frames import DecodedVideoFrame
 from .motion_pipeline import (
     MotionDecisionHandlerFactory,
@@ -738,8 +738,8 @@ class CameraWorker:
         end_epoch: float,
         sample_fps: float,
         frame_width: int,
-    ) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
-        yield from self.tracking_frames.recorded_frames(
+    ) -> TrackingFrameBatch:
+        return self.tracking_frames.read_recorded_frames(
             start_epoch,
             end_epoch,
             sample_fps,

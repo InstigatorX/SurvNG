@@ -576,6 +576,11 @@ class SystemTelemetryService:
                 "active": bool(tracking.get("active")),
                 "frames_processed": int(tracking.get("frames_processed") or 0),
                 "track_count": int(tracking.get("track_count") or 0),
+                "coverage_gap_count": int(tracking.get("coverage_gap_count") or 0),
+                "coverage_interruption": tracking.get("coverage_interruption"),
+                "coverage_interruption_counts": dict(
+                    tracking.get("coverage_interruption_counts") or {}
+                ),
                 "capacity_requests": int(tracking.get("capacity_requests") or 0),
                 "capacity_waits": int(tracking.get("capacity_waits") or 0),
                 "capacity_timeouts": int(tracking.get("capacity_timeouts") or 0),

@@ -26,6 +26,7 @@ from survng.app.object_track.session import (
     _adaptive_tracking_fps,
     _tracking_persistence_due,
 )
+from survng.app.tracking_frames import TrackingFrameBatch
 from survng.app.video_frames import VideoFrameReference
 
 
@@ -1777,7 +1778,9 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 time.time(),
                 time.monotonic(),
             ),
-            catchup_frame_provider=lambda *_args: (),
+            catchup_frame_provider=lambda *_args: TrackingFrameBatch(
+                (), 0.0, "capture_generation_changed"
+            ),
             update_event=update_event,
             publisher=None,
             limiter=threading.BoundedSemaphore(1),
@@ -1810,7 +1813,11 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertGreater(updates[-1]["maximum_coverage_gap_seconds"], 3.0)
         self.assertEqual(
             updates[-1]["completion_reason"],
-            "missing_media_while_object_active",
+            "capture_generation_changed",
+        )
+        self.assertEqual(
+            updates[-1]["coverage_interruption"],
+            "capture_generation_changed",
         )
         gap_records = [
             record
@@ -1819,7 +1826,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         ]
         self.assertEqual(len(gap_records), 1)
         self.assertEqual(gap_records[0].levelname, "INFO")
-        self.assertIn("open recording segment not bridged", gap_records[0].getMessage())
+        self.assertIn("capture generation changed", gap_records[0].getMessage())
 
 
     def test_large_unresolved_catchup_gap_logs_warning(self) -> None:

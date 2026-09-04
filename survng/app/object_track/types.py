@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Iterator, Protocol
 
 import numpy as np
 
@@ -12,6 +13,20 @@ from ..video_frames import DecodedVideoFrame, VideoFrameReference
 Box = tuple[float, float, float, float]
 FrameSample = tuple[np.ndarray, float, float]
 FrameProvider = Callable[[], FrameSample | None]
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingFrameBatch:
+    """Frames plus the truthful continuity boundary for a tracking read."""
+
+    frames: tuple[tuple[float, np.ndarray] | DecodedVideoFrame, ...]
+    covered_through: float
+    interruption: str | None = None
+
+    def __iter__(self) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
+        return iter(self.frames)
+
+
 CatchupFrameProvider = Callable[
     [float, float, float, int],
     Iterable[tuple[float, np.ndarray] | DecodedVideoFrame],
