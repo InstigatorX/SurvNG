@@ -117,10 +117,10 @@ class DockerPackagingTest(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("FROM ubuntu:24.04 AS runtime-base", dockerfile)
-        self.assertIn("INTEL_COMPUTE_VERSION=26.27.39122.14-1~24.04~ppa1", dockerfile)
-        self.assertIn("INTEL_IGC_VERSION=2.38.5-1~24.04", dockerfile)
+        self.assertIn("INTEL_COMPUTE_VERSION=26.31.39395.13-1~24.04~ppa1", dockerfile)
+        self.assertIn("INTEL_IGC_VERSION=2.40.13+ds1-1~24.04", dockerfile)
         self.assertIn("INTEL_LEVEL_ZERO_VERSION=1.32.0-1~24.04~ppa1", dockerfile)
-        self.assertIn("INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1", dockerfile)
+        self.assertIn("INTEL_MEDIA_VERSION=26.3.2-1~24.04~ppa1", dockerfile)
         self.assertIn("ppa:kobuk-team/intel-graphics", dockerfile)
         self.assertIn('"libze-intel-gpu1=${INTEL_COMPUTE_VERSION}"', dockerfile)
         self.assertIn('"intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}"', dockerfile)
