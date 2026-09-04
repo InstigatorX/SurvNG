@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -17,6 +18,60 @@ from survng.app.manager_access import ManagerAccessCoordinator
 
 
 class IncidentQueryRouterTest(unittest.TestCase):
+    def test_recent_feed_scans_past_grouping_boundary_before_paging(self) -> None:
+        def row(event_id: int, camera_id: str, second: int) -> dict:
+            return {
+                "id": event_id,
+                "camera_id": camera_id,
+                "kind": "motion",
+                "objects_json": "[]",
+                "created_at": (
+                    datetime(2026, 7, 30, tzinfo=timezone.utc)
+                    + timedelta(seconds=second)
+                ).isoformat(),
+            }
+
+        # The older incident remains active more recently than the newer one.
+        # Its first 499 events fill the initial compact page, while the event
+        # that establishes its true start is immediately across the page
+        # boundary. The scan must continue because it has not crossed the
+        # 45-second grouping gap.
+        older_events = [
+            row(1000 - offset, "older", 9999 - offset)
+            for offset in range(499)
+        ]
+        newer_incident = row(1001, "newer", 9998)
+        first_batch = [older_events[0], newer_incident, *older_events[1:]]
+        final_older_event = row(501, "older", 9500)
+        calls: list[tuple[int, int | None]] = []
+
+        def recent_compact(limit: int, _before_created_at=None, before_id=None, *_args):
+            calls.append((limit, before_id))
+            if before_id is None:
+                return first_batch
+            if before_id == 502:
+                return [final_older_event]
+            return []
+
+        manager = SimpleNamespace(
+            events=SimpleNamespace(recent_compact=recent_compact)
+        )
+
+        page, has_more, scanned = IncidentQueryService.recent_filtered_summaries(
+            manager,
+            limit=1,
+            offset=0,
+            gap_seconds=45,
+            event_type="all",
+        )
+
+        self.assertEqual([item["camera_id"] for item in page], ["newer"])
+        self.assertTrue(has_more)
+        self.assertEqual([item["camera_id"] for item in scanned], ["newer", "older"])
+        self.assertEqual(scanned[1]["id"], "incident-older-501")
+        self.assertEqual(scanned[1]["event_count"], 500)
+        self.assertEqual(len(calls), 2)
+
     def test_search_keeps_full_day_facets_when_results_are_camera_filtered(self) -> None:
         rows = [
             {
