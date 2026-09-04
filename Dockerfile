@@ -90,11 +90,11 @@ CMD ["python", "-m", "survng.app", "--host", "0.0.0.0", "--port", "8088", "--loo
 # Pins match the prototype Noble + kobuk-team/intel-graphics stack.
 FROM runtime-base AS runtime-intel
 USER root
-ARG INTEL_COMPUTE_VERSION=26.27.39122.14-1~24.04~ppa1
-ARG INTEL_IGC_VERSION=2.38.5-1~24.04
-ARG INTEL_GMMLIB_VERSION=22.10.0-1~24.04~ppa1
+ARG INTEL_COMPUTE_VERSION=26.31.39395.13-1~24.04~ppa1
+ARG INTEL_IGC_VERSION=2.40.13+ds1-1~24.04
+ARG INTEL_GMMLIB_VERSION=22.10.1-1~24.04~ppa1
 ARG INTEL_LEVEL_ZERO_VERSION=1.32.0-1~24.04~ppa1
-ARG INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1
+ARG INTEL_MEDIA_VERSION=26.3.2-1~24.04~ppa1
 ARG INTEL_VPL_VERSION=1:2.16.0-1~24.04~ppa1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
