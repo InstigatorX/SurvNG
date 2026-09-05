@@ -773,6 +773,7 @@ class MotionAnalysisService:
             / elapsed_seconds,
             3,
         )
+        result["metrics_started_monotonic"] = self._telemetry_started_monotonic
         return result
 
     def _record_mailbox_depth(self) -> None:

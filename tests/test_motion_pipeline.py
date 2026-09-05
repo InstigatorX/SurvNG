@@ -1010,6 +1010,25 @@ class MotionPipelineTest(unittest.TestCase):
         self.assertTrue(snapshot["invocation_timings"]["first"]["succeeded"])
         self.assertEqual(snapshot["stage_metrics"]["first"]["calls"], 1)
 
+        first_status = pipeline.status()
+        first_total = first_status["stages"]["first"]["total_ms"]
+        self.assertEqual(first_total, result.timings["first"].duration_ms)
+        pipeline.runtime.reset()
+        reset_status = pipeline.status()
+        self.assertEqual(reset_status["metrics_instance_id"], first_status["metrics_instance_id"])
+        self.assertNotEqual(reset_status["runtime_generation"], first_status["runtime_generation"])
+        self.assertEqual(reset_status["stages"]["first"]["total_ms"], first_total)
+        pipeline.process(context)
+        self.assertEqual(pipeline.status()["stages"]["first"]["calls"], 2)
+        self.assertEqual(pipeline.status()["stages"]["first"]["total_ms"], first_total + context.timings["first"].duration_ms)
+        isolated = pipeline.isolated_copy()
+        try:
+            self.assertNotEqual(isolated.status()["metrics_instance_id"], first_status["metrics_instance_id"])
+            self.assertEqual(isolated.status()["stages"]["first"]["total_ms"], 0.0)
+        finally:
+            isolated.close()
+            pipeline.close()
+
     def test_audit_snapshot_redacts_sensitive_stage_options(self) -> None:
         registry = MotionStageRegistry()
         registry.register(MotionStageRegistration(

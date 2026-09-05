@@ -31,6 +31,7 @@ SOCKET_ENVIRONMENT_VARIABLE = "SURVNG_OBSERVABILITY_SOCKET"
 MAX_RECENT_LOG_ROWS = 100
 MAX_RECENT_LOG_BYTES = 32 * 1024
 MAX_RECENT_LOG_MESSAGE_CHARACTERS = 500
+MAX_MOTION_STAGES = 64
 _LOG_URL_RE = re.compile(
     r"\b(?:rtsp|rtsps|rtmp|http|https)://[^\s\"'<>]+",
     re.IGNORECASE,
@@ -71,6 +72,103 @@ def _optional_number(value: object) -> int | float | None:
     return None
 
 
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _motion_identifier(value: object) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.-]{1,128}", value):
+        return value
+    return None
+
+
+def _numeric_fields(raw: object, names: Sequence[str]) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    return {name: _optional_number(source.get(name)) for name in names}
+
+
+def _motion_pipeline_snapshot(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    stages = raw.get("stages")
+    if not isinstance(stages, dict):
+        return None
+    configuration = raw.get("configuration")
+    implementations = {
+        item.get("stage_id"): _motion_identifier(item.get("implementation"))
+        for item in configuration[:MAX_MOTION_STAGES]
+        if isinstance(item, dict) and isinstance(item.get("stage_id"), str)
+    } if isinstance(configuration, list) else {}
+    rows = []
+    for stage_id, metrics in stages.items():
+        if len(rows) >= MAX_MOTION_STAGES:
+            break
+        rows.append({
+            "stage_id": _motion_identifier(stage_id),
+            "implementation": implementations.get(stage_id),
+            **_numeric_fields(metrics, ("calls", "failures", "total_ms", "last_ms", "max_ms")),
+        })
+    return {
+        "metrics_instance_id": _motion_identifier(raw.get("metrics_instance_id")),
+        "runtime_generation": _optional_number(raw.get("runtime_generation")),
+        "stages": rows,
+        "truncated": len(stages) > MAX_MOTION_STAGES,
+    }
+
+
+def _motion_snapshot(raw: object, incidents: dict[str, Any]) -> dict[str, Any] | None:
+    """Project existing status only; never acquire frames or call runtime providers."""
+    if not isinstance(raw, dict):
+        return None
+    analysis = raw.get("analysis_runtime")
+    demand = raw.get("demand")
+    demand = demand if isinstance(demand, dict) else {}
+    debug = raw.get("debug")
+    debug = debug if isinstance(debug, dict) else {}
+    return {
+        "metrics_instance_id": _motion_identifier(raw.get("metrics_instance_id")),
+        "mode": raw.get("mode") if raw.get("mode") in (
+            "adaptive", "camera_rescue", "camera", "enforce", "audit", "off",
+        ) else None,
+        "illumination_filter_enabled": _optional_bool(raw.get("illumination_filter_enabled")),
+        **_numeric_fields(raw, (
+            "frame_width", "sample_fps", "camera_mode_background_fps",
+            "continuous_frames", "continuous_candidates", "analysis_queue_depth",
+        )),
+        "analysis_worker_running": _optional_bool(raw.get("analysis_worker_running")),
+        "demand": {
+            key: _optional_bool(demand.get(key)) for key in (
+                "adaptive_analysis_required", "continuous_primary_required",
+                "frame_observer_required", "frame_analysis_required",
+            )
+        },
+        "debug": {
+            "enabled": _optional_bool(debug.get("enabled")),
+            "expires_in_seconds": _optional_number(debug.get("expires_in_seconds")),
+        },
+        "analysis": _numeric_fields(analysis, (
+            "metrics_started_monotonic", "frames_sampled", "raw_frames_submitted",
+            "mailbox_replacements", "analysis_slot_deferrals", "clock_discontinuity_resets",
+            *(f"{prefix}_{suffix}" for prefix in (
+                "preprocess", "qualification", "capture_to_analysis", "analysis_cycle",
+            ) for suffix in ("count", "total_ms", "last_ms", "max_ms", "p95_ms", "p99_ms")),
+        )),
+        "limiter": _numeric_fields(raw, (
+            "analysis_wait_ms_total", "analysis_wait_ms_max",
+            "analysis_wait_ms_p95", "analysis_wait_ms_p99",
+        )),
+        "pipelines": {
+            name: _motion_pipeline_snapshot(raw.get(key)) for name, key in (
+                ("qualification", "pipeline"), ("observation", "observation_pipeline"),
+                ("fusion", "fusion_pipeline"),
+            )
+        },
+        "refinement": _numeric_fields(incidents, (
+            "refinement_queue_depth", "refinement_pending_episodes", "oldest_refinement_age_ms",
+        )),
+    }
+
+
 def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
     tracking = raw.get("object_tracking")
     tracking = tracking if isinstance(tracking, dict) else {}
@@ -90,6 +188,8 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "recording_enabled": bool(raw.get("recording_enabled", True)),
         "detection_enabled": bool(raw.get("detection_enabled")),
         "onvif_connected": bool(raw.get("onvif_connected")),
+        "lifecycle_generation": _optional_number(lifecycle.get("generation")),
+        "motion": _motion_snapshot(raw.get("motion_qualification"), tracking),
         "spatial_alignment": {
             "mode": str(alignment.get("mode") or "untrusted"),
             "reliable": bool(alignment.get("reliable")),

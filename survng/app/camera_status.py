@@ -28,6 +28,8 @@ class CameraStatusMotionState(Protocol):
 
 
 class CameraStatusQualification(Protocol):
+    def adaptive_analysis_required(self) -> bool: ...
+    def continuous_primary_required(self) -> bool: ...
     def settings(self) -> tuple[str, str, int]: ...
     def stationary_object_tolerance(self) -> str: ...
     def rescue_settings(self) -> tuple[bool, float]: ...
@@ -132,9 +134,20 @@ class CameraStatusService:
         rescue_enabled, rescue_margin = self.qualification.rescue_settings()
         visual = self.qualification.visual_backup_settings()
         motion_runtime = self.motion_runtime.runtime_status()
+        debug = self.debug_store.status()
+        adaptive_required = self.qualification.adaptive_analysis_required()
+        frame_observer_required = self.observation_pipeline.handles_observation("frame")
         motion = {
             **self.motion_state.stats_snapshot(),
             "mode": mode,
+            "demand": {
+                "adaptive_analysis_required": adaptive_required,
+                "continuous_primary_required": self.qualification.continuous_primary_required(),
+                "frame_observer_required": frame_observer_required,
+                "frame_analysis_required": bool(
+                    adaptive_required or frame_observer_required or debug.get("enabled")
+                ),
+            },
             "sensitivity": sensitivity,
             "stationary_object_tolerance": (
                 self.qualification.stationary_object_tolerance()
@@ -181,7 +194,7 @@ class CameraStatusService:
             "pipeline": self.qualification_pipeline.status(),
             "observation_pipeline": self.observation_pipeline.status(),
             "fusion_pipeline": self.fusion_pipeline.status(),
-            "debug": self.debug_store.status(),
+            "debug": debug,
         }
         capture_running = bool(capture["live_running"])
         connectivity = self.capture_connectivity(
