@@ -2,17 +2,40 @@
 
 ## Objective
 
-Work efficiently and safely on SurvNG. Use the least expensive model that can
-reliably complete the task. Avoid wasting high-capability reasoning on
-repository navigation, mechanical edits, routine Git work, or known test runs.
+Work efficiently and safely on SurvNG. Prioritize correctness, architectural
+judgment, and the user's model choice. Optimize cost only after those needs
+are met. Avoid unnecessary delegation for repository navigation, mechanical
+edits, routine Git work, or known test runs.
 
-The project uses three custom agents:
+The project uses four model roles, when available in the current environment:
 
 - `luna`: bounded, mechanical, read-heavy, repetitive, or clearly specified work
 - `terra`: normal software engineering and routine debugging
-- `sol`: difficult root-cause analysis, architecture, protocol behavior, or high-risk work
+- `sol`: difficult but bounded debugging and implementation within established boundaries
+- `astra`: architecture, subsystem audits, cross-subsystem root-cause analysis,
+  high-risk design, and final integration review
 
 ## Model-routing policy
+
+### Respect the user's selected model
+
+- An explicit model instruction takes precedence over the default routing below.
+- When the user selects or requests Astra, keep Astra responsible for the core
+  investigation, architectural decisions, risk assessment, and final review.
+  Do not turn an Astra-led task into Sol/Terra work merely to reduce cost.
+- Bounded evidence collection, routine implementation against an agreed design,
+  and known test runs may be delegated when useful, unless the user requests
+  Astra-only work or prohibits delegation. Astra must inspect the consequential
+  diffs and evidence before accepting the result; a subagent summary is not
+  a substitute for review.
+- State the model roles and delegated scope briefly before substantive
+  delegation. Report the models actually used, not just the intended roles.
+- Use model IDs or agent aliases actually exposed by the current environment.
+  This file defines policy; it does not install an agent or change the session's
+  selected model. Never claim Astra performed work if that cannot be verified.
+- If Astra is required but unavailable, disclose that limitation. Continue
+  useful bounded preparation, but do not silently substitute another model
+  for the required architectural judgment or final approval.
 
 ### Do not delegate reflexively
 
@@ -77,20 +100,31 @@ Terra is the normal implementation tier.
 
 ### Route to Sol
 
-Use `sol` only when deeper reasoning is justified:
+Use `sol` for deeper reasoning within a bounded, established design:
 
-- difficult or ambiguous root-cause analysis
-- architecture or subsystem design
-- ONVIF/SOAP/Zeep discrepancies
-- vendor protocol interoperability
-- FFmpeg timestamp, muxing, decoding, or process-lifecycle problems
-- concurrency, race conditions, async lifecycle, or state corruption
-- event/state-machine design
-- recording/index/storage consistency
-- large refactors with meaningful regression risk
-- security-sensitive behavior
-- repeated failed fixes
-- problems spanning several subsystems with an unclear root cause
+- difficult root-cause analysis confined to one component
+- ONVIF/SOAP/Zeep or FFmpeg debugging with a defined scope and contract
+- implementation of a complex fix whose ownership and invariants are agreed
+- localized concurrency fixes with understood lifecycle boundaries
+- targeted technical review supporting an Astra-led investigation
+
+Escalate to Astra when the investigation reveals conflicting ownership,
+uncertain system invariants, or consequences spanning multiple subsystems.
+
+### Route to Astra
+
+Use `astra` directly when the task requires system-level judgment:
+
+- whole-repository or subsystem architecture and production-readiness audits
+- design or simplification of boundaries, contracts, and ownership
+- ambiguous failures spanning capture, motion, inference, persistence, or UI
+- races involving admission, retries, leases, shutdown, or durable completion
+- event/state-machine redesign and recording/index/storage consistency
+- protocol interoperability that changes shared event semantics or policy
+- security-sensitive design and changes with broad regression risk
+- repeated failed fixes that suggest the underlying model is wrong
+- performance tradeoffs involving detection quality, latency, and resource use
+- staging related PRs and reviewing their combined behavior
 
 Examples:
 - raw SOAP contains the motion topic but Zeep does not preserve it
@@ -101,9 +135,12 @@ Examples:
 
 ### Escalation
 
-Prefer:
+Default escalation path, subject to the user's model instruction:
 
-`Luna -> Terra -> Sol`
+`Luna -> Terra -> Sol -> Astra`
+
+Start with Astra immediately for Astra-class work. The path is not a requirement
+to exhaust cheaper models first, and task size alone does not determine the role.
 
 Do not escalate merely because a task is large. Escalate because it is
 ambiguous, reasoning-intensive, high-risk, or the lower tier has failed.
@@ -116,11 +153,14 @@ Escalate from Luna to Terra when:
 
 Escalate from Terra to Sol when:
 - root cause remains uncertain after targeted investigation
-- two reasonable fixes fail
 - raw protocol data contradicts library/parser behavior
-- concurrency, lifecycle, timestamp, or state corruption is suspected
-- architectural boundaries must change
-- regression risk is high
+- a bounded implementation requires deeper algorithmic or protocol reasoning
+
+Escalate from any role directly to Astra when:
+- architectural boundaries or system invariants must change
+- concurrency, lifecycle, or durable-state ownership spans components
+- two reasonable fixes fail or competing explanations remain unresolved
+- regression risk or performance/correctness tradeoffs extend beyond one component
 
 When escalating, pass a concise evidence packet instead of making the next
 agent rediscover everything:
@@ -226,7 +266,8 @@ For FFmpeg problems:
 For recording bugs:
 - trace state across event input, in-memory state, recorder process state,
   database/index state, and filesystem output
-- treat lifecycle/race issues as Sol-class when state can diverge
+- use Astra for lifecycle/race issues when state can diverge across these boundaries
+  and Sol for bounded implementation under the established contract
 - avoid fixes that merely mask inconsistent state
 
 ## Frontend rules
@@ -293,7 +334,7 @@ Large cleanup audits should be report-first unless implementation was explicitly
 For a normal task:
 1. identify the requested outcome
 2. inspect only enough code to locate the real execution path
-3. classify the work as Luna, Terra, or Sol
+3. honor the user's model instruction, then classify the work as Luna, Terra, Sol, or Astra
 4. delegate only when useful
 5. make the smallest coherent change
 6. validate proportionately
