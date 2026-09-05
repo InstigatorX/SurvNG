@@ -1491,9 +1491,9 @@ class AppManager:
             event_id = int(payload.get("event_id") or 0)
             event = self.events.get(event_id) if event_id else None
             if event is not None:
-                # Presentation-only cover changes must refresh image-derived
-                # indexes, but must not reopen an MQTT incident or emit a
-                # second object notification.
+                # Cover changes and manual evidence corrections must refresh
+                # image-derived indexes without reopening an MQTT incident or
+                # emitting another object notification.
                 self.semantic_search.index.delete_event(event_id)
                 self.semantic_search.queue_event(event)
             self.state_events.publish("incident", payload)

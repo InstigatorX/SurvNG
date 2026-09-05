@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from .config import AppConfig, camera_by_id
 from .detector import detection_failure, objects_to_json
 from .domain_events import ObjectDetected
+from .event_store import EventSnapshotChangedError
 from .incident_presenter import _event_row
 from .incident_utils import event_epoch, event_snapshot_path
 from .manager import AppManager
@@ -174,9 +175,17 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
             detected_object["manual_confidence_threshold"] = safe_confidence
             detected_object["detection_frame_width"] = int(frame.shape[1])
             detected_object["detection_frame_height"] = int(frame.shape[0])
-        persisted = active_manager.events.replace_detected_objects(
-            event_id, objects_to_json(objects)
-        )
+        try:
+            persisted = active_manager.events.replace_detected_objects(
+                event_id,
+                objects_to_json(objects),
+                expected_snapshot_path=str(event.get("snapshot_path") or ""),
+            )
+        except EventSnapshotChangedError:
+            raise HTTPException(
+                status_code=409,
+                detail="event snapshot changed during detection; refresh and try again",
+            ) from None
         if persisted is None:
             raise HTTPException(status_code=404, detail="event not found")
         detected = [
@@ -201,6 +210,15 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
                     source="manual_openvino",
                     objects=tuple(detected),
                 ).to_payload(),
+            )
+        else:
+            active_manager.publish_event(
+                "incident_update",
+                {
+                    "event_id": event_id,
+                    "camera_id": str(persisted.get("camera_id") or ""),
+                    "updated": True,
+                },
             )
         detector_status = active_manager.detector_status()
         return {
