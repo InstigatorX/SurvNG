@@ -199,14 +199,25 @@ class DeferredAppearanceBackfillTest(unittest.TestCase):
                 "camera_id": "gate",
                 "created_at": "2026-08-05T21:52:05+00:00",
                 "snapshot_path": "snapshots/gate/event.webp",
-                "objects_json": json.dumps([{
-                    "label": "car",
-                    "incident_eligible": True,
-                    "box": {"x1": 20, "y1": 10, "x2": 180, "y2": 90},
-                    "detection_frame_width": 200,
-                    "detection_frame_height": 100,
-                    "snapshot_quality_score": 0.9,
-                }]),
+                "objects_json": json.dumps([
+                    {
+                        "label": "car",
+                        "incident_eligible": True,
+                        "snapshot_visible": False,
+                        "box": {"x1": 0, "y1": 0, "x2": 200, "y2": 100},
+                        "detection_frame_width": 200,
+                        "detection_frame_height": 100,
+                        "snapshot_quality_score": 1.0,
+                    },
+                    {
+                        "label": "car",
+                        "incident_eligible": True,
+                        "box": {"x1": 20, "y1": 10, "x2": 180, "y2": 90},
+                        "detection_frame_width": 200,
+                        "detection_frame_height": 100,
+                        "snapshot_quality_score": 0.9,
+                    },
+                ]),
             }
             index = AppearanceIndex(database)
             service = DeferredAppearanceBackfill(

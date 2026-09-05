@@ -25,7 +25,11 @@ def _labels(objects: list[dict[str, Any]]) -> set[str]:
     return {
         str(item.get("label") or "").strip()
         for item in objects
-        if isinstance(item, dict) and item.get("label")
+        if (
+            isinstance(item, dict)
+            and item.get("label")
+            and item.get("snapshot_visible") is not False
+        )
     }
 
 

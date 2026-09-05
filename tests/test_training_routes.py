@@ -140,6 +140,8 @@ class TrainingRoutesTest(unittest.TestCase):
     def test_filters_annotations_without_exposing_other_coordinate_planes(self) -> None:
         mismatched = self.detected_object("person", 0.99)
         mismatched["detection_frame_width"] = 200
+        off_frame = self.detected_object("person", 0.98)
+        off_frame["snapshot_visible"] = False
         self.add_event(
             camera_id="gate",
             created_at="2026-08-10T16:00:00+00:00",
@@ -147,6 +149,7 @@ class TrainingRoutesTest(unittest.TestCase):
                 self.detected_object("car", 0.93),
                 self.detected_object("person", 0.82),
                 mismatched,
+                off_frame,
                 self.detected_object("person", 0.95, eligible=False),
             ],
         )

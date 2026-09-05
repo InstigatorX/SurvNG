@@ -193,6 +193,8 @@ def _sample_annotations(
     for index, item in enumerate(objects):
         if not isinstance(item, dict):
             continue
+        if item.get("snapshot_visible") is False:
+            continue
         label = str(item.get("label") or "").strip()
         normalized_label = label.lower()
         confidence = _finite_number(item.get("confidence"))

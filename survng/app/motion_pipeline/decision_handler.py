@@ -132,10 +132,11 @@ def motion_correlated_objects(
     stationary_spatial_rejections = 0
     height, width = frame.shape[:2]
     for detected in objects:
+        snapshot_visible = detected.get("snapshot_visible") is not False
         evidence = temporal_object_motion_evidence(
             detected,
-            frame_width=width,
-            frame_height=height,
+            frame_width=width if snapshot_visible else None,
+            frame_height=height if snapshot_visible else None,
         )
         box = evidence.normalized_box
         spatial = bool(
@@ -1042,11 +1043,19 @@ class MotionDecisionHandler:
                     incident_objects=tuple(eligible_objects),
                 ).to_payload(),
             )
+        # The outcome feeds the post-persistence tracking handoff together with
+        # this snapshot. Off-frame evidence remains in durable/event payloads,
+        # but its box must never seed tracking against the representative frame.
+        tracking_seed_objects = tuple(
+            detected
+            for detected in eligible_objects
+            if detected.get("snapshot_visible") is not False
+        )
         return MotionDecisionOutcome(
             event_id=event_id,
             snapshot_path=snapshot_path,
             object_detected=bool(eligible_objects) if detection_completed else None,
-            detected_objects=tuple(eligible_objects),
+            detected_objects=tracking_seed_objects,
             motion_correlation=correlation,
             refinement_pending=bool(
                 getattr(provider_result, "refinement_pending", False)

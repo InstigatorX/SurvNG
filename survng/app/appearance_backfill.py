@@ -248,7 +248,11 @@ class DeferredAppearanceBackfill:
         created_at = str(event.get("created_at") or datetime.now(timezone.utc).isoformat())
         records: list[dict[str, Any]] = []
         for position, detected in enumerate(objects):
-            if not isinstance(detected, dict) or detected.get("incident_eligible") is False:
+            if (
+                not isinstance(detected, dict)
+                or detected.get("incident_eligible") is False
+                or detected.get("snapshot_visible") is False
+            ):
                 continue
             label = str(detected.get("label") or "").strip().lower()
             if not label or not self.encoder.supports_label(label):
