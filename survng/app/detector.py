@@ -181,6 +181,7 @@ class OpenVinoDetector:
             return False
 
         started = time.perf_counter()
+        original_input_shape: tuple[int, int] | None = None
         try:
             try:
                 from openvino import Core, Layout, Type
@@ -200,6 +201,7 @@ class OpenVinoDetector:
             original_shape = [int(value) for value in model.input(0).shape]
             if len(original_shape) >= 4:
                 self.input_shape = (original_shape[-1], original_shape[-2])
+                original_input_shape = self.input_shape
             preprocessor = PrePostProcessor(model)
             preprocessor.input().tensor().set_element_type(Type.u8).set_layout(Layout("NHWC")).set_color_format(ColorFormat.BGR)
             preprocessor.input().model().set_layout(Layout("NCHW"))
@@ -245,6 +247,14 @@ class OpenVinoDetector:
             )
             return True
         except Exception as exc:
+            # Loading can fail after preprocessing or compilation. Do not let
+            # a partially initialized OpenVINO backend win inference dispatch.
+            self.compiled_model = None
+            self.infer_request = None
+            self.input_layer = None
+            self.output_layer = None
+            self.output_layers = []
+            self._openvino_embedded_preprocess = False
             if model_path.suffix.lower() != ".onnx":
                 LOGGER.exception("OpenVINO detector failed to load %s", model_path)
                 return False
@@ -255,8 +265,8 @@ class OpenVinoDetector:
                 LOGGER.exception("OpenCV DNN detector failed to load %s", model_path)
                 self.cv_net = None
                 return False
-            self.input_shape = (640, 640)
-            self.output_format = "yolo"
+            self.input_shape = original_input_shape or (640, 640)
+            self.output_format = "unknown"
             self.backend = "opencv-dnn"
             self.loaded_device = "CPU"
             return True
@@ -371,6 +381,7 @@ class OpenVinoDetector:
             else:
                 self.cv_net.setInput(tensor)
                 output = self.cv_net.forward()
+                self.output_format = self._output_format_from_shapes([list(output.shape)], allow_batchless=True)
                 stages["inference"] = (time.perf_counter() - inference_started) * 1000
                 postprocess_started = time.perf_counter()
             if self.output_format == "yolo":
@@ -391,7 +402,7 @@ class OpenVinoDetector:
             elif self.output_format == "yolo-e2e":
                 objects = self._parse_yolo_e2e_output(output, metadata)
             else:
-                objects = self._parse_ssd_output(output, frame.shape[1], frame.shape[0])
+                objects = self._parse_ssd_output(output, frame.shape[1], frame.shape[0], metadata)
             stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
             succeeded = True
             return objects
@@ -592,11 +603,14 @@ class OpenVinoDetector:
                 np.asarray(outputs[confidence_key]),
                 image_width,
                 image_height,
+                metadata,
             )
 
         for value in outputs.values():
             array = np.asarray(value)
             squeezed = np.squeeze(array)
+            if metadata is not None and self._output_format_from_shapes([list(array.shape)], allow_batchless=True) == "yolo-e2e":
+                return self._parse_yolo_e2e_output(array, metadata)
             if squeezed.ndim == 2:
                 if metadata is not None and min(squeezed.shape) >= 5 and (
                     squeezed.shape[0] == len(self.labels) + 4
@@ -605,7 +619,7 @@ class OpenVinoDetector:
                 ):
                     return self._parse_yolo_output(array, metadata)
                 if min(squeezed.shape) >= 7:
-                    return self._parse_ssd_output(array, image_width, image_height)
+                    return self._parse_ssd_output(array, image_width, image_height, metadata)
             if squeezed.ndim == 3 and min(squeezed.shape[-2:]) >= 5 and metadata is not None:
                 return self._parse_yolo_output(array, metadata)
 
@@ -653,6 +667,7 @@ class OpenVinoDetector:
         confidence: np.ndarray,
         image_width: int,
         image_height: int,
+        metadata: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         coordinates = np.squeeze(coordinates)
         confidence = np.squeeze(confidence)
@@ -677,10 +692,17 @@ class OpenVinoDetector:
             if not np.all(np.isfinite([x, y, width, height])) or width <= 0 or height <= 0:
                 continue
             if max(abs(x), abs(y), abs(width), abs(height)) <= 1.5:
-                x *= image_width
-                width *= image_width
-                y *= image_height
-                height *= image_height
+                coordinate_width, coordinate_height = self.input_shape if metadata is not None else (image_width, image_height)
+                x *= coordinate_width
+                width *= coordinate_width
+                y *= coordinate_height
+                height *= coordinate_height
+
+            if metadata is not None:
+                x = (x - metadata["pad_x"]) / metadata["scale"]
+                y = (y - metadata["pad_y"]) / metadata["scale"]
+                width /= metadata["scale"]
+                height /= metadata["scale"]
 
             x1 = max(0, min(image_width, x - width / 2))
             y1 = max(0, min(image_height, y - height / 2))
@@ -705,11 +727,18 @@ class OpenVinoDetector:
 
     def _detect_output_format(self) -> str:
         shapes = [[int(dim) for dim in layer.shape if int(dim) > 0] for layer in self.output_layers]
+        return self._output_format_from_shapes(shapes or [list(self.output_layer.shape)])
+
+    @staticmethod
+    def _output_format_from_shapes(shapes: list[list[int]], *, allow_batchless: bool = False) -> str:
+        # OpenCV and Core ML can omit the single-image batch dimension.
+        if allow_batchless:
+            shapes = [[1, *shape] if len(shape) == 2 else shape for shape in shapes]
         if any(len(shape) == 4 and shape[1] == 32 for shape in shapes) and any(
             len(shape) == 3 and max(shape[1:]) > min(shape[1:]) >= 5 for shape in shapes
         ):
             return "yolo-seg"
-        shape = [int(dim) for dim in self.output_layer.shape if int(dim) > 0]
+        shape = shapes[0]
         if len(shape) == 3:
             channels = min(shape[1], shape[2])
             anchors = max(shape[1], shape[2])
@@ -908,6 +937,7 @@ class OpenVinoDetector:
         output: np.ndarray,
         image_width: int,
         image_height: int,
+        metadata: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         detections = np.squeeze(output)
         objects: list[dict[str, Any]] = []
@@ -930,10 +960,20 @@ class OpenVinoDetector:
             if label_id > 0 and self.labels and self.labels[0].strip().lower() not in {"background", "__background__"}:
                 label_index = label_id - 1
             label = self.labels[label_index] if 0 <= label_index < len(self.labels) else str(label_id)
-            x1 = max(0, min(image_width, float(detection[3]) * image_width))
-            y1 = max(0, min(image_height, float(detection[4]) * image_height))
-            x2 = max(0, min(image_width, float(detection[5]) * image_width))
-            y2 = max(0, min(image_height, float(detection[6]) * image_height))
+            coordinate_width, coordinate_height = self.input_shape if metadata is not None else (image_width, image_height)
+            x1, y1, x2, y2 = (
+                float(detection[3]) * coordinate_width,
+                float(detection[4]) * coordinate_height,
+                float(detection[5]) * coordinate_width,
+                float(detection[6]) * coordinate_height,
+            )
+            if metadata is not None:
+                x1 = (x1 - metadata["pad_x"]) / metadata["scale"]
+                x2 = (x2 - metadata["pad_x"]) / metadata["scale"]
+                y1 = (y1 - metadata["pad_y"]) / metadata["scale"]
+                y2 = (y2 - metadata["pad_y"]) / metadata["scale"]
+            x1, x2 = (max(0, min(image_width, value)) for value in (x1, x2))
+            y1, y2 = (max(0, min(image_height, value)) for value in (y1, y2))
             if x2 <= x1 or y2 <= y1:
                 continue
             objects.append(
