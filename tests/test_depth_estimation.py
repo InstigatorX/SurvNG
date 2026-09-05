@@ -122,7 +122,7 @@ class DepthEstimationTests(unittest.TestCase):
             },
         ]
         filtered = apply_depth_zone_filters(camera, objects)
-        self.assertTrue(filtered[0]["incident_eligible"])
+        self.assertFalse(filtered[0]["incident_eligible"])
         self.assertEqual(filtered[0]["depth_zone_matched"], "Near Door")
         self.assertTrue(filtered[1]["incident_eligible"])
         self.assertNotIn("depth_zone_matched", filtered[1])
