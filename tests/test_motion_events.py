@@ -11,6 +11,7 @@ import pytest
 
 from survng.app.ema_v2 import CameraNotice
 from survng.app.events import EventStore
+from survng.app.motion import MotionQualificationResult
 from survng.app.motion_events import (
     MotionEventCoordinator,
     MotionTrigger,
@@ -376,6 +377,50 @@ def test_coalesce_preserves_batch_order_and_stop_sentinel() -> None:
         quiet_seconds=0.1,
         stop_event=threading.Event(),
     ) is None
+
+
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("route_first", [False, True])
+def test_coalesce_closes_at_first_route_and_preserves_remaining_fifo(
+    tmp_path: Path, durable: bool, route_first: bool,
+) -> None:
+    store = EventStore(tmp_path) if durable else None
+    events = MotionEventCoordinator(
+        queue_size=8, retry_limit=2, camera_id="gate", durable_store=store,
+    )
+    route_a, route_b = _trigger(2), _trigger(4)
+    for trigger in (route_a, route_b):
+        trigger.detection_intent_id = f"route:gate:source:{trigger.message}"
+        trigger.prequalified = MotionQualificationResult(
+            True, 0.9, 0.5, "route_watch", 1,
+            {"route_detection_watch": {"source_event_id": int(trigger.message)}},
+        )
+    # Ordinary camera and EMA notices still share a burst, but a route closes it.
+    ordinary = [_trigger(1), _trigger(3, topic="adaptive/motion")]
+    submitted = (
+        [route_a, *ordinary, route_b] if route_first else [*ordinary, route_a, route_b]
+    )
+    for trigger in submitted:
+        assert events.enqueue(trigger)
+    events.signal_stop()
+
+    batches = []
+    for _ in range(2):
+        first = events.next_trigger(0.1)
+        assert first is not None
+        batch = events.coalesce(first, quiet_seconds=0.1, stop_event=threading.Event())
+        assert batch is not None
+        batches.append([trigger.message for trigger in batch])
+        if store is not None:
+            assert store.motion_trigger_status("gate")["running"] == len(batch)
+            assert all(trigger.retry_count == 0 for trigger in batch)
+        events.complete_deliveries(batch)
+    assert batches == (
+        [["2"], ["1", "3", "4"]] if route_first else [["1", "3", "2"], ["4"]]
+    )
+    assert events.next_trigger(0.1) is None
+    if store is not None:
+        assert store.motion_trigger_status("gate") == {}
 
 
 def test_retry_batch_is_prioritized_and_bounded() -> None:

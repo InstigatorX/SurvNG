@@ -480,6 +480,14 @@ class MotionEventCoordinator:
         quiet_deadline = time.monotonic() + quiet_seconds
         hard_deadline = time.monotonic() + max(2.0, quiet_seconds * 4)
         while not stop_event.is_set():
+            # A route watch owns a separate occurrence. Close the burst at its
+            # first route trigger so the decision cannot acknowledge another
+            # occurrence without evaluating it. Later deliveries stay queued
+            # (and, for durable delivery, unclaimed) until their own turn.
+            if triggers[-1].prequalified is not None and isinstance(
+                triggers[-1].prequalified.features.get("route_detection_watch"), dict
+            ):
+                break
             remaining = min(quiet_deadline, hard_deadline) - time.monotonic()
             if remaining <= 0:
                 break
