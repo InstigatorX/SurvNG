@@ -59,6 +59,11 @@ def _event_row(row: dict) -> dict:
         None,
     )
     event["object_tracking"] = tracking_entry
+    event["camera_semantics"] = (
+        qualification_entry.get("camera_semantics")
+        if isinstance((qualification_entry or {}).get("camera_semantics"), dict)
+        else {"reports": []}
+    )
 
     def positive_confidence(item: dict) -> bool:
         try:
@@ -297,6 +302,7 @@ def _incident_list_payload(incident: dict) -> dict:
                 "labels",
                 "zones",
                 "trigger_source",
+                "camera_semantics",
             )
             if key in event
         }
@@ -359,6 +365,20 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
     final_item = max([last, *motion_observations, *tracking_updates], key=event_epoch)
     last_epoch = event_epoch(final_item)
     object_count = sum(1 for event in ordered if event.get("has_objects"))
+    semantic_reports = [
+        {
+            **report,
+            "source_event_id": event.get("id"),
+            "source_created_at": event.get("created_at"),
+        }
+        for event in ordered
+        for report in (
+            event.get("camera_semantics", {}).get("reports", [])
+            if isinstance(event.get("camera_semantics"), dict)
+            else []
+        )
+        if isinstance(report, dict)
+    ]
     incident = {
         **representative_payload,
         "id": stable_incident_id(camera_id, first.get("id")),
@@ -386,6 +406,7 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
         # Top-level incident media and objects come from the representative
         # event, so its tracking metadata must use the same temporal context.
         "object_tracking": representative.get("object_tracking"),
+        "camera_semantics": {"reports": semantic_reports},
     }
     return incident
 

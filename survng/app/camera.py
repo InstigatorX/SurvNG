@@ -367,12 +367,18 @@ class CameraWorker:
             media=self.media,
             analysis=self.motion_analysis,
             state=self.motion_state,
+            model_labels=lambda: list(
+                getattr(self.motion_object_detector.detector, "labels", [])
+            ),
         )
         self.motion_ingress = MotionEventIngressService(
             camera_id=camera.id,
             events=self.motion_events,
             qualification=self.motion_qualification,
             state=self.motion_state,
+            model_labels=lambda: list(
+                getattr(self.motion_object_detector.detector, "labels", [])
+            ),
         )
         self.motion_runtime = MotionRuntimeService(
             camera_id=camera.id,

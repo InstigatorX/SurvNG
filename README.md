@@ -121,9 +121,11 @@ identity—because camera angle, lighting, occlusion, and similar-looking subjec
 can affect the score. Raw appearance vectors remain server-side and are never
 returned by the API or assistant.
 
-## Reolink / ONVIF Notes
+## Camera / ONVIF Notes
 
-ONVIF includes event handling in its network interface specifications, and many Reolink cameras expose ONVIF and RTSP when enabled in the camera network settings. In practice, Reolink event topic names and support vary by model and firmware, so this app logs raw ONVIF event topics and treats events containing `motion`, `cellmotion`, `person`, `vehicle`, `animal`, or `alarm` as detection triggers by default.
+ONVIF camera events are interpreted through shared, vendor-neutral rules. Recognized person, vehicle, animal and face reports can prioritize detection. Reolink's `DogCatDetect` is an alias for an animal report, not a separate detection subsystem. Topic and payload support still depends on the camera's actual message format.
+
+Camera reports are kept separately from SurvNG's model detections. Their candidate model classes are advisory: an animal report does not restrict detection to animals or create an animal label without visual evidence. See [Camera reports and model detections](docs/guide/motion-detection.md#camera-reports-and-model-detections).
 
 If ONVIF motion events are missing or unreliable, select **EMA only** so Enhanced Motion Analysis becomes the sole automatic trigger.
 

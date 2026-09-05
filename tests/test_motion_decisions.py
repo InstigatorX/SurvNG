@@ -96,7 +96,7 @@ def test_audit_features_copies_inputs_and_attaches_pipeline_telemetry() -> None:
 
 
 def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> None:
-    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2, camera_id="gate")
     stop_event = threading.Event()
     process_incident = Mock()
 
@@ -126,12 +126,13 @@ def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> 
         media=Mock(),
         analysis=Mock(),
         state=state,
+        model_labels=lambda: ["person", "car"],
     )
     now = datetime.now(timezone.utc)
     assert events.enqueue(
         MotionTrigger(
-            topic="onvif/motion",
-            message="motion",
+            topic="RuleEngine/VehicleDetect",
+            message="",
             event_at=now,
             received_at=now.timestamp(),
         )
@@ -140,6 +141,8 @@ def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> 
     orchestrator.run_until_error(stop_event)
 
     process_incident.assert_called_once()
+    durable_qualification = process_incident.call_args.args[3]
+    assert durable_qualification["camera_semantics"]["reports"][0]["category"] == "vehicle"
     state.publish_event.assert_called_once()
     state.record_decision.assert_called_once()
     assert events.active_triggers is None
@@ -198,6 +201,47 @@ def test_camera_primary_batch_preserves_route_provenance_for_admission() -> None
     assert persisted_qualification["features"]["route_detection_watch"] == {
         "origin_camera_id": "back-left", "origin_event_id": 58395,
     }
+
+
+def test_retained_episode_camera_notice_supplies_semantic_provenance() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2, camera_id="gate")
+    now = datetime.now(timezone.utc)
+    reserved = events.episode_controller.observe_camera(
+        CameraNotice(
+            "gate", now.timestamp(), 100.0, "RuleEngine/VehicleDetect", ""
+        ),
+        generation=0,
+    )
+    assert reserved.intent is not None
+    events.episode_controller.acknowledge_admission(
+        reserved.intent.intent_id, admitted=True, occurred_monotonic=100.1
+    )
+    trigger = MotionTrigger(
+        topic="adaptive/visual_backup",
+        message="ema",
+        event_at=now,
+        received_at=now.timestamp(),
+        detection_intent_id=reserved.intent.intent_id,
+    )
+    qualification = Mock()
+    qualification.settings.return_value = ("off", "balanced", 320)
+    qualification.rescue_settings.return_value = (False, 0.0)
+    qualification.suppression_verification_rate.return_value = 0.0
+    incidents = Mock()
+    incidents.process.return_value = Mock(as_dict=Mock(return_value={
+        "event_id": 9, "object_detected": False, "snapshot_path": "",
+    }))
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate", events=events, audit_recorder=Mock(),
+        config=MotionQualificationConfig(burst_quiet_seconds=0.1),
+        qualification=qualification, incidents=incidents, media=Mock(),
+        analysis=Mock(), state=Mock(), model_labels=lambda: ["car", "truck"],
+    )
+
+    orchestrator._process_batch(MotionTriggerBatch((trigger,)), threading.Event())
+
+    reports = incidents.process.call_args.args[3]["camera_semantics"]["reports"]
+    assert reports[0]["candidate_model_classes"] == ["car", "truck"]
 
 
 def test_stopping_batch_skips_qualification_and_releases_adaptive_state() -> None:
