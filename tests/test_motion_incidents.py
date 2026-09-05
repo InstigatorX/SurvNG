@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import errno
+import sqlite3
 import tempfile
 import threading
 import time
@@ -13,6 +15,7 @@ import pytest
 
 from survng.app.events import EventStore
 from survng.app.event_store.jobs import (
+    DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS,
     DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS,
     DETECTION_JOB_MAXIMUM_AGE_SECONDS,
 )
@@ -1085,7 +1088,7 @@ def test_transient_checkpoint_failure_reuses_inference_before_handoff() -> None:
             nonlocal retry_calls
             retry_calls += 1
             if retry_calls == 1:
-                raise RuntimeError("retry database unavailable")
+                raise sqlite3.OperationalError("database is locked")
             return original_retry(*args, **kwargs)
 
         store.checkpoint_detection_job = flaky_checkpoint  # type: ignore[method-assign]
@@ -1303,3 +1306,241 @@ def test_running_multicamera_burst_survives_queued_age_expiry_while_lease_is_val
         assert store._jobs["back-right-running"]["state"] == "running"
         assert store._jobs["same-camera-queued"]["state"] == "failed"
         assert store._jobs["same-camera-queued"]["last_error"] == "stale_refinement"
+
+
+@pytest.fixture(params=["sqlite", "memory"])
+def recovery_store(request, tmp_path):
+    return EventStore(tmp_path) if request.param == "sqlite" else _MemoryDetectionJobStore()
+
+
+def _recovery_job(intent="recovery", *, existing_event_id=None, checkpointed=False):
+    return _RefinementJob(
+        topic="motion", message="person", event_at=datetime.now(timezone.utc),
+        qualification={"detection_intent_id": intent}, existing_event_id=existing_event_id,
+        require_eligible_object=True, require_motion_correlation=True, callback=None,
+        completion_context={"completion_id": f"{intent}:completion"},
+        initial_outcome=MotionDecisionOutcome(existing_event_id, "", None, refinement_pending=True),
+        refined_outcome=(MotionDecisionOutcome(42, "confirmed.webp", True,
+            detected_objects=({"label": "person", "incident_eligible": True},)) if checkpointed else None),
+    )
+
+
+def _enqueue_recovery(store, job):
+    job_id = job.job_id("gate")
+    store.enqueue_detection_job(job_id=job_id, camera_id="gate", dedupe_key=job.dedupe_key(), payload=job.payload())
+    return job_id
+
+
+def _recovery_row(store, job_id):
+    if isinstance(store, _MemoryDetectionJobStore):
+        return dict(store._jobs[job_id])
+    with store._connect_jobs() as conn:
+        return dict(conn.execute("select * from detection_jobs where id = ?", (job_id,)).fetchone())
+
+
+def _age_recovery_job(store, job_id, age, *, expired_lease=False):
+    if isinstance(store, _MemoryDetectionJobStore):
+        store._jobs[job_id]["created_at_monotonic"] = time.monotonic() - age
+        if expired_lease:
+            store._jobs[job_id]["lease_expires_at"] = 0
+    else:
+        with store._connect_jobs() as conn:
+            conn.execute("update detection_jobs set created_at = ? where id = ?", (
+                datetime.fromtimestamp(time.time() - age, timezone.utc).isoformat(), job_id,
+            ))
+            if expired_lease:
+                conn.execute("update detection_jobs set lease_expires_at = 0 where id = ?", (job_id,))
+
+
+def _run_recovery_to_completion(store, *, before_start=None):
+    service, decision, tracking, *_ = _service(
+        MotionDecisionOutcome(None, "", None), refinement_store=store,
+    )
+    decision.refine.return_value = MotionDecisionOutcome(42, "confirmed.webp", True,
+        detected_objects=({"label": "person", "incident_eligible": True},))
+    tracking.start.return_value = True
+    completed = threading.Event()
+    completion = Mock(side_effect=lambda *_: completed.set())
+    service.set_refinement_completion_handler(completion)
+    if before_start is not None:
+        before_start(service, decision)
+    stop = threading.Event()
+    try:
+        with patch("survng.app.motion_incidents.REFINEMENT_STORE_RETRY_SECONDS", 0.01):
+            service.start(stop)
+            assert completed.wait(2.0), service.status()
+    finally:
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(1.0)
+    return service, decision, tracking, completion
+
+
+@pytest.mark.parametrize("error", [
+    sqlite3.OperationalError("database is locked"), OSError(errno.EIO, "I/O error"),
+])
+def test_refinement_claim_error_recovers_and_completes_handoff(recovery_store, monkeypatch, error):
+    job = _recovery_job()
+    job_id = _enqueue_recovery(recovery_store, job)
+    original = recovery_store.claim_detection_job
+    claim = Mock(side_effect=[error])
+
+    def flaky_claim(*args, **kwargs):
+        if claim.call_count == 0:
+            return claim(*args, **kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(recovery_store, "claim_detection_job", flaky_claim)
+    service, decision, tracking, completion = _run_recovery_to_completion(recovery_store)
+    decision.refine.assert_called_once()
+    tracking.start.assert_called_once()
+    completion.assert_called_once_with(decision.refine.return_value, job.completion_context)
+    assert _recovery_row(recovery_store, job_id)["state"] == "completed"
+    assert service.status()["refinement_failures"] == 1
+
+
+@pytest.mark.parametrize("indeterminate", [False, True])
+def test_inference_failure_retry_write_error_recovers(recovery_store, monkeypatch, indeterminate):
+    job_id = _enqueue_recovery(recovery_store, _recovery_job())
+    original = recovery_store.retry_detection_job
+    retry_calls = 0
+
+    def retry(*args, **kwargs):
+        nonlocal retry_calls
+        retry_calls += 1
+        if retry_calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(recovery_store, "retry_detection_job", retry)
+
+    def prepare(_service, decision):
+        decision.refine.side_effect = [
+            MotionDecisionOutcome(None, "", None) if indeterminate else RuntimeError("decode failed"),
+            decision.refine.return_value,
+        ]
+
+    _service_result, decision, tracking, completion = _run_recovery_to_completion(
+        recovery_store, before_start=prepare,
+    )
+    assert decision.refine.call_count == 2
+    tracking.start.assert_called_once()
+    completion.assert_called_once()
+    assert _recovery_row(recovery_store, job_id)["state"] == "completed"
+
+
+def test_bad_refinement_payload_is_terminal_and_next_job_completes(recovery_store):
+    bad = _recovery_job("bad")
+    payload = bad.payload()
+    payload["event_at"] = "invalid-date"
+    bad_id = bad.job_id("gate")
+    recovery_store.enqueue_detection_job(job_id=bad_id, camera_id="gate", dedupe_key=bad.dedupe_key(), payload=payload)
+    good_id = _enqueue_recovery(recovery_store, _recovery_job("good"))
+
+    def prepare(service, _decision):
+        # Make the poison row the next claim under both SQLite's freshness
+        # ordering and the compatibility memory store's queue ordering.
+        if isinstance(recovery_store, _MemoryDetectionJobStore):
+            row = recovery_store._jobs[bad_id]
+            row.update(state="running", lease_owner=service._lease_owner, lease_expires_at=time.monotonic() + 60)
+        else:
+            with recovery_store._connect_jobs() as conn:
+                conn.execute("update detection_jobs set state='running', lease_owner=?, lease_expires_at=? where id=?", (service._lease_owner, time.time() + 60, bad_id))
+        service._refinement_callbacks[bad_id] = Mock()
+
+    service, decision, tracking, completion = _run_recovery_to_completion(recovery_store, before_start=prepare)
+    bad_row = _recovery_row(recovery_store, bad_id)
+    assert bad_row["state"] == "failed"
+    assert bad_row["attempts"] == 1
+    assert bad_row["last_error"].startswith("invalid_refinement_payload")
+    assert _recovery_row(recovery_store, good_id)["state"] == "completed"
+    decision.refine.assert_called_once()
+    tracking.start.assert_called_once()
+    completion.assert_called_once()
+    assert service.status()["refinement_failures"] == 1
+
+
+def test_refinement_store_backoff_stops_promptly(recovery_store, monkeypatch):
+    entered = threading.Event()
+
+    def unavailable(*_args, **_kwargs):
+        entered.set()
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(recovery_store, "claim_detection_job", unavailable)
+    service, *_ = _service(MotionDecisionOutcome(None, "", None), refinement_store=recovery_store)
+    stop = threading.Event()
+    with patch("survng.app.motion_incidents.REFINEMENT_STORE_RETRY_SECONDS", 30.0):
+        service.start(stop)
+        assert entered.wait(1.0)
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(1.0)
+    assert not service.running()
+
+
+@pytest.mark.parametrize("error", [
+    sqlite3.OperationalError("no such table: detection_jobs"), PermissionError(errno.EACCES, "permission denied"),
+])
+def test_permanent_claim_error_is_visible_and_does_not_loop(recovery_store, monkeypatch, error):
+    claim = Mock(side_effect=error)
+    monkeypatch.setattr(recovery_store, "claim_detection_job", claim)
+    service, *_ = _service(MotionDecisionOutcome(None, "", None), refinement_store=recovery_store)
+    service.start(threading.Event())
+    assert service.wait_stopped(1.0)
+    claim.assert_called_once()
+    assert not service._refinement_accepting
+    failure = service.status()["last_refinement_failure"]
+    assert failure["error_type"] == type(error).__name__
+    assert failure["error"] == str(error)
+
+
+@pytest.mark.parametrize("existing_event_id", [None, 42])
+def test_checkpoint_replays_completion_after_inference_freshness(recovery_store, existing_event_id):
+    job = _recovery_job(existing_event_id=existing_event_id, checkpointed=True)
+    job_id = _enqueue_recovery(recovery_store, job)
+    _age_recovery_job(recovery_store, job_id, 120)
+    _svc, decision, tracking, completion = _run_recovery_to_completion(recovery_store)
+    decision.refine.assert_not_called()
+    tracking.start.assert_called_once()
+    completion.assert_called_once_with(job.refined_outcome, job.completion_context)
+    assert _recovery_row(recovery_store, job_id)["state"] == "completed"
+
+
+def test_checkpoint_retention_is_finite_and_preserves_live_lease(recovery_store):
+    job_id = _enqueue_recovery(recovery_store, _recovery_job(checkpointed=True))
+    recovery_store.claim_detection_job("gate", lease_owner="live-owner")
+    _age_recovery_job(recovery_store, job_id, DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS + 1)
+    assert recovery_store.expire_stale_detection_jobs("gate", maximum_age_seconds=20, event_maximum_age_seconds=60) == 0
+    _age_recovery_job(recovery_store, job_id, DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS + 1, expired_lease=True)
+    assert recovery_store.expire_stale_detection_jobs("gate", maximum_age_seconds=20, event_maximum_age_seconds=60) == 1
+    row = _recovery_row(recovery_store, job_id)
+    assert row["state"] == "failed"
+    assert row["last_error"] == "expired_refinement_completion"
+    assert row["lease_owner"] == ""
+
+
+@pytest.mark.parametrize("existing_event_id", [None, 42])
+def test_unrefined_jobs_still_expire_at_original_deadline(recovery_store, existing_event_id):
+    job_id = _enqueue_recovery(recovery_store, _recovery_job(existing_event_id=existing_event_id))
+    _age_recovery_job(recovery_store, job_id, 25)
+    assert recovery_store.expire_stale_detection_jobs("gate", maximum_age_seconds=20, event_maximum_age_seconds=60) == int(existing_event_id is None)
+    _age_recovery_job(recovery_store, job_id, 61)
+    recovery_store.expire_stale_detection_jobs("gate", maximum_age_seconds=20, event_maximum_age_seconds=60)
+    assert _recovery_row(recovery_store, job_id)["last_error"] == "stale_refinement"
+
+
+def test_terminal_cleanup_keeps_pending_local_progress(recovery_store):
+    expired = _recovery_job("expired", checkpointed=True)
+    pending = _recovery_job("pending", checkpointed=True)
+    expired_id = _enqueue_recovery(recovery_store, expired)
+    pending_id = _enqueue_recovery(recovery_store, pending)
+    service, *_ = _service(MotionDecisionOutcome(None, "", None), refinement_store=recovery_store)
+    for job_id, job in ((expired_id, expired), (pending_id, pending)):
+        service._refinement_callbacks[job_id] = Mock()
+        service._refinement_progress[job_id] = job
+    _age_recovery_job(recovery_store, expired_id, DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS + 1)
+    recovery_store.expire_stale_detection_jobs("gate", maximum_age_seconds=20, event_maximum_age_seconds=60)
+    service._forget_terminal_refinements()
+    assert set(service._refinement_callbacks) == {pending_id}
+    assert service._refinement_progress == {pending_id: pending}

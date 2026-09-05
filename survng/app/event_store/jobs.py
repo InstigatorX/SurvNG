@@ -15,6 +15,9 @@ DETECTION_JOB_MAXIMUM_AGE_SECONDS = 20.0
 # durable. Give those event-bound jobs enough time to survive one busy 4K
 # decode ahead of them.
 DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS = 60.0
+# Inference freshness no longer matters once its result is checkpointed.
+# Bound unfinished bookkeeping independently, including recovery after restart.
+DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS = 24 * 60 * 60.0
 
 
 def _detection_job_occurrence(payload: dict[str, Any]) -> dict[str, Any]:
@@ -775,18 +778,34 @@ class EventStoreJobsMixin:
             now - event_maximum_age,
             timezone.utc,
         ).isoformat()
+        completion_cutoff = datetime.fromtimestamp(
+            now - DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS,
+            timezone.utc,
+        ).isoformat()
         cursor = conn.execute(
             "update detection_jobs set state = 'failed', lease_expires_at = null, "
-            "lease_owner = '', last_error = 'stale_refinement', updated_at = ? "
-            "where camera_id = ? and (("
+            "lease_owner = '', last_error = case when "
+            "json_type(payload_json, '$.refined_outcome') = 'object' "
+            "then 'expired_refinement_completion' else 'stale_refinement' end, updated_at = ? "
+            "where camera_id = ? and (case when "
+            "json_type(payload_json, '$.refined_outcome') = 'object' then created_at <= ? "
+            "else (("
             "json_extract(payload_json, '$.existing_event_id') is null "
             "and created_at <= ?) or ("
             "json_extract(payload_json, '$.existing_event_id') is not null "
-            "and created_at <= ?)) and (state = 'queued' "
+            "and created_at <= ?)) end) and (state = 'queued' "
             "or (state = 'running' and lease_expires_at <= ?))",
-            (now_iso, camera_id, probe_cutoff, event_cutoff, now),
+            (now_iso, camera_id, completion_cutoff, probe_cutoff, event_cutoff, now),
         )
         return max(0, int(cursor.rowcount))
+
+    def pending_detection_job_ids(self, camera_id: str) -> set[str]:
+        """Identify live jobs when their owner reconciles expired local state."""
+        with self._connect_jobs() as conn:
+            return {str(row["id"]) for row in conn.execute(
+                "select id from detection_jobs where camera_id = ? "
+                "and state in ('queued', 'running')", (camera_id,),
+            )}
 
     def complete_detection_job(
         self,
