@@ -51,6 +51,20 @@ jobs:
             tests/test_object_tracking.py \
             tests/test_camera_worker.py \
             tests/test_config_reload.py
+      - name: Run motion subsystem regression tests
+        run: |
+          scripts/run-tests.sh \
+            tests/test_motion*.py \
+            tests/test_ema*.py \
+            tests/test_adaptive_motion.py \
+            tests/test_capture_protocols.py \
+            tests/test_onvif_inspector.py \
+            tests/test_recorded_object_detection.py \
+            tests/test_recorded_decode_budget.py \
+            tests/test_object_motion.py \
+            tests/test_stationary_policy.py \
+            tests/test_config.py \
+            tests/test_zones.py
       - name: Run frontend unit tests
         run: node frontend/tests/run-tests.mjs unit
       - name: Post-job cleanup
