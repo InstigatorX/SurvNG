@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 from .config import CameraConfig
 from .security import redact_secret_text
 from .onvif_inspector import ONVIF_INSPECTOR
+from .motion_topics import normalize_motion_topic, semantic_motion_kind
 
 LOGGER = logging.getLogger("uvicorn.error")
 MOTION_WORDS = ("motion", "cellmotion", "person", "vehicle", "animal", "alarm")
@@ -924,11 +925,7 @@ class OnvifEventListener:
 
     @staticmethod
     def _normalized_topic(topic: str) -> str:
-        return "/".join(
-            segment.rsplit(":", 1)[-1].strip().lower()
-            for segment in str(topic or "").strip().split("/")
-            if segment.strip()
-        )
+        return normalize_motion_topic(topic)
 
     @staticmethod
     def _xml_local_name(tag: str) -> str:
@@ -1030,7 +1027,9 @@ class OnvifEventListener:
 
     def _motion_event_state(self, topic: str, message: str) -> bool | None:
         searchable = f"{topic} {message}".lower()
-        if not any(word in searchable for word in MOTION_WORDS):
+        if semantic_motion_kind(topic) is None and not any(
+            word in searchable for word in MOTION_WORDS
+        ):
             return None
         explicit_states: list[bool] = []
         containers = [

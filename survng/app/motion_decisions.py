@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from .config import MotionQualificationConfig
 from .motion import MotionQualificationResult
+from .motion_topics import semantic_motion_kind
 from .motion_events import (
     MotionEventCoordinator,
     MotionTrigger,
@@ -65,11 +66,7 @@ class MotionDecisionState(Protocol):
 
 
 def priority_motion_topic(topic: str) -> bool:
-    searchable = topic.lower()
-    return searchable.startswith("manual") or any(
-        word in searchable
-        for word in ("person", "people", "human", "vehicle", "animal", "face")
-    )
+    return semantic_motion_kind(topic) is not None
 
 
 def should_verify_suppression(decision_id: str, rate: float) -> bool:
