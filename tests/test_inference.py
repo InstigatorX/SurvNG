@@ -178,6 +178,39 @@ class InferenceSupervisorTest(unittest.TestCase):
         first.request.assert_called_once()
         second.request.assert_called_once()
 
+    def test_connection_failure_reaches_healthy_worker_through_supervisor(self) -> None:
+        frame = np.zeros((24, 32, 3), dtype=np.uint8)
+        for method in ("detect", "detect_initial"):
+            for stage, error_type in (
+                ("send", BrokenPipeError),
+                ("poll", OSError),
+                ("recv", EOFError),
+            ):
+                with self.subTest(method=method, stage=stage):
+                    supervisor = InferenceSupervisor(
+                        DetectorConfig(enabled=False, object_worker_count=2)
+                    )
+                    self.addCleanup(supervisor.stop)
+                    failed, healthy = supervisor._object_workers
+                    # Exercise real admission, IPC exception translation and pool
+                    # failover; only native startup/frame transport are replaced.
+                    failed._connection = Mock()
+                    getattr(failed._connection, stage).side_effect = error_type("closed")
+                    healthy.request = Mock(return_value=[{"label": "person"}])
+                    with (
+                        patch.object(failed, "_ensure_worker_locked", return_value=True),
+                        patch.object(failed, "_write_frame_locked", return_value={}),
+                        patch.object(failed, "_terminate_failed_worker_locked") as terminate,
+                    ):
+                        result = getattr(supervisor, method)(frame)
+
+                    self.assertEqual(result, [{"label": "person"}])
+                    terminate.assert_called_once_with(
+                        "object inference worker connection failed."
+                    )
+                    healthy.request.assert_called_once()
+                    self.assertEqual(failed.pending_requests(), 0)
+
     def test_initial_detection_uses_bounded_per_worker_failover(self) -> None:
         supervisor = InferenceSupervisor(
             DetectorConfig(enabled=False, object_worker_count=2)
