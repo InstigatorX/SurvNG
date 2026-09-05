@@ -351,6 +351,9 @@ class EventStoreTest(unittest.TestCase):
             self.assertIsNone(store.claim_motion_trigger(
                 "gate", "trigger-1", lease_owner="generation-b"
             ))
+            self.assertIsNone(store.fail_motion_trigger(
+                "trigger-1", "stale failure", lease_owner="generation-b"
+            ))
             store.complete_motion_trigger("trigger-1", lease_owner="generation-b")
             self.assertEqual(store.motion_trigger_status("gate"), {"running": 1})
             store.complete_motion_trigger("trigger-1", lease_owner="generation-a")
@@ -370,6 +373,93 @@ class EventStoreTest(unittest.TestCase):
             self.assertIsNone(store.claim_motion_trigger(
                 "gate", "trigger-1", lease_owner="generation-a"
             ))
+
+    def test_motion_trigger_retry_decision_and_update_are_one_lease_cas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first = EventStore(root)
+            second = EventStore(root)
+            first.enqueue_motion_trigger(
+                job_id="trigger-1",
+                camera_id="gate",
+                payload={"topic": "onvif/motion"},
+            )
+            self.assertIsNotNone(first.claim_motion_trigger(
+                "gate", "trigger-1", lease_owner="generation-a"
+            ))
+            with first._connect_jobs() as connection:
+                connection.execute(
+                    "update motion_trigger_jobs set lease_expires_at = 0 "
+                    "where id = 'trigger-1'"
+                )
+            selected = threading.Event()
+            release = threading.Event()
+            competing_begin = threading.Event()
+            original_connect = first._connect_jobs
+            competing_connect = second._connect_jobs
+
+            class PausingConnection:
+                def __init__(self):
+                    self.connection = original_connect()
+
+                def __enter__(self):
+                    self.connection.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.connection.__exit__(*args)
+
+                def execute(self, sql, parameters=()):
+                    result = self.connection.execute(sql, parameters)
+                    if sql.startswith("select attempts from motion_trigger_jobs"):
+                        selected.set()
+                        assert release.wait(1.0)
+                    return result
+
+            first._connect_jobs = PausingConnection  # type: ignore[method-assign]
+
+            class ObservedConnection:
+                def __init__(self):
+                    self.connection = competing_connect()
+
+                def __enter__(self):
+                    self.connection.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.connection.__exit__(*args)
+
+                def execute(self, sql, parameters=()):
+                    if sql == "begin immediate":
+                        competing_begin.set()
+                    return self.connection.execute(sql, parameters)
+
+            second._connect_jobs = ObservedConnection  # type: ignore[method-assign]
+            retry_result: list[bool | None] = []
+            claim_result: list[dict | None] = []
+            retry_thread = threading.Thread(target=lambda: retry_result.append(
+                first.fail_motion_trigger(
+                    "trigger-1", "detector failed", lease_owner="generation-a"
+                )
+            ))
+            retry_thread.start()
+            self.assertTrue(selected.wait(1.0))
+            claim_thread = threading.Thread(target=lambda: claim_result.append(
+                second.claim_motion_trigger(
+                    "gate", "trigger-1", lease_owner="generation-b"
+                )
+            ))
+            claim_thread.start()
+            self.assertTrue(competing_begin.wait(1.0))
+            release.set()
+            retry_thread.join(1.0)
+            claim_thread.join(1.0)
+
+            self.assertFalse(retry_thread.is_alive())
+            self.assertFalse(claim_thread.is_alive())
+            self.assertEqual(retry_result, [True])
+            self.assertEqual(claim_result, [None])
+            self.assertEqual(first.motion_trigger_status("gate"), {"queued": 1})
 
     def test_route_watch_consumption_survives_store_recreation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -515,6 +605,46 @@ class EventStoreTest(unittest.TestCase):
             status = store.detection_job_status("gate")
             self.assertEqual(status["completed"], 1)
             self.assertEqual(status["oldest_age_ms"], 0.0)
+
+    def test_detection_job_checkpoint_requires_the_current_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            original = {"event_at": "2026-09-05T12:00:00+00:00"}
+            store.enqueue_detection_job(
+                job_id="job-1",
+                camera_id="gate",
+                dedupe_key="episode:1",
+                payload=original,
+            )
+            self.assertIsNotNone(store.claim_detection_job(
+                "gate", lease_owner="generation-a"
+            ))
+
+            self.assertFalse(store.checkpoint_detection_job(
+                "job-1",
+                {**original, "refined_outcome": {"event_id": 42}},
+                lease_owner="generation-b",
+            ))
+            with store._connect_jobs() as connection:
+                row = connection.execute(
+                    "select state, lease_owner, payload_json from detection_jobs "
+                    "where id = 'job-1'"
+                ).fetchone()
+            self.assertEqual(row["state"], "running")
+            self.assertEqual(row["lease_owner"], "generation-a")
+            self.assertEqual(json.loads(row["payload_json"]), original)
+
+            checkpoint = {**original, "refined_outcome": {"event_id": 42}}
+            self.assertTrue(store.checkpoint_detection_job(
+                "job-1", checkpoint, lease_owner="generation-a"
+            ))
+            replacement = EventStore(root)
+            with replacement._connect_jobs() as connection:
+                payload = json.loads(connection.execute(
+                    "select payload_json from detection_jobs where id = 'job-1'"
+                ).fetchone()["payload_json"])
+            self.assertEqual(payload, checkpoint)
 
     def test_detection_intent_idempotently_links_one_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

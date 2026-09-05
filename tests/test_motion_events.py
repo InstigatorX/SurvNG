@@ -192,12 +192,15 @@ def test_duplicate_durable_trigger_does_not_queue_a_second_wake() -> None:
         assert coordinator.enqueue(first, evict_oldest=False)
         assert coordinator.enqueue(replay, evict_oldest=False)
         assert coordinator.queue.qsize() == 1
-        assert coordinator.next_trigger(timeout=0.1) is first
+        recovered = coordinator.next_trigger(timeout=0.1)
+        assert recovered is not None
+        assert recovered.delivery_job_id == first.delivery_job_id
+        assert recovered.event_at == first.event_at
         with pytest.raises(queue.Empty):
             coordinator.next_trigger(timeout=0.02)
 
 
-def test_durable_wake_eviction_is_not_reported_as_trigger_loss() -> None:
+def test_full_durable_wake_queue_preserves_fifo_delivery() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = EventStore(Path(tmpdir))
         coordinator = MotionEventCoordinator(
@@ -213,11 +216,128 @@ def test_durable_wake_eviction_is_not_reported_as_trigger_loss() -> None:
         status = coordinator.runtime_status()
         assert drops == []
         assert status["evicted"] == 0
-        assert status["durable_wake_evictions"] == 1
+        assert status["durable_wake_evictions"] == 0
+        assert status["durable_deferred"] == 1
         assert status["durable_delivery"] == {"queued": 2}
+        first = coordinator.next_trigger(timeout=0.1)
+        assert first is not None
+        assert first.message == "1"
+        assert coordinator.enqueue(_trigger(3), on_drop=drops.append)
+        coordinator.complete_deliveries(MotionTriggerBatch((first,)))
+        second = coordinator.next_trigger(timeout=0.1)
+        assert second is not None
+        assert second.message == "2"
+        coordinator.complete_deliveries(MotionTriggerBatch((second,)))
+        third = coordinator.next_trigger(timeout=0.1)
+        assert third is not None
+        assert third.message == "3"
 
 
-def test_stale_durable_wakeups_are_drained_iteratively() -> None:
+def test_durable_retry_budget_is_persisted_and_terminal_status_is_truthful() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        coordinator = MotionEventCoordinator(
+            queue_size=1,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        reserved = coordinator.episode_controller.observe_camera(
+            CameraNotice("gate", 100.0, 100.0, "onvif/motion"),
+            generation=0,
+        )
+        assert reserved.intent is not None
+        intent_id = reserved.intent.intent_id
+        coordinator.episode_controller.acknowledge_admission(
+            intent_id,
+            admitted=True,
+            occurred_monotonic=100.1,
+        )
+        coordinator.episode_controller.mark_running(
+            intent_id,
+            occurred_monotonic=100.2,
+        )
+        trigger = _trigger(1)
+        trigger.detection_intent_id = intent_id
+        assert coordinator.enqueue(trigger)
+        terminal: list[MotionTriggerBatch] = []
+
+        def fail_terminal(batch: MotionTriggerBatch) -> None:
+            terminal.append(batch)
+            coordinator.episode_controller.fail(
+                batch[0].detection_intent_id,
+                occurred_monotonic=101.0,
+            )
+
+        for attempt in range(1, 4):
+            claimed = coordinator.next_trigger(timeout=0.1)
+            assert claimed is not None
+            batch = MotionTriggerBatch((claimed,))
+            disposition = coordinator.schedule_retry(
+                batch,
+                stop_event=threading.Event(),
+                on_terminal=fail_terminal,
+                error="detector unavailable",
+            )
+            if attempt < 3:
+                assert disposition is RetryDisposition.SCHEDULED
+                assert coordinator.episode_snapshot()["request_status"] == "running"
+                assert store.motion_trigger_status("gate") == {"queued": 1}
+                with store._connect_jobs() as connection:
+                    connection.execute(
+                        "update motion_trigger_jobs set available_at = 0 where id = ?",
+                        (trigger.delivery_job_id,),
+                    )
+            else:
+                assert disposition is RetryDisposition.DROPPED
+
+        assert len(terminal) == 1
+        assert coordinator.retry_queue_depth() == 0
+        assert coordinator.episode_snapshot()["request_status"] == "failed"
+        assert store.motion_trigger_status("gate") == {"failed": 1}
+
+
+def test_stale_durable_failure_does_not_mark_another_owners_job_terminal() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        first = MotionEventCoordinator(
+            queue_size=1,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        second = MotionEventCoordinator(
+            queue_size=1,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        assert first.enqueue(_trigger(1))
+        stale_claim = first.next_trigger(timeout=0.1)
+        assert stale_claim is not None
+        with store._connect_jobs() as connection:
+            connection.execute(
+                "update motion_trigger_jobs set lease_expires_at = 0 where id = ?",
+                (stale_claim.delivery_job_id,),
+            )
+        current_claim = second.next_trigger(timeout=0.1)
+        assert current_claim is not None
+        terminal: list[MotionTriggerBatch] = []
+
+        disposition = first.schedule_retry(
+            MotionTriggerBatch((stale_claim,)),
+            stop_event=threading.Event(),
+            on_terminal=terminal.append,
+            error="stale worker failed",
+        )
+
+        assert disposition is RetryDisposition.SCHEDULED
+        assert terminal == []
+        assert first.runtime_status()["retries_dropped"] == 0
+        assert store.motion_trigger_status("gate") == {"running": 1}
+
+
+def test_durable_wake_claims_oldest_instead_of_its_exact_job_id() -> None:
     store = Mock()
     recovered = _trigger(9999).durable_payload()
 
@@ -229,21 +349,21 @@ def test_stale_durable_wakeups_are_drained_iteratively() -> None:
     store.claim_motion_trigger.side_effect = claim
     store.motion_trigger_status.return_value = {}
     coordinator = MotionEventCoordinator(
-        queue_size=1500,
+        queue_size=1,
         retry_limit=1,
         camera_id="gate",
         durable_store=store,
     )
-    for index in range(1200):
-        trigger = _trigger(index)
-        trigger.delivery_job_id = f"stale-{index}"
-        coordinator.queue.put_nowait(trigger)
+    trigger = _trigger(1)
+    trigger.delivery_job_id = "newer-wake"
+    coordinator.queue.put_nowait(trigger)
 
     result = coordinator.next_trigger(timeout=1.0)
 
     assert result is not None
     assert result.delivery_job_id == "recovered"
     assert coordinator.queue.empty()
+    assert store.claim_motion_trigger.call_args.args == ("gate",)
 
 
 def test_coalesce_preserves_batch_order_and_stop_sentinel() -> None:
