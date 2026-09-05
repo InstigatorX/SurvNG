@@ -7,6 +7,8 @@ from unittest.mock import Mock, call, patch
 import pytest
 
 from survng.app.config import AppConfig
+from survng.app.config_application import TargetedConfigApplication
+from survng.app.inference import InferenceRollbackIncomplete, InferenceSupervisor
 from survng.app.inference_lifecycle import InferenceLifecycle
 
 
@@ -125,6 +127,58 @@ def test_degraded_inference_start_retries_during_maintenance() -> None:
     assert service.detector.start.call_count == 2
     service.faces.start.assert_called_once_with()
     assert service.status()["core_ready"]
+
+
+def test_targeted_compensation_restores_inference_admission_after_failed_inner_rollback() -> None:
+    import numpy as np
+
+    current = AppConfig.model_validate({
+        "detector": {"enabled": False, "object_worker_count": 1, "tracking": {"enabled": False}},
+    })
+    incoming = current.model_copy(deep=True)
+    incoming.detector.device = "GPU"
+    service = _lifecycle()
+    service.detector = InferenceSupervisor(current.detector)
+    runtime = Mock(config=current)
+    runtime.reconfigure_inference.side_effect = service.reconfigure_roles
+    save = Mock()
+    application = TargetedConfigApplication(
+        lock=threading.RLock(), save=save, active_exports=lambda: [],
+    )
+    try:
+        service.start_core()
+        worker = service.detector._object
+        original_start = worker.start
+        attempts = 0
+
+        def fail_candidate_and_inner_rollback() -> bool:
+            nonlocal attempts
+            attempts += 1
+            return False if attempts <= 2 else original_start()
+
+        with (
+            patch.object(worker, "start", side_effect=fail_candidate_and_inner_rollback),
+            pytest.raises(InferenceRollbackIncomplete),
+        ):
+            application.apply(current, incoming, runtime, persist=True)
+
+        assert attempts == 3
+        assert runtime.config is current
+        assert service.detector.config == current.detector
+        assert service.detector.isolation_status()["worker_alive"]
+        assert service.detector.workload_status()["accepting"]
+        assert service.status()["core_ready"]
+        assert save.call_args_list == [call(incoming, assign_ids=False), call(current, assign_ids=False)]
+        with patch.object(worker, "request", wraps=worker.request) as request:
+            assert service.detector.detect_initial(np.zeros((8, 8, 3), dtype=np.uint8)) == [
+                {"status": "detector_unavailable"},
+            ]
+        request.assert_called_once()
+        with patch.object(service.detector, "start", wraps=service.detector.start) as start:
+            service.maintain()
+        start.assert_not_called()
+    finally:
+        service.close()
 
 
 def test_workers_bind_once_before_start() -> None:

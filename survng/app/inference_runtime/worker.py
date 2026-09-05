@@ -239,6 +239,11 @@ class _InferenceWorker:
             payload["enabled"] = False
             if time.monotonic() < self._fallback_until:
                 payload["face_recognition_device"] = "CPU"
+        elif self.role == "depth":
+            payload["enabled"] = False
+            payload["face_recognition_enabled"] = False
+            if time.monotonic() < self._fallback_until:
+                payload["depth"]["device"] = "CPU"
         else:
             payload["enabled"] = False
             payload["face_recognition_enabled"] = False
