@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from .config import DetectorConfig
+from .detector_labels import load_detector_labels
 
 LOGGER = logging.getLogger(__name__)
 DETECTION_FAILURE_STATUSES = frozenset({"detector_unavailable", "inference_error"})
@@ -535,32 +536,7 @@ class OpenVinoDetector:
         }
 
     def _load_labels(self, config: DetectorConfig) -> list[str]:
-        labels = list(config.labels)
-        if config.labels_path:
-            labels_path = Path(config.labels_path)
-            if labels_path.exists():
-                labels = [
-                    line.strip()
-                    for line in labels_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                ]
-        if not labels:
-            model_path_text = config.resolved_model_path()
-            model_path = Path(model_path_text) if model_path_text else None
-            metadata_path = model_path.parent / "metadata.yaml" if model_path else None
-            if metadata_path and metadata_path.exists():
-                try:
-                    import yaml
-
-                    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
-                    names = metadata.get("names") or {}
-                    if isinstance(names, dict):
-                        labels = [str(value) for _, value in sorted(names.items(), key=lambda item: int(item[0]))]
-                    elif isinstance(names, list):
-                        labels = [str(value) for value in names]
-                except Exception:
-                    LOGGER.exception("Failed to load detector labels from %s", metadata_path)
-        return labels
+        return load_detector_labels(config)
 
     def _detect_coreml(self, frame: np.ndarray) -> list[dict[str, Any]]:
         try:
