@@ -180,6 +180,11 @@ class MotionScoringStage:
             len(context.processed_frame_history),
             sensitivity,
         )
+        if result.reason == "insufficient_frames":
+            # The reusable classic scorer historically failed open for direct,
+            # event-triggered calls. A continuously sampled pipeline must wait
+            # for a scoreable window instead of emitting an automatic trigger.
+            result = replace(result, accepted=False, score=0.0)
         scored_track = replace(context.dominant_track, score=result.score)
         context.dominant_track = scored_track
         context.tracked_objects = [scored_track] if scored_track.observations else []

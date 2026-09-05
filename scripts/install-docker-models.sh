@@ -752,7 +752,6 @@ DOCKER_DEFAULT = {
         "sensitivity": "balanced",
         "frame_width": 320,
         "sample_fps": 5.0,
-        "temporal_filter_threshold": 0.005,
         "window_seconds": 1.6,
         "post_trigger_seconds": 2.5,
         "burst_quiet_seconds": 0.5,

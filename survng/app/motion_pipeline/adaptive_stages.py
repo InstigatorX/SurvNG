@@ -881,8 +881,8 @@ class AdaptiveMotionScoringStage:
         stage_id: str,
         minimum_persistence_frames: int = 2,
         *,
-        stationary_displacement_ratio: float = 0.01,
-        stationary_path_ratio: float = 0.025,
+        stationary_displacement_ratio: float | None = None,
+        stationary_path_ratio: float | None = None,
         micro_area_ratio: float = 0.001,
         micro_displacement_ratio: float = 0.04,
         credible_displacement_ratio: float = 0.03,
@@ -890,8 +890,16 @@ class AdaptiveMotionScoringStage:
     ) -> None:
         self._stage_id = stage_id
         self.minimum_persistence_frames = max(1, int(minimum_persistence_frames))
-        self.stationary_displacement_ratio = max(0.0, float(stationary_displacement_ratio))
-        self.stationary_path_ratio = max(0.0, float(stationary_path_ratio))
+        self.stationary_displacement_ratio = (
+            None
+            if stationary_displacement_ratio is None
+            else max(0.0, float(stationary_displacement_ratio))
+        )
+        self.stationary_path_ratio = (
+            None
+            if stationary_path_ratio is None
+            else max(0.0, float(stationary_path_ratio))
+        )
         self.micro_area_ratio = max(0.0, float(micro_area_ratio))
         self.micro_displacement_ratio = max(0.0, float(micro_displacement_ratio))
         self.credible_displacement_ratio = max(
@@ -928,6 +936,10 @@ class AdaptiveMotionScoringStage:
                 stationary_policy.maximum_displacement_ratio,
             )
         )
+        if self.stationary_displacement_ratio is not None:
+            stationary_displacement_ratio = self.stationary_displacement_ratio
+        if self.stationary_path_ratio is not None:
+            stationary_path_ratio = self.stationary_path_ratio
         context.debug.values["stationary_object_tolerance"] = (
             stationary_tolerance or "custom"
         )
@@ -1693,10 +1705,16 @@ def _build_scorer(stage_id: str, options: Mapping[str, Any], dependencies: Motio
     return AdaptiveMotionScoringStage(
         stage_id,
         int(options.get("minimum_persistence_frames", 2)),
-        stationary_displacement_ratio=float(
-            options.get("stationary_displacement_ratio", 0.01)
+        stationary_displacement_ratio=(
+            float(options["stationary_displacement_ratio"])
+            if "stationary_displacement_ratio" in options
+            else None
         ),
-        stationary_path_ratio=float(options.get("stationary_path_ratio", 0.025)),
+        stationary_path_ratio=(
+            float(options["stationary_path_ratio"])
+            if "stationary_path_ratio" in options
+            else None
+        ),
         micro_area_ratio=float(options.get("micro_area_ratio", 0.001)),
         micro_displacement_ratio=float(
             options.get("micro_displacement_ratio", 0.04)
