@@ -529,6 +529,8 @@ def _representative_needs_refinement(objects: list[dict[str, Any]]) -> bool:
     ]
     if not primary:
         return False
+    if any(item.get("snapshot_visible") is False for item in primary):
+        return True
     return any(
         float(item.get("snapshot_edge_clearance_ratio") or 0.0)
         < REPRESENTATIVE_MIN_EDGE_CLEARANCE_RATIO
@@ -811,8 +813,8 @@ def _temporal_consensus(
         )
         raw_peak = max((_confidence(detected) for detected in sample.objects if _candidate_detection(detected)), default=0.0)
         return (
-            len(admitted_visible),
             int(bool(primary_visible)),
+            len(admitted_visible),
             fully_framed_primary,
             best_primary_area,
             best_primary_clearance,
@@ -827,15 +829,18 @@ def _temporal_consensus(
     selected_index, selected = max(enumerate(samples), key=sample_score)
     if selected.frame is None:
         raise ValueError("recorded consensus samples must retain frames")
-    selected_quality = quality_by_sample[selected_index]
-    annotated: list[dict[str, Any]] = []
-    for detected in selected.objects:
-        if not _candidate_detection(detected):
-            annotated.append(dict(detected))
-            continue
-        track = assignments.get((selected_index, id(detected)))
-        if track is None:
-            continue
+
+    def enrich_observation(
+        detected: dict[str, Any],
+        track: _TemporalDetectionEvidence,
+        observation_index: int,
+        *,
+        snapshot_visible: bool,
+    ) -> dict[str, Any]:
+        observation_sample = samples[observation_index]
+        if observation_sample.frame is None:
+            raise ValueError("recorded consensus samples must retain frames")
+        observation_quality = quality_by_sample[observation_index]
         confirmed = id(track) in confirmed_ids
         label_confirmed_here = str(detected.get("label") or "").strip() == track.winning_label
         confirmed = confirmed and label_confirmed_here
@@ -856,7 +861,10 @@ def _temporal_consensus(
                 for item in track.winning_observations
             )
         )
-        edge_clearance, subject_area = _normalized_box_metrics(detected, selected.frame)
+        edge_clearance, subject_area = _normalized_box_metrics(
+            detected,
+            observation_sample.frame,
+        )
         enriched = {
             **detected,
             "label": track.winning_label,
@@ -906,14 +914,16 @@ def _temporal_consensus(
                 4,
             ),
             "semantic_max_confidence": round(track.peak_confidence, 4),
-            "temporal_sample_offset_seconds": selected.offset,
+            "temporal_sample_offset_seconds": observation_sample.offset,
             "temporal_requested_sample_offset_seconds": (
-                selected.requested_offset
-                if selected.requested_offset is not None
-                else selected.offset
+                observation_sample.requested_offset
+                if observation_sample.requested_offset is not None
+                else observation_sample.offset
             ),
             "temporal_sample_timestamp_source": (
-                "source_pts" if selected.exact_timestamp else "requested_offset"
+                "source_pts"
+                if observation_sample.exact_timestamp
+                else "requested_offset"
             ),
             "temporal_observations": len(track.winning_observations),
             "temporal_track_observations": len(track.observations),
@@ -927,11 +937,11 @@ def _temporal_consensus(
             "temporal_samples": len(samples),
             "temporal_peak_confidence": round(track.peak_confidence, 4),
             "temporal_label_votes": track.label_votes,
-            "snapshot_quality_score": round(selected_quality.score, 4),
-            "snapshot_sharpness_score": round(selected_quality.sharpness, 4),
-            "snapshot_exposure_score": round(selected_quality.exposure, 4),
-            "snapshot_contrast_score": round(selected_quality.contrast, 4),
-            "snapshot_edge_detail_score": round(selected_quality.edge_detail, 4),
+            "snapshot_quality_score": round(observation_quality.score, 4),
+            "snapshot_sharpness_score": round(observation_quality.sharpness, 4),
+            "snapshot_exposure_score": round(observation_quality.exposure, 4),
+            "snapshot_contrast_score": round(observation_quality.contrast, 4),
+            "snapshot_edge_detail_score": round(observation_quality.edge_detail, 4),
             "snapshot_primary_subject": id(track) in primary_ids,
             "snapshot_edge_clearance_ratio": round(edge_clearance, 5),
             "snapshot_subject_area_ratio": round(subject_area, 5),
@@ -1014,7 +1024,72 @@ def _temporal_consensus(
         enriched["temporal_center_path_ratio"] = round(path, 5)
         if confirmed:
             enriched["confidence"] = round(track.aggregate_confidence, 4)
-        annotated.append(enriched)
+        if not snapshot_visible:
+            enriched["snapshot_visible"] = False
+        return enriched
+
+    annotated: list[dict[str, Any]] = []
+    represented_confirmed_ids: set[int] = set()
+    for detected in selected.objects:
+        if not _candidate_detection(detected):
+            annotated.append(dict(detected))
+            continue
+        track = assignments.get((selected_index, id(detected)))
+        if track is None:
+            continue
+        annotated.append(
+            enrich_observation(
+                detected,
+                track,
+                selected_index,
+                snapshot_visible=True,
+            )
+        )
+        if (
+            id(track) in confirmed_ids
+            and str(detected.get("label") or "").strip() == track.winning_label
+        ):
+            represented_confirmed_ids.add(id(track))
+
+    # The best presentation frame need not contain every confirmed active
+    # subject. Preserve one source observation for each missing primary track
+    # so incident admission does not depend on the cover-frame composition.
+    for track in evidence:
+        if id(track) not in primary_ids or id(track) in represented_confirmed_ids:
+            continue
+        observation_indices = [
+            index
+            for index, item in track.observations.items()
+            if str(item.get("label") or "").strip() == track.winning_label
+        ]
+        if not observation_indices:
+            continue
+
+        def observation_score(index: int) -> tuple[int, int, float, float, float, float, float]:
+            frame = samples[index].frame
+            if frame is None:
+                raise ValueError("recorded consensus samples must retain frames")
+            item = track.observations[index]
+            clearance, area = _normalized_box_metrics(item, frame)
+            return (
+                int(_eligible_detection(item)),
+                int(clearance >= REPRESENTATIVE_MIN_EDGE_CLEARANCE_RATIO),
+                area,
+                clearance,
+                _confidence(item),
+                quality_by_sample[index].score,
+                -abs(samples[index].offset),
+            )
+
+        observation_index = max(observation_indices, key=observation_score)
+        annotated.append(
+            enrich_observation(
+                track.observations[observation_index],
+                track,
+                observation_index,
+                snapshot_visible=False,
+            )
+        )
 
     LOGGER.debug(
         "recorded object consensus retained %d/%d candidates across %d frames (minimum %d)",
@@ -2244,6 +2319,7 @@ class RecordedMotionObjectDetector:
             item
             for item in objects
             if item.get("temporal_consensus") is True
+            and item.get("snapshot_visible") is not False
         ]
         dedicated_faces = self._detect_faces_in_people(
             frame,
@@ -2313,9 +2389,14 @@ class RecordedMotionObjectDetector:
         if not callable(estimate_depth):
             return objects
         enrichment_started = time.monotonic()
-        eligible = [
+        visible_objects = [
             item
             for item in objects
+            if item.get("snapshot_visible") is not False
+        ]
+        eligible = [
+            item
+            for item in visible_objects
             if isinstance(item, dict)
             and item.get("label")
             and item.get("incident_eligible") is not False
@@ -2324,10 +2405,16 @@ class RecordedMotionObjectDetector:
             return objects
         enriched, metadata = estimate_depth(
             frame,
-            list(objects),
+            visible_objects,
             frame_offset_s=frame_offset_s,
         )
-        apply_depth_zone_filters(self.camera, enriched)
+        enriched_iter = iter(enriched)
+        merged = [
+            item if item.get("snapshot_visible") is False else next(enriched_iter, item)
+            for item in objects
+        ]
+        merged.extend(enriched_iter)
+        apply_depth_zone_filters(self.camera, merged)
         if timing is not None:
             timing["depth_enrichment_ms"] = round(
                 (time.monotonic() - enrichment_started) * 1000.0,
@@ -2335,7 +2422,7 @@ class RecordedMotionObjectDetector:
             )
             if metadata.get("inference_ms") is not None:
                 timing["depth_inference_ms"] = float(metadata["inference_ms"])
-        return enriched
+        return merged
 
     @staticmethod
     def _detect_faces_in_people(

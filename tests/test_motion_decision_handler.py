@@ -29,6 +29,49 @@ class RecordingEventStore:
 
 
 class MotionDecisionHandlerTest(unittest.TestCase):
+    def test_off_frame_evidence_uses_its_detection_frame_geometry(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        detected = {
+            "label": "person",
+            "incident_eligible": True,
+            "snapshot_visible": False,
+            "box": {"x1": 100, "y1": 20, "x2": 140, "y2": 60},
+            "detection_frame_width": 200,
+            "detection_frame_height": 100,
+            "temporal_track_observations": 2,
+            "temporal_robust_new_appearance": True,
+        }
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [detected],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 1, 22, 10, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.45, 0.1, 0.75, 0.7]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertEqual(outcome.detected_objects, ())
+        self.assertEqual(outcome.motion_correlation["new_appearance_match_count"], 1)
+        stored = json.loads(events.payload["objects_json"])
+        stored_person = next(item for item in stored if item.get("label") == "person")
+        self.assertFalse(stored_person["snapshot_visible"])
+        self.assertEqual(stored_person["detection_frame_width"], 200)
+        self.assertEqual(stored_person["motion_correlation"], "appearance")
+
     def test_depth_attribution_shadow_is_decision_scoped_and_preserves_result(self) -> None:
         frame = np.zeros((100, 100, 3), dtype=np.uint8)
         detected = {

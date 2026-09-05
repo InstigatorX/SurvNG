@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from survng.app.config import AppConfig
-from survng.app.model_evaluation import ModelEvaluationRunner
+from survng.app.model_evaluation import ModelEvaluationRunner, _reference_labels
 
 
 def _model(root: Path, name: str) -> Path:
@@ -20,6 +20,18 @@ def _model(root: Path, name: str) -> Path:
     xml.write_text("<xml/>", encoding="utf-8")
     xml.with_suffix(".bin").write_bytes(b"weights")
     return xml
+
+
+def test_reference_labels_include_only_objects_visible_in_snapshot() -> None:
+    event = {
+        "objects_json": json.dumps([
+            {"label": "car"},
+            {"label": "person", "snapshot_visible": False},
+            {"status": "motion_qualification"},
+        ])
+    }
+
+    assert _reference_labels(event) == {"car"}
 
 
 def test_model_path_must_stay_inside_models_directory(tmp_path: Path, monkeypatch) -> None:

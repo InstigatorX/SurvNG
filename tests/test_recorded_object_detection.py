@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -568,6 +568,132 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             0.01,
         )
         self.assertFalse(_representative_needs_refinement(objects))
+
+    def test_representative_prefers_primary_subject_over_more_stationary_context(self) -> None:
+        frame = np.full((40, 60, 3), 127, dtype=np.uint8)
+        car = detected("car", 0.94, (2, 10, 22, 30))
+        bus = detected("bus", 0.92, (35, 8, 57, 32))
+        first_person = {
+            **detected("person", 0.86, (18, 5, 42, 38)),
+            "detection_frame_width": 60,
+            "detection_frame_height": 40,
+        }
+        best_person = {**first_person, "confidence": 0.9}
+        samples = [
+            _RecordedDetectionSample(-0.5, frame, [dict(car), dict(bus)], "before-1.mp4"),
+            _RecordedDetectionSample(0.0, frame, [dict(car), dict(bus)], "before-2.mp4"),
+            _RecordedDetectionSample(0.5, frame, [first_person], "person-1.mp4"),
+            _RecordedDetectionSample(1.0, frame, [best_person], "person-2.mp4"),
+        ]
+
+        selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(selected.recording_path, "person-2.mp4")
+        retained_person = next(item for item in objects if item["label"] == "person")
+        self.assertTrue(retained_person["temporal_consensus"])
+        self.assertTrue(retained_person["incident_eligible"])
+        self.assertTrue(retained_person["snapshot_primary_subject"])
+        self.assertNotIn("snapshot_visible", retained_person)
+        self.assertEqual(retained_person["temporal_sample_offset_seconds"], 1.0)
+        self.assertEqual(retained_person["detection_frame_width"], 60)
+        self.assertEqual(retained_person["detection_frame_height"], 40)
+
+    def test_consensus_preserves_each_primary_track_when_none_contains_all(self) -> None:
+        frame = np.full((40, 60, 3), 127, dtype=np.uint8)
+        person = {
+            **detected("person", 0.9, (18, 5, 42, 38)),
+            "detection_frame_width": 60,
+            "detection_frame_height": 40,
+        }
+        bicycle = {
+            **detected("bicycle", 0.88, (5, 15, 28, 35)),
+            "detection_frame_width": 60,
+            "detection_frame_height": 40,
+        }
+        samples = [
+            _RecordedDetectionSample(-1.0, frame, [], "before-1.mp4"),
+            _RecordedDetectionSample(-0.5, frame, [], "before-2.mp4"),
+            _RecordedDetectionSample(0.0, frame, [dict(person)], "person-1.mp4"),
+            _RecordedDetectionSample(0.5, frame, [dict(person)], "person-2.mp4"),
+            _RecordedDetectionSample(1.0, frame, [dict(bicycle)], "bicycle-1.mp4"),
+            _RecordedDetectionSample(1.5, frame, [dict(bicycle)], "bicycle-2.mp4"),
+        ]
+
+        selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(selected.recording_path, "person-1.mp4")
+        self.assertEqual({item["label"] for item in objects}, {"person", "bicycle"})
+        retained_bicycle = next(item for item in objects if item["label"] == "bicycle")
+        self.assertTrue(retained_bicycle["temporal_consensus"])
+        self.assertTrue(retained_bicycle["snapshot_primary_subject"])
+        self.assertFalse(retained_bicycle["snapshot_visible"])
+        self.assertEqual(retained_bicycle["temporal_sample_offset_seconds"], 1.0)
+        self.assertTrue(_representative_needs_refinement(objects))
+
+    def test_selected_frame_depth_skips_off_frame_consensus_evidence(self) -> None:
+        estimate_depth = Mock(side_effect=lambda _frame, objects, **_kwargs: (
+            [{**item, "depth_stats": {"median_m": 4.0}} for item in objects],
+            {},
+        ))
+        detector = SimpleNamespace(
+            config=SimpleNamespace(
+                confidence_threshold=0.5,
+                depth=SimpleNamespace(enabled=True),
+            ),
+            estimate_depth_for_objects=estimate_depth,
+        )
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector,
+            SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
+            lambda: None,
+        )
+        visible = detected("car", 0.9, (2, 2, 12, 12))
+        off_frame = {
+            **detected("person", 0.9, (20, 5, 40, 35)),
+            "snapshot_visible": False,
+        }
+
+        enriched = backend._enrich_depth(
+            np.zeros((40, 60, 3), dtype=np.uint8),
+            [visible, off_frame],
+            0.0,
+        )
+
+        depth_objects = estimate_depth.call_args.args[1]
+        self.assertEqual([item["label"] for item in depth_objects], ["car"])
+        self.assertEqual(enriched[0]["depth_stats"], {"median_m": 4.0})
+        self.assertNotIn("depth_stats", enriched[1])
+        self.assertFalse(enriched[1]["snapshot_visible"])
+
+    def test_selected_frame_face_enrichment_skips_off_frame_person(self) -> None:
+        detect_faces = Mock(return_value=[])
+        detector = SimpleNamespace(
+            config=SimpleNamespace(
+                confidence_threshold=0.5,
+                face_enrich_max_people=4,
+            ),
+            detect_faces=detect_faces,
+        )
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            detector,
+            SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
+            lambda: None,
+        )
+        off_frame_person = {
+            **detected("person", 0.9, (20, 5, 40, 35)),
+            "temporal_consensus": True,
+            "snapshot_visible": False,
+        }
+
+        enriched = backend._enrich_selected_faces(
+            np.zeros((40, 60, 3), dtype=np.uint8),
+            [off_frame_person],
+        )
+
+        self.assertEqual(enriched, [off_frame_person])
+        detect_faces.assert_not_called()
 
     def test_representative_prefers_close_fully_framed_subject_over_tiny_centered_subject(self) -> None:
         """Gate-like approach should favor useful detail after framing is safe."""
