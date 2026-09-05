@@ -22,6 +22,10 @@ from .tracking import EventStoreTrackingMixin
 LOGGER = logging.getLogger(__name__)
 
 
+class EventSnapshotChangedError(RuntimeError):
+    """Detection results no longer describe the event's current snapshot."""
+
+
 class EventStore(
     EventStoreJobsMixin,
     EventStoreCalibrationMixin,
@@ -796,8 +800,10 @@ class EventStore(
         self,
         event_id: int,
         detected_objects_json: str,
+        *,
+        expected_snapshot_path: str,
     ) -> dict[str, Any] | None:
-        """Replace detections while preserving metadata added by concurrent workers."""
+        """Replace detections only while their source snapshot is still current."""
         try:
             detected_objects = json.loads(detected_objects_json or "[]")
         except (TypeError, ValueError):
@@ -823,10 +829,12 @@ class EventStore(
                 and item.get("status") in {"motion_qualification", "object_tracking"}
             ] if isinstance(existing, list) else []
             objects_json = json.dumps([*detected_objects, *preserved], separators=(",", ":"))
-            conn.execute(
-                "update events set objects_json = ? where id = ?",
-                (objects_json, event_id),
+            updated_count = conn.execute(
+                "update events set objects_json = ? where id = ? and snapshot_path = ?",
+                (objects_json, event_id, expected_snapshot_path),
             )
+            if updated_count.rowcount == 0:
+                raise EventSnapshotChangedError("event snapshot changed during detection")
             updated = conn.execute(
                 "select * from events where id = ?",
                 (event_id,),
