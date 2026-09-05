@@ -89,6 +89,10 @@ Object confidence and confirmation are separate from activity. They establish th
 
 Only enabled visual processors consume analysis time. Camera + EMA backup and EMA-only modes continuously run EMA qualification. A shared fair limiter permits `motion_qualification.max_concurrent_analysis` cameras (default 2) to execute visual analysis at the same instant. Raise that ceiling on a larger NVR if backup coverage is falling behind. Cameras waiting for a slot retain recent frames, while their bounded latest-frame mailboxes replace stale pending requests with the newest request.
 
+The former `motion_qualification.temporal_filter_threshold` shortcut is retired. Existing configuration files containing it remain valid, but the value is ignored and its control no longer appears in Admin. Every cadence-due sample now reaches the scene-aware pipeline so quiet frames and small motion can update the adaptive background. Sampling rate, latest-frame mailboxes, and the shared concurrency limit still bound the work, though installations that previously skipped many quiet frames should expect higher EMA CPU use.
+
+The classic modular scorer now waits for four frames before it can produce a continuous trigger. Camera-event validation remains fail-open while a frame window is incomplete or has no temporal signal. In custom adaptive graphs, explicit `stationary_displacement_ratio` and `stationary_path_ratio` stage options override the named Light, Standard, or Strong stationary policy; omit those options to follow the named policy.
+
 ## Episode admission
 
 EMA scene learning and score persistence produce a single qualified edge rather than detector work for every sampled frame. A generation-tagged episode controller then merges that edge with camera notices and is the sole owner of detector reservation, admission, follow-up limits, completion, and incident linkage. Every controller incarnation has a random durable namespace, so restarting SurvNG or replacing a camera runtime cannot reuse an old episode, refinement-job, or event idempotency key. Exact retries still coalesce; a conflicting reuse is an explicit error instead of a silent drop.

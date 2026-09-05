@@ -492,6 +492,33 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         finally:
             scorer.close()
 
+    def test_explicit_stationary_stage_thresholds_override_named_policy(self) -> None:
+        scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "custom-tolerance",
+            [MotionStageConfig("scoring", "adaptive_motion_score", {
+                "stationary_displacement_ratio": 0.003,
+                "stationary_path_ratio": 0.009,
+            })],
+            initial_artifacts={"tracked_objects", "processed_frame_history"},
+        )
+        try:
+            result = scorer.process(MotionContext(
+                camera_id="custom-tolerance",
+                captured_at=100.0,
+                original_frame=None,
+                configuration={
+                    "sensitivity": "balanced",
+                    "stationary_object_tolerance": "high",
+                },
+                runtime=scorer.runtime,
+                processed_frame_history=(np.zeros((10, 10), dtype=np.uint8),),
+            ))
+        finally:
+            scorer.close()
+
+        self.assertEqual(result.debug.values["stationary_displacement_ratio"], 0.003)
+        self.assertEqual(result.debug.values["stationary_path_ratio"], 0.009)
+
     def test_small_subpixel_jitter_is_not_credible_motion(self) -> None:
         frames: list[np.ndarray] = []
         for index in range(10):

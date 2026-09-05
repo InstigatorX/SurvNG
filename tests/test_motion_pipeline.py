@@ -1219,6 +1219,28 @@ class MotionPipelineTest(unittest.TestCase):
         self.assertIs(result.processed_frame, prepared[-1])
         self.assertIsNone(result.decision)
 
+    def test_modular_pipeline_waits_for_a_scoreable_window(self) -> None:
+        frames = [np.zeros((90, 160), dtype=np.uint8) for _index in range(3)]
+        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "gate",
+            default_motion_stage_configs(),
+        )
+        try:
+            result = pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=10.0,
+                original_frame=frames[-1],
+                frame_history=tuple(frames),
+                configuration={"sensitivity": "balanced"},
+                runtime=pipeline.runtime,
+            ))
+        finally:
+            pipeline.close()
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.scoring.score, 0.0)
+        self.assertEqual(result.scoring.reason, "insufficient_frames")
+
 
 if __name__ == "__main__":
     unittest.main()

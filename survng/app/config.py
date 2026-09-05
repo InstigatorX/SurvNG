@@ -310,6 +310,8 @@ class MotionQualificationConfig(BaseModel):
     illumination_filter_enabled: bool = False
     frame_width: int = Field(default=320, ge=240, le=960)
     sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
+    # Retained so v1.1/v1.2 configuration files remain loadable. The old
+    # pre-pipeline filter prevented EMA from learning quiet scene state.
     temporal_filter_threshold: float = Field(default=0.005, ge=0.0, le=1.0)
     camera_mode_background_fps: float = Field(default=2.0, ge=0.5, le=5.0)
     visual_backup_warmup_seconds: float = Field(default=10.0, ge=0.0, le=120.0)

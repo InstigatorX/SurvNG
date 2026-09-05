@@ -23,6 +23,7 @@ from .ema_v2 import (
     EmaSignalDecision,
     EmaSignalAction,
     EmaSignalConditioner,
+    EpisodeDecision,
     EpisodeDecisionReason,
     VISUAL_BACKUP_EXCLUDED_REASONS,
     MotionSource,
@@ -163,19 +164,16 @@ class MotionAnalysisService:
         self.qualification = qualification
         self.media = media
         self.state = state
-        # Temporal filtering threshold: skip analysis if < this ratio of pixels changed
-        # Configurable in config.json as motion_qualification.temporal_filter_threshold
-        # Default: 0.005 (0.5% pixel change)
-        # Lower values = more aggressive skipping; Higher values = more analysis
-        self.temporal_filter_threshold = float(config.temporal_filter_threshold)
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
-        self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
+        # Four frames are the minimum required by the classic modular scorer.
+        # EMA still consumes only previously unseen timestamps from this window.
+        self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=4)
         self.evidence_frames: deque[MotionEvidenceFrame] = deque(
             # Enough history to cover the EMA decision/dispatch delay without
             # retaining the full qualification ring as color images.
             maxlen=max(6, min(16, ring_size))
         )
-        self.processed_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
+        self.processed_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=4)
         self.qualification_results: deque[
             tuple[float, MotionQualificationResult]
         ] = deque(maxlen=ring_size)
@@ -255,6 +253,8 @@ class MotionAnalysisService:
             "shared_reads_by_reason": {},
             "cached_derivative_reuse_count": 0,
             "cached_derivative_reuse_bytes": 0,
+            # Kept in telemetry for compatibility with existing dashboards. The
+            # old pre-pipeline gate starved EMA scene learning and was retired.
             "temporal_filter_skips": 0,
         }
         self._timing_samples_ms: dict[str, deque[float]] = {
@@ -630,6 +630,49 @@ class MotionAnalysisService:
             return None
         return nearest
 
+    def _attach_evidence_provenance(
+        self,
+        qualified: EmaQualified,
+        *,
+        lifecycle_generation: int,
+    ) -> tuple[EmaQualified, MotionEvidenceFrame | None]:
+        """Bind a qualified edge to the nearest retained capture token."""
+        with self.frame_lock:
+            compatible = tuple(
+                item
+                for item in self.evidence_frames
+                if item.lifecycle_generation == lifecycle_generation
+                and item.capture_generation > 0
+            )
+        nearest = min(
+            compatible,
+            key=lambda item: abs(item.captured_at_epoch - qualified.captured_at),
+            default=None,
+        )
+        evidence_frame = (
+            nearest
+            if nearest is not None
+            and abs(nearest.captured_at_epoch - qualified.captured_at) <= 1.0
+            else None
+        )
+        qualified = replace(
+            qualified,
+            evidence_frame_at_epoch=(
+                evidence_frame.captured_at_epoch
+                if evidence_frame is not None
+                else qualified.captured_at
+            ),
+            evidence_frame_sequence=(
+                evidence_frame.sequence if evidence_frame is not None else 0
+            ),
+            evidence_capture_generation=(
+                evidence_frame.capture_generation
+                if evidence_frame is not None
+                else 0
+            ),
+        )
+        return qualified, evidence_frame
+
     def samples_since(self, captured_at: float) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
             return [
@@ -1000,7 +1043,7 @@ class MotionAnalysisService:
             source_samples = (
                 self.color_frames
                 if len(self.color_frames) >= 2
-                else list(self.frames)[-3:]
+                else list(self.frames)[-4:]
             )
             samples = [
                 (timestamp, self._share_frame(frame, "continuous_samples"))
@@ -1019,56 +1062,6 @@ class MotionAnalysisService:
                     frame.setflags(write=False)
         if len(samples) < 2:
             return
-        
-        # Temporal filtering: skip analysis if frame is stable (no significant change)
-        if len(samples) >= 2:
-            prev_frame = samples[-2][1]
-            curr_frame = samples[-1][1]
-            
-            # Convert to grayscale if needed for comparison
-            if prev_frame.ndim == 3:
-                prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-                curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-            else:
-                prev_gray = prev_frame
-                curr_gray = curr_frame
-            
-            # Calculate pixel-wise difference
-            frame_diff = cv2.absdiff(prev_gray, curr_gray)
-
-            # Count pixels with significant change (> 5 value difference)
-            # Use NumPy here instead of cv2.countNonZero on a boolean mask, which
-            # OpenCV rejects with a type error.
-            changed_pixels = int(np.count_nonzero(frame_diff > 5))
-            total_pixels = frame_diff.size
-            pixel_change_ratio = changed_pixels / max(1, total_pixels)
-            
-            # If frame is stable, skip expensive analysis
-            if pixel_change_ratio < self.temporal_filter_threshold:
-                with self._telemetry_lock:
-                    self._telemetry["temporal_filter_skips"] = self._telemetry.get(
-                        "temporal_filter_skips", 0
-                    ) + 1
-                stable_result = MotionQualificationResult(
-                    accepted=False,
-                    score=0.0,
-                    threshold=1.0,
-                    reason="temporal_stable_scene",
-                    frame_count=len(samples),
-                    features={"pixel_change_ratio": pixel_change_ratio},
-                    telemetry={},
-                )
-                with self.frame_lock:
-                    # A cheap temporal observation still satisfies the primary
-                    # cadence and must not leave every subsequent quiet frame due.
-                    self.primary_last_processed_at = captured_at
-                if self.qualification.trigger_mode() == "camera_rescue":
-                    self._observe_stable_scene_for_visual_backup(
-                        stable_result,
-                        captured_at,
-                    )
-                return
-        
         if cached_processed:
             with self._telemetry_lock:
                 self._telemetry["cached_derivative_reuse_count"] += len(
@@ -1143,40 +1136,6 @@ class MotionAnalysisService:
             )
             self._persist_ema_route_candidate(captured_at, persist_candidate)
             return
-
-    def _observe_stable_scene_for_visual_backup(
-        self,
-        result: MotionQualificationResult,
-        captured_at: float,
-    ) -> None:
-        """Advance visual-backup readiness without running route/audit work."""
-        observed_monotonic = time.monotonic()
-        with self._visual_lock:
-            policy = self.qualification.visual_backup_policy()
-            detection_enabled = self.state.detection_enabled()
-            self.ema_v2.evaluate(
-                result,
-                captured_at,
-                observed_monotonic,
-                policy,
-                detection_enabled=detection_enabled,
-            )
-            self.ema_verification.evaluate(
-                result,
-                captured_at,
-                observed_monotonic,
-                replace(
-                    policy,
-                    minimum_score=min(
-                        float(policy.minimum_score),
-                        float(result.threshold),
-                    ),
-                    score_margin=0.0,
-                    minimum_consecutive=policy.minimum_consecutive + 2,
-                    grace_seconds=policy.grace_seconds + 1.0,
-                ),
-                detection_enabled=detection_enabled,
-            )
 
     def _persist_ema_route_candidate(
         self,
@@ -1436,6 +1395,12 @@ class MotionAnalysisService:
             return
         if decision.action != EmaSignalAction.QUALIFIED or decision.qualified is None:
             return
+        generation = self.state.lifecycle_generation()
+        qualified, evidence_frame = self._attach_evidence_provenance(
+            decision.qualified,
+            lifecycle_generation=generation,
+        )
+        decision = replace(decision, qualified=qualified)
         route_details = result.features.get("route_detection_watch")
         standalone_route = bool(
             result.features.get("security_verification_bypass_limits")
@@ -1458,17 +1423,17 @@ class MotionAnalysisService:
                 intent_id=route_identity,
                 episode_id=route_identity,
                 camera_id=self.camera_id,
-                generation=self.state.lifecycle_generation(),
+                generation=generation,
                 event_at=captured_at,
                 created_monotonic=observed_monotonic,
                 primary_source=MotionSource.EMA,
                 sources=(MotionSource.EMA,),
-                ema=decision.qualified,
+                ema=qualified,
             )
         else:
             episode = self.events.episode_controller.observe_ema(
-                decision.qualified,
-                generation=self.state.lifecycle_generation(),
+                qualified,
+                generation=generation,
             )
             intent = episode.intent
         matched_onvif = bool(
@@ -1553,23 +1518,10 @@ class MotionAnalysisService:
             )
             self.last_continuous_result = fused
             event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-            with self.frame_lock:
-                compatible_evidence = tuple(
-                    item
-                    for item in self.evidence_frames
-                    if item.lifecycle_generation == intent.generation
-                    and item.capture_generation > 0
-                )
-            nearest_evidence = min(
-                compatible_evidence,
-                key=lambda item: abs(item.captured_at_epoch - captured_at),
-                default=None,
-            )
-            evidence_frame = (
-                nearest_evidence
-                if nearest_evidence is not None
-                and abs(nearest_evidence.captured_at_epoch - captured_at) <= 1.0
-                else None
+            qualified_evidence_at = qualified.evidence_frame_at_epoch
+            qualified_evidence_sequence = qualified.evidence_frame_sequence
+            qualified_capture_generation = (
+                qualified.evidence_capture_generation
             )
             trigger_enqueued = self._enqueue_trigger(
                 MotionTrigger(
@@ -1594,26 +1546,26 @@ class MotionAnalysisService:
                     detection_intent_id=intent.intent_id,
                     lifecycle_generation=intent.generation,
                     evidence_frame_at_epoch=(
-                        evidence_frame.captured_at_epoch
+                        float(qualified_evidence_at)
+                        if qualified_evidence_at is not None
+                        else evidence_frame.captured_at_epoch
                         if evidence_frame is not None
                         else captured_at
                     ),
                     evidence_frame_sequence=(
-                        evidence_frame.sequence if evidence_frame is not None else 0
+                        qualified_evidence_sequence
+                        or (evidence_frame.sequence if evidence_frame is not None else 0)
                     ),
                     evidence_capture_generation=(
-                        evidence_frame.capture_generation
-                        if evidence_frame is not None
-                        else 0
+                        qualified_capture_generation
+                        or (
+                            evidence_frame.capture_generation
+                            if evidence_frame is not None
+                            else 0
+                        )
                     ),
                 )
             )
-            if not standalone_route:
-                self.events.episode_controller.acknowledge_admission(
-                    intent.intent_id,
-                    admitted=trigger_enqueued,
-                    occurred_monotonic=time.monotonic(),
-                )
             if not trigger_enqueued and not standalone_route:
                 if followup:
                     self.state.increment_stat("active_followup_queue_rejected", 1)
@@ -1639,13 +1591,15 @@ class MotionAnalysisService:
                 else "adaptive",
             )
         finally:
-            if not trigger_enqueued:
+            if not standalone_route:
                 try:
-                    self.events.episode_controller.acknowledge_admission(
+                    replacement = self.events.episode_controller.acknowledge_admission(
                         intent.intent_id,
-                        admitted=False,
+                        admitted=trigger_enqueued,
                         occurred_monotonic=time.monotonic(),
                     )
+                    if not trigger_enqueued:
+                        self._enqueue_replacement_camera_notice(replacement)
                 except ValueError:
                     pass
 
@@ -1773,6 +1727,33 @@ class MotionAnalysisService:
             on_trigger=lambda name: self.state.increment_stat(name, 1),
             on_drop=lambda name: self.state.increment_stat(name, 1),
         )
+
+    def _enqueue_replacement_camera_notice(self, decision: EpisodeDecision) -> bool:
+        """Admit a retained camera notice after a merged EMA request aborts."""
+        if decision.reason is not EpisodeDecisionReason.REQUEST_RESERVED:
+            return False
+        intent = decision.intent
+        if intent is None or intent.camera_notice is None:
+            return False
+        notice = intent.camera_notice
+        admitted = False
+        try:
+            admitted = self._enqueue_trigger(MotionTrigger(
+                topic=notice.topic,
+                message=notice.message,
+                event_at=datetime.fromtimestamp(notice.event_at, timezone.utc),
+                received_at=time.time(),
+                episode_id=intent.episode_id,
+                detection_intent_id=intent.intent_id,
+                lifecycle_generation=intent.generation,
+            ))
+            return admitted
+        finally:
+            self.events.episode_controller.acknowledge_admission(
+                intent.intent_id,
+                admitted=admitted,
+                occurred_monotonic=time.monotonic(),
+            )
 
     def record_visual_backup_readiness_audit(
         self,

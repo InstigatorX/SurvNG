@@ -285,6 +285,13 @@ class AppConfigTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             MotionQualificationConfig(max_concurrent_analysis=17)
 
+    def test_retired_temporal_filter_setting_remains_loadable(self) -> None:
+        config = AppConfig.model_validate({
+            "motion_qualification": {"temporal_filter_threshold": 0.75},
+        })
+
+        self.assertEqual(config.motion_qualification.temporal_filter_threshold, 0.75)
+
     def test_camera_incident_zone_policy_can_override_global_default(self) -> None:
         config = AppConfig.model_validate({
             "detector": {"require_incident_zone": False},

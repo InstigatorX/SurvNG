@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -18,9 +19,22 @@ from survng.app.motion_analysis_service import (
 )
 from survng.app.config import CameraTransitionRoute, MotionQualificationConfig
 from survng.app.detection_watch import RouteDetectionWatch
-from survng.app.ema_v2 import EmaPolicy
+from survng.app.ema_v2 import (
+    CameraNotice,
+    DetectionIntent,
+    EmaPolicy,
+    EpisodeDecision,
+    EpisodeDecisionReason,
+    MotionSource,
+)
 from survng.app.motion_events import MotionEventCoordinator
-from survng.app.motion_pipeline import MotionDebugSnapshotStore
+from survng.app.motion_pipeline import (
+    MotionContext,
+    MotionDebugSnapshotStore,
+    MotionPipelineFactory,
+    adaptive_motion_stage_configs,
+    build_builtin_motion_registry,
+)
 
 
 def _hooks(
@@ -213,6 +227,23 @@ def test_evidence_frame_selection_is_nearest_and_generation_bounded() -> None:
         lifecycle_generation=3,
     ) is None
 
+    @dataclass(frozen=True)
+    class QualifiedWithProvenance:
+        captured_at: float
+        evidence_frame_at_epoch: float | None = None
+        evidence_frame_sequence: int = 0
+        evidence_capture_generation: int = 0
+
+    qualified, retained = service._attach_evidence_provenance(
+        QualifiedWithProvenance(captured_at=100.29),  # type: ignore[arg-type]
+        lifecycle_generation=3,
+    )
+    assert retained is not None
+    assert retained.sequence == 42
+    assert getattr(qualified, "evidence_frame_at_epoch") == 100.3
+    assert getattr(qualified, "evidence_frame_sequence") == 42
+    assert getattr(qualified, "evidence_capture_generation") == 7
+
 
 def test_portrait_sampling_caps_the_long_edge_instead_of_expanding_pixels() -> None:
     service = _service(_hooks())
@@ -241,7 +272,7 @@ def test_extreme_aspect_sampling_preserves_geometry() -> None:
     assert service.color_frames[-1][1].shape == (320, 32, 3)
 
 
-def test_cached_derivatives_are_bounded_to_the_reusable_three_frame_window() -> None:
+def test_cached_derivatives_are_bounded_to_the_reusable_four_frame_window() -> None:
     service = _service(_hooks())
     stop_event = threading.Event()
 
@@ -254,9 +285,10 @@ def test_cached_derivatives_are_bounded_to_the_reusable_three_frame_window() -> 
         )
 
     assert len(service.frames) == 6
-    assert len(service.color_frames) == 3
-    assert len(service.processed_frames) == 3
+    assert len(service.color_frames) == 4
+    assert len(service.processed_frames) == 4
     assert [timestamp for timestamp, _frame in service.processed_frames] == [
+        102.0,
         103.0,
         104.0,
         105.0,
@@ -899,45 +931,165 @@ def test_adaptive_enqueue_failure_releases_reservation() -> None:
     assert service.events.episode_controller.snapshot()["request_status"] == "aborted"
 
 
-def test_temporal_filter_skips_stable_scene() -> None:
-    accepted = MotionQualificationResult(True, 0.8, 0.48, "qualified", 3, {})
-    service = _service(
-        _hooks(
-            run_pipeline=Mock(return_value=accepted),
-            with_source_evidence=Mock(return_value=accepted),
-            trigger_mode="adaptive",
-        )
+def test_aborted_ema_reservation_admits_retained_camera_notice() -> None:
+    service = _service(_hooks())
+    controller = Mock()
+    service.events.episode_controller = controller
+    enqueue = Mock(return_value=True)
+    service._enqueue_trigger = enqueue
+    notice = CameraNotice(
+        camera_id="gate",
+        event_at=100.0,
+        observed_monotonic=10.0,
+        topic="tns1:RuleEngine/CellMotionDetector/Motion",
+        message="camera motion",
     )
+    intent = DetectionIntent(
+        intent_id="camera-intent",
+        episode_id="episode-1",
+        camera_id="gate",
+        generation=4,
+        event_at=100.0,
+        created_monotonic=10.1,
+        primary_source=MotionSource.CAMERA,
+        sources=(MotionSource.CAMERA,),
+        camera_notice=notice,
+    )
+
+    admitted = service._enqueue_replacement_camera_notice(EpisodeDecision(
+        EpisodeDecisionReason.REQUEST_RESERVED,
+        "episode-1",
+        intent,
+    ))
+
+    assert admitted
+    trigger = enqueue.call_args.args[0]
+    assert trigger.topic == notice.topic
+    assert trigger.message == notice.message
+    assert trigger.event_at.timestamp() == notice.event_at
+    assert trigger.episode_id == intent.episode_id
+    assert trigger.detection_intent_id == intent.intent_id
+    assert trigger.lifecycle_generation == intent.generation
+    controller.acknowledge_admission.assert_called_once_with(
+        intent.intent_id,
+        admitted=True,
+        occurred_monotonic=controller.acknowledge_admission.call_args.kwargs[
+            "occurred_monotonic"
+        ],
+    )
+
+
+def test_small_motion_reaches_scene_aware_pipeline() -> None:
+    rejected = MotionQualificationResult(False, 0.1, 0.48, "low_score", 2, {})
+    run_pipeline = Mock(return_value=rejected)
+    dependencies = _hooks(
+        run_pipeline=run_pipeline,
+        trigger_mode="camera",
+    )
+    # The retired value remains accepted in saved configurations, but no
+    # longer stands ahead of scene-aware qualification.
+    dependencies.config.temporal_filter_threshold = 1.0
+    service = _service(dependencies)
+    first = np.zeros((180, 320, 3), dtype=np.uint8)
+    second = first.copy()
+    first[80:100, 100:110] = 255
+    second[80:100, 101:111] = 255
     with service.frame_lock:
         service.color_frames.extend(
             [
-                (99.5, np.full((90, 160, 3), 45, dtype=np.uint8)),
-                (100.0, np.full((90, 160, 3), 45, dtype=np.uint8)),
+                (99.8, first),
+                (100.0, second),
             ]
         )
 
     service.analyze_continuous(100.0)
 
-    assert list(service.events.queue.queue) == []
-    assert service.telemetry_snapshot()["temporal_filter_skips"] == 1
+    run_pipeline.assert_called_once()
+    assert len(run_pipeline.call_args.args[0]) == 2
+    assert run_pipeline.call_args.args[0][0] is first
+    assert run_pipeline.call_args.args[0][1] is second
+    assert service.telemetry_snapshot()["temporal_filter_skips"] == 0
     assert service.primary_last_processed_at == 100.0
 
 
-def test_temporal_filter_leaves_motion_debug_capture_due() -> None:
-    service = _service(_hooks(trigger_mode="adaptive"))
+def test_quiet_frames_advance_stationary_foreground_learning() -> None:
+    pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+        "gate",
+        adaptive_motion_stage_configs(),
+        required_artifacts={"scoring"},
+    )
+
+    def run_pipeline(
+        frames: list[np.ndarray],
+        sensitivity: str,
+        captured_at: float,
+        frame_timestamps: list[float],
+        **_kwargs: object,
+    ) -> MotionQualificationResult:
+        processed = pipeline.process(MotionContext(
+            camera_id="gate",
+            captured_at=captured_at,
+            original_frame=frames[-1],
+            frame_history=tuple(frames),
+            frame_timestamps=tuple(frame_timestamps),
+            configuration={
+                "sample_fps": 5.0,
+                "sensitivity": sensitivity,
+                "stationary_object_tolerance": "balanced",
+                "illumination_filter_enabled": False,
+            },
+            runtime=pipeline.runtime,
+        ))
+        return MotionQualificationResult(
+            processed.scoring.accepted,
+            processed.scoring.score,
+            processed.scoring.threshold,
+            processed.scoring.reason,
+            processed.scoring.frame_count,
+            dict(processed.scoring.features),
+        )
+
+    qualification = _hooks(
+        run_pipeline=Mock(side_effect=run_pipeline),
+        trigger_mode="camera",
+    )
+    service = _service(qualification)
+    base = np.zeros((40, 60, 3), dtype=np.uint8)
+    stationary = base.copy()
+    stationary[12:30, 20:40] = 180
+    try:
+        with service.frame_lock:
+            service.color_frames.extend([(100.0, base), (100.2, stationary)])
+        service.analyze_continuous(100.2)
+        for index in range(1, 46):
+            captured_at = 100.2 + index * 0.2
+            with service.frame_lock:
+                service.color_frames.append((captured_at, stationary.copy()))
+            service.analyze_continuous(captured_at)
+
+        background = pipeline.runtime.stage_state["background"].background
+        assert background is not None
+        assert float(np.mean(background[15:27, 23:37])) > 20.0
+        assert qualification.qualification.run_pipeline.call_count == 46
+    finally:
+        pipeline.close()
+
+
+def test_quiet_scene_runs_pipeline_and_refreshes_continuous_result() -> None:
+    stable = MotionQualificationResult(False, 0.0, 0.48, "no_motion_blobs", 2, {})
+    run_pipeline = Mock(return_value=stable)
+    service = _service(_hooks(run_pipeline=run_pipeline, trigger_mode="camera"))
     service.debug_store.set_enabled(True)
     frame = np.full((90, 160, 3), 45, dtype=np.uint8)
-    gray = np.full((90, 160), 45, dtype=np.uint8)
     with service.frame_lock:
         service.color_frames.extend([(99.5, frame), (100.0, frame.copy())])
-        service.frames.extend([(99.5, gray), (100.0, gray.copy())])
 
     service.analyze_continuous(100.0)
 
-    assert service.telemetry_snapshot()["temporal_filter_skips"] == 1
-    assert service.debug_store.status()["snapshot"] is None
-    assert service.debug_store.capture_due()
-    service.qualification.run_pipeline.assert_not_called()
+    run_pipeline.assert_called_once()
+    assert run_pipeline.call_args.kwargs["capture_debug"] is True
+    assert service.last_continuous_result is stable
+    assert service.qualification_results[-1] == (100.0, stable)
 
 
 def test_worker_captures_motion_debug_while_analysis_slot_is_busy() -> None:
@@ -974,8 +1126,9 @@ def test_worker_captures_motion_debug_while_analysis_slot_is_busy() -> None:
     assert run_pipeline.call_args.kwargs.get("isolated") is True
 
 
-def test_temporal_filter_warms_visual_backup_during_quiet_scene() -> None:
-    run_pipeline = Mock()
+def test_quiet_pipeline_results_warm_visual_backup() -> None:
+    stable = MotionQualificationResult(False, 0.0, 0.48, "no_motion_blobs", 2, {})
+    run_pipeline = Mock(return_value=stable)
     service = _service(_hooks(run_pipeline=run_pipeline, trigger_mode="camera_rescue"))
     frame = np.full((90, 160, 3), 45, dtype=np.uint8)
 
@@ -986,7 +1139,7 @@ def test_temporal_filter_warms_visual_backup_during_quiet_scene() -> None:
             )
         service.analyze_continuous(captured_at)
 
-    run_pipeline.assert_not_called()
+    assert run_pipeline.call_count == 5
     assert service.ema_v2.scene_ready is True
     assert service.ema_verification.scene_ready is True
     assert service.primary_last_processed_at == 112.0
