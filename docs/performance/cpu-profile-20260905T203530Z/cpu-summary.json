@@ -1,0 +1,1924 @@
+{
+  "profile_window": {
+    "tool": "py-spy 0.4.2",
+    "binary_sha256": "9b4d1f39b2a47ae44f4c6a46f615dcc0287d7755beba5065f32391951e07d594",
+    "target_pid": 651962,
+    "command": [
+      "/root/survng-measurements/cpu-profile-20260905T203530Z/profiler-env/bin/py-spy",
+      "record",
+      "--pid",
+      "651962",
+      "--rate",
+      "25",
+      "--duration",
+      "60",
+      "--format",
+      "speedscope",
+      "--native",
+      "--threads",
+      "--full-filenames",
+      "--output",
+      "/root/survng-measurements/cpu-profile-20260905T203530Z/pyspy-native.speedscope.json"
+    ],
+    "requested_duration_seconds": 60,
+    "requested_rate_hz": 25,
+    "native_requested": true,
+    "gil_filter": false,
+    "include_idle": false,
+    "subprocesses": false,
+    "capture_locals": false,
+    "started_at": "2026-09-05T20:36:55.882650+00:00",
+    "started_monotonic": 692209.083171341,
+    "status": "complete",
+    "profiler_pid": 705885,
+    "returncode": 0,
+    "ended_at": "2026-09-05T20:37:58.306166+00:00",
+    "ended_monotonic": 692271.515408219,
+    "elapsed_seconds": 62.432236877968535
+  },
+  "resource_interval_count": 61,
+  "covered_seconds": 61.004968310007825,
+  "profile_wrapper_seconds": 62.432236877968535,
+  "excluded_boundary_intervals": 0,
+  "service_cpu_seconds": 141.22254199999952,
+  "service_cpu_cores": 2.314935093193583,
+  "category_cpu_seconds": {
+    "main": 115.41000000000167,
+    "python": 0.0,
+    "survng-object": 0.1700000000000017,
+    "survng-face": 0.0,
+    "survng-reid": 0.009999999999999787,
+    "survng-recorder": 4.419999999999995,
+    "survng-semantic": 0.0,
+    "survng-capture": 20.83000000000004
+  },
+  "category_cpu_cores": {
+    "main": 1.8918131292770255,
+    "python": 0.0,
+    "survng-object": 0.002786658278980096,
+    "survng-face": 0.0,
+    "survng-reid": 0.00016392107523411815,
+    "survng-recorder": 0.07245311525348168,
+    "survng-semantic": 0.0,
+    "survng-capture": 0.3414475997126761
+  },
+  "unattributed_service_cpu_seconds": 0.38254199999781235,
+  "main_thread_cpu_seconds_sum": 114.81000000000003,
+  "main_process_minus_observed_threads_cpu_seconds": 0.6000000000016428,
+  "threads": [
+    {
+      "tid": 652477,
+      "start_ticks": 68660604,
+      "comm": "uvicorn",
+      "cpu_seconds": 9.75,
+      "cpu_cores": 0.1598230483532686,
+      "fraction_of_main_cpu": 0.08448141408889921
+    },
+    {
+      "tid": 652968,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 5.259999999999991,
+      "cpu_cores": 0.08622248557314784,
+      "fraction_of_main_cpu": 0.04557663980590863
+    },
+    {
+      "tid": 652969,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 5.189999999999998,
+      "cpu_cores": 0.0850750380465091,
+      "fraction_of_main_cpu": 0.04497010657655249
+    },
+    {
+      "tid": 652970,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 5.0400000000000205,
+      "cpu_cores": 0.08261622191799765,
+      "fraction_of_main_cpu": 0.043670392513646544
+    },
+    {
+      "tid": 652971,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 4.680000000000007,
+      "cpu_cores": 0.07671506320956904,
+      "fraction_of_main_cpu": 0.04055107876267168
+    },
+    {
+      "tid": 652986,
+      "start_ticks": 68661605,
+      "comm": "uvicorn",
+      "cpu_seconds": 3.839999999999975,
+      "cpu_cores": 0.0629456928899023,
+      "fraction_of_main_cpu": 0.033272680010397016
+    },
+    {
+      "tid": 652490,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 3.82000000000005,
+      "cpu_cores": 0.0626178507394353,
+      "fraction_of_main_cpu": 0.033099384802010176
+    },
+    {
+      "tid": 652993,
+      "start_ticks": 68661606,
+      "comm": "uvicorn",
+      "cpu_seconds": 3.430000000000007,
+      "cpu_cores": 0.05622492880530384,
+      "fraction_of_main_cpu": 0.029720128238453835
+    },
+    {
+      "tid": 653159,
+      "start_ticks": 68662039,
+      "comm": "uvicorn",
+      "cpu_seconds": 3.2199999999999704,
+      "cpu_cores": 0.05278258622538669,
+      "fraction_of_main_cpu": 0.027900528550384922
+    },
+    {
+      "tid": 653469,
+      "start_ticks": 68663106,
+      "comm": "uvicorn",
+      "cpu_seconds": 3.1200000000000045,
+      "cpu_cores": 0.05114337547304603,
+      "fraction_of_main_cpu": 0.02703405250844779
+    },
+    {
+      "tid": 652856,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 3.0400000000000205,
+      "cpu_cores": 0.04983200687117332,
+      "fraction_of_main_cpu": 0.026340871674897983
+    },
+    {
+      "tid": 653570,
+      "start_ticks": 68663539,
+      "comm": "uvicorn",
+      "cpu_seconds": 3.0399999999999636,
+      "cpu_cores": 0.04983200687117239,
+      "fraction_of_main_cpu": 0.02634087167489749
+    },
+    {
+      "tid": 653349,
+      "start_ticks": 68662606,
+      "comm": "uvicorn",
+      "cpu_seconds": 3.0299999999999727,
+      "cpu_cores": 0.04966808579593841,
+      "fraction_of_main_cpu": 0.026254224070703828
+    },
+    {
+      "tid": 653331,
+      "start_ticks": 68662539,
+      "comm": "uvicorn",
+      "cpu_seconds": 2.9099999999999966,
+      "cpu_cores": 0.047701032893129346,
+      "fraction_of_main_cpu": 0.02521445282037912
+    },
+    {
+      "tid": 652972,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 2.8300000000000125,
+      "cpu_cores": 0.046389664291256634,
+      "fraction_of_main_cpu": 0.024521271986829317
+    },
+    {
+      "tid": 653461,
+      "start_ticks": 68663039,
+      "comm": "uvicorn",
+      "cpu_seconds": 2.799999999999983,
+      "cpu_cores": 0.04589790106555378,
+      "fraction_of_main_cpu": 0.024261329174247833
+    },
+    {
+      "tid": 652478,
+      "start_ticks": 68660604,
+      "comm": "uvicorn",
+      "cpu_seconds": 2.75,
+      "cpu_cores": 0.04507829568938346,
+      "fraction_of_main_cpu": 0.023828091153279267
+    },
+    {
+      "tid": 652482,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 2.2900000000000205,
+      "cpu_cores": 0.037537926228614196,
+      "fraction_of_main_cpu": 0.019842301360367274
+    },
+    {
+      "tid": 652492,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 2.0999999999999943,
+      "cpu_cores": 0.03442342579916546,
+      "fraction_of_main_cpu": 0.018195996880685936
+    },
+    {
+      "tid": 653179,
+      "start_ticks": 68662106,
+      "comm": "uvicorn",
+      "cpu_seconds": 2.0800000000000125,
+      "cpu_cores": 0.03409558364869751,
+      "fraction_of_main_cpu": 0.018022701672298608
+    },
+    {
+      "tid": 652854,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.9699999999999989,
+      "cpu_cores": 0.03229245182112195,
+      "fraction_of_main_cpu": 0.01706957802616732
+    },
+    {
+      "tid": 652973,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.8799999999999955,
+      "cpu_cores": 0.030817162144014795,
+      "fraction_of_main_cpu": 0.016289749588423604
+    },
+    {
+      "tid": 652974,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.8700000000000045,
+      "cpu_cores": 0.030653241068780823,
+      "fraction_of_main_cpu": 0.01620310198422994
+    },
+    {
+      "tid": 652975,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.8400000000000034,
+      "cpu_cores": 0.03016147784307844,
+      "fraction_of_main_cpu": 0.0159431591716487
+    },
+    {
+      "tid": 652980,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.8000000000000114,
+      "cpu_cores": 0.029505793542142084,
+      "fraction_of_main_cpu": 0.0155965687548738
+    },
+    {
+      "tid": 652978,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.7800000000000011,
+      "cpu_cores": 0.029177951391673673,
+      "fraction_of_main_cpu": 0.015423273546486226
+    },
+    {
+      "tid": 652979,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.7800000000000011,
+      "cpu_cores": 0.029177951391673673,
+      "fraction_of_main_cpu": 0.015423273546486226
+    },
+    {
+      "tid": 652981,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.7700000000000102,
+      "cpu_cores": 0.0290140303164397,
+      "fraction_of_main_cpu": 0.015336625942292561
+    },
+    {
+      "tid": 652976,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.759999999999991,
+      "cpu_cores": 0.028850109241205263,
+      "fraction_of_main_cpu": 0.015249978338098652
+    },
+    {
+      "tid": 652982,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.6399999999999864,
+      "cpu_cores": 0.026883056338395727,
+      "fraction_of_main_cpu": 0.014210207087773699
+    },
+    {
+      "tid": 652983,
+      "start_ticks": 68661598,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.3499999999999943,
+      "cpu_cores": 0.02212934515660633,
+      "fraction_of_main_cpu": 0.011697426566155227
+    },
+    {
+      "tid": 653158,
+      "start_ticks": 68662039,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.1299999999999955,
+      "cpu_cores": 0.018523081501455672,
+      "fraction_of_main_cpu": 0.009791179273892895
+    },
+    {
+      "tid": 652486,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 1.0600000000000023,
+      "cpu_cores": 0.017375633974816933,
+      "fraction_of_main_cpu": 0.009184646044536756
+    },
+    {
+      "tid": 653178,
+      "start_ticks": 68662106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.8900000000000006,
+      "cpu_cores": 0.014588975695836837,
+      "fraction_of_main_cpu": 0.007711636773243113
+    },
+    {
+      "tid": 653330,
+      "start_ticks": 68662539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.8100000000000023,
+      "cpu_cores": 0.01327760709396389,
+      "fraction_of_main_cpu": 0.007018455939693185
+    },
+    {
+      "tid": 652853,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.7799999999999869,
+      "cpu_cores": 0.012785843868261275,
+      "fraction_of_main_cpu": 0.006758513127111824
+    },
+    {
+      "tid": 652489,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.769999999999996,
+      "cpu_cores": 0.012621922793027303,
+      "fraction_of_main_cpu": 0.00667186552291816
+    },
+    {
+      "tid": 652867,
+      "start_ticks": 68661109,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.75,
+      "cpu_cores": 0.012294080642559125,
+      "fraction_of_main_cpu": 0.006498570314530709
+    },
+    {
+      "tid": 652855,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.7000000000000028,
+      "cpu_cores": 0.011474475266388562,
+      "fraction_of_main_cpu": 0.00606533229356202
+    },
+    {
+      "tid": 652985,
+      "start_ticks": 68661605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.5799999999999983,
+      "cpu_cores": 0.009507422363579028,
+      "fraction_of_main_cpu": 0.005025561043237067
+    },
+    {
+      "tid": 653460,
+      "start_ticks": 68663039,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.480000000000004,
+      "cpu_cores": 0.007868211611237904,
+      "fraction_of_main_cpu": 0.0041590850012996885
+    },
+    {
+      "tid": 652497,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.44999999999999574,
+      "cpu_cores": 0.007376448385535405,
+      "fraction_of_main_cpu": 0.0038991421887183885
+    },
+    {
+      "tid": 653182,
+      "start_ticks": 68662106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.44000000000000483,
+      "cpu_cores": 0.007212527310301432,
+      "fraction_of_main_cpu": 0.0038124945845247247
+    },
+    {
+      "tid": 652989,
+      "start_ticks": 68661605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.39000000000000057,
+      "cpu_cores": 0.006392921934130754,
+      "fraction_of_main_cpu": 0.0033792565635559738
+    },
+    {
+      "tid": 653352,
+      "start_ticks": 68662606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.39000000000000057,
+      "cpu_cores": 0.006392921934130754,
+      "fraction_of_main_cpu": 0.0033792565635559738
+    },
+    {
+      "tid": 652866,
+      "start_ticks": 68661109,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.34999999999999787,
+      "cpu_cores": 0.005737237633194223,
+      "fraction_of_main_cpu": 0.003032666146780979
+    },
+    {
+      "tid": 652996,
+      "start_ticks": 68661606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.34999999999999787,
+      "cpu_cores": 0.005737237633194223,
+      "fraction_of_main_cpu": 0.003032666146780979
+    },
+    {
+      "tid": 652498,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.33999999999999986,
+      "cpu_cores": 0.005573316557960134,
+      "fraction_of_main_cpu": 0.0029460185425872537
+    },
+    {
+      "tid": 653464,
+      "start_ticks": 68663040,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.33999999999999986,
+      "cpu_cores": 0.005573316557960134,
+      "fraction_of_main_cpu": 0.0029460185425872537
+    },
+    {
+      "tid": 653472,
+      "start_ticks": 68663106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.33999999999999986,
+      "cpu_cores": 0.005573316557960134,
+      "fraction_of_main_cpu": 0.0029460185425872537
+    },
+    {
+      "tid": 652493,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.3300000000000054,
+      "cpu_cores": 0.005409395482726103,
+      "fraction_of_main_cpu": 0.0028593709383935586
+    },
+    {
+      "tid": 653162,
+      "start_ticks": 68662039,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.33000000000000185,
+      "cpu_cores": 0.005409395482726045,
+      "fraction_of_main_cpu": 0.0028593709383935278
+    },
+    {
+      "tid": 653573,
+      "start_ticks": 68663539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.33000000000000185,
+      "cpu_cores": 0.005409395482726045,
+      "fraction_of_main_cpu": 0.0028593709383935278
+    },
+    {
+      "tid": 652495,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.3200000000000003,
+      "cpu_cores": 0.005245474407491898,
+      "fraction_of_main_cpu": 0.0027727233341997715
+    },
+    {
+      "tid": 652860,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.3099999999999987,
+      "cpu_cores": 0.00508155333225775,
+      "fraction_of_main_cpu": 0.0026860757300060153
+    },
+    {
+      "tid": 652988,
+      "start_ticks": 68661605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.3099999999999987,
+      "cpu_cores": 0.00508155333225775,
+      "fraction_of_main_cpu": 0.0026860757300060153
+    },
+    {
+      "tid": 652992,
+      "start_ticks": 68661606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.30999999999999517,
+      "cpu_cores": 0.005081553332257692,
+      "fraction_of_main_cpu": 0.0026860757300059845
+    },
+    {
+      "tid": 652857,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.3000000000000007,
+      "cpu_cores": 0.004917632257023661,
+      "fraction_of_main_cpu": 0.00259942812581229
+    },
+    {
+      "tid": 653160,
+      "start_ticks": 68662039,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.3000000000000007,
+      "cpu_cores": 0.004917632257023661,
+      "fraction_of_main_cpu": 0.00259942812581229
+    },
+    {
+      "tid": 652858,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.28999999999999915,
+      "cpu_cores": 0.004753711181789514,
+      "fraction_of_main_cpu": 0.0025127805216185336
+    },
+    {
+      "tid": 653180,
+      "start_ticks": 68662106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.28000000000000114,
+      "cpu_cores": 0.004589790106555425,
+      "fraction_of_main_cpu": 0.0024261329174248077
+    },
+    {
+      "tid": 653332,
+      "start_ticks": 68662539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.28000000000000114,
+      "cpu_cores": 0.004589790106555425,
+      "fraction_of_main_cpu": 0.0024261329174248077
+    },
+    {
+      "tid": 653334,
+      "start_ticks": 68662539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.28000000000000114,
+      "cpu_cores": 0.004589790106555425,
+      "fraction_of_main_cpu": 0.0024261329174248077
+    },
+    {
+      "tid": 652987,
+      "start_ticks": 68661605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.2799999999999976,
+      "cpu_cores": 0.004589790106555367,
+      "fraction_of_main_cpu": 0.002426132917424777
+    },
+    {
+      "tid": 652994,
+      "start_ticks": 68661606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.2799999999999976,
+      "cpu_cores": 0.004589790106555367,
+      "fraction_of_main_cpu": 0.002426132917424777
+    },
+    {
+      "tid": 653351,
+      "start_ticks": 68662606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.26000000000000156,
+      "cpu_cores": 0.004261947956087189,
+      "fraction_of_main_cpu": 0.002252837709037326
+    },
+    {
+      "tid": 653470,
+      "start_ticks": 68663106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.26000000000000156,
+      "cpu_cores": 0.004261947956087189,
+      "fraction_of_main_cpu": 0.002252837709037326
+    },
+    {
+      "tid": 653350,
+      "start_ticks": 68662606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.259999999999998,
+      "cpu_cores": 0.004261947956087131,
+      "fraction_of_main_cpu": 0.002252837709037295
+    },
+    {
+      "tid": 653462,
+      "start_ticks": 68663039,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.259999999999998,
+      "cpu_cores": 0.004261947956087131,
+      "fraction_of_main_cpu": 0.002252837709037295
+    },
+    {
+      "tid": 652995,
+      "start_ticks": 68661606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.25,
+      "cpu_cores": 0.004098026880853041,
+      "fraction_of_main_cpu": 0.0021661901048435697
+    },
+    {
+      "tid": 653571,
+      "start_ticks": 68663539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.240000000000002,
+      "cpu_cores": 0.003934105805618952,
+      "fraction_of_main_cpu": 0.0020795425006498443
+    },
+    {
+      "tid": 652859,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.23999999999999844,
+      "cpu_cores": 0.003934105805618894,
+      "fraction_of_main_cpu": 0.0020795425006498135
+    },
+    {
+      "tid": 652496,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.23000000000000043,
+      "cpu_cores": 0.003770184730384805,
+      "fraction_of_main_cpu": 0.0019928948964560876
+    },
+    {
+      "tid": 653161,
+      "start_ticks": 68662039,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.23000000000000043,
+      "cpu_cores": 0.003770184730384805,
+      "fraction_of_main_cpu": 0.0019928948964560876
+    },
+    {
+      "tid": 653463,
+      "start_ticks": 68663040,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.23000000000000043,
+      "cpu_cores": 0.003770184730384805,
+      "fraction_of_main_cpu": 0.0019928948964560876
+    },
+    {
+      "tid": 653333,
+      "start_ticks": 68662539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.22000000000000242,
+      "cpu_cores": 0.003606263655150716,
+      "fraction_of_main_cpu": 0.0019062472922623623
+    },
+    {
+      "tid": 655043,
+      "start_ticks": 68689119,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.22000000000000242,
+      "cpu_cores": 0.003606263655150716,
+      "fraction_of_main_cpu": 0.0019062472922623623
+    },
+    {
+      "tid": 653471,
+      "start_ticks": 68663106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.21999999999999886,
+      "cpu_cores": 0.003606263655150658,
+      "fraction_of_main_cpu": 0.0019062472922623315
+    },
+    {
+      "tid": 653572,
+      "start_ticks": 68663539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.1999999999999993,
+      "cpu_cores": 0.0032784215046824214,
+      "fraction_of_main_cpu": 0.0017329520838748496
+    },
+    {
+      "tid": 653569,
+      "start_ticks": 68663539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.16999999999999993,
+      "cpu_cores": 0.002786658278980067,
+      "fraction_of_main_cpu": 0.0014730092712936268
+    },
+    {
+      "tid": 653468,
+      "start_ticks": 68663106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.15000000000000036,
+      "cpu_cores": 0.0024588161285118305,
+      "fraction_of_main_cpu": 0.001299714062906145
+    },
+    {
+      "tid": 653348,
+      "start_ticks": 68662606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.120000000000001,
+      "cpu_cores": 0.001967052902809476,
+      "fraction_of_main_cpu": 0.0010397712503249221
+    },
+    {
+      "tid": 651962,
+      "start_ticks": 68660200,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.11999999999999922,
+      "cpu_cores": 0.001967052902809447,
+      "fraction_of_main_cpu": 0.0010397712503249067
+    },
+    {
+      "tid": 652485,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.08000000000000007,
+      "cpu_cores": 0.0013113686018729745,
+      "fraction_of_main_cpu": 0.0006931808335499429
+    },
+    {
+      "tid": 652494,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.04999999999999982,
+      "cpu_cores": 0.0008196053761706054,
+      "fraction_of_main_cpu": 0.0004332380209687124
+    },
+    {
+      "tid": 652499,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.040000000000000036,
+      "cpu_cores": 0.0006556843009364872,
+      "fraction_of_main_cpu": 0.00034659041677497144
+    },
+    {
+      "tid": 652868,
+      "start_ticks": 68661109,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.040000000000000036,
+      "cpu_cores": 0.0006556843009364872,
+      "fraction_of_main_cpu": 0.00034659041677497144
+    },
+    {
+      "tid": 652990,
+      "start_ticks": 68661605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.040000000000000036,
+      "cpu_cores": 0.0006556843009364872,
+      "fraction_of_main_cpu": 0.00034659041677497144
+    },
+    {
+      "tid": 653181,
+      "start_ticks": 68662106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.040000000000000036,
+      "cpu_cores": 0.0006556843009364872,
+      "fraction_of_main_cpu": 0.00034659041677497144
+    },
+    {
+      "tid": 653183,
+      "start_ticks": 68662106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.040000000000000036,
+      "cpu_cores": 0.0006556843009364872,
+      "fraction_of_main_cpu": 0.00034659041677497144
+    },
+    {
+      "tid": 653353,
+      "start_ticks": 68662606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.040000000000000036,
+      "cpu_cores": 0.0006556843009364872,
+      "fraction_of_main_cpu": 0.00034659041677497144
+    },
+    {
+      "tid": 653465,
+      "start_ticks": 68663040,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.040000000000000036,
+      "cpu_cores": 0.0006556843009364872,
+      "fraction_of_main_cpu": 0.00034659041677497144
+    },
+    {
+      "tid": 652500,
+      "start_ticks": 68660605,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.03999999999999959,
+      "cpu_cores": 0.00065568430093648,
+      "fraction_of_main_cpu": 0.0003465904167749676
+    },
+    {
+      "tid": 652861,
+      "start_ticks": 68661105,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.03000000000000025,
+      "cpu_cores": 0.000491763225702369,
+      "fraction_of_main_cpu": 0.00025994281258123053
+    },
+    {
+      "tid": 653163,
+      "start_ticks": 68662039,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.03000000000000025,
+      "cpu_cores": 0.000491763225702369,
+      "fraction_of_main_cpu": 0.00025994281258123053
+    },
+    {
+      "tid": 653335,
+      "start_ticks": 68662539,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.03000000000000025,
+      "cpu_cores": 0.000491763225702369,
+      "fraction_of_main_cpu": 0.00025994281258123053
+    },
+    {
+      "tid": 651964,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.03,
+      "cpu_cores": 0.000491763225702365,
+      "fraction_of_main_cpu": 0.00025994281258122836
+    },
+    {
+      "tid": 651967,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.03,
+      "cpu_cores": 0.000491763225702365,
+      "fraction_of_main_cpu": 0.00025994281258122836
+    },
+    {
+      "tid": 652476,
+      "start_ticks": 68660604,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000038654,
+      "cpu_cores": 0.0003278421504688769,
+      "fraction_of_main_cpu": 0.0001732952083878205
+    },
+    {
+      "tid": 651993,
+      "start_ticks": 68660348,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000018,
+      "cpu_cores": 0.0003278421504682436,
+      "fraction_of_main_cpu": 0.00017329520838748572
+    },
+    {
+      "tid": 652997,
+      "start_ticks": 68661606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000018,
+      "cpu_cores": 0.0003278421504682436,
+      "fraction_of_main_cpu": 0.00017329520838748572
+    },
+    {
+      "tid": 651963,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651965,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651966,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651968,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651969,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651970,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651971,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651972,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651973,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651974,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651978,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 651980,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.020000000000000004,
+      "cpu_cores": 0.00032784215046824334,
+      "fraction_of_main_cpu": 0.0001732952083874856
+    },
+    {
+      "tid": 652506,
+      "start_ticks": 68660606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.02,
+      "cpu_cores": 0.0003278421504682433,
+      "fraction_of_main_cpu": 0.00017329520838748559
+    },
+    {
+      "tid": 652524,
+      "start_ticks": 68660632,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.02,
+      "cpu_cores": 0.0003278421504682433,
+      "fraction_of_main_cpu": 0.00017329520838748559
+    },
+    {
+      "tid": 653002,
+      "start_ticks": 68661628,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.02,
+      "cpu_cores": 0.0003278421504682433,
+      "fraction_of_main_cpu": 0.00017329520838748559
+    },
+    {
+      "tid": 653216,
+      "start_ticks": 68662213,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.02,
+      "cpu_cores": 0.0003278421504682433,
+      "fraction_of_main_cpu": 0.00017329520838748559
+    },
+    {
+      "tid": 653221,
+      "start_ticks": 68662234,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.02,
+      "cpu_cores": 0.0003278421504682433,
+      "fraction_of_main_cpu": 0.00017329520838748559
+    },
+    {
+      "tid": 652474,
+      "start_ticks": 68660599,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.01999999999999999,
+      "cpu_cores": 0.0003278421504682431,
+      "fraction_of_main_cpu": 0.00017329520838748548
+    },
+    {
+      "tid": 651975,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 651976,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 651977,
+      "start_ticks": 68660228,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 651979,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 651981,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 651982,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 651989,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 651990,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 652479,
+      "start_ticks": 68660604,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 652507,
+      "start_ticks": 68660606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000009,
+      "cpu_cores": 0.0001639210752341218,
+      "fraction_of_main_cpu": 8.664760419374286e-05
+    },
+    {
+      "tid": 652510,
+      "start_ticks": 68660608,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 652864,
+      "start_ticks": 68661106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 652879,
+      "start_ticks": 68661132,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 652991,
+      "start_ticks": 68661606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 653169,
+      "start_ticks": 68662061,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 653191,
+      "start_ticks": 68662127,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 653197,
+      "start_ticks": 68662149,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 653202,
+      "start_ticks": 68662170,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 653211,
+      "start_ticks": 68662192,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.010000000000000002,
+      "cpu_cores": 0.00016392107523412167,
+      "fraction_of_main_cpu": 8.66476041937428e-05
+    },
+    {
+      "tid": 652517,
+      "start_ticks": 68660631,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.01,
+      "cpu_cores": 0.00016392107523412164,
+      "fraction_of_main_cpu": 8.664760419374279e-05
+    },
+    {
+      "tid": 652519,
+      "start_ticks": 68660631,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.01,
+      "cpu_cores": 0.00016392107523412164,
+      "fraction_of_main_cpu": 8.664760419374279e-05
+    },
+    {
+      "tid": 652904,
+      "start_ticks": 68661406,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.01,
+      "cpu_cores": 0.00016392107523412164,
+      "fraction_of_main_cpu": 8.664760419374279e-05
+    },
+    {
+      "tid": 652505,
+      "start_ticks": 68660606,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999998,
+      "cpu_cores": 0.00016392107523412162,
+      "fraction_of_main_cpu": 8.664760419374278e-05
+    },
+    {
+      "tid": 652523,
+      "start_ticks": 68660632,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999998,
+      "cpu_cores": 0.00016392107523412162,
+      "fraction_of_main_cpu": 8.664760419374278e-05
+    },
+    {
+      "tid": 652869,
+      "start_ticks": 68661110,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999998,
+      "cpu_cores": 0.00016392107523412162,
+      "fraction_of_main_cpu": 8.664760419374278e-05
+    },
+    {
+      "tid": 652998,
+      "start_ticks": 68661610,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999998,
+      "cpu_cores": 0.00016392107523412162,
+      "fraction_of_main_cpu": 8.664760419374278e-05
+    },
+    {
+      "tid": 653007,
+      "start_ticks": 68661631,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999998,
+      "cpu_cores": 0.00016392107523412162,
+      "fraction_of_main_cpu": 8.664760419374278e-05
+    },
+    {
+      "tid": 653164,
+      "start_ticks": 68662040,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999998,
+      "cpu_cores": 0.00016392107523412162,
+      "fraction_of_main_cpu": 8.664760419374278e-05
+    },
+    {
+      "tid": 653177,
+      "start_ticks": 68662104,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999998,
+      "cpu_cores": 0.00016392107523412162,
+      "fraction_of_main_cpu": 8.664760419374278e-05
+    },
+    {
+      "tid": 651983,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999995,
+      "cpu_cores": 0.00016392107523412156,
+      "fraction_of_main_cpu": 8.664760419374274e-05
+    },
+    {
+      "tid": 651984,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999995,
+      "cpu_cores": 0.00016392107523412156,
+      "fraction_of_main_cpu": 8.664760419374274e-05
+    },
+    {
+      "tid": 651985,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999995,
+      "cpu_cores": 0.00016392107523412156,
+      "fraction_of_main_cpu": 8.664760419374274e-05
+    },
+    {
+      "tid": 651986,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999995,
+      "cpu_cores": 0.00016392107523412156,
+      "fraction_of_main_cpu": 8.664760419374274e-05
+    },
+    {
+      "tid": 651987,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999995,
+      "cpu_cores": 0.00016392107523412156,
+      "fraction_of_main_cpu": 8.664760419374274e-05
+    },
+    {
+      "tid": 651988,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999995,
+      "cpu_cores": 0.00016392107523412156,
+      "fraction_of_main_cpu": 8.664760419374274e-05
+    },
+    {
+      "tid": 651991,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999995,
+      "cpu_cores": 0.00016392107523412156,
+      "fraction_of_main_cpu": 8.664760419374274e-05
+    },
+    {
+      "tid": 651992,
+      "start_ticks": 68660237,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999995,
+      "cpu_cores": 0.00016392107523412156,
+      "fraction_of_main_cpu": 8.664760419374274e-05
+    },
+    {
+      "tid": 654976,
+      "start_ticks": 68688939,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.009999999999999981,
+      "cpu_cores": 0.00016392107523412135,
+      "fraction_of_main_cpu": 8.664760419374262e-05
+    },
+    {
+      "tid": 652527,
+      "start_ticks": 68660653,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 652528,
+      "start_ticks": 68660653,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 652847,
+      "start_ticks": 68661006,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 652851,
+      "start_ticks": 68661044,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 652871,
+      "start_ticks": 68661126,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 652874,
+      "start_ticks": 68661127,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 652876,
+      "start_ticks": 68661131,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 652885,
+      "start_ticks": 68661148,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 652888,
+      "start_ticks": 68661152,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653000,
+      "start_ticks": 68661627,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653004,
+      "start_ticks": 68661630,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653011,
+      "start_ticks": 68661648,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653015,
+      "start_ticks": 68661657,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653069,
+      "start_ticks": 68661803,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653120,
+      "start_ticks": 68661999,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653157,
+      "start_ticks": 68662037,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653166,
+      "start_ticks": 68662060,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653174,
+      "start_ticks": 68662081,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653184,
+      "start_ticks": 68662106,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653186,
+      "start_ticks": 68662126,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653189,
+      "start_ticks": 68662127,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653195,
+      "start_ticks": 68662148,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653199,
+      "start_ticks": 68662169,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653209,
+      "start_ticks": 68662191,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653213,
+      "start_ticks": 68662212,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653218,
+      "start_ticks": 68662233,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653223,
+      "start_ticks": 68662254,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653315,
+      "start_ticks": 68662361,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653449,
+      "start_ticks": 68662943,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653523,
+      "start_ticks": 68663395,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653564,
+      "start_ticks": 68663522,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653655,
+      "start_ticks": 68663796,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653763,
+      "start_ticks": 68664169,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653815,
+      "start_ticks": 68664468,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 653838,
+      "start_ticks": 68664667,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 655473,
+      "start_ticks": 68694194,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    },
+    {
+      "tid": 655474,
+      "start_ticks": 68694194,
+      "comm": "uvicorn",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0,
+      "fraction_of_main_cpu": 0.0
+    }
+  ],
+  "processes": [
+    {
+      "pid": 651962,
+      "start_ticks": 68660200,
+      "comm": "uvicorn",
+      "cpu_seconds": 115.41000000000167,
+      "cpu_cores": 1.8918131292770255
+    },
+    {
+      "pid": 653314,
+      "start_ticks": 68662361,
+      "comm": "survng-capture",
+      "cpu_seconds": 3.0400000000000205,
+      "cpu_cores": 0.04983200687117332
+    },
+    {
+      "pid": 653448,
+      "start_ticks": 68662943,
+      "comm": "survng-capture",
+      "cpu_seconds": 2.009999999999991,
+      "cpu_cores": 0.032948136122058304
+    },
+    {
+      "pid": 652846,
+      "start_ticks": 68661006,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.7399999999999807,
+      "cpu_cores": 0.02852226709073685
+    },
+    {
+      "pid": 653068,
+      "start_ticks": 68661803,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.6500000000000057,
+      "cpu_cores": 0.027046977413630165
+    },
+    {
+      "pid": 652903,
+      "start_ticks": 68661405,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.6100000000000136,
+      "cpu_cores": 0.02639129311269381
+    },
+    {
+      "pid": 653654,
+      "start_ticks": 68663796,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.5300000000000011,
+      "cpu_cores": 0.025079924510820632
+    },
+    {
+      "pid": 653837,
+      "start_ticks": 68664667,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.5200000000000102,
+      "cpu_cores": 0.02491600343558666
+    },
+    {
+      "pid": 653563,
+      "start_ticks": 68663522,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.460000000000008,
+      "cpu_cores": 0.023932476984181893
+    },
+    {
+      "pid": 653119,
+      "start_ticks": 68661999,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.450000000000017,
+      "cpu_cores": 0.02376855590894792
+    },
+    {
+      "pid": 653156,
+      "start_ticks": 68662037,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.4399999999999977,
+      "cpu_cores": 0.02360463483371348
+    },
+    {
+      "pid": 653762,
+      "start_ticks": 68664169,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.4299999999999926,
+      "cpu_cores": 0.023440713758479274
+    },
+    {
+      "pid": 653522,
+      "start_ticks": 68663395,
+      "comm": "survng-capture",
+      "cpu_seconds": 1.1200000000000045,
+      "cpu_cores": 0.0183591604262217
+    },
+    {
+      "pid": 653814,
+      "start_ticks": 68664468,
+      "comm": "survng-capture",
+      "cpu_seconds": 0.8299999999999983,
+      "cpu_cores": 0.013605449244432069
+    },
+    {
+      "pid": 652518,
+      "start_ticks": 68660631,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.39000000000000057,
+      "cpu_cores": 0.006392921934130754
+    },
+    {
+      "pid": 652875,
+      "start_ticks": 68661131,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.3399999999999963,
+      "cpu_cores": 0.005573316557960076
+    },
+    {
+      "pid": 653194,
+      "start_ticks": 68662148,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.3299999999999983,
+      "cpu_cores": 0.005409395482725987
+    },
+    {
+      "pid": 653217,
+      "start_ticks": 68662233,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.3000000000000007,
+      "cpu_cores": 0.004917632257023661
+    },
+    {
+      "pid": 653185,
+      "start_ticks": 68662126,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.28000000000000114,
+      "cpu_cores": 0.004589790106555425
+    },
+    {
+      "pid": 652516,
+      "start_ticks": 68660631,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.2699999999999996,
+      "cpu_cores": 0.004425869031321278
+    },
+    {
+      "pid": 652999,
+      "start_ticks": 68661627,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.2699999999999996,
+      "cpu_cores": 0.004425869031321278
+    },
+    {
+      "pid": 652870,
+      "start_ticks": 68661126,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.23000000000000043,
+      "cpu_cores": 0.003770184730384805
+    },
+    {
+      "pid": 653165,
+      "start_ticks": 68662060,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.23000000000000043,
+      "cpu_cores": 0.003770184730384805
+    },
+    {
+      "pid": 653003,
+      "start_ticks": 68661630,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.2099999999999973,
+      "cpu_cores": 0.0034423425799165104
+    },
+    {
+      "pid": 653207,
+      "start_ticks": 68662190,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.2099999999999973,
+      "cpu_cores": 0.0034423425799165104
+    },
+    {
+      "pid": 652525,
+      "start_ticks": 68660653,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.16999999999999993,
+      "cpu_cores": 0.002786658278980067
+    },
+    {
+      "pid": 653010,
+      "start_ticks": 68661648,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.15000000000000036,
+      "cpu_cores": 0.0024588161285118305
+    },
+    {
+      "pid": 652887,
+      "start_ticks": 68661152,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.13000000000000078,
+      "cpu_cores": 0.0021309739780435944
+    },
+    {
+      "pid": 653173,
+      "start_ticks": 68662081,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.13000000000000078,
+      "cpu_cores": 0.0021309739780435944
+    },
+    {
+      "pid": 653222,
+      "start_ticks": 68662254,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.13000000000000078,
+      "cpu_cores": 0.0021309739780435944
+    },
+    {
+      "pid": 652884,
+      "start_ticks": 68661148,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.120000000000001,
+      "cpu_cores": 0.001967052902809476
+    },
+    {
+      "pid": 653014,
+      "start_ticks": 68661657,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.11999999999999922,
+      "cpu_cores": 0.001967052902809447
+    },
+    {
+      "pid": 653188,
+      "start_ticks": 68662127,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.10999999999999943,
+      "cpu_cores": 0.001803131827575329
+    },
+    {
+      "pid": 653212,
+      "start_ticks": 68662212,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.10999999999999943,
+      "cpu_cores": 0.001803131827575329
+    },
+    {
+      "pid": 653198,
+      "start_ticks": 68662169,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.10000000000000142,
+      "cpu_cores": 0.0016392107523412398
+    },
+    {
+      "pid": 651995,
+      "start_ticks": 68660351,
+      "comm": "survng-object",
+      "cpu_seconds": 0.08999999999999986,
+      "cpu_cores": 0.0014752896771070925
+    },
+    {
+      "pid": 652526,
+      "start_ticks": 68660653,
+      "comm": "survng-recorder",
+      "cpu_seconds": 0.08999999999999986,
+      "cpu_cores": 0.0014752896771070925
+    },
+    {
+      "pid": 652086,
+      "start_ticks": 68660407,
+      "comm": "survng-object",
+      "cpu_seconds": 0.08000000000000185,
+      "cpu_cores": 0.0013113686018730035
+    },
+    {
+      "pid": 652352,
+      "start_ticks": 68660543,
+      "comm": "survng-reid",
+      "cpu_seconds": 0.009999999999999787,
+      "cpu_cores": 0.00016392107523411815
+    },
+    {
+      "pid": 651994,
+      "start_ticks": 68660351,
+      "comm": "python",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0
+    },
+    {
+      "pid": 652177,
+      "start_ticks": 68660453,
+      "comm": "survng-face",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0
+    },
+    {
+      "pid": 652531,
+      "start_ticks": 68660655,
+      "comm": "survng-semantic",
+      "cpu_seconds": 0.0,
+      "cpu_cores": 0.0
+    }
+  ],
+  "notes": [
+    "Only whole one-second resource intervals inside the profiler wrapper are included; actual sample coverage may differ from nominal60s.",
+    "Cgroup total includes service processes; main-process CPU includes its threads. These are nested scopes, not additive totals.",
+    "Exited-between-poll processes/threads remain unattributed; independently read counters have quantization/skew.",
+    "Thread comm does not establish Python/OpenCV ownership; correlate native TIDs with profiler records where possible."
+  ]
+}

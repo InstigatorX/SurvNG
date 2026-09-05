@@ -1,0 +1,28 @@
+Records stack trace information to a flamegraph, speedscope or raw file
+
+Usage: py-spy record [OPTIONS] [python_program]...
+
+Arguments:
+  [python_program]...  commandline of a python program to run
+
+Options:
+  -p, --pid <pid>            PID of a running python program to spy on, in decimal or hex
+      --full-filenames       Show full Python filenames, instead of shortening to show only the
+                             package part
+  -o, --output <filename>    Output filename
+  -f, --format <format>      Output file format [default: flamegraph] [possible values: flamegraph,
+                             raw, speedscope, chrometrace]
+  -d, --duration <duration>  The number of seconds to sample for [default: unlimited]
+  -r, --rate <rate>          The number of samples to collect per second [default: 100]
+  -s, --subprocesses         Profile subprocesses of the original process
+  -F, --function             Aggregate samples by function's first line number, instead of current
+                             line number
+      --nolineno             Do not show line numbers
+  -t, --threads              Show thread ids in the output
+  -g, --gil                  Only include traces that are holding on to the GIL
+  -i, --idle                 Include stack traces for idle threads
+  -n, --native               Collect stack traces from native extensions written in Cython, C or C++
+      --nonblocking          Don't pause the python process when collecting samples. Setting this
+                             option will reduce the performance impact of sampling, but may lead to
+                             inaccurate results
+  -h, --help                 Print help

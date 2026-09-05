@@ -1,0 +1,4 @@
+py-spy> Sampling process 25 times a second for 60 seconds. Press Control-C to exit.
+
+py-spy> Wrote speedscope file to '/root/survng-measurements/cpu-profile-20260905T203530Z/pyspy-native.speedscope.json'. Samples: 2726 Errors: 11
+py-spy> Visit https://www.speedscope.app/ to view
