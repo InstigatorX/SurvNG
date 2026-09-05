@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from survng.app.ema_v2 import (
     CameraNotice,
     EmaSignalAction,
@@ -218,6 +220,112 @@ def test_camera_and_ema_merge_only_after_request_is_admitted() -> None:
     assert camera.intent is not None
     assert set(camera.intent.sources) == {"camera", "ema"}
     assert controller.intent(ema.intent.intent_id) == camera.intent
+
+
+def test_late_admission_acknowledgement_cannot_revive_completed_request() -> None:
+    controller = MotionEpisodeController("gate", incarnation_id="race")
+    first = controller.observe_camera(
+        CameraNotice("gate", 10.0, 1010.0, "motion"), generation=0
+    )
+    assert first.intent is not None
+    controller.mark_running(first.intent.intent_id, occurred_monotonic=1010.1)
+    controller.complete(first.intent.intent_id, occurred_monotonic=1010.2)
+
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1010.3
+    )
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1010.4
+    )
+
+    snapshot = controller.snapshot()
+    assert snapshot["request_status"] == "completed"
+    assert snapshot["decision_counts"]["request_admitted"] == 1
+    later = controller.observe_camera(
+        CameraNotice("gate", 50.0, 1050.0, "motion"), generation=0
+    )
+    assert later.reason is EpisodeDecisionReason.REQUEST_RESERVED
+    assert later.intent is not None
+    assert later.intent.intent_id != first.intent.intent_id
+
+
+def test_camera_first_merge_remembers_ema_track_for_followup_deduplication() -> None:
+    controller = MotionEpisodeController(
+        "gate", minimum_followup_interval_seconds=0.0
+    )
+    camera = controller.observe_camera(
+        CameraNotice("gate", 10.0, 1010.0, "motion"), generation=0
+    )
+    assert camera.intent is not None
+    controller.acknowledge_admission(
+        camera.intent.intent_id, admitted=True, occurred_monotonic=1010.1
+    )
+    merged_ema = _qualified_region(
+        track_id=7,
+        region=(0.1, 0.1, 0.3, 0.4),
+        started_at=10.0,
+    )
+
+    merged = controller.observe_ema(merged_ema, generation=0)
+    controller.complete(camera.intent.intent_id, occurred_monotonic=1011.2)
+    duplicate = controller.observe_ema(
+        replace(
+            merged_ema,
+            captured_at=14.0,
+            observed_monotonic=1014.0,
+        ),
+        generation=0,
+    )
+
+    assert merged.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST
+    assert duplicate.reason is EpisodeDecisionReason.FOLLOWUP_DUPLICATE
+
+
+def test_failed_reserved_source_hands_retained_evidence_to_other_source() -> None:
+    controller = MotionEpisodeController("gate", incarnation_id="handoff")
+    camera = controller.observe_camera(
+        CameraNotice("gate", 10.0, 1010.0, "motion"), generation=0
+    )
+    assert camera.intent is not None
+    merged = controller.observe_ema(_qualified("gate"), generation=0)
+    assert merged.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST
+
+    fallback = controller.acknowledge_admission(
+        camera.intent.intent_id, admitted=False, occurred_monotonic=1011.1
+    )
+
+    assert fallback.reason is EpisodeDecisionReason.REQUEST_RESERVED
+    assert fallback.intent is not None
+    assert fallback.intent.primary_source.value == "ema"
+    assert fallback.intent.intent_id != camera.intent.intent_id
+    assert controller.snapshot()["request_status"] == "reserved"
+    assert [item.reason for item in controller.transitions()][-2:] == [
+        EpisodeDecisionReason.REQUEST_ABORTED,
+        EpisodeDecisionReason.REQUEST_RESERVED,
+    ]
+
+    for admitted in (True, False):
+        settled = controller.acknowledge_admission(
+            camera.intent.intent_id,
+            admitted=admitted,
+            occurred_monotonic=1011.15,
+        )
+        assert settled.reason is EpisodeDecisionReason.REQUEST_ABORTED
+        assert controller.snapshot()["request_status"] == "reserved"
+        assert controller.snapshot()["intent_id"] == fallback.intent.intent_id
+
+    terminal = controller.acknowledge_admission(
+        fallback.intent.intent_id, admitted=False, occurred_monotonic=1011.2
+    )
+    assert terminal.reason is EpisodeDecisionReason.REQUEST_ABORTED
+    assert controller.snapshot()["request_status"] == "aborted"
+    assert controller.snapshot()["intent_id"] is None
+    with pytest.raises(ValueError, match="unknown or stale"):
+        controller.acknowledge_admission(
+            "gate:unknown",
+            admitted=True,
+            occurred_monotonic=1011.3,
+        )
 
 
 def test_route_security_verification_is_not_dropped_by_cooldown_or_rate_limit() -> None:
