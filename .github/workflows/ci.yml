@@ -47,6 +47,9 @@ jobs:
             tests/test_face_store.py \
             tests/test_calibration.py \
             tests/test_live_delivery.py \
+            tests/test_detector*.py \
+            tests/test_detection*.py \
+            tests/test_depth_estimation.py \
             tests/test_inference.py \
             tests/test_inference_lifecycle.py \
             tests/test_object_tracking.py \
