@@ -393,6 +393,31 @@ class AdaptiveEmaBackgroundStage:
         return context
 
 
+def _difference_statistics(difference: np.ndarray) -> tuple[float, float, float]:
+    """Use a byte histogram for median/MAD and NumPy for percentile interpolation."""
+    flat = difference.reshape(-1)
+    if difference.dtype != np.uint8 or not flat.size:
+        flat = flat.astype(np.float32, copy=False)
+        median = float(np.median(flat))
+        mad = float(np.median(np.abs(flat - median)))
+        return median, mad, float(np.percentile(flat, 80))
+
+    counts = np.bincount(flat, minlength=256)
+    cumulative = counts.cumsum()
+    middle_ranks = [(flat.size - 1) // 2, flat.size // 2]
+    median = float(np.mean(np.searchsorted(cumulative, middle_ranks, side="right")))
+
+    deviations = np.abs(np.arange(256, dtype=np.float32) - median)
+    order = np.argsort(deviations)
+    deviation_ranks = np.searchsorted(
+        counts[order].cumsum(), middle_ranks, side="right",
+    )
+    mad = float(np.mean(deviations[order[deviation_ranks]]))
+
+    percentile = float(np.percentile(flat.astype(np.float32, copy=False), 80))
+    return median, mad, percentile
+
+
 class AdaptiveStatisticalThresholdStage:
     """Derive a smoothed threshold from robust per-scene difference statistics."""
 
@@ -430,11 +455,8 @@ class AdaptiveStatisticalThresholdStage:
                 )
                 cached = state.statistics.get(timestamp) if timestamp is not None else None
                 if cached is None:
-                    flat = difference.reshape(-1).astype(np.float32, copy=False)
-                    median = float(np.median(flat))
-                    mad = float(np.median(np.abs(flat - median)))
+                    median, mad, percentile = _difference_statistics(difference)
                     noise = max(0.5, 1.4826 * mad)
-                    percentile = float(np.percentile(flat, 80))
                     candidate = min(
                         self.maximum,
                         max(
