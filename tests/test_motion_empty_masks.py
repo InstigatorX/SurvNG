@@ -107,13 +107,14 @@ class EmptyMotionMasksTest(unittest.TestCase):
                     self.assertEqual(actual[1][0, 0], 0)
                     self.assertEqual(empty[0, 0], 0)
 
-    def test_morphology_only_skips_exact_zero_binary_masks(self):
+    def test_morphology_processes_masks_without_a_preliminary_zero_scan(self):
         empty = np.zeros((48, 64), np.uint8)
         single = empty.copy()
         single[20, 20] = 1
-        with patch("survng.app.motion.cv2.morphologyEx", wraps=cv2.morphologyEx) as native:
-            morphology_motion_masks([empty, single])
-        self.assertEqual(native.call_count, 2)
+        with patch("survng.app.motion.cv2.countNonZero", wraps=cv2.countNonZero) as zero_scan:
+            actual = morphology_motion_masks([empty, single])
+        zero_scan.assert_not_called()
+        self.assert_equivalent(actual, native_morphology([empty, single]))
         self.assertEqual(morphology_motion_masks([]), [])
 
     def test_morphology_retains_native_format_and_invalid_input_behavior(self):
