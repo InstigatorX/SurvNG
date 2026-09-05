@@ -592,7 +592,7 @@ class _InferenceWorker:
                         )
                         raise InferenceUnavailable(self._last_error)
                     response = connection.recv()
-                except (BrokenPipeError, EOFError, OSError):
+                except (BrokenPipeError, EOFError, OSError) as exc:
                     error = f"{self.role} inference worker connection failed."
                     self._terminate_failed_worker_locked(
                         error
