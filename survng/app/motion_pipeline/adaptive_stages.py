@@ -603,6 +603,21 @@ class ConnectedComponentBlobStage:
                 if context.motion_inclusion_mask is not None
                 else mask
             )
+            changed = int(cv2.countNonZero(effective_mask))
+            if (
+                effective_mask.dtype == np.uint8
+                and effective_mask.ndim == 2
+                and effective_mask.size
+                and changed == 0
+            ):
+                # Preserve empty observations for downstream tracking/scoring.
+                history.append(MotionFrameBlobs(
+                    frame_area=frame_area,
+                    changed_pixels=0,
+                    changed_ratio=0.0,
+                    blobs=(),
+                ))
+                continue
             count, labels, stats, centroids = cv2.connectedComponentsWithStats(effective_mask, 8)
             intensity = (
                 context.difference_history[index]
@@ -640,7 +655,6 @@ class ConnectedComponentBlobStage:
                     ignored_zone_overlap=0.0,
                     zone_names=(),
                 ))
-            changed = int(cv2.countNonZero(effective_mask))
             history.append(MotionFrameBlobs(
                 frame_area=frame_area,
                 changed_pixels=changed,

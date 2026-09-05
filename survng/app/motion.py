@@ -60,8 +60,21 @@ def morphology_motion_masks(
     close_iterations: int = 2,
 ) -> list[np.ndarray]:
     kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    # Keep OpenCV's parameter validation for unusual iteration values.
+    can_skip_empty = type(close_iterations) is int and 0 <= close_iterations < 2**31
     processed: list[np.ndarray] = []
     for mask in masks:
+        # Empty binary masks are unchanged by opening/closing. Keep each result
+        # independently owned, and leave other input formats to OpenCV.
+        if (
+            can_skip_empty
+            and mask.dtype == np.uint8
+            and mask.ndim == 2
+            and mask.size
+            and not cv2.countNonZero(mask)
+        ):
+            processed.append(mask.copy())
+            continue
         opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         processed.append(
             cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
