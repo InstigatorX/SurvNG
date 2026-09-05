@@ -4,9 +4,11 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 import copy
 from collections import deque
+import errno
 import hashlib
 import logging
 import queue
+import sqlite3
 import threading
 import time
 import uuid
@@ -16,6 +18,7 @@ import numpy as np
 
 from .durable_payload import durable_json_copy
 from .event_store.jobs import (
+    DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS,
     DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS,
     DETECTION_JOB_MAXIMUM_AGE_SECONDS,
     detection_job_occurrence_equivalent,
@@ -28,6 +31,7 @@ from .security import redact_secret_text
 LOGGER = logging.getLogger(__name__)
 REFINEMENT_COMPLETION_RETRY_SECONDS = 2.0
 REFINEMENT_COMPLETION_MAXIMUM_ATTEMPTS = 2_147_483_647
+REFINEMENT_STORE_RETRY_SECONDS = 2.0
 
 
 class MotionDecisionProcessor(Protocol):
@@ -69,6 +73,7 @@ class DetectionJobStore(Protocol):
         event_maximum_age_seconds: float | None = None,
     ) -> int: ...
     def detection_job_status(self, camera_id: str) -> dict[str, int | float]: ...
+    def pending_detection_job_ids(self, camera_id: str) -> set[str]: ...
 
     def refine(
         self,
@@ -372,8 +377,11 @@ class _MemoryDetectionJobStore:
         event_cutoff = now - event_maximum_age
         expired = 0
         for job in self._jobs.values():
+            checkpointed = isinstance(job["payload"].get("refined_outcome"), dict)
             cutoff = (
-                event_cutoff
+                now - DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS
+                if checkpointed
+                else event_cutoff
                 if job["payload"].get("existing_event_id") is not None
                 else probe_cutoff
             )
@@ -387,7 +395,9 @@ class _MemoryDetectionJobStore:
             )
             if job["state"] == "queued" or reclaimable_running:
                 job["state"] = "failed"
-                job["last_error"] = "stale_refinement"
+                job["last_error"] = (
+                    "expired_refinement_completion" if checkpointed else "stale_refinement"
+                )
                 job["lease_owner"] = ""
                 job["lease_expires_at"] = None
                 expired += 1
@@ -419,7 +429,6 @@ class _MemoryDetectionJobStore:
         self, job_id, error, *, retry_delay_seconds=2.0, maximum_attempts=5,
         lease_owner="",
     ):
-        del error
         with self._lock:
             job = self._jobs[job_id]
             if job["state"] != "running":
@@ -428,10 +437,19 @@ class _MemoryDetectionJobStore:
                 return None
             retry = job["attempts"] < maximum_attempts
             job["state"] = "queued" if retry else "failed"
+            job["last_error"] = str(error)[:1000]
             job["available_at"] = time.monotonic() + retry_delay_seconds
             job["lease_owner"] = ""
             job["lease_expires_at"] = None
             return retry
+
+    def pending_detection_job_ids(self, camera_id):
+        with self._lock:
+            return {
+                job_id for job_id, job in self._jobs.items()
+                if job["camera_id"] == camera_id
+                and job["state"] in {"queued", "running"}
+            }
 
     def detection_job_status(self, camera_id):
         with self._lock:
@@ -826,6 +844,65 @@ class MotionIncidentService:
         return "queued"
 
     def _run_refinements(self) -> None:
+        """Recover ledger I/O without starting a second consumer or losing leases."""
+        last_log: float | None = None
+        try:
+            while (stop := self._refinement_stop) is not None and not stop.is_set():
+                try:
+                    self._run_refinements_until_error()
+                    return
+                except Exception as error:
+                    retryable = self._retryable_store_error(error)
+                    with self._status_lock:
+                        self._refinement_failures += 1
+                        self._last_refinement_failure = {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "error": redact_secret_text(error)[:500],
+                            "error_type": type(error).__name__,
+                        }
+                    now = time.monotonic()
+                    if not retryable or last_log is None or now - last_log >= 60.0:
+                        last_log = now
+                        LOGGER.exception(
+                            "motion refinement worker %s for %s",
+                            "retrying ledger I/O" if retryable else "stopped after unexpected failure",
+                            self.camera_id,
+                        )
+                    if not retryable or stop.wait(REFINEMENT_STORE_RETRY_SECONDS):
+                        return
+        finally:
+            with self._status_lock:
+                self._refinement_accepting = False
+
+    @staticmethod
+    def _retryable_store_error(error: Exception) -> bool:
+        if isinstance(error, sqlite3.OperationalError):
+            code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+            return code in {
+                sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_IOERR,
+                sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_FULL, sqlite3.SQLITE_PROTOCOL,
+            } or (not code and str(error).lower() in {
+                "database is locked", "database table is locked", "disk i/o error",
+                "unable to open database file", "database or disk is full",
+            })
+        return isinstance(error, OSError) and error.errno in {
+            errno.EAGAIN, errno.EINTR, errno.EIO, errno.ENOSPC,
+            errno.ESTALE, errno.ETIMEDOUT,
+        }
+
+    def _forget_terminal_refinements(self) -> None:
+        with self._status_lock:
+            local_ids = set(self._refinement_callbacks) | set(self._refinement_progress)
+        if not local_ids:
+            return
+        pending = self.refinement_store.pending_detection_job_ids(self.camera_id)
+        with self._status_lock:
+            for job_id in local_ids:
+                if job_id not in pending:
+                    self._refinement_callbacks.pop(job_id, None)
+                    self._refinement_progress.pop(job_id, None)
+
+    def _run_refinements_until_error(self) -> None:
         last_prune = 0.0
         last_stale_expiry = 0.0
         while True:
@@ -859,6 +936,7 @@ class MotionIncidentService:
                                 REFINEMENT_EVENT_MAX_QUEUE_AGE_SECONDS
                             ),
                         ))
+                        self._forget_terminal_refinements()
                         if expired:
                             LOGGER.info(
                                 "expired %d stale motion refinement job(s) for %s",
@@ -888,9 +966,30 @@ class MotionIncidentService:
             with self._status_lock:
                 callback = self._refinement_callbacks.get(job_id)
                 completion_handler = self._refinement_completion_handler
-            durable_job = _RefinementJob.from_payload(
-                dict(claimed["payload"]), callback
-            )
+            try:
+                durable_job = _RefinementJob.from_payload(
+                    dict(claimed["payload"]), callback
+                )
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
+                # This claimed occurrence cannot be processed. Quarantine it
+                # under our lease so later valid work can proceed immediately.
+                self.refinement_store.retry_detection_job(
+                    job_id,
+                    f"invalid_refinement_payload: {redact_secret_text(error)[:500]}",
+                    maximum_attempts=1,
+                    lease_owner=self._lease_owner,
+                )
+                with self._status_lock:
+                    self._refinement_callbacks.pop(job_id, None)
+                    self._refinement_progress.pop(job_id, None)
+                    self._refinement_failures += 1
+                    self._last_refinement_failure = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "error": "invalid_refinement_payload",
+                        "error_type": type(error).__name__,
+                    }
+                LOGGER.exception("invalid refinement job %s for %s", job_id, self.camera_id)
+                continue
             with self._status_lock:
                 local_progress = self._refinement_progress.get(job_id)
             job = durable_job
@@ -1108,7 +1207,9 @@ class MotionIncidentService:
                 maximum_attempts=REFINEMENT_COMPLETION_MAXIMUM_ATTEMPTS,
                 lease_owner=self._lease_owner,
             )
-        except Exception:
+        except Exception as retry_error:
+            if not self._retryable_store_error(retry_error):
+                raise
             # Keep the successful result in memory. The same owner can reclaim
             # its running lease and retry the checkpoint without inference.
             LOGGER.exception(
