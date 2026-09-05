@@ -289,8 +289,10 @@ def apply_depth_zone_filters(
             None,
         )
         if incident_zone is not None:
-            detected["incident_eligible"] = True
-            detected["zone_eligible"] = True
+            # Depth is enrichment after spatial/confidence/temporal admission.
+            # A matching band must not reverse another stage's rejection,
+            # including the estimator's global maximum-distance veto.
             detected["depth_zone_matched"] = incident_zone.name
-            detected["zone_admission_reason"] = "depth_incident_zone"
+            if detected.get("incident_eligible") is not False:
+                detected["zone_admission_reason"] = "depth_incident_zone"
     return objects
