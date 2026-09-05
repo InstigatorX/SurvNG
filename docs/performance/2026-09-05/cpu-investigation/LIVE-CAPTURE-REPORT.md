@@ -1,13 +1,11 @@
-> Preliminary, frozen investigation snapshot for the follow-up to PR #167.
-> The 45-minute capture was still running when these files were prepared;
-> final analysis and recording checks are pending. Referenced JSON/raw captures
-> and helper scripts remain host-local under `/root/survng-measurements/` and
-> are intentionally not published here. Commands and PIDs describe the original
-> capture, not a newly started job; verify process identity before using them.
+> Completed capture: 2026-09-05 05:45:44–06:30:44 UTC (45 minutes).
+> See [Final Astra assessment](FINAL-ASTRA-ASSESSMENT.md) for conclusions and limits.
+> Referenced raw captures, JSON evidence and collector helpers remain host-local
+> under `/root/survng-measurements/`; they are not published in this documentation PR.
 
 # 45-minute motion CPU investigation
 
-Updated 2026-09-05T05:56:55.195146+00:00; capture running.
+Updated 2026-09-05T06:31:27.946477+00:00; capture finished.
 
 ## CPU and memory over process age
 
@@ -23,7 +21,13 @@ No warmup cutoff is imposed. These are five-minute reporting bins; changing acti
 | original post | 25.0–29.9 | 26.9–31.8 | 2.894 | 2.293 | 0.461 | 11.604 | 0 | 59 |
 | new | 0.0–5.0 | 163.3–168.3 | 3.452 | 2.651 | 0.572 | 9.018 | 0 | 59 |
 | new | 5.0–10.0 | 168.3–173.3 | 3.620 | 2.691 | 0.605 | 9.193 | 1 | 59 |
-| new | 10.0–11.2 | 173.3–174.5 | 4.227 | 2.908 | 0.780 | 9.193 | 0 | 14 |
+| new | 10.0–15.0 | 173.3–178.3 | 3.784 | 2.736 | 0.674 | 9.407 | 0 | 59 |
+| new | 15.0–20.0 | 178.3–183.3 | 3.905 | 2.803 | 0.691 | 9.822 | 0 | 59 |
+| new | 20.0–25.0 | 183.3–188.3 | 3.419 | 2.553 | 0.591 | 8.547 | 0 | 59 |
+| new | 25.0–30.0 | 188.3–193.3 | 3.172 | 2.394 | 0.548 | 8.359 | 0 | 59 |
+| new | 30.0–35.0 | 193.3–198.3 | 3.567 | 2.690 | 0.601 | 8.565 | 0 | 59 |
+| new | 35.0–40.0 | 198.3–203.3 | 3.935 | 2.833 | 0.734 | 8.377 | 0 | 59 |
+| new | 40.0–44.9 | 203.3–208.2 | 3.303 | 2.525 | 0.545 | 8.065 | 0 | 59 |
 
 ## Matched measurement coverage
 
@@ -31,14 +35,14 @@ The fixed elapsed-capture window starts at minute 6 and ends at minute 29 (or th
 
 | Capture | Covered seconds | CPU cores | Main cores | Unattributed CPU seconds |
 |---|---:|---:|---:|---:|
-| original_post | 305.0 | 2.905 | 2.303 | 20.431 |
-| new | 310.0 | 3.572 | 2.645 | 59.653 |
+| original_post | 1376.3 | 3.143 | 2.439 | 149.160 |
+| new | 1375.0 | 3.527 | 2.607 | 256.119 |
 
 ## Marked activity
 
 | Category | Seconds | CPU cores | Intervals |
 |---|---:|---:|---:|
-| unmarked | 670.0 | 3.625 | 134 |
+| unmarked | 2695.8 | 3.584 | 539 |
 
 Quiet on one camera is not quiet for the whole fleet. Marker-boundary intervals are separated; unfinished scenarios are not retrospectively classified. Actual activity and detection outcomes are stored in separate files. No marked scenes means no recall conclusions.
 
@@ -46,31 +50,31 @@ Quiet on one camera is not quiet for the whole fleet. Marker-boundary intervals 
 
 | Camera | Scene category | Minute rows | Preparation fps estimate | Admissions | Failures | Superseded |
 |---|---|---:|---:|---:|---:|---:|
-| back-left | unmarked | 7 | 4.036 | 5 | 0 | 0 |
-| back-middle | unmarked | 7 | 2.938 | 1 | 0 | 0 |
-| back-right | unmarked | 7 | 4.183 | 4 | 0 | 0 |
-| boiler | unmarked | 7 | 3.938 | 5 | 0 | 0 |
-| downstairs | unmarked | 7 | 3.907 | 0 | 0 | 0 |
-| foyer | unmarked | 7 | 3.848 | 0 | 0 | 0 |
-| front-door | unmarked | 7 | 4.010 | 0 | 0 | 0 |
-| front-side | unmarked | 7 | 4.002 | 1 | 0 | 0 |
-| gate | unmarked | 7 | 4.005 | 0 | 0 | 0 |
-| lower-garage | unmarked | 7 | 2.695 | 0 | 0 | 0 |
-| sherry-garage | unmarked | 7 | 4.371 | 0 | 0 | 0 |
-| steve-garage | unmarked | 7 | 4.005 | 0 | 0 | 0 |
-| upper-garage | unmarked | 7 | 2.895 | 0 | 0 | 0 |
+| back-left | unmarked | 40 | 4.026 | 28 | 0 | 1 |
+| back-middle | unmarked | 40 | 2.957 | 11 | 0 | 0 |
+| back-right | unmarked | 40 | 4.221 | 18 | 0 | 0 |
+| boiler | unmarked | 40 | 3.957 | 17 | 0 | 3 |
+| downstairs | unmarked | 40 | 3.957 | 0 | 0 | 0 |
+| foyer | unmarked | 40 | 3.863 | 2 | 0 | 0 |
+| front-door | unmarked | 40 | 4.019 | 0 | 0 | 0 |
+| front-side | unmarked | 40 | 3.993 | 8 | 0 | 0 |
+| gate | unmarked | 40 | 3.991 | 0 | 0 | 0 |
+| lower-garage | unmarked | 40 | 2.732 | 0 | 0 | 0 |
+| sherry-garage | unmarked | 40 | 4.370 | 0 | 0 | 0 |
+| steve-garage | unmarked | 40 | 3.997 | 0 | 0 | 0 |
+| upper-garage | unmarked | 40 | 2.912 | 1 | 0 | 0 |
 
 Full per-camera capture/queue/failure evidence, process-age bins, alignment/budget indicators, and separate human outcomes are in live-comparison.json. Preparation fps is not stage duration or completed qualification cadence.
 
 ## Verified causes versus hypotheses
 
-The aligned original evidence localizes ~97% of the measured service CPU increase to the main process. Astra verified that the retired quiet gate now allows qualification/learning to execute and that the four-frame window processes an additional transition. Neither identifies stage CPU shares. See ASTRA-SOURCE-REVIEW.md for consumers, mechanisms and missing timers.
+The aligned original pre→post evidence localizes ~97% of that service CPU increase to the main process. This does not describe the later original-post→new comparison, where about 44% of the additional CPU lies in the main process. Astra verified that the retired quiet gate now allows qualification/learning to execute and that the four-frame window processes an additional transition. Neither identifies stage CPU shares. See ASTRA-SOURCE-REVIEW.md for consumers, mechanisms and missing timers.
 
 No plateau in process CPU alone proves EMA warmup is complete. EMA learning-state indicators are absent from the allowlisted snapshot; alignment state must not be substituted. No existing diagnostic samples were found for the earlier captures.
 
 ## Recording checks
 
-Recording flags are not proof of decodability. Only completed marked scenarios on recording-enabled cameras are eligible for saved-segment checks. Results, when run, are in recording-checks.json; absent markers mean unverified recording continuity, not a clean bill of health.
+The recording checker completed with zero eligible marked scenarios and no media reads or decodes. Recording continuity and decodability remain unverified, not passed. The host-local result is recording-checks.json.
 
 ## Smallest next measurement
 

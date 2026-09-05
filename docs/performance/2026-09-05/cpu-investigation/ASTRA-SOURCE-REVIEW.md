@@ -1,9 +1,7 @@
-> Preliminary, frozen investigation snapshot for the follow-up to PR #167.
-> The 45-minute capture was still running when these files were prepared;
-> final analysis and recording checks are pending. Referenced JSON/raw captures
-> and helper scripts remain host-local under `/root/survng-measurements/` and
-> are intentionally not published here. Commands and PIDs describe the original
-> capture, not a newly started job; verify process identity before using them.
+> Completed capture: 2026-09-05 05:45:44–06:30:44 UTC (45 minutes).
+> See [Final Astra assessment](FINAL-ASTRA-ASSESSMENT.md) for conclusions and limits.
+> Referenced raw captures, JSON evidence and collector helpers remain host-local
+> under `/root/survng-measurements/`; they are not published in this documentation PR.
 
 # Motion CPU source review — 2026-09-05
 
@@ -32,7 +30,7 @@ The new path at `:1040-1137` reuses prepared derivatives and runs the actual qua
 | Stage | Work now reached on formerly gated cycles | Conditions/limits |
 |---|---|---|
 | Preprocessor | Uses cached processed-frame history (`image_stages.py:33`) | Normal path does **not** blur the same history again; prep had already paid that cost before the old gate. |
-| Adaptive background | Copies float background and persistence images; float conversion, absolute differences, median/MAD and changed-pixel counts per transition; persistent-change time and stable/moving/stationary masked weighted updates; brightness/noise state and output conversion (`adaptive_stages.py:213-390`) | Historical transitions skip learning writes but still compute difference/robust statistics before the stale check at `:279`. Quiet pixels still participate in learning. |
+| Adaptive background | Copies float background and persistence images; float conversion, absolute differences, median/MAD and changed-pixel counts per transition; persistent-change time and stable/moving/stationary masked weighted updates; brightness/noise state and output conversion (`adaptive_stages.py:213-390`) | Historical transitions skip background/persistence-image updates, but still compute difference/robust statistics and update the invocation's noise accumulator before the stale check at `:279`; that noise accumulator can later be persisted at `:370`. Quiet pixels still participate in learning. |
 | Adaptive threshold | For uncached timestamps, float statistics, median/MAD and 80th percentile; threshold smoothing for new timestamps; threshold each difference (`:417-472`) | Historical timestamp statistics are cached (up to 16), but masks are generated again. |
 | EMA exclusion | Resolve cached zone-mask signature and apply mask (`:533-579`) | No pixel mask application when no EMA exclusion zones exist. |
 | Morphology | Open and close every transition mask (`image_stages.py:93`, `motion.py:57-68`) | Includes all-zero quiet masks. |

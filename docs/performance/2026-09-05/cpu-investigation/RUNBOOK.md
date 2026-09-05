@@ -1,15 +1,13 @@
-> Preliminary, frozen investigation snapshot for the follow-up to PR #167.
-> The 45-minute capture was still running when these files were prepared;
-> final analysis and recording checks are pending. Referenced JSON/raw captures
-> and helper scripts remain host-local under `/root/survng-measurements/` and
-> are intentionally not published here. Commands and PIDs describe the original
-> capture, not a newly started job; verify process identity before using them.
+> Completed capture: 2026-09-05 05:45:44–06:30:44 UTC (45 minutes).
+> See [Final Astra assessment](FINAL-ASTRA-ASSESSMENT.md) for conclusions and limits.
+> Referenced raw captures, JSON evidence and collector helpers remain host-local
+> under `/root/survng-measurements/`; they are not published in this documentation PR.
 
-# Motion CPU investigation — active capture
+# Motion CPU investigation — completed capture
 
 The unchanged original collector started at 2026-09-05 05:45:44 UTC
-(01:45:44 EDT), for 2700 seconds. Expected finish: 06:30:44 UTC
-(02:30:44 EDT). Do not start a duplicate capture.
+(01:45:44 EDT), for 2700 seconds. Finished: 06:30:44 UTC
+(02:30:44 EDT). The collectors have exited; do not start another capture without authorization.
 
 Capture directory:
 `/root/survng-measurements/investigation-20260905/capture-20260905T054543Z`
@@ -32,13 +30,9 @@ python3 -B /root/survng-measurements/pre-deployment/baseline.py status /root/sur
 python3 -B /root/survng-measurements/pre-deployment/baseline.py stop /root/survng-measurements/investigation-20260905/capture-20260905T054543Z
 ```
 
-The report updater and recording checker exit automatically. To cancel only
-those helpers before completion, verify their command lines first:
-
-```bash
-ps -p 4041905,4041906 -o pid,args
-kill -TERM 4041905 4041906
-```
+The report updater and recording checker have exited. PIDs above are historical;
+do not signal them because they may be reused. Commands describe the original
+host-local workflow, not active jobs.
 
 ## Human ground truth
 
@@ -71,8 +65,9 @@ Unmarked periods remain unmarked, not automatically quiet or normal.
 Original scripts and original captures are unchanged. Process resources are
 sampled about every five seconds. The original application collector begins
 at fifteen seconds and backs off after requests exceeding 250 ms or errors.
-This run has backed off to thirty seconds; actual timestamps/request durations
-are saved. Existing minute telemetry is read with the original lag/bounds.
+This completed run scheduled intervals of 15, 30, 60 and finally 120 seconds.
+There were 67 successful application snapshots; the final state sample preceded
+capture completion by 84.5 seconds. Actual timestamps/request durations are saved. Existing minute telemetry is read with the original lag/bounds.
 Do not treat missing final minute rows as zero activity.
 
 Metadata records checkout/deployment evidence, process identity/age and the
@@ -110,3 +105,10 @@ decoder errors, timeouts, and unverified portions are reported separately.
 Successful samples do not establish whole-scenario frame continuity.
 
 No service, settings, application code, packages or profiler changes were made.
+
+## Completed outcome
+
+All measured periods were unmarked. The recording checker completed without
+reading or decoding media because no eligible scenarios were marked. Recording
+continuity, decodability and detection recall remain unverified. Final assessment
+and full measurement tables are included alongside this historical runbook.
