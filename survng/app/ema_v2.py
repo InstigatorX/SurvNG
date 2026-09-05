@@ -70,6 +70,9 @@ class EmaQualified:
     qualifying_samples: int
     window_samples: int
     candidate_started_at: float
+    evidence_frame_at_epoch: float | None = None
+    evidence_frame_sequence: int = 0
+    evidence_capture_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,12 +340,16 @@ class _Episode:
     # influence the authority of detector work downstream.
     sources: set[MotionSource] = field(default_factory=set)
     admitted_sources: set[MotionSource] = field(default_factory=set)
+    failed_admission_sources: set[MotionSource] = field(default_factory=set)
+    pending_sources: set[MotionSource] = field(default_factory=set)
     ema: EmaQualified | None = None
     camera_notice: CameraNotice | None = None
     intent: DetectionIntent | None = None
     status: DetectionRequestStatus | None = None
+    admission_acknowledged: bool = False
     completed_monotonic: float | None = None
     request_count: int = 0
+    intent_sequence: int = 0
     followup_count: int = 0
     last_request_monotonic: float = 0.0
     known_track_ids: set[int] = field(default_factory=set)
@@ -470,6 +477,10 @@ class MotionEpisodeController:
                 )
             episode = self._episode_for(observed_monotonic)
             episode.sources.add(source)
+            # A fresh observation may retry a source whose earlier queue
+            # admission failed.  Retain failures only long enough to prevent
+            # an automatic cross-source handoff from cycling indefinitely.
+            episode.failed_admission_sources.discard(source)
             episode.updated_monotonic = max(
                 episode.updated_monotonic, observed_monotonic
             )
@@ -488,9 +499,12 @@ class MotionEpisodeController:
             }:
                 if episode.intent is not None:
                     if episode.status is DetectionRequestStatus.RESERVED:
+                        episode.pending_sources.add(source)
                         request_sources = set(episode.intent.sources) | {source}
                     else:
                         episode.admitted_sources.add(source)
+                        if ema is not None:
+                            self._remember_ema(episode, ema)
                         request_sources = set(episode.admitted_sources)
                     episode.intent = DetectionIntent(
                         intent_id=episode.intent.intent_id,
@@ -561,37 +575,12 @@ class MotionEpisodeController:
                     observed_monotonic,
                     episode,
                 )
-            episode.request_count += 1
-            followup = episode.request_count > 1
-            request_sources = set(episode.admitted_sources) | {source}
-            intent = DetectionIntent(
-                intent_id=f"{episode.episode_id}:request:{episode.request_count}",
-                episode_id=episode.episode_id,
-                camera_id=self.camera_id,
-                generation=generation,
-                event_at=event_at,
-                created_monotonic=observed_monotonic,
-                primary_source=source,
-                sources=tuple(sorted(request_sources, key=str)),
-                followup=followup,
-                ema=episode.ema,
-                camera_notice=episode.camera_notice,
-            )
-            episode.intent = intent
-            episode.status = DetectionRequestStatus.RESERVED
-            episode.last_request_monotonic = observed_monotonic
-            if followup:
-                episode.followup_count += 1
-            return self._decision(
-                (
-                    EpisodeDecisionReason.FOLLOWUP_RESERVED
-                    if followup
-                    else EpisodeDecisionReason.REQUEST_RESERVED
-                ),
-                source,
-                observed_monotonic,
+            return self._reserve_intent(
                 episode,
-                intent,
+                source=source,
+                event_at=event_at,
+                observed_monotonic=observed_monotonic,
+                generation=generation,
             )
 
     def acknowledge_admission(
@@ -602,25 +591,62 @@ class MotionEpisodeController:
         occurred_monotonic: float,
     ) -> EpisodeDecision:
         with self._lock:
+            settled = self._settled_admission(intent_id)
+            if settled is not None:
+                return settled
             episode = self._require_intent(intent_id)
             intent = episode.intent
             source = intent.primary_source
             if admitted:
+                first_admission = not episode.admission_acknowledged
+                episode.admission_acknowledged = True
                 episode.admitted_sources.update(intent.sources)
-                episode.status = DetectionRequestStatus.ADMITTED
+                # Queue delivery can begin immediately after enqueue returns.
+                # A fast worker may therefore advance this reservation before
+                # its producer records admission.  Preserve that later state.
+                if episode.status is DetectionRequestStatus.RESERVED:
+                    episode.status = DetectionRequestStatus.ADMITTED
                 episode.intent = self._refresh_intent_sources(
                     intent, episode.admitted_sources
                 )
-                if source is MotionSource.EMA:
-                    self._record_ema_admission(occurred_monotonic)
-                if intent.ema is not None:
-                    self._remember_ema(episode, intent.ema)
+                if first_admission:
+                    if source is MotionSource.EMA:
+                        self._record_ema_admission(occurred_monotonic)
+                    if intent.ema is not None:
+                        self._remember_ema(episode, intent.ema)
+                else:
+                    return EpisodeDecision(
+                        EpisodeDecisionReason.REQUEST_ADMITTED,
+                        episode.episode_id,
+                        episode.intent,
+                    )
                 reason = EpisodeDecisionReason.REQUEST_ADMITTED
             else:
+                if episode.status is not DetectionRequestStatus.RESERVED:
+                    return EpisodeDecision(
+                        EpisodeDecisionReason.REQUEST_ABORTED,
+                        episode.episode_id,
+                        episode.intent,
+                    )
                 episode.status = DetectionRequestStatus.ABORTED
                 episode.intent = None
+                episode.failed_admission_sources.add(source)
                 self._refund_reservation(episode, intent)
-                reason = EpisodeDecisionReason.REQUEST_ABORTED
+                fallback_sources = (
+                    episode.pending_sources - episode.failed_admission_sources
+                )
+                aborted = self._decision(
+                    EpisodeDecisionReason.REQUEST_ABORTED,
+                    source,
+                    occurred_monotonic,
+                    episode,
+                )
+                fallback = self._fallback_reservation(
+                    episode,
+                    occurred_monotonic=occurred_monotonic,
+                    sources=fallback_sources,
+                )
+                return fallback or aborted
             return self._decision(
                 reason,
                 source,
@@ -628,6 +654,116 @@ class MotionEpisodeController:
                 episode,
                 episode.intent,
             )
+
+    def _reserve_intent(
+        self,
+        episode: _Episode,
+        *,
+        source: MotionSource,
+        event_at: float,
+        observed_monotonic: float,
+        generation: int,
+        sources: Iterable[MotionSource] | None = None,
+    ) -> EpisodeDecision:
+        episode.request_count += 1
+        episode.intent_sequence += 1
+        followup = episode.request_count > 1
+        pending_sources = set(sources or ()) | {source}
+        request_sources = set(episode.admitted_sources) | pending_sources
+        intent = DetectionIntent(
+            intent_id=f"{episode.episode_id}:request:{episode.intent_sequence}",
+            episode_id=episode.episode_id,
+            camera_id=self.camera_id,
+            generation=generation,
+            event_at=event_at,
+            created_monotonic=observed_monotonic,
+            primary_source=source,
+            sources=tuple(sorted(request_sources, key=str)),
+            followup=followup,
+            ema=episode.ema,
+            camera_notice=episode.camera_notice,
+        )
+        episode.intent = intent
+        episode.status = DetectionRequestStatus.RESERVED
+        episode.admission_acknowledged = False
+        episode.pending_sources = pending_sources
+        episode.last_request_monotonic = observed_monotonic
+        if followup:
+            episode.followup_count += 1
+        return self._decision(
+            (
+                EpisodeDecisionReason.FOLLOWUP_RESERVED
+                if followup
+                else EpisodeDecisionReason.REQUEST_RESERVED
+            ),
+            source,
+            observed_monotonic,
+            episode,
+            intent,
+        )
+
+    def _fallback_reservation(
+        self,
+        episode: _Episode,
+        *,
+        occurred_monotonic: float,
+        sources: set[MotionSource],
+    ) -> EpisodeDecision | None:
+        if (
+            episode.ema is not None
+            and MotionSource.EMA in sources
+        ):
+            return self._reserve_intent(
+                episode,
+                source=MotionSource.EMA,
+                event_at=episode.ema.captured_at,
+                observed_monotonic=occurred_monotonic,
+                generation=episode.generation,
+                sources=sources,
+            )
+        notice = episode.camera_notice
+        camera_source = (
+            MotionSource.MANUAL
+            if notice is not None and notice.manual
+            else MotionSource.CAMERA
+        )
+        if (
+            notice is not None
+            and camera_source in sources
+        ):
+            return self._reserve_intent(
+                episode,
+                source=camera_source,
+                event_at=notice.event_at,
+                observed_monotonic=occurred_monotonic,
+                generation=episode.generation,
+                sources=sources,
+            )
+        return None
+
+    def _settled_admission(self, intent_id: str) -> EpisodeDecision | None:
+        episode = self._episode
+        if episode is None:
+            return None
+        prefix = f"{episode.episode_id}:request:"
+        if not intent_id.startswith(prefix):
+            return None
+        try:
+            attempt = int(intent_id[len(prefix):])
+        except ValueError:
+            return None
+        current_id = episode.intent.intent_id if episode.intent is not None else None
+        if (
+            attempt <= 0
+            or attempt > episode.intent_sequence
+            or intent_id == current_id
+        ):
+            return None
+        return EpisodeDecision(
+            EpisodeDecisionReason.REQUEST_ABORTED,
+            episode.episode_id,
+            episode.intent,
+        )
 
     def abort(
         self, intent_id: str, *, occurred_monotonic: float

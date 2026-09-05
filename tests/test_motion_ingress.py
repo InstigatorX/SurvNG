@@ -7,7 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 from survng.app.motion_ingress import MotionEventClock, MotionEventIngressService
-from survng.app.ema_v2 import MotionEpisodeController
+from survng.app.ema_v2 import EmaQualified, MotionEpisodeController
+from survng.app.motion import MotionQualificationResult
 
 
 def _service(
@@ -89,6 +90,59 @@ def test_camera_enqueue_exception_aborts_episode_reservation() -> None:
     assert episode["intent_id"] is None
     assert episode["decision_counts"]["request_aborted"] == 1
     owned.state.end_ingress.assert_called_once_with(1)
+
+
+def test_camera_admission_failure_enqueues_merged_ema_fallback() -> None:
+    service, owned = _service(mode="camera_rescue")
+    ema = EmaQualified(
+        camera_id="gate",
+        captured_at=1_700_000_000.0,
+        observed_monotonic=100.0,
+        result=MotionQualificationResult(
+            accepted=True,
+            score=0.8,
+            threshold=0.48,
+            reason="credible_motion",
+            frame_count=3,
+            features={"motion_region_track_id": 7},
+            telemetry={},
+        ),
+        required_score=0.65,
+        qualifying_samples=3,
+        window_samples=4,
+        candidate_started_at=1_699_999_999.0,
+        evidence_frame_at_epoch=1_699_999_999.875,
+        evidence_frame_sequence=27,
+        evidence_capture_generation=9,
+    )
+    enqueue_calls = 0
+
+    def enqueue(_trigger: object, **_kwargs: object) -> bool:
+        nonlocal enqueue_calls
+        enqueue_calls += 1
+        if enqueue_calls == 1:
+            merged = owned.events.episode_controller.observe_ema(
+                ema, generation=1
+            )
+            assert merged.reason.value == "merged_with_request"
+            return False
+        return True
+
+    owned.events.enqueue.side_effect = enqueue
+
+    service.handle("onvif/motion", "motion")
+
+    assert owned.events.enqueue.call_count == 2
+    fallback = owned.events.enqueue.call_args.args[0]
+    assert fallback.topic == "adaptive/visual_backup"
+    assert fallback.prequalified is not None
+    assert fallback.prequalified.features["ema_v2"] is True
+    assert fallback.evidence_frame_at_epoch == ema.evidence_frame_at_epoch
+    assert fallback.evidence_frame_sequence == 27
+    assert fallback.evidence_capture_generation == 9
+    episode = owned.events.episode_controller.snapshot()
+    assert episode["request_status"] == "admitted"
+    assert episode["admitted_sources"] == ("ema",)
 
 
 def test_event_clock_separates_stable_offset_from_delivery_delay() -> None:

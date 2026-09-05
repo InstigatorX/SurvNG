@@ -8,10 +8,11 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 
+from .motion import MotionQualificationResult
 from .motion_decisions import priority_motion_topic
 from .motion_events import MotionEventCoordinator, MotionEventTiming, MotionTrigger
 from .domain_events import MotionObserved
-from .ema_v2 import CameraNotice, EpisodeDecisionReason
+from .ema_v2 import CameraNotice, EpisodeDecision, EpisodeDecisionReason
 
 
 class MotionIngressQualification(Protocol):
@@ -210,11 +211,13 @@ class MotionEventIngressService:
                     lifecycle_generation=intent.generation,
                 ), evict_oldest=False)
             finally:
-                self.events.episode_controller.acknowledge_admission(
+                admission = self.events.episode_controller.acknowledge_admission(
                     intent.intent_id,
                     admitted=queued,
                     occurred_monotonic=time.monotonic(),
                 )
+                if not queued:
+                    self._enqueue_ema_fallback(admission)
         finally:
             self.state.end_ingress(generation)
 
@@ -240,6 +243,80 @@ class MotionEventIngressService:
             on_trigger=lambda name: self.state.increment_stat(name, 1),
             on_drop=lambda name: self.state.increment_stat(name, 1),
         )
+
+    def _enqueue_ema_fallback(self, admission: EpisodeDecision) -> None:
+        """Deliver EMA evidence retained behind a failed camera reservation."""
+        if admission.reason is not EpisodeDecisionReason.REQUEST_RESERVED:
+            return
+        intent = admission.intent
+        if intent is None or intent.ema is None:
+            return
+        qualified = intent.ema
+        result = qualified.result
+        mode = self.qualification.settings()[0]
+        fallback_result = MotionQualificationResult(
+            accepted=True,
+            score=result.score,
+            threshold=result.threshold,
+            reason=(
+                result.reason
+                if result.reason == "illumination_verification_probe"
+                else "ema_v2_qualified"
+            ),
+            frame_count=result.frame_count,
+            features={
+                **result.features,
+                "visual_backup": mode == "camera_rescue",
+                "active_event_followup": False,
+                "ema_v2": True,
+                "motion_episode_id": intent.episode_id,
+                "visual_backup_required_score": round(
+                    qualified.required_score, 4
+                ),
+                "visual_backup_consecutive": qualified.qualifying_samples,
+                "visual_backup_window_samples": qualified.window_samples,
+                "visual_backup_grace_seconds": max(
+                    0.0, qualified.captured_at - qualified.candidate_started_at
+                ),
+            },
+            telemetry=dict(result.telemetry),
+        )
+        queued = False
+        try:
+            queued = self.enqueue(
+                MotionTrigger(
+                    topic=(
+                        "adaptive/visual_backup"
+                        if mode == "camera_rescue"
+                        else "adaptive/motion"
+                    ),
+                    message="EMA fallback after camera admission failure",
+                    event_at=datetime.fromtimestamp(
+                        qualified.captured_at, timezone.utc
+                    ),
+                    received_at=qualified.captured_at,
+                    prequalified=fallback_result,
+                    episode_id=intent.episode_id,
+                    detection_intent_id=intent.intent_id,
+                    lifecycle_generation=intent.generation,
+                    evidence_frame_at_epoch=(
+                        qualified.evidence_frame_at_epoch
+                        if qualified.evidence_frame_at_epoch is not None
+                        else qualified.captured_at
+                    ),
+                    evidence_frame_sequence=qualified.evidence_frame_sequence,
+                    evidence_capture_generation=(
+                        qualified.evidence_capture_generation
+                    ),
+                ),
+                evict_oldest=False,
+            )
+        finally:
+            self.events.episode_controller.acknowledge_admission(
+                intent.intent_id,
+                admitted=queued,
+                occurred_monotonic=time.monotonic(),
+            )
 
     @staticmethod
     def _utc(value: datetime) -> datetime:
