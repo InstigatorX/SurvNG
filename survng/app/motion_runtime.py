@@ -6,6 +6,7 @@ import copy
 import logging
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Iterable
@@ -49,6 +50,7 @@ class CameraMotionState:
         self._ingress_by_generation: dict[int, int] = {}
         self._last_motion_at = ""
         self._analysis_wait_samples_ms: deque[float] = deque(maxlen=600)
+        self._metrics_instance_id = uuid.uuid4().hex
         self._stats: dict[str, Any] = {
             "triggers": 0,
             "bursts": 0,
@@ -226,6 +228,7 @@ class CameraMotionState:
             samples = sorted(self._analysis_wait_samples_ms)
         result["analysis_wait_ms_p95"] = self._percentile(samples, 0.95)
         result["analysis_wait_ms_p99"] = self._percentile(samples, 0.99)
+        result["metrics_instance_id"] = self._metrics_instance_id
         return result
 
     @staticmethod

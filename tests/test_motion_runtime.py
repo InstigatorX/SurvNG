@@ -325,3 +325,9 @@ def test_motion_state_reports_bounded_analysis_wait_percentiles() -> None:
     snapshot = state.stats_snapshot()
     assert snapshot["analysis_wait_ms_p95"] == 95.0
     assert snapshot["analysis_wait_ms_p99"] == 99.0
+    assert snapshot["analysis_wait_ms_total"] == 5050.0
+    state.record_analysis_wait(0.0)
+    assert state.stats_snapshot()["metrics_instance_id"] == snapshot["metrics_instance_id"]
+    replacement = CameraMotionState(camera_id="gate", camera_state=CameraRuntimeState(), event_callback=None)
+    assert replacement.stats_snapshot()["metrics_instance_id"] != snapshot["metrics_instance_id"]
+    assert replacement.stats_snapshot()["analysis_wait_ms_total"] == 0.0

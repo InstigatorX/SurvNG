@@ -74,6 +74,7 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
     pipelines = [Mock(), Mock(), Mock()]
     for index, pipeline in enumerate(pipelines):
         pipeline.status.return_value = {"pipeline": index}
+        pipeline.handles_observation.return_value = False
     debug = Mock()
     debug.status.return_value = {"enabled": False}
     runtime_state = SimpleNamespace(
@@ -86,6 +87,8 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
     motion_state.stats_snapshot.return_value = {"triggers": 4}
     qualification = Mock()
     qualification.settings.return_value = ("camera_rescue", "balanced", 640)
+    qualification.adaptive_analysis_required.return_value = True
+    qualification.continuous_primary_required.return_value = True
     qualification.stationary_object_tolerance.return_value = "balanced"
     qualification.rescue_settings.return_value = (True, 0.03)
     qualification.visual_backup_settings.return_value = {
@@ -167,6 +170,51 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
 def test_disabled_or_stale_camera_is_not_reported_connected() -> None:
     assert _service(enabled=False).snapshot()["connected"] is False
     assert _service(live_clock=0.0).snapshot()["connected"] is False
+
+
+def test_motion_demand_and_existing_metrics_reach_local_snapshot() -> None:
+    from survng.app.local_observability import _camera_snapshot
+
+    service = _service()
+    service.runtime_state.detection_enabled = False
+    service.motion_analysis.status.return_value["telemetry"] = {
+        "preprocess_count": 10, "preprocess_total_ms": 2.5,
+        "metrics_started_monotonic": 50.0,
+    }
+    service.motion_state.stats_snapshot.return_value.update({
+        "continuous_frames": 4, "analysis_wait_ms_total": 1.25,
+    })
+    service.qualification_pipeline.status.return_value = {
+        "metrics_instance_id": "pipeline-one", "runtime_generation": 3,
+        "configuration": [{"stage_id": "background", "implementation": "adaptive_ema_background"}],
+        "stages": {"background": {"calls": 4, "failures": 0, "total_ms": 4.123456}},
+    }
+    camera = _camera_snapshot(service.snapshot())
+    assert camera["detection_enabled"] is False
+    motion = camera["motion"]
+    assert motion["demand"] == {
+        "adaptive_analysis_required": True, "continuous_primary_required": True,
+        "frame_observer_required": False, "frame_analysis_required": True,
+    }
+    assert motion["analysis"]["preprocess_total_ms"] == 2.5
+    assert motion["continuous_frames"] == 4
+    assert motion["limiter"]["analysis_wait_ms_total"] == 1.25
+    assert motion["pipelines"]["qualification"]["stages"][0]["total_ms"] == 4.123456
+    service.incidents.status.assert_called_once()
+    service.debug_store.status.assert_called_once()
+    service.motion_analysis.status.assert_called_once()
+    service.qualification_pipeline.status.assert_called_once()
+
+    service.qualification.adaptive_analysis_required.return_value = False
+    service.qualification.continuous_primary_required.return_value = False
+    assert _camera_snapshot(service.snapshot())["motion"]["demand"]["frame_analysis_required"] is False
+    service.debug_store.status.return_value = {"enabled": True, "expires_in_seconds": 20.0}
+    debug_motion = _camera_snapshot(service.snapshot())["motion"]
+    assert debug_motion["demand"]["frame_analysis_required"] is True
+    assert debug_motion["debug"]["expires_in_seconds"] == 20.0
+    service.debug_store.status.return_value = {"enabled": False}
+    service.observation_pipeline.handles_observation.return_value = True
+    assert _camera_snapshot(service.snapshot())["motion"]["demand"]["frame_analysis_required"] is True
 
 
 def test_capture_connectivity_reports_reconnecting_when_thread_is_alive_without_fresh_frames() -> None:

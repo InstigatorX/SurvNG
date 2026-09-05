@@ -13,6 +13,7 @@ from survng.app.local_observability import (
     LocalObservabilityServer,
     MAX_RECENT_LOG_BYTES,
     MAX_RECENT_LOG_ROWS,
+    MAX_MOTION_STAGES,
     build_runtime_status,
     request_runtime_status,
 )
@@ -197,6 +198,53 @@ def test_runtime_status_log_tail_is_bounded_allowlisted_and_redacted() -> None:
     assert "[redacted-url]" in encoded
     assert "traceback" not in encoded
     assert "structured_extra" not in encoded
+
+
+def test_motion_projection_excludes_payloads_and_preserves_unavailable_values() -> None:
+    manager = _manager()
+    raw = manager.statuses.return_value[0]
+    raw["motion_qualification"] = {
+        "mode": "camera_rescue", "metrics_instance_id": "motion-one",
+        "continuous_frames": 0, "continuous_candidates": float("nan"),
+        "analysis_runtime": {"qualification_count": True, "preprocess_total_ms": float("inf")},
+        "debug": {"enabled": False, "snapshot": {"image": "secret-payload"}, "last_error": "secret-payload"},
+        "pipeline": {
+            "configuration": [{"stage_id": "background", "implementation": "adaptive_ema_background", "options": {"password": "secret-payload"}}],
+            "stages": {"background": {"calls": 1, "total_ms": 0.123456789, "last_error": "secret-payload"}},
+        },
+        "continuous_last_result": {"features": {"token": "secret-payload"}},
+        "demand": {"frame_analysis_required": "false"},
+    }
+    payload = build_runtime_status(AppConfig(), manager, instance_id="one", uptime_seconds=10, stopping=False)
+    motion = payload["cameras"][0]["motion"]
+    assert motion["continuous_frames"] == 0
+    assert motion["continuous_candidates"] is None
+    assert motion["analysis"]["qualification_count"] is None
+    assert motion["analysis"]["preprocess_total_ms"] is None
+    assert motion["analysis"]["qualification_total_ms"] is None
+    assert motion["debug"]["enabled"] is False
+    assert motion["demand"]["frame_analysis_required"] is None
+    assert motion["pipelines"]["observation"] is None
+    assert motion["pipelines"]["qualification"]["stages"][0]["total_ms"] == 0.123456789
+    assert "secret-payload" not in json.dumps(payload, allow_nan=False)
+    manager.statuses.assert_called_once()
+
+    del raw["motion_qualification"]
+    assert build_runtime_status(AppConfig(), manager, instance_id="one", uptime_seconds=10, stopping=False)["cameras"][0]["motion"] is None
+
+
+def test_motion_stage_projection_has_explicit_bounds() -> None:
+    manager = _manager()
+    manager.statuses.return_value[0]["motion_qualification"] = {
+        "pipeline": {"stages": {f"stage-{i}": {"calls": i} for i in range(MAX_MOTION_STAGES + 2)}},
+        "observation_pipeline": {"stages": {"rtsp://secret@example/stream": {}, "x" * 129: {}}},
+    }
+    payload = build_runtime_status(AppConfig(), manager, instance_id="one", uptime_seconds=10, stopping=False)
+    pipelines = payload["cameras"][0]["motion"]["pipelines"]
+    assert len(pipelines["qualification"]["stages"]) == MAX_MOTION_STAGES
+    assert pipelines["qualification"]["truncated"] is True
+    assert all(stage["stage_id"] is None for stage in pipelines["observation"]["stages"])
+    assert "rtsp://" not in json.dumps(payload)
 
 
 def test_owner_only_socket_serves_status_and_is_removed(tmp_path: Path) -> None:

@@ -567,6 +567,8 @@ def test_backward_wall_clock_step_resets_runtime_without_suspending_frames() -> 
 
 def test_runtime_reset_clears_both_ema_conditioners_and_route_replay_history() -> None:
     service = _service(_hooks())
+    service._record_timing("qualification", 1.25)
+    before = service.telemetry_snapshot()
     service.ema_v2.scene_ready = True
     service.ema_verification.scene_ready = True
     service.recent_accepted_results.append(
@@ -578,6 +580,11 @@ def test_runtime_reset_clears_both_ema_conditioners_and_route_replay_history() -
     assert service.ema_v2.scene_ready is False
     assert service.ema_verification.scene_ready is False
     assert list(service.recent_accepted_results) == []
+    after = service.telemetry_snapshot()
+    assert after["metrics_started_monotonic"] == before["metrics_started_monotonic"]
+    assert after["qualification_total_ms"] == before["qualification_total_ms"] == 1.25
+    replacement = _service(_hooks())
+    assert replacement.telemetry_snapshot()["metrics_started_monotonic"] != before["metrics_started_monotonic"]
 
 
 def test_failed_deferred_analysis_is_not_retried_in_idle_loop() -> None:

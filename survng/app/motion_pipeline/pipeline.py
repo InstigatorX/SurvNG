@@ -4,6 +4,7 @@ import logging
 import math
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Mapping, Sequence
@@ -60,6 +61,7 @@ class _StageMetrics:
         return {
             "calls": self.calls,
             "failures": self.failures,
+            "total_ms": self.total_ms,
             "last_ms": round(self.last_ms, 3),
             "average_ms": round(self.total_ms / self.calls, 3) if self.calls else 0.0,
             "max_ms": round(self.max_ms, 3),
@@ -151,6 +153,7 @@ class MotionPipeline:
             else None
         )
         self._metrics = {stage.stage_id: _StageMetrics() for stage in self.stages}
+        self._metrics_instance_id = uuid.uuid4().hex
         self._metrics_lock = threading.Lock()
         self._lifecycle_condition = threading.Condition()
         self._active_invocations = 0
@@ -381,6 +384,7 @@ class MotionPipeline:
         return {
             "camera_id": self.camera_id,
             "runtime_generation": self.runtime.generation,
+            "metrics_instance_id": self._metrics_instance_id,
             "error_policy": self.error_policy,
             "configuration": [dict(item) for item in self.stage_configuration],
             "execution_groups": [
