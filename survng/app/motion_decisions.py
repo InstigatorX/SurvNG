@@ -211,7 +211,7 @@ class MotionDecisionOrchestrator:
             try:
                 self.run_until_error(stop_event)
                 return
-            except Exception:
+            except Exception as error:
                 failed_triggers = self._events.take_failed_active()
                 self._state.increment_stat("event_worker_errors", 1)
                 LOGGER.exception("motion event cycle failed for %s", self._camera_id)
@@ -220,14 +220,12 @@ class MotionDecisionOrchestrator:
                         self._abort_episode_intents(failed_triggers)
                         self._events.release_deliveries(failed_triggers)
                     else:
-                        disposition = self.retry_batch(failed_triggers, stop_event)
-                        if disposition == RetryDisposition.DROPPED:
-                            self._fail_episode_intents(failed_triggers)
-                            self._events.fail_deliveries(
-                                failed_triggers,
-                                "motion decision retry limit exceeded",
-                            )
-                        elif disposition == RetryDisposition.STOPPED:
+                        disposition = self.retry_batch(
+                            failed_triggers,
+                            stop_event,
+                            error=error,
+                        )
+                        if disposition == RetryDisposition.STOPPED:
                             self._abort_episode_intents(failed_triggers)
                             self._events.release_deliveries(failed_triggers)
 
@@ -235,12 +233,16 @@ class MotionDecisionOrchestrator:
         self,
         triggers: MotionTriggerBatch | list[MotionTrigger | dict[str, Any]],
         stop_event: threading.Event,
+        *,
+        error: Exception | str = "motion decision failed",
     ) -> RetryDisposition:
         return self._events.schedule_retry(
             triggers,
             stop_event=stop_event,
             on_retry=lambda name: self._state.increment_stat(name, 1),
             on_drop=lambda name: self._state.increment_stat(name, 1),
+            on_terminal=self._fail_episode_intents,
+            error=str(error),
         )
 
     def run_until_error(self, stop_event: threading.Event) -> None:

@@ -804,6 +804,25 @@ class EventStoreJobsMixin:
                 (event_id, now_iso, job_id, lease_owner, lease_owner),
             )
 
+    def checkpoint_detection_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+        *,
+        lease_owner: str = "",
+    ) -> bool:
+        """Persist successful inference while retaining the active job lease."""
+        payload_json = durable_json_dumps(payload, sort_keys=True)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._jobs_lock, self._connect_jobs() as conn:
+            cursor = conn.execute(
+                "update detection_jobs set payload_json = ?, updated_at = ? "
+                "where id = ? and state = 'running' "
+                "and (lease_owner = ? or ? = '')",
+                (payload_json, now_iso, job_id, lease_owner, lease_owner),
+            )
+            return cursor.rowcount == 1
+
     def retry_detection_job(
         self,
         job_id: str,
@@ -812,22 +831,24 @@ class EventStoreJobsMixin:
         retry_delay_seconds: float = 2.0,
         maximum_attempts: int = 5,
         lease_owner: str = "",
-    ) -> bool:
-        """Release a failed lease for retry; return False once terminal."""
+    ) -> bool | None:
+        """Release an owned lease; return None when ownership is stale."""
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._jobs_lock, self._connect_jobs() as conn:
+            conn.execute("begin immediate")
             row = conn.execute(
-                "select attempts from detection_jobs where id = ? "
+                "select attempts from detection_jobs where id = ? and state = 'running' "
                 "and (lease_owner = ? or ? = '')",
                 (job_id, lease_owner, lease_owner),
             ).fetchone()
             if row is None:
-                return False
+                return None
             retry = int(row["attempts"]) < maximum_attempts
-            conn.execute(
+            cursor = conn.execute(
                 "update detection_jobs set state = ?, available_at = ?, "
                 "lease_expires_at = null, lease_owner = '', last_error = ?, updated_at = ? "
-                "where id = ? and (lease_owner = ? or ? = '')",
+                "where id = ? and state = 'running' "
+                "and (lease_owner = ? or ? = '')",
                 (
                     "queued" if retry else "failed",
                     time.time() + max(0.0, retry_delay_seconds),
@@ -838,7 +859,7 @@ class EventStoreJobsMixin:
                     lease_owner,
                 ),
             )
-            return retry
+            return retry if cursor.rowcount == 1 else None
 
     def detection_job_status(self, camera_id: str) -> dict[str, int | float]:
         with self._connect_jobs() as conn:
@@ -1011,7 +1032,11 @@ class EventStoreJobsMixin:
                 "lease_expires_at = ?, lease_owner = ?, updated_at = ? where id = ?",
                 (now_epoch + lease_seconds, lease_owner, now_iso, str(row["id"])),
             )
-            return {**dict(row), "payload": json.loads(str(row["payload_json"]))}
+            return {
+                **dict(row),
+                "attempts": int(row["attempts"]) + 1,
+                "payload": json.loads(str(row["payload_json"])),
+            }
 
     def complete_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None:
         with self._jobs_lock, self._connect_jobs() as conn:
@@ -1038,26 +1063,37 @@ class EventStoreJobsMixin:
         job_id: str,
         error: str,
         *,
+        payload: dict[str, Any] | None = None,
         maximum_attempts: int = 5,
         lease_owner: str = "",
-    ) -> bool:
+    ) -> bool | None:
         now = datetime.now(timezone.utc).isoformat()
+        payload_json = (
+            durable_json_dumps(payload, sort_keys=True)
+            if payload is not None
+            else None
+        )
         with self._jobs_lock, self._connect_jobs() as conn:
+            conn.execute("begin immediate")
             row = conn.execute(
                 "select attempts from motion_trigger_jobs where id = ? "
+                "and state = 'running' "
                 "and (lease_owner = ? or ? = '')",
                 (job_id, lease_owner, lease_owner),
             ).fetchone()
             if row is None:
-                return False
+                return None
             retry = int(row["attempts"]) < maximum_attempts
-            conn.execute(
+            cursor = conn.execute(
                 "update motion_trigger_jobs set state = ?, available_at = ?, "
+                "payload_json = coalesce(?, payload_json), "
                 "lease_expires_at = null, lease_owner = '', last_error = ?, updated_at = ? "
-                "where id = ? and (lease_owner = ? or ? = '')",
+                "where id = ? and state = 'running' "
+                "and (lease_owner = ? or ? = '')",
                 (
                     "queued" if retry else "failed",
                     time.time() + min(30.0, max(1, int(row["attempts"])) * 2.0),
+                    payload_json,
                     str(error)[:1000],
                     now,
                     job_id,
@@ -1065,7 +1101,7 @@ class EventStoreJobsMixin:
                     lease_owner,
                 ),
             )
-            return retry
+            return retry if cursor.rowcount == 1 else None
 
     def motion_trigger_status(self, camera_id: str) -> dict[str, int]:
         with self._connect_jobs() as conn:

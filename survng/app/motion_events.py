@@ -15,6 +15,7 @@ from .motion import MotionQualificationResult
 from .ema_v2 import MotionEpisodeController
 
 StatCallback = Callable[[str], None]
+TerminalRetryCallback = Callable[["MotionTriggerBatch"], None]
 
 
 class MotionTriggerStore(Protocol):
@@ -22,7 +23,7 @@ class MotionTriggerStore(Protocol):
     def claim_motion_trigger(self, camera_id: str, job_id: str | None = None, *, lease_seconds: float = 60.0, lease_owner: str = "") -> dict[str, Any] | None: ...
     def complete_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None: ...
     def release_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None: ...
-    def fail_motion_trigger(self, job_id: str, error: str, *, maximum_attempts: int = 5, lease_owner: str = "") -> bool: ...
+    def fail_motion_trigger(self, job_id: str, error: str, *, payload: dict[str, Any] | None = None, maximum_attempts: int = 5, lease_owner: str = "") -> bool | None: ...
     def motion_trigger_status(self, camera_id: str) -> dict[str, int]: ...
 
 
@@ -162,6 +163,12 @@ class MotionTrigger:
             "received_at": self.received_at,
             "prequalified": self.prequalified.as_dict() if self.prequalified else None,
             "decision_id": self.decision_id,
+            "retry_qualification_result": (
+                self.retry_qualification_result.as_dict()
+                if self.retry_qualification_result is not None
+                else None
+            ),
+            "retry_diagnostics": self.retry_diagnostics,
             "audit_snapshot_path": self.audit_snapshot_path,
             "event_timing": self.event_timing.to_payload() if self.event_timing else None,
             "episode_id": self.episode_id,
@@ -173,8 +180,15 @@ class MotionTrigger:
         }
 
     @classmethod
-    def from_durable_payload(cls, payload: dict[str, Any], job_id: str) -> "MotionTrigger":
+    def from_durable_payload(
+        cls,
+        payload: dict[str, Any],
+        job_id: str,
+        *,
+        retry_count: int = 0,
+    ) -> "MotionTrigger":
         prequalified = payload.get("prequalified")
+        retry_qualification = payload.get("retry_qualification_result")
         timing = payload.get("event_timing")
         return cls(
             topic=str(payload["topic"]),
@@ -183,6 +197,17 @@ class MotionTrigger:
             received_at=float(payload["received_at"]),
             prequalified=(MotionQualificationResult(**prequalified) if prequalified else None),
             decision_id=str(payload.get("decision_id") or ""),
+            retry_count=retry_count,
+            retry_qualification_result=(
+                MotionQualificationResult(**retry_qualification)
+                if retry_qualification
+                else None
+            ),
+            retry_diagnostics=(
+                dict(payload["retry_diagnostics"])
+                if isinstance(payload.get("retry_diagnostics"), dict)
+                else None
+            ),
             audit_snapshot_path=payload.get("audit_snapshot_path"),
             event_timing=(
                 MotionEventTiming(
@@ -309,10 +334,13 @@ class MotionEventCoordinator:
             self._record_enqueue()
             return True
         except queue.Full:
+            if self.durable_store is not None:
+                # Keep the oldest wake in memory so the fast path preserves the
+                # durable store's FIFO order. The new row remains recoverable
+                # and will be claimed as soon as the wake queue drains.
+                self._record_durable_deferred()
+                return True
             if not evict_oldest:
-                if self.durable_store is not None:
-                    self._record_durable_deferred()
-                    return True
                 self._record_rejected()
                 if on_drop is not None:
                     on_drop("dropped_triggers")
@@ -374,15 +402,17 @@ class MotionEventCoordinator:
             if item is not None and self.durable_store is not None:
                 claimed = self.durable_store.claim_motion_trigger(
                     self.camera_id,
-                    item.delivery_job_id or None,
                     lease_owner=self._lease_owner,
                 )
                 if claimed is None:
                     if time.monotonic() >= deadline:
                         raise queue.Empty
                     continue
-                item.delivery_job_id = str(claimed["id"])
-                return item
+                return MotionTrigger.from_durable_payload(
+                    dict(claimed["payload"]),
+                    str(claimed["id"]),
+                    retry_count=max(0, int(claimed.get("attempts") or 1) - 1),
+                )
             if from_queue:
                 return item
             claimed = self.durable_store.claim_motion_trigger(
@@ -393,6 +423,7 @@ class MotionEventCoordinator:
                 return MotionTrigger.from_durable_payload(
                     dict(claimed["payload"]),
                     str(claimed["id"]),
+                    retry_count=max(0, int(claimed.get("attempts") or 1) - 1),
                 )
             if time.monotonic() >= deadline:
                 raise queue.Empty
@@ -450,12 +481,15 @@ class MotionEventCoordinator:
             if self.durable_store is not None:
                 claimed = self.durable_store.claim_motion_trigger(
                     self.camera_id,
-                    item.delivery_job_id or None,
                     lease_owner=self._lease_owner,
                 )
                 if claimed is None:
                     continue
-                item.delivery_job_id = str(claimed["id"])
+                item = MotionTrigger.from_durable_payload(
+                    dict(claimed["payload"]),
+                    str(claimed["id"]),
+                    retry_count=max(0, int(claimed.get("attempts") or 1) - 1),
+                )
             triggers.append(item)
             quiet_deadline = min(hard_deadline, time.monotonic() + quiet_seconds)
         return MotionTriggerBatch(tuple(triggers))
@@ -467,8 +501,62 @@ class MotionEventCoordinator:
         stop_event: threading.Event,
         on_retry: StatCallback | None = None,
         on_drop: StatCallback | None = None,
+        on_terminal: TerminalRetryCallback | None = None,
+        error: str = "motion decision failed",
     ) -> RetryDisposition:
         batch = MotionTriggerBatch.coerce(triggers)
+        delivery_job_ids = {
+            item.delivery_job_id for item in batch if item.delivery_job_id
+        }
+        if self.durable_store is not None and delivery_job_ids:
+            retrying_job_ids: set[str] = set()
+            terminal_job_ids: set[str] = set()
+            stale_job_ids: set[str] = set()
+            for job_id in delivery_job_ids:
+                trigger = next(
+                    item for item in batch if item.delivery_job_id == job_id
+                )
+                retrying = self.durable_store.fail_motion_trigger(
+                    job_id,
+                    error,
+                    payload=trigger.durable_payload(),
+                    maximum_attempts=self._retry_limit + 1,
+                    lease_owner=self._lease_owner,
+                )
+                if retrying is None:
+                    stale_job_ids.add(job_id)
+                elif retrying:
+                    retrying_job_ids.add(job_id)
+                else:
+                    terminal_job_ids.add(job_id)
+            retrying_intent_ids = {
+                item.detection_intent_id
+                for item in batch
+                if item.delivery_job_id in retrying_job_ids
+                and item.detection_intent_id
+            }
+            terminal_triggers = tuple(
+                item
+                for item in batch
+                if item.delivery_job_id in terminal_job_ids
+                and item.detection_intent_id not in retrying_intent_ids
+            )
+            with self._lock:
+                if retrying_job_ids:
+                    self._runtime_metrics["retries_scheduled"] += 1
+                if terminal_job_ids:
+                    self._runtime_metrics["retries_dropped"] += 1
+            if retrying_job_ids and on_retry is not None:
+                on_retry("event_retries")
+            if terminal_job_ids and on_drop is not None:
+                on_drop("event_retry_drops")
+            if terminal_triggers and on_terminal is not None:
+                on_terminal(MotionTriggerBatch(terminal_triggers))
+            return (
+                RetryDisposition.SCHEDULED
+                if retrying_job_ids or stale_job_ids
+                else RetryDisposition.DROPPED
+            )
         retry_count = max(
             (item.retry_count for item in batch),
             default=0,
@@ -478,6 +566,8 @@ class MotionEventCoordinator:
                 self._runtime_metrics["retries_dropped"] += 1
             if on_drop is not None:
                 on_drop("event_retry_drops")
+            if on_terminal is not None:
+                on_terminal(batch)
             return RetryDisposition.DROPPED
         retry_triggers = [
             replace(item, retry_count=retry_count)

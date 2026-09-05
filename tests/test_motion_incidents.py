@@ -21,6 +21,7 @@ from survng.app.motion_incidents import (
     REFINEMENT_MAX_QUEUE_AGE_SECONDS,
     MotionIncidentService,
     _MemoryDetectionJobStore,
+    _RefinementJob,
 )
 from survng.app.motion_pipeline.decision_handler import MotionDecisionOutcome
 
@@ -969,40 +970,240 @@ def test_durable_completion_failure_retries_until_handler_succeeds() -> None:
         object_detected=True,
         detected_objects=({"label": "person", "incident_eligible": True},),
     )
-    service, decision, *_ = _service(initial)
-    decision.refine.return_value = refined
-    completion = Mock(side_effect=[RuntimeError("audit unavailable"), None])
-    service.set_refinement_completion_handler(completion)
-    stop = threading.Event()
-
-    with patch(
-        "survng.app.motion_incidents.REFINEMENT_COMPLETION_RETRY_SECONDS",
-        0.0,
-    ):
-        service.start(stop)
-        service.process(
-            "motion",
-            "person",
-            datetime.now(timezone.utc),
-            {"detection_intent_id": "gate:retry-completion"},
-            refinement_completion_context={"completion_id": "decision-8:refinement"},
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        first, decision, tracking, *_ = _service(
+            initial,
+            refinement_store=store,
         )
+        decision.refine.return_value = refined
+        tracking.start.return_value = True
+        first_stop = threading.Event()
+
+        def fail_completion(*_args: object) -> None:
+            first_stop.set()
+            raise RuntimeError("audit unavailable")
+
+        failed_completion = Mock(side_effect=fail_completion)
+        first.set_refinement_completion_handler(failed_completion)
+
+        with patch(
+            "survng.app.motion_incidents.REFINEMENT_COMPLETION_RETRY_SECONDS",
+            0.0,
+        ):
+            first.start(first_stop)
+            first.process(
+                "motion",
+                "person",
+                datetime.now(timezone.utc),
+                {"detection_intent_id": "gate:retry-completion"},
+                refinement_completion_context={"completion_id": "decision-8:refinement"},
+            )
+            assert first_stop.wait(1.0)
+            assert first.wait_stopped(1.0)
+
+        replacement, replay_decision, replay_tracking, *_ = _service(
+            initial,
+            refinement_store=store,
+        )
+        replay_decision.refine.side_effect = AssertionError(
+            "checkpointed inference must not run again"
+        )
+        replay_completion = Mock()
+        replacement.set_refinement_completion_handler(replay_completion)
+        replacement_stop = threading.Event()
+        replacement.start(replacement_stop)
+        waiter = threading.Event()
+        for _ in range(100):
+            if replacement.status()["refinements_completed"]:
+                break
+            waiter.wait(0.01)
+
+        failed_completion.assert_called_once_with(
+            refined,
+            {"completion_id": "decision-8:refinement"},
+        )
+        replay_completion.assert_called_once_with(
+            refined,
+            {"completion_id": "decision-8:refinement"},
+        )
+        assert decision.refine.call_count == 1
+        assert tracking.start.call_count == 1
+        replay_decision.refine.assert_not_called()
+        replay_tracking.start.assert_not_called()
+        assert first.status()["refinement_callback_failures"] == 1
+        assert replacement.status()["refinements_completed"] == 1
+        refinement_jobs = replacement.status()["refinement_jobs"]
+        assert refinement_jobs["completed"] == 1
+        assert refinement_jobs["oldest_age_ms"] == 0.0
+        with store._connect_jobs() as connection:
+            payload = json.loads(connection.execute(
+                "select payload_json from detection_jobs"
+            ).fetchone()["payload_json"])
+        assert payload["refined_outcome"]["snapshot_path"] == "refined.webp"
+        replacement_stop.set()
+        replacement.request_stop()
+        assert replacement.wait_stopped(1.0)
+
+
+def test_transient_checkpoint_failure_reuses_inference_before_handoff() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=84,
+        snapshot_path="refined.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        service, decision, tracking, *_ = _service(
+            initial,
+            refinement_store=store,
+        )
+        decision.refine.return_value = refined
+        tracking.start.return_value = True
+        completion = Mock()
+        service.set_refinement_completion_handler(completion)
+        original_checkpoint = store.checkpoint_detection_job
+        original_retry = store.retry_detection_job
+        checkpoint_calls = 0
+        retry_calls = 0
+
+        def flaky_checkpoint(*args: object, **kwargs: object) -> bool:
+            nonlocal checkpoint_calls
+            checkpoint_calls += 1
+            if checkpoint_calls == 1:
+                raise RuntimeError("checkpoint database unavailable")
+            return original_checkpoint(*args, **kwargs)
+
+        def flaky_retry(*args: object, **kwargs: object) -> bool:
+            nonlocal retry_calls
+            retry_calls += 1
+            if retry_calls == 1:
+                raise RuntimeError("retry database unavailable")
+            return original_retry(*args, **kwargs)
+
+        store.checkpoint_detection_job = flaky_checkpoint  # type: ignore[method-assign]
+        store.retry_detection_job = flaky_retry  # type: ignore[method-assign]
+        stop = threading.Event()
+        with patch(
+            "survng.app.motion_incidents.REFINEMENT_COMPLETION_RETRY_SECONDS",
+            0.0,
+        ):
+            service.start(stop)
+            service.process(
+                "motion",
+                "person",
+                datetime.now(timezone.utc),
+                {"detection_intent_id": "gate:retry-checkpoint"},
+                refinement_completion_context={"completion_id": "decision-9:refinement"},
+            )
+            waiter = threading.Event()
+            for _ in range(100):
+                if service.status()["refinements_completed"]:
+                    break
+                waiter.wait(0.01)
+
+        assert decision.refine.call_count == 1
+        assert tracking.start.call_count == 1
+        completion.assert_called_once_with(
+            refined,
+            {"completion_id": "decision-9:refinement"},
+        )
+        assert checkpoint_calls == 3
+        assert retry_calls == 1
+        assert service.status()["refinement_callback_failures"] == 1
+        assert store.detection_job_status("gate")["completed"] == 1
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(1.0)
+
+
+def test_reclaimed_job_prefers_newer_durable_refinement_progress() -> None:
+    event_at = datetime.now(timezone.utc)
+    initial = MotionDecisionOutcome(
+        event_id=84,
+        snapshot_path="initial.webp",
+        object_detected=True,
+        refinement_pending=True,
+    )
+    durable_outcome = MotionDecisionOutcome(
+        event_id=84,
+        snapshot_path="tracking-enriched.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "track_id": 7},),
+    )
+    stale_outcome = MotionDecisionOutcome(
+        event_id=84,
+        snapshot_path="stale-refinement.webp",
+        object_detected=True,
+        detected_objects=({"label": "person"},),
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        service, decision, tracking, *_ = _service(
+            initial,
+            refinement_store=store,
+        )
+        durable_job = _RefinementJob(
+            topic="motion",
+            message="person",
+            event_at=event_at,
+            qualification={"detection_intent_id": "gate:cross-owner"},
+            existing_event_id=84,
+            require_eligible_object=False,
+            require_motion_correlation=False,
+            callback=None,
+            completion_context={"completion_id": "decision-10:refinement"},
+            initial_outcome=initial,
+            refined_outcome=durable_outcome,
+            handoff_completed=True,
+        )
+        job_id = durable_job.job_id("gate")
+        assert store.enqueue_detection_job(
+            job_id=job_id,
+            camera_id="gate",
+            dedupe_key=durable_job.dedupe_key(),
+            payload=durable_job.payload(),
+        ) == "queued"
+        service._refinement_progress[job_id] = _RefinementJob(
+            topic=durable_job.topic,
+            message=durable_job.message,
+            event_at=durable_job.event_at,
+            qualification=durable_job.qualification,
+            existing_event_id=durable_job.existing_event_id,
+            require_eligible_object=False,
+            require_motion_correlation=False,
+            callback=None,
+            completion_context=durable_job.completion_context,
+            initial_outcome=initial,
+            refined_outcome=stale_outcome,
+            handoff_completed=False,
+        )
+        completion = Mock()
+        service.set_refinement_completion_handler(completion)
+        stop = threading.Event()
+        service.start(stop)
         waiter = threading.Event()
         for _ in range(100):
             if service.status()["refinements_completed"]:
                 break
             waiter.wait(0.01)
 
-    assert completion.call_count == 2
-    assert decision.refine.call_count == 2
-    assert service.status()["refinements_completed"] == 1
-    assert service.status()["refinement_callback_failures"] == 1
-    refinement_jobs = service.status()["refinement_jobs"]
-    assert refinement_jobs["completed"] == 1
-    assert refinement_jobs["oldest_age_ms"] == 0.0
-    stop.set()
-    service.request_stop()
-    assert service.wait_stopped(1.0)
+        completion.assert_called_once_with(
+            durable_outcome,
+            {"completion_id": "decision-10:refinement"},
+        )
+        decision.refine.assert_not_called()
+        tracking.start.assert_not_called()
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(1.0)
 
 
 def test_refinement_age_constant_matches_detection_job_store() -> None:

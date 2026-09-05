@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import copy
 from collections import deque
 import hashlib
@@ -56,11 +56,14 @@ class DetectionJobStore(Protocol):
         event_maximum_age_seconds: float | None = None,
     ) -> dict[str, Any] | None: ...
     def complete_detection_job(self, job_id: str, event_id: int | None, *, lease_owner: str = "") -> None: ...
+    def checkpoint_detection_job(
+        self, job_id: str, payload: dict[str, Any], *, lease_owner: str = "",
+    ) -> bool: ...
     def retry_detection_job(
         self, job_id: str, error: str, *, retry_delay_seconds: float = 2.0,
         maximum_attempts: int = 5,
         lease_owner: str = "",
-    ) -> bool: ...
+    ) -> bool | None: ...
     def expire_stale_detection_jobs(
         self, camera_id: str, *, maximum_age_seconds: float,
         event_maximum_age_seconds: float | None = None,
@@ -111,6 +114,35 @@ def _compact_refinement_qualification(
     return compact
 
 
+def _outcome_payload(outcome: MotionDecisionOutcome) -> dict[str, Any]:
+    return {
+        **outcome.as_dict(),
+        "detected_objects": list(outcome.detected_objects),
+    }
+
+
+def _outcome_from_payload(payload: dict[str, Any]) -> MotionDecisionOutcome:
+    return MotionDecisionOutcome(
+        event_id=(int(payload["event_id"]) if payload.get("event_id") is not None else None),
+        snapshot_path=str(payload.get("snapshot_path") or ""),
+        object_detected=payload.get("object_detected"),
+        detected_objects=tuple(payload.get("detected_objects") or ()),
+        rejection_reason=str(payload.get("rejection_reason") or ""),
+        motion_correlation=payload.get("motion_correlation"),
+        refinement_pending=bool(payload.get("refinement_pending")),
+        processing_timing=payload.get("processing_timing"),
+        object_activity=payload.get("object_activity"),
+        depth_attribution=payload.get("depth_attribution"),
+        cover_promoted=bool(payload.get("cover_promoted")),
+        cover_promotion_reason=str(payload.get("cover_promotion_reason") or ""),
+        refinement_event_id=(
+            int(payload["refinement_event_id"])
+            if payload.get("refinement_event_id") is not None
+            else None
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _RefinementJob:
     topic: str
@@ -123,6 +155,8 @@ class _RefinementJob:
     callback: RefinementCallback | None
     completion_context: dict[str, Any] | None
     initial_outcome: MotionDecisionOutcome
+    refined_outcome: MotionDecisionOutcome | None = None
+    handoff_completed: bool = False
 
     def key(self) -> tuple[str, str | int | float]:
         # Once the fast path persists an incident, that canonical event—not the
@@ -157,10 +191,13 @@ class _RefinementJob:
             "require_eligible_object": self.require_eligible_object,
             "require_motion_correlation": self.require_motion_correlation,
             "completion_context": durable_json_copy(self.completion_context or {}),
-            "initial_outcome": {
-                **self.initial_outcome.as_dict(),
-                "detected_objects": list(self.initial_outcome.detected_objects),
-            },
+            "initial_outcome": _outcome_payload(self.initial_outcome),
+            "refined_outcome": (
+                _outcome_payload(self.refined_outcome)
+                if self.refined_outcome is not None
+                else None
+            ),
+            "handoff_completed": self.handoff_completed,
         }
 
     @classmethod
@@ -183,22 +220,13 @@ class _RefinementJob:
             require_motion_correlation=bool(payload.get("require_motion_correlation")),
             callback=callback,
             completion_context=(dict(payload.get("completion_context") or {}) or None),
-            initial_outcome=MotionDecisionOutcome(
-                event_id=(int(initial["event_id"]) if initial.get("event_id") is not None else None),
-                snapshot_path=str(initial.get("snapshot_path") or ""),
-                object_detected=initial.get("object_detected"),
-                detected_objects=tuple(initial.get("detected_objects") or ()),
-                rejection_reason=str(initial.get("rejection_reason") or ""),
-                motion_correlation=initial.get("motion_correlation"),
-                refinement_pending=bool(initial.get("refinement_pending")),
-                processing_timing=initial.get("processing_timing"),
-                object_activity=initial.get("object_activity"),
-                refinement_event_id=(
-                    int(initial["refinement_event_id"])
-                    if initial.get("refinement_event_id") is not None
-                    else None
-                ),
+            initial_outcome=_outcome_from_payload(initial),
+            refined_outcome=(
+                _outcome_from_payload(dict(payload["refined_outcome"]))
+                if isinstance(payload.get("refined_outcome"), dict)
+                else None
             ),
+            handoff_completed=bool(payload.get("handoff_completed")),
         )
 
 
@@ -368,12 +396,24 @@ class _MemoryDetectionJobStore:
     def complete_detection_job(self, job_id, event_id, *, lease_owner=""):
         with self._lock:
             job = self._jobs[job_id]
-            if lease_owner and str(job.get("lease_owner") or "") not in {"", lease_owner}:
+            if job["state"] != "running":
+                return
+            if lease_owner and str(job.get("lease_owner") or "") != lease_owner:
                 return
             job["state"] = "completed"
             job["event_id"] = event_id
             job["lease_owner"] = ""
             job["lease_expires_at"] = None
+
+    def checkpoint_detection_job(self, job_id, payload, *, lease_owner=""):
+        with self._lock:
+            job = self._jobs[job_id]
+            if lease_owner and str(job.get("lease_owner") or "") != lease_owner:
+                return False
+            if job["state"] != "running":
+                return False
+            job["payload"] = copy.deepcopy(payload)
+            return True
 
     def retry_detection_job(
         self, job_id, error, *, retry_delay_seconds=2.0, maximum_attempts=5,
@@ -382,8 +422,10 @@ class _MemoryDetectionJobStore:
         del error
         with self._lock:
             job = self._jobs[job_id]
-            if lease_owner and str(job.get("lease_owner") or "") not in {"", lease_owner}:
-                return False
+            if job["state"] != "running":
+                return None
+            if lease_owner and str(job.get("lease_owner") or "") != lease_owner:
+                return None
             retry = job["attempts"] < maximum_attempts
             job["state"] = "queued" if retry else "failed"
             job["available_at"] = time.monotonic() + retry_delay_seconds
@@ -454,6 +496,7 @@ class MotionIncidentService:
         self._refinement_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
         self._lease_owner = uuid.uuid4().hex
         self._refinement_callbacks: dict[str, RefinementCallback] = {}
+        self._refinement_progress: dict[str, _RefinementJob] = {}
         self._refinement_completion_handler: RefinementCompletionHandler | None = None
         self._refinement_thread: threading.Thread | None = None
         self._refinement_stop: threading.Event | None = None
@@ -845,20 +888,42 @@ class MotionIncidentService:
             with self._status_lock:
                 callback = self._refinement_callbacks.get(job_id)
                 completion_handler = self._refinement_completion_handler
-            job = _RefinementJob.from_payload(dict(claimed["payload"]), callback)
-            job.qualification["detection_intent_id"] = job_id
+            durable_job = _RefinementJob.from_payload(
+                dict(claimed["payload"]), callback
+            )
+            with self._status_lock:
+                local_progress = self._refinement_progress.get(job_id)
+            job = durable_job
+            if local_progress is not None:
+                job = replace(
+                    durable_job,
+                    refined_outcome=(
+                        durable_job.refined_outcome
+                        if durable_job.refined_outcome is not None
+                        else local_progress.refined_outcome
+                    ),
+                    handoff_completed=(
+                        durable_job.handoff_completed
+                        or local_progress.handoff_completed
+                    ),
+                )
+            refinement_qualification = dict(job.qualification)
+            refinement_qualification["detection_intent_id"] = job_id
             completed = False
             try:
                 try:
-                    outcome = self.decision_processor.refine(
-                        job.topic,
-                        job.message,
-                        job.event_at,
-                        job.qualification,
-                        existing_event_id=job.existing_event_id,
-                        require_eligible_object=job.require_eligible_object,
-                        require_motion_correlation=job.require_motion_correlation,
-                    )
+                    if job.refined_outcome is not None:
+                        outcome = job.refined_outcome
+                    else:
+                        outcome = self.decision_processor.refine(
+                            job.topic,
+                            job.message,
+                            job.event_at,
+                            refinement_qualification,
+                            existing_event_id=job.existing_event_id,
+                            require_eligible_object=job.require_eligible_object,
+                            require_motion_correlation=job.require_motion_correlation,
+                        )
                 except Exception as error:
                     failure = {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -895,7 +960,9 @@ class MotionIncidentService:
                             self._refinement_callbacks.pop(job_id, None)
                     continue
 
-                self._record_timing(outcome, kind="refine")
+                reused_checkpoint = job.refined_outcome is not None
+                if not reused_checkpoint:
+                    self._record_timing(outcome, kind="refine")
                 if self._is_refinement_timeout_outcome(outcome):
                     with self._status_lock:
                         self._refinement_timeouts += 1
@@ -914,10 +981,25 @@ class MotionIncidentService:
                         with self._status_lock:
                             self._refinement_callbacks.pop(job_id, None)
                     continue
-                self._handoff(
-                    outcome,
-                    job.event_at,
-                )
+                if not reused_checkpoint:
+                    job = replace(job, refined_outcome=outcome)
+                    with self._status_lock:
+                        self._refinement_progress[job_id] = job
+                if (
+                    durable_job.refined_outcome is None
+                    and not self._checkpoint_refinement_progress(job_id, job)
+                ):
+                    continue
+                if not job.handoff_completed:
+                    self._handoff(outcome, job.event_at)
+                    job = replace(job, handoff_completed=True)
+                    with self._status_lock:
+                        self._refinement_progress[job_id] = job
+                if (
+                    not durable_job.handoff_completed
+                    and not self._checkpoint_refinement_progress(job_id, job)
+                ):
+                    continue
                 durable_completion = job.completion_context is not None
                 if durable_completion:
                     try:
@@ -964,6 +1046,38 @@ class MotionIncidentService:
                 with self._status_lock:
                     if completed:
                         self._refinement_callbacks.pop(job_id, None)
+                        self._refinement_progress.pop(job_id, None)
+
+    def _checkpoint_refinement_progress(
+        self,
+        job_id: str,
+        job: _RefinementJob,
+    ) -> bool:
+        try:
+            checkpointed = self.refinement_store.checkpoint_detection_job(
+                job_id,
+                job.payload(),
+                lease_owner=self._lease_owner,
+            )
+        except Exception as error:
+            self._record_refinement_completion_failure(job, error)
+            retrying = self._retry_refinement_completion(job_id, error)
+            if not retrying:
+                with self._status_lock:
+                    self._refinement_progress.pop(job_id, None)
+            return False
+        if checkpointed:
+            return True
+        error = RuntimeError("refinement result checkpoint lost its lease")
+        self._record_refinement_completion_failure(job, error)
+        with self._status_lock:
+            self._refinement_progress.pop(job_id, None)
+        LOGGER.error(
+            "motion refinement checkpoint rejected for %s: %s",
+            self.camera_id,
+            error,
+        )
+        return False
 
     def _record_refinement_completion_failure(
         self,
@@ -985,14 +1099,26 @@ class MotionIncidentService:
         self,
         job_id: str,
         error: Exception,
-    ) -> None:
-        retrying = self.refinement_store.retry_detection_job(
-            job_id,
-            redact_secret_text(error)[:500],
-            retry_delay_seconds=REFINEMENT_COMPLETION_RETRY_SECONDS,
-            maximum_attempts=REFINEMENT_COMPLETION_MAXIMUM_ATTEMPTS,
-            lease_owner=self._lease_owner,
-        )
+    ) -> bool:
+        try:
+            retrying = self.refinement_store.retry_detection_job(
+                job_id,
+                redact_secret_text(error)[:500],
+                retry_delay_seconds=REFINEMENT_COMPLETION_RETRY_SECONDS,
+                maximum_attempts=REFINEMENT_COMPLETION_MAXIMUM_ATTEMPTS,
+                lease_owner=self._lease_owner,
+            )
+        except Exception:
+            # Keep the successful result in memory. The same owner can reclaim
+            # its running lease and retry the checkpoint without inference.
+            LOGGER.exception(
+                "motion refinement retry write failed for %s",
+                self.camera_id,
+            )
+            stop = self._refinement_stop
+            if stop is not None:
+                stop.wait(REFINEMENT_COMPLETION_RETRY_SECONDS)
+            return True
         LOGGER.exception(
             "motion refinement completion failed for %s (%s): %s: %s",
             self.camera_id,
@@ -1005,6 +1131,11 @@ class MotionIncidentService:
                 self._refinement_queue.put_nowait(True)
             except queue.Full:
                 pass
+        else:
+            with self._status_lock:
+                self._refinement_callbacks.pop(job_id, None)
+                self._refinement_progress.pop(job_id, None)
+        return retrying
 
     @staticmethod
     def _is_refinement_timeout_error(error: Exception) -> bool:

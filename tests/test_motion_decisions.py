@@ -444,6 +444,92 @@ def test_shutdown_after_durable_claim_returns_row_to_queued_state() -> None:
         assert store.motion_trigger_status("gate") == {"queued": 1}
 
 
+def test_durable_delivery_uses_one_persisted_retry_budget() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        events = MotionEventCoordinator(
+            queue_size=4,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        reserved = events.episode_controller.observe_camera(
+            CameraNotice("gate", 100.0, 100.0, "onvif/motion"),
+            generation=0,
+        )
+        assert reserved.intent is not None
+        events.episode_controller.acknowledge_admission(
+            reserved.intent.intent_id,
+            admitted=True,
+            occurred_monotonic=100.1,
+        )
+        now = datetime.now(timezone.utc)
+        assert events.enqueue(MotionTrigger(
+            topic="onvif/motion",
+            message="motion",
+            event_at=now,
+            received_at=now.timestamp(),
+            detection_intent_id=reserved.intent.intent_id,
+        ))
+        original_fail = store.fail_motion_trigger
+
+        def fail_and_make_due(*args: object, **kwargs: object) -> bool:
+            retrying = original_fail(*args, **kwargs)
+            if retrying:
+                with store._connect_jobs() as connection:
+                    connection.execute(
+                        "update motion_trigger_jobs set available_at = 0 where id = ?",
+                        (args[0],),
+                    )
+            return retrying
+
+        store.fail_motion_trigger = fail_and_make_due  # type: ignore[method-assign]
+        qualification = Mock()
+        qualification.settings.return_value = ("off", "default", 640)
+        qualification.rescue_settings.return_value = (False, 0.0)
+        qualification.suppression_verification_rate.return_value = 0.0
+        incidents = Mock()
+        incidents.process.side_effect = RuntimeError("detector unavailable")
+        state = Mock()
+        orchestrator = MotionDecisionOrchestrator(
+            camera_id="gate",
+            events=events,
+            audit_recorder=Mock(),
+            config=MotionQualificationConfig(burst_quiet_seconds=0.1),
+            qualification=qualification,
+            incidents=incidents,
+            media=Mock(),
+            analysis=Mock(),
+            state=state,
+        )
+        stop = threading.Event()
+        thread = threading.Thread(target=orchestrator.run, args=(stop,))
+        thread.start()
+        waiter = threading.Event()
+        for _ in range(100):
+            if store.motion_trigger_status("gate") == {"failed": 1}:
+                break
+            waiter.wait(0.01)
+        stop.set()
+        events.signal_stop()
+        thread.join(1.0)
+
+        assert not thread.is_alive()
+        assert incidents.process.call_count == 3
+        assert events.retry_queue_depth() == 0
+        assert events.episode_snapshot()["request_status"] == "failed"
+        assert store.motion_trigger_status("gate") == {"failed": 1}
+        retry_stats = [
+            call.args for call in state.increment_stat.call_args_list
+            if call.args and call.args[0] in {"event_retries", "event_retry_drops"}
+        ]
+        assert retry_stats == [
+            ("event_retries", 1),
+            ("event_retries", 1),
+            ("event_retry_drops", 1),
+        ]
+
+
 def test_learned_camera_nuisance_remains_suppressed_without_forced_check() -> None:
     events = MotionEventCoordinator(queue_size=4, retry_limit=2)
     now = datetime.now(timezone.utc)
