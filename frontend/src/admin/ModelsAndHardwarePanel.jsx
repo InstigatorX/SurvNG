@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Activity, Cpu, Gauge, X } from "lucide-react";
 import { appUrl, fetch } from "../shared/api.js";
+import { modelEvaluationCoverage } from "../modelEvaluation.mjs";
 
 function normalizeDetectorModelPath(value) {
   return String(value || "").replaceAll("\\", "/").replace(/\/+/g, "/");
@@ -54,6 +55,7 @@ export function ModelsAndHardwarePanel({ config, updateConfig, detectorModels = 
       ? "Intel QSV listed by FFmpeg but runtime init failed"
       : "Intel QSV not available to FFmpeg";
   const activeModel = findDetectorModel(detectorModels, activeModelPath);
+  const evaluationCoverage = modelEvaluationCoverage(modelEvaluation.result);
 
   function closeModelEvaluationPreview() {
     setModelEvaluationPreview(null);
@@ -167,17 +169,22 @@ export function ModelsAndHardwarePanel({ config, updateConfig, detectorModels = 
         {modelEvaluationError || modelEvaluation.error ? <div className="error-banner">{modelEvaluationError || modelEvaluation.error}</div> : null}
         {modelEvaluation.result ? <div className="model-evaluation-results">
           <div className="model-evaluation-summary">
-            <span><strong>{modelEvaluation.result.sample_count}</strong> images</span>
+            <span><strong>{evaluationCoverage.compared} / {evaluationCoverage.total}</strong> images compared</span>
             <span><strong>{modelEvaluation.result.camera_count}</strong> cameras</span>
             <span><strong>{modelEvaluation.result.disagreement_frames}</strong> disagreements</span>
             <span><strong>{modelEvaluation.result.candidate.average_ms} ms</strong> candidate average</span>
           </div>
+          {!evaluationCoverage.complete ? <div className="probe-result bad">
+            <strong>{evaluationCoverage.compared ? "Partial comparison" : "No valid comparison"}</strong>
+            <span>{evaluationCoverage.failed} images could not be compared. Baseline errors: {evaluationCoverage.baselineErrors}; candidate errors: {evaluationCoverage.candidateErrors}.</span>
+            {evaluationCoverage.compared ? <span>Agreement and recall include only the {evaluationCoverage.compared} images successfully evaluated by both models.</span> : null}
+          </div> : null}
           {modelEvaluation.result.disagreements?.length ? <div className="model-evaluation-disagreements">
             {modelEvaluation.result.disagreements.map((item) => <article key={`${item.source_kind}-${item.source_id}`}>
               <button type="button" className="model-evaluation-image-button" onClick={(event) => { modelEvaluationTriggerRef.current = event.currentTarget; setModelEvaluationPreview(item); }} aria-label={`Enlarge ${item.camera_id} comparison image`}><img src={appUrl(item.image_url)} alt="" loading="lazy" /></button>
               <span><strong>{item.camera_id}</strong><small>{item.source_kind === "motion_audit" ? "Motion audit negative" : "Incident"} · {item.created_at}</small></span>
             </article>)}
-          </div> : <div className="probe-result ok"><strong>No label disagreements</strong><span>Both models returned the same label sets on this corpus.</span></div>}
+          </div> : evaluationCoverage.complete ? <div className="probe-result ok"><strong>No label disagreements</strong><span>Both models returned the same label sets on this corpus.</span></div> : evaluationCoverage.compared > 0 ? <div className="probe-result"><strong>No label disagreements among successful comparisons</strong><span>Failed images were excluded.</span></div> : null}
         </div> : null}
         {modelEvaluationPreview ? <div className="model-evaluation-preview" role="presentation">
           <button type="button" className="live-overlay-backdrop" onClick={closeModelEvaluationPreview} aria-label="Close comparison image" />

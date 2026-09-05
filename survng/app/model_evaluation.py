@@ -222,9 +222,9 @@ class ModelEvaluationRunner:
                     objects = detector.detect(frame, confidence_threshold=confidence)
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 error = detection_failure(objects)
-            labels = sorted(_labels(objects))
+            labels = sorted(_labels(objects)) if not error else []
             counts.update(labels)
-            if elapsed_ms:
+            if elapsed_ms and not error:
                 latencies.append(elapsed_ms)
             rows.append({"labels": labels, "objects": objects, "elapsed_ms": round(elapsed_ms, 2), "error": error})
             with self._lock:
@@ -272,8 +272,12 @@ class ModelEvaluationRunner:
             )
             comparisons = []
             agreements = 0
+            failed_samples = 0
             stored_reference_hits = {"baseline": 0, "candidate": 0, "total": 0}
             for (event, _path), left, right in zip(corpus, baseline_rows, candidate_rows):
+                if left["error"] or right["error"]:
+                    failed_samples += 1
+                    continue
                 reference = _reference_labels(event)
                 left_labels, right_labels = set(left["labels"]), set(right["labels"])
                 agreements += left_labels == right_labels
@@ -299,8 +303,11 @@ class ModelEvaluationRunner:
                         "baseline_only": sorted(left_labels - right_labels),
                     })
             total_reference = stored_reference_hits["total"]
+            compared_samples = len(corpus) - failed_samples
             result = {
                 "sample_count": len(corpus),
+                "compared_sample_count": compared_samples,
+                "failed_sample_count": failed_samples,
                 "camera_count": len({str(event.get("camera_id") or "") for event, _ in corpus}),
                 "source_counts": dict(sorted(Counter(
                     str(event.get("source_kind") or "incident")
@@ -319,7 +326,8 @@ class ModelEvaluationRunner:
             }
             with self._lock:
                 self._status.update({
-                    "status": "completed",
+                    "status": "completed" if compared_samples else "failed",
+                    "error": "" if compared_samples else "No images could be compared successfully.",
                     "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "progress": {"completed": len(corpus) * 2, "total": len(corpus) * 2},
                     "result": result,
