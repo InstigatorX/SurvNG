@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from .config import MotionQualificationConfig
 from .motion import MotionQualificationResult
 from .motion_topics import semantic_motion_kind
+from .camera_semantics import active_camera_semantic_kind, camera_semantic_reports
 from .motion_events import (
     MotionEventCoordinator,
     MotionTrigger,
@@ -65,8 +66,11 @@ class MotionDecisionState(Protocol):
     def increment_stat(self, name: str, amount: int = 1) -> None: ...
 
 
-def priority_motion_topic(topic: str) -> bool:
-    return semantic_motion_kind(topic) is not None
+def priority_motion_topic(topic: str, message: str = "") -> bool:
+    return (
+        semantic_motion_kind(topic) == "manual"
+        or active_camera_semantic_kind(topic, message) is not None
+    )
 
 
 def should_verify_suppression(decision_id: str, rate: float) -> bool:
@@ -148,6 +152,7 @@ class MotionDecisionOrchestrator:
         media: MotionDecisionMedia,
         analysis: MotionDecisionAnalysis,
         state: MotionDecisionState,
+        model_labels: Callable[[], list[str]] | None = None,
     ) -> None:
         self._camera_id = camera_id
         self._events = events
@@ -158,6 +163,7 @@ class MotionDecisionOrchestrator:
         self._media = media
         self._analysis = analysis
         self._state = state
+        self._model_labels = model_labels or (lambda: [])
         self._thread: threading.Thread | None = None
         self._refinement_completion_lock = threading.Lock()
         self._completed_refinement_contexts: set[str] = set()
@@ -286,16 +292,20 @@ class MotionDecisionOrchestrator:
             self._events.set_active(None)
             return
         self._mark_episode_intents_running(triggers)
-        authoritative_sources = {
-            source.value
+        intents = [
+            intent
             for item in triggers
             if item.detection_intent_id
             for intent in (self._events.episode_controller.intent(item.detection_intent_id),)
             if intent is not None
+        ]
+        authoritative_sources = {
+            source.value
+            for intent in intents
             for source in intent.sources
         }
         priority_triggers = [
-            item for item in triggers if priority_motion_topic(item.topic)
+            item for item in triggers if priority_motion_topic(item.topic, item.message)
         ]
         representative = min(
             priority_triggers or triggers,
@@ -323,7 +333,40 @@ class MotionDecisionOrchestrator:
 
         mode, sensitivity, frame_width = self._qualification.settings()
         rescue_enabled, rescue_margin = self._qualification.rescue_settings()
-        priority = bool(priority_triggers)
+        retained_notices = [
+            intent.camera_notice
+            for intent in intents
+            if intent.camera_notice is not None
+        ]
+        semantic_reports: list[dict[str, object]] = []
+        report_keys: set[tuple[str, str, str, tuple[str, ...]]] = set()
+        sources = [
+            (trigger.topic, trigger.message, trigger.camera_semantics)
+            for trigger in triggers
+        ] + [
+            (notice.topic, notice.message, None)
+            for notice in retained_notices
+        ]
+        labels = self._model_labels()
+        for topic, message, stored in sources:
+            reports = (
+                stored.get("reports", [])
+                if isinstance(stored, dict)
+                else camera_semantic_reports(topic, message, labels)
+            )
+            for report in reports:
+                if not isinstance(report, dict):
+                    continue
+                key = (
+                    str(report.get("topic") or ""),
+                    str(report.get("category") or ""),
+                    str(report.get("reported_class") or ""),
+                    tuple(str(value) for value in report.get("candidate_model_classes", [])),
+                )
+                if key not in report_keys:
+                    report_keys.add(key)
+                    semantic_reports.append(dict(report))
+        priority = bool(priority_triggers or semantic_reports)
         adaptive_only = bool(
             all(item.topic.startswith("adaptive/") for item in triggers)
             and not authoritative_sources.intersection({"camera", "manual"})
@@ -431,6 +474,8 @@ class MotionDecisionOrchestrator:
                 and representative.prequalified.features.get("ema_v2")
             ),
         }
+        if semantic_reports:
+            qualification["camera_semantics"] = {"reports": semantic_reports}
         if route_trigger is not None and route_trigger.prequalified is not None:
             # The representative controls the camera-primary presentation and
             # timing, but route provenance controls the durable occurrence

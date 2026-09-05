@@ -40,6 +40,7 @@ jobs:
         run: |
           scripts/run-tests.sh \
             tests/test_event_store.py \
+            tests/test_camera_semantics*.py \
             tests/test_app_lifespan.py \
             tests/test_frontend_routes.py \
             tests/test_recorder.py \

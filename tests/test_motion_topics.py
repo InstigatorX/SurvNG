@@ -69,7 +69,21 @@ def test_generic_motion_and_unknown_topics_do_not_gain_semantic_bypass():
     for topic in ("tns1:VideoSource/MotionAlarm", "tns1:Device/Status", ""):
         assert semantic_motion_kind(topic) is None
         assert not priority_motion_topic(topic)
+    assert not priority_motion_topic(
+        "RuleEngine/PersonDetect",
+        '<SimpleItem Name="State" Value="false"/>',
+    )
     assert semantic_motion_kind("manual") == "manual"
+
+
+def test_generic_alarm_with_explicit_class_is_an_active_semantic_notice():
+    listener = OnvifEventListener(
+        CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid"),
+        Mock(),
+    )
+    message = "{'Name': 'ObjectType', 'Value': 'dog'}"
+    assert listener._motion_event_state("RuleEngine/MyRuleDetector/Alarm", message) is True
+    assert priority_motion_topic("RuleEngine/MyRuleDetector/Alarm", message)
 
 
 def test_custom_evidence_keywords_remain_supported():
@@ -83,3 +97,16 @@ def test_custom_evidence_keywords_remain_supported():
     evidence = stage.process(context).source_evidence["onvif"]
     assert evidence["priority"] is True
     assert evidence["semantic_kind"] is None
+
+
+def test_manual_evidence_remains_priority() -> None:
+    repository = MotionEvidenceRepository("gate")
+    stage = OnvifEventEvidenceStage("onvif", repository)
+    context = MotionContext(
+        camera_id="gate", captured_at=10.0, original_frame=None,
+        configuration={"observation_kind": "motion_event", "event_topic": "manual"},
+        runtime=MotionRuntimeState("gate"),
+    )
+    evidence = stage.process(context).source_evidence["onvif"]
+    assert evidence["priority"] is True
+    assert evidence["score"] == 0.95

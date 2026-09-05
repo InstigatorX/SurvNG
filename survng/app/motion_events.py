@@ -83,6 +83,7 @@ class MotionTrigger:
     evidence_frame_sequence: int = 0
     evidence_capture_generation: int = 0
     delivery_job_id: str = ""
+    camera_semantics: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.topic, str) or not self.topic.strip():
@@ -124,6 +125,10 @@ class MotionTrigger:
             raise TypeError("motion trigger lifecycle generation must be an integer")
         if not isinstance(self.delivery_job_id, str):
             raise TypeError("motion trigger delivery job ID must be a string")
+        if self.camera_semantics is not None and not isinstance(
+            self.camera_semantics, dict
+        ):
+            raise TypeError("motion trigger camera semantics must be a dictionary")
         if self.evidence_frame_at_epoch is not None:
             if isinstance(self.evidence_frame_at_epoch, bool) or not isinstance(
                 self.evidence_frame_at_epoch, (int, float)
@@ -170,6 +175,7 @@ class MotionTrigger:
             "evidence_frame_at_epoch": self.evidence_frame_at_epoch,
             "evidence_frame_sequence": self.evidence_frame_sequence,
             "evidence_capture_generation": self.evidence_capture_generation,
+            "camera_semantics": self.camera_semantics,
         }
 
     @classmethod
@@ -206,6 +212,11 @@ class MotionTrigger:
             evidence_frame_sequence=int(payload.get("evidence_frame_sequence") or 0),
             evidence_capture_generation=int(
                 payload.get("evidence_capture_generation") or 0
+            ),
+            camera_semantics=(
+                dict(payload["camera_semantics"])
+                if isinstance(payload.get("camera_semantics"), dict)
+                else None
             ),
             delivery_job_id=job_id,
         )

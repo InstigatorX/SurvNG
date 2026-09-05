@@ -17,6 +17,7 @@ from .config import CameraConfig
 from .security import redact_secret_text
 from .onvif_inspector import ONVIF_INSPECTOR
 from .motion_topics import normalize_motion_topic, semantic_motion_kind
+from .camera_semantics import active_camera_semantic_kind
 
 LOGGER = logging.getLogger("uvicorn.error")
 MOTION_WORDS = ("motion", "cellmotion", "person", "vehicle", "animal", "alarm")
@@ -1027,8 +1028,12 @@ class OnvifEventListener:
 
     def _motion_event_state(self, topic: str, message: str) -> bool | None:
         searchable = f"{topic} {message}".lower()
-        if semantic_motion_kind(topic) is None and not any(
+        if (
+            semantic_motion_kind(topic) is None
+            and active_camera_semantic_kind(topic, message) is None
+            and not any(
             word in searchable for word in MOTION_WORDS
+            )
         ):
             return None
         explicit_states: list[bool] = []

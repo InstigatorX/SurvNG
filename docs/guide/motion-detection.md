@@ -44,6 +44,27 @@ You care about people at a side gate but not distant sidewalk traffic:
 4. Review **Incidents** after walking the gate path.
 5. If windy bushes create junk, tighten zones or raise sensitivity carefully — do not jump straight to extreme thresholds.
 
+## Camera reports and model detections
+
+Some cameras report only motion. Others report a person, vehicle, animal or face in an ONVIF topic or a supported object-type field. SurvNG normalizes these reports across camera brands and keeps them separate from its own object detections.
+
+| Camera report | Meaning | Possible configured model classes |
+| --- | --- | --- |
+| People detection | Camera reported a person | `person` |
+| Vehicle detection | Camera reported a vehicle | `car`, `truck`, and other recognized vehicle labels present in the model |
+| Dog/cat detection | Camera reported a dog or cat without distinguishing them | `dog`, `cat` |
+| Explicit dog object type | Camera reported a dog | `dog` |
+
+The candidate list contains compatible model labels, not detected objects. An empty list means no compatible model label was resolved; it does not invalidate the camera's report. Unrecognized custom labels are not guessed.
+
+SurvNG still checks every enabled model class and applies its usual confidence, confirmation and incident eligibility rules. For example, a camera animal report can lead to a SurvNG detection of both a dog and a person. Camera reports never populate object badges, object filters, training labels or model-confirmed MQTT classes by themselves.
+
+Incident details show camera reports separately from model detections. The reports travel with stored event qualification, durable detection work and incident API/MQTT data. Existing events without this metadata remain readable and show no inferred camera report.
+
+For API and MQTT consumers, `camera_semantics.reports` contains the original `topic`, normalized `category`, optional `reported_class`, and advisory `candidate_model_classes`. Grouped incident reports also identify their `source_event_id` and `source_created_at`. Continue to use the existing object/class fields for SurvNG detections. No database migration or camera-specific setting is required.
+
+This is support for recognized message formats, not automatic understanding of every vendor's analytics. Unsupported payload fields and unknown topics do not gain semantic priority. Line-crossing and intrusion describe behavior and are not automatically treated as object classes.
+
 ## Object tracking
 
 When tracking is enabled, SurvNG can follow an object across frames **after** recorded confirmation. That improves cover selection and review overlays. It does not decide whether the incident is kept, and it spends extra detector time, so it starts only once refinement has finished (or could not run). Tracking settings live with detection configuration.

@@ -817,6 +817,25 @@ class MqttService:
                 detected.append(item)
         return detected
 
+    @staticmethod
+    def _event_camera_semantics(event: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = event.get("objects")
+        if raw is None:
+            try:
+                raw = json.loads(str(event.get("objects_json") or "[]"))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                raw = []
+        if not isinstance(raw, list):
+            return []
+        for item in reversed(raw):
+            if not isinstance(item, dict) or item.get("status") != "motion_qualification":
+                continue
+            qualification = item.get("motion_qualification")
+            semantics = qualification.get("camera_semantics") if isinstance(qualification, dict) else None
+            reports = semantics.get("reports") if isinstance(semantics, dict) else None
+            return [dict(report) for report in reports or [] if isinstance(report, dict)]
+        return []
+
     @classmethod
     def _incident_payload(cls, pending: dict[str, Any], state: str) -> dict[str, Any]:
         events = sorted(pending["events"].values(), key=event_epoch)
@@ -930,6 +949,15 @@ class MqttService:
                 str(item.get("name") or "").lower(),
             ),
         )
+        semantic_reports = [
+            {
+                **report,
+                "source_event_id": event.get("id"),
+                "source_created_at": event.get("created_at"),
+            }
+            for event in events
+            for report in cls._event_camera_semantics(event)
+        ]
         return {
             "schema_version": 1,
             "type": "incident",
@@ -948,6 +976,7 @@ class MqttService:
             "classes": [item["label"] for item in objects],
             "zones": sorted({zone for item in objects for zone in item["zones"]}),
             "objects": objects,
+            "camera_semantics": {"reports": semantic_reports},
             "identities": identities,
             "people": [
                 str(item.get("name") or "")

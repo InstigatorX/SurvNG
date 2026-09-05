@@ -21,12 +21,13 @@ def semantic_motion_kind(topic: str) -> str | None:
     normalized = normalize_motion_topic(topic)
     if normalized.startswith("manual"):
         return "manual"
+    terminal = "".join(character for character in normalized.rsplit("/", 1)[-1] if character.isalnum())
     for kind, aliases in (
-        ("person", ("person", "people", "human")),
-        ("vehicle", ("vehicle",)),
-        ("animal", ("animal", "dogcatdetect")),
-        ("face", ("face",)),
+        ("person", {"person", "persondetect", "persondetected", "persondetection", "persondetector", "people", "peopledetect", "humandetect"}),
+        ("vehicle", {"vehicle", "vehicledetect", "vehicledetected", "vehicledetection", "vehicledetector"}),
+        ("animal", {"animal", "animaldetect", "animaldetected", "animaldetection", "animaldetector", "dogcatdetect"}),
+        ("face", {"face", "facedetect", "facedetected", "facedetection", "facedetector"}),
     ):
-        if any(alias in normalized for alias in aliases):
+        if terminal in aliases:
             return kind
     return None

@@ -15,6 +15,7 @@ def _service(
     accepting: bool = True,
     detection_enabled: bool = True,
     mode: str = "camera",
+    labels: list[str] | None = None,
 ) -> tuple[MotionEventIngressService, Mock]:
     owned = Mock()
     owned.events.enqueue.return_value = True
@@ -38,6 +39,7 @@ def _service(
         qualification=owned.qualification,
         state=owned.state,
         epoch_now=lambda: 1_700_000_000.0,
+        model_labels=lambda: labels or [],
     )
     return service, owned
 
@@ -75,6 +77,20 @@ def test_camera_notice_is_normalized_observed_published_and_enqueued() -> None:
     assert trigger.received_at == 1_700_000_000.0
     assert trigger.event_timing.camera_event_at == camera_time
     owned.state.end_ingress.assert_called_once_with(1)
+
+
+def test_camera_semantics_are_attached_without_changing_admission() -> None:
+    service, owned = _service(labels=["person", "car"])
+
+    service.handle("RuleEngine/VehicleDetect", "")
+
+    trigger = owned.events.enqueue.call_args.args[0]
+    assert trigger.camera_semantics == {"reports": [{
+        "topic": "RuleEngine/VehicleDetect",
+        "category": "vehicle",
+        "candidate_model_classes": ["car"],
+    }]}
+    assert owned.events.enqueue.call_count == 1
 
 
 def test_camera_enqueue_exception_aborts_episode_reservation() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+from ..camera_semantics import active_camera_semantic_kind
 from ..motion_topics import semantic_motion_kind
 
 from .context import MotionContext
@@ -144,9 +145,11 @@ class OnvifEventEvidenceStage:
         message = str(context.configuration.get("event_message") or "")
         event_source = str(context.configuration.get("event_source") or "onvif")
         searchable = f"{topic} {message}".lower()
-        semantic_kind = semantic_motion_kind(topic)
-        priority = semantic_kind is not None or any(
-            keyword in searchable for keyword in self.priority_keywords
+        semantic_kind = active_camera_semantic_kind(topic, message)
+        topic_semantic_kind = semantic_motion_kind(topic)
+        priority = topic_semantic_kind == "manual" or semantic_kind is not None or (
+            topic_semantic_kind is None
+            and any(keyword in searchable for keyword in self.priority_keywords)
         )
         evidence = {
             "warmed": 1.0,

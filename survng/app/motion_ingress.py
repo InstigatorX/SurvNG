@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 
 from .motion_decisions import priority_motion_topic
+from .camera_semantics import camera_semantic_reports
 from .motion_events import MotionEventCoordinator, MotionEventTiming, MotionTrigger
 from .domain_events import MotionObserved
 from .ema_v2 import CameraNotice, EpisodeDecisionReason
@@ -132,12 +133,14 @@ class MotionEventIngressService:
         qualification: MotionIngressQualification,
         state: MotionIngressState,
         epoch_now: Callable[[], float] = time.time,
+        model_labels: Callable[[], list[str]] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.events = events
         self.qualification = qualification
         self.state = state
         self.epoch_now = epoch_now
+        self.model_labels = model_labels or (lambda: [])
         self.event_clock = MotionEventClock()
 
     def handle(
@@ -199,6 +202,9 @@ class MotionEventIngressService:
                 return
             queued = False
             try:
+                semantic_reports = camera_semantic_reports(
+                    topic, message, self.model_labels()
+                )
                 queued = self.enqueue(MotionTrigger(
                     topic=topic,
                     message=message,
@@ -208,6 +214,9 @@ class MotionEventIngressService:
                     episode_id=intent.episode_id,
                     detection_intent_id=intent.intent_id,
                     lifecycle_generation=intent.generation,
+                    camera_semantics=(
+                        {"reports": semantic_reports} if semantic_reports else None
+                    ),
                 ), evict_oldest=False)
             finally:
                 self.events.episode_controller.acknowledge_admission(

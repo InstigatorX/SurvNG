@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
+import { cameraReportsForIncident } from "../cameraSemantics.mjs";
 import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
@@ -1003,6 +1004,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const objectTracks = incidentTracking?.tracks || [];
   const faces = faceEvent?.faces || [];
   const zones = incidentZones(inspectedEvent);
+  const cameraReports = cameraReportsForIncident(incident);
   const eventId = Number(inspectedEvent.representative_event_id || inspectedEvent.id);
   const findSimilarAnchorId = Number(
     anchorEventId
@@ -1029,6 +1031,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
       </div>
       <section className="incident-current-summary">
         <h3>Current incident</h3>
+        <h4>Model detections</h4>
         <div className="incident-summary-objects">
           {objects.length ? objects.map((object) => {
             const objectIndex = searchableObjects.indexOf(object);
@@ -1066,6 +1069,22 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
             );
           }) : <p>No eligible object detections.</p>}
         </div>
+        {cameraReports.length ? (
+          <div className="incident-camera-reports">
+            <h4>Camera reported</h4>
+            <small>Camera claims are separate from model detections.</small>
+            {cameraReports.map((report, index) => (
+              <div className="incident-camera-report" key={`${report.eventId || "event"}-${report.eventAt}-${report.topic}-${index}`}>
+                <div>
+                  <strong>{report.reportedClass || report.category}</strong>
+                  <span>{report.topic}</span>
+                </div>
+                {report.eventAt ? <time>Camera event · {formatTimeOnly(report.eventAt, timeZone)}</time> : null}
+                {report.candidateModelClasses.length ? <small>Possible model classes: {report.candidateModelClasses.join(", ")}</small> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
         <dl>
           <div><dt>Trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
           <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>

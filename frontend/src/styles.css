@@ -14442,3 +14442,51 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   font-weight: 700;
   padding: 0 10px;
 }
+
+.incident-current-summary h4 {
+  margin: 10px 0 5px;
+  font-size: 11px;
+}
+
+.incident-camera-reports {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.incident-camera-reports > h4 {
+  margin: 0;
+}
+
+.incident-camera-reports > small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.incident-camera-report {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  padding: 7px;
+}
+
+.incident-camera-report > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.incident-camera-report span,
+.incident-camera-report small,
+.incident-camera-report time {
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.incident-camera-report > small {
+  grid-column: 1 / -1;
+}
