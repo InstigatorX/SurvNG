@@ -1,0 +1,124 @@
+{
+  "timestamp": "2026-09-05T19:15:38.256823+00:00",
+  "phase": "after",
+  "candidate": "8177935464ed3c398cad01082c7dfab47b2d2e05",
+  "pr172_head": "704bc2c8c3666375da26d0a1ca50b0a3b498ed21",
+  "pr173_head": "323b8051d1fac622c797787e63bc5f87877b1343",
+  "checks": {
+    "gate/frames.npy_matches_original_decode": true,
+    "gate/prepared.npy_matches_original_decode": true,
+    "gate/timestamps.npy_matches_original_decode": true,
+    "lower-garage/frames.npy_matches_original_decode": true,
+    "lower-garage/prepared.npy_matches_original_decode": true,
+    "lower-garage/timestamps.npy_matches_original_decode": true,
+    "back-left/frames.npy_matches_original_decode": true,
+    "back-left/prepared.npy_matches_original_decode": true,
+    "back-left/timestamps.npy_matches_original_decode": true,
+    "pr172_ancestor_of_candidate": true,
+    "pr173_ancestor_of_candidate": true,
+    "pr172_candidate_blob_matches_pr_head": true,
+    "pr173_candidate_blob_matches_pr_head": true
+  },
+  "saved_inputs": {
+    "gate/frames.npy": {
+      "sha256": "92e93b311e2165f9fb4998e9b84b9f28efd252339db7d2c249bced4fb565cf2f",
+      "size_bytes": 414720128
+    },
+    "gate/prepared.npy": {
+      "sha256": "b80124f1edd7d0d27777e65ae4b016e30b9a3efeb210e783097113b4fb328206",
+      "size_bytes": 138240128
+    },
+    "gate/timestamps.npy": {
+      "sha256": "b8a3a9d4f3694ff1e62054cc4498aaba9b6996b579a4456d4934465f8d82a98c",
+      "size_bytes": 3728
+    },
+    "gate/spec.json": {
+      "sha256": "7b868d63259df483de1d868d16cf96ff45a8ff4bef6631591cd5ce39cb15a163",
+      "size_bytes": 12247
+    },
+    "gate/decode.json": {
+      "sha256": "f97993aef56b4bc23567882e8e9b0fd669542c5be74498f1dd0b4e87847a7686",
+      "size_bytes": 13988
+    },
+    "lower-garage/frames.npy": {
+      "sha256": "ec77f65ea7ff9c4370f0088d2896a852a3a3db6b6b91b53f26a005409d9f7a84",
+      "size_bytes": 172800128
+    },
+    "lower-garage/prepared.npy": {
+      "sha256": "f15abf354d0f379a8e0d2c6f8be3b26f3bbf8e53e32316b8e0b5a78e95589e74",
+      "size_bytes": 57600128
+    },
+    "lower-garage/timestamps.npy": {
+      "sha256": "4e5eba1496ff6aa82b4e6819b3e2fb7b000b6e40d058b4b73c00a54ad8fb4a10",
+      "size_bytes": 2128
+    },
+    "lower-garage/spec.json": {
+      "sha256": "33c9b858cfef2309654a1322fbdf873cf9c55db80befe7c5e820889e287051bf",
+      "size_bytes": 10499
+    },
+    "lower-garage/decode.json": {
+      "sha256": "cbd03f91cd0a09abcf3a2d4465a49b4bb33f00ec0912b284c1537e4302746d24",
+      "size_bytes": 11645
+    },
+    "back-left/frames.npy": {
+      "sha256": "2d0a0d2fd66613963c1a62941fe7d72045bb85f525b90f66a0a16c34c1b5b233",
+      "size_bytes": 311040128
+    },
+    "back-left/prepared.npy": {
+      "sha256": "427914f1ce16631b9444dfe6651331f1484517b7c3a6dbe01b4923f8d7b1f15f",
+      "size_bytes": 103680128
+    },
+    "back-left/timestamps.npy": {
+      "sha256": "7467424adea72dba1bc8412387630adba9a414458ec859760f55bfb55437d204",
+      "size_bytes": 3728
+    },
+    "back-left/spec.json": {
+      "sha256": "d2b2b1c38c94dcdab88cbfda484c420e7d8f775e72c37f906469724f7a9cdb38",
+      "size_bytes": 12466
+    },
+    "back-left/decode.json": {
+      "sha256": "95b7671fd2e52671b8036a87194609054aea3a8025f88180ddab36bcfe35616a",
+      "size_bytes": 14042
+    },
+    "worker.py": {
+      "sha256": "ed5c4c35915643ff8032df5d15ef2a12dfa0e6b69fe95bd1415715d5b3b51556",
+      "size_bytes": 15932
+    },
+    "run_replay.py": {
+      "sha256": "acdc24457adf22ef9821d0422a051e234925175ce6e9a213549f74177bebaa73",
+      "size_bytes": 33753
+    },
+    "environment.json": {
+      "sha256": "dabda7a5f6e04940ac91b9499c458c1c66c2a1c7f41ffc781e5c6586a6054119",
+      "size_bytes": 9642
+    },
+    "selection.json": {
+      "sha256": "12db6fe2023feea0208b7768e86f68c91395b66b2f021c0d350e028a20be7737",
+      "size_bytes": 32887
+    }
+  },
+  "service": {
+    "MainPID": "651962",
+    "ExecMainStartTimestamp": "Sat 2026-09-05 15:03:28 EDT",
+    "persisted_config_sha256": "0444474a52f5eaf09e2330c2bdb338640774a134caf3cd633bed9acb0f4fa6b0",
+    "checkout_commit": "8177935464ed3c398cad01082c7dfab47b2d2e05",
+    "checkout_status": "",
+    "socket_process": {
+      "instance_id": "dd09ac996b6e79246c785aeb",
+      "pid": 651962,
+      "uptime_seconds": 728.8,
+      "stopping": false
+    },
+    "detector_ready": true,
+    "socket_request_ms": 62.59607104584575
+  },
+  "candidate_delta_files": [
+    "survng/app/motion.py",
+    "survng/app/motion_pipeline/adaptive_stages.py",
+    "tests/test_adaptive_motion.py",
+    "tests/test_motion_empty_masks.py"
+  ],
+  "saved_inputs_unchanged": true,
+  "service_identity_and_config_unchanged": true,
+  "publication_note": "Saved-input keys are relative to the original replay directory; full local paths omitted."
+}
