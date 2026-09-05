@@ -267,9 +267,6 @@ class AdaptiveEmaBackgroundStage:
                 mad = float(np.median(np.abs(delta - median)))
                 robust_noise = max(1.0, median + 1.4826 * mad)
                 noise_ema = noise_ema * 0.92 + robust_noise * 0.08
-                stable_limit = max(6.0, noise_ema * 3.0)
-                changed = delta > stable_limit
-                changed_ratio = float(np.count_nonzero(changed)) / max(1, changed.size)
 
                 current_at = (
                     timestamps[frame_index]
@@ -297,6 +294,9 @@ class AdaptiveEmaBackgroundStage:
                     global_changes.append(0.0)
                     continue
 
+                stable_limit = max(6.0, noise_ema * 3.0)
+                changed = delta > stable_limit
+                changed_ratio = float(np.count_nonzero(changed)) / max(1, changed.size)
                 elapsed = 1.0 / sample_fps
                 if frame_index < len(timestamps):
                     previous_at = timestamps[frame_index - 1]
@@ -354,11 +354,12 @@ class AdaptiveEmaBackgroundStage:
 
                 differences.append(np.clip(delta, 0, 255).astype(np.uint8))
                 learning_rates.append(rate)
+                persistent_change_count = np.count_nonzero(persistent_change)
                 moving_learning_rates.append(
-                    stationary_rate if np.any(persistent_change) else moving_rate
+                    stationary_rate if persistent_change_count else moving_rate
                 )
                 persistent_change_ratios.append(
-                    float(np.count_nonzero(persistent_change)) / max(1, persistent_change.size)
+                    float(persistent_change_count) / max(1, persistent_change.size)
                 )
                 global_changes.append(changed_ratio)
                 brightness = float(np.mean(current))
