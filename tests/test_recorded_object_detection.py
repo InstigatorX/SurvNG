@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -13,6 +16,7 @@ import cv2
 import numpy as np
 
 from survng.app.config import CameraConfig
+from survng.app.motion_pipeline.decision_handler import MotionDecisionHandler
 from survng.app.motion_pipeline.object_detection import (
     _EventRecordedSampler,
     _RecordedDetectionSample,
@@ -1979,6 +1983,148 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertGreaterEqual(detector.calls, 4)
         labels = {item["label"] for item in result.objects if item.get("incident_eligible")}
         self.assertIn("person", labels)
+
+    def test_adaptive_sampling_confirms_each_same_class_subject(self) -> None:
+        event_epoch = 1_800_000_000.0
+        event_at = datetime.fromtimestamp(event_epoch, timezone.utc)
+        requested: list[float] = []
+        rows, columns = np.indices((100, 200))
+        checker = (((rows // 2) + (columns // 2)) % 2 * 220).astype(np.uint8)
+        clear_frame = np.repeat(checker[..., None], 3, axis=2)
+
+        class Recorder:
+            def recording_at(self, _camera_id, epoch):
+                offset = round(epoch - event_epoch, 1)
+                requested.append(offset)
+                return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+                event_refinement_stages=[[-1.0, -0.5, 0.0, 0.5, 1.0]],
+            )
+
+            def detect(self, frame, confidence_threshold=None):
+                offset = float(frame[0, 0, 0]) / 10.0 - 2.0
+                first = detected("person", 0.9, (20, 20, 40, 70))
+                second = detected("person", 0.9, (140, 20, 160, 70))
+                return [first, second] if offset >= 0.5 else [first]
+
+        def read_frame(path, _offset, **_kwargs):
+            offset = float(str(path).removeprefix("sample-").removesuffix(".mp4"))
+            frame = clear_frame.copy()
+            frame[0, 0, :] = int(round((offset + 2.0) * 10.0))
+            return frame
+
+        for adaptive in (True, False):
+            with self.subTest(adaptive=adaptive):
+                requested.clear()
+                detector = Detector()
+                detector.config.recorded_adaptive_sampling = adaptive
+                backend = RecordedMotionObjectDetector(
+                    CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+                    detector, Recorder(), lambda: None,
+                )
+                with (
+                    patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20),
+                    patch.object(backend, "_read_recorded_frame", side_effect=read_frame),
+                ):
+                    result = backend.detect(event_at)
+                self.assertIn(1.0, requested)
+                eligible = [item for item in result.objects if item.get("incident_eligible")]
+                self.assertEqual({item["box"]["x1"] for item in eligible}, {20, 140})
+                self.assertEqual(next(item for item in eligible if item["box"]["x1"] == 140)["temporal_observations"], 2)
+                events = Mock()
+                events.add_event.return_value = {"id": 1}
+                publish = Mock()
+                handler = MotionDecisionHandler(
+                    "gate", events, lambda _at: result,
+                    lambda _frame, _at: "snapshot.jpg", json.dumps,
+                    event_callback=publish,
+                )
+                outcome = handler.handle("manual", "test", event_at, {}, require_eligible_object=True)
+                self.assertTrue(outcome.object_detected)
+                self.assertEqual(len(outcome.detected_objects), 2)
+                payload = next(call.args[1] for call in publish.call_args_list if call.args[0] == "object")
+                self.assertEqual(len(payload["incident_objects"]), 2)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for source-PTS regression")
+    def test_low_fps_confirmation_counts_distinct_decoded_frames(self) -> None:
+        start_epoch = 1_800_000_000.0
+        event_at = datetime.fromtimestamp(start_epoch + 1.2, timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "low-fps.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc=size=160x120:rate=1",
+                "-t", "6", "-c:v", "mpeg4", "-q:v", "2",
+                "-pix_fmt", "yuv420p", str(path),
+            ], check=True, capture_output=True, timeout=15)
+
+            class Recorder:
+                ffmpeg_path = "ffmpeg"
+                hardware_acceleration = "none"
+
+                def recording_at(self, _camera_id, _epoch):
+                    return {"path": str(path), "start_epoch": start_epoch, "duration_seconds": 6}
+
+            class Detector:
+                config = SimpleNamespace(
+                    confidence_threshold=0.5,
+                    require_incident_zone=False,
+                    event_confirmation_frames=2,
+                    event_class_confirmation_frames={},
+                    event_refinement_stages=[[-1.0, -0.5, 0.0, 0.5, 1.0]],
+                    event_refinement_retry_seconds=10.0,
+                    recorded_adaptive_sampling=True,
+                )
+                targets: list[np.ndarray] = []
+                calls = 0
+                detections = 0
+
+                def detect(self, frame, confidence_threshold=None):
+                    self.calls += 1
+                    if any(np.array_equal(frame, target) for target in self.targets):
+                        self.detections += 1
+                        return [detected("person", 0.9, (40, 20, 100, 100))]
+                    return []
+
+            for distinct_confirmations in (False, True):
+                with self.subTest(distinct_confirmations=distinct_confirmations):
+                    detector = Detector()
+                    backend = RecordedMotionObjectDetector(
+                        CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+                        detector, Recorder(), lambda: None,
+                    )
+                    reference, _ = backend._read_recorded_frames(path, [2.0, 3.0])
+                    self.assertEqual(set(reference), {2.0, 3.0})
+                    detector.targets = [reference[2.0].frame]
+                    if distinct_confirmations:
+                        detector.targets.append(reference[3.0].frame)
+                    decoded_pts: list[float] = []
+                    read_frames = backend._read_recorded_frames
+
+                    def read(path, offsets, **kwargs):
+                        decoded, processes = read_frames(path, offsets, **kwargs)
+                        decoded_pts.extend(item.actual_offset for item in decoded.values())
+                        return decoded, processes
+
+                    with (
+                        patch("survng.app.motion_pipeline.object_detection.time.time", return_value=start_epoch + 20),
+                        patch.object(backend, "_read_recorded_frames", side_effect=read),
+                    ):
+                        result = backend.detect(event_at)
+                    self.assertGreaterEqual(decoded_pts.count(2.0), 2)
+                    self.assertEqual(detector.calls, len(set(decoded_pts)))
+                    self.assertEqual(detector.detections, 2 if distinct_confirmations else 1)
+                    eligible = [item for item in result.objects if item.get("incident_eligible")]
+                    self.assertEqual(len(eligible), 1 if distinct_confirmations else 0)
+                    if distinct_confirmations:
+                        self.assertEqual(eligible[0]["temporal_observations"], 2)
+                        self.assertTrue(eligible[0]["temporal_consensus"])
 
     def test_configured_refinement_stages_limit_requested_offsets(self) -> None:
         event_epoch = 1_800_000_000.0

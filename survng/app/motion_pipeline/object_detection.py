@@ -1678,6 +1678,18 @@ class RecordedMotionObjectDetector:
     ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
+        samples_by_source_frame: dict[tuple[str, float], _RecordedDetectionSample] = {}
+
+        def ordered_samples() -> list[_RecordedDetectionSample]:
+            # Different requested slots can resolve to one source frame. Keep
+            # those slots satisfied, but count their shared evidence only once.
+            unique: dict[int, _RecordedDetectionSample] = {}
+            for offset in planned_offsets:
+                sample = samples_by_offset.get(offset)
+                if sample is not None:
+                    unique.setdefault(id(sample), sample)
+            return list(unique.values())
+
         samples: list[_RecordedDetectionSample] = []
         default_required = max(
             1,
@@ -1850,29 +1862,39 @@ class RecordedMotionObjectDetector:
                         decoded = frames.get(frame_offset)
                         if decoded is None:
                             continue
-                        objects = self._detect_objects(
-                            decoded.frame,
-                            timing=timing,
-                            enrich_faces=False,
-                            workload="refinement",
+                        source_key = (
+                            (str(row["path"]), decoded.actual_offset)
+                            if decoded.exact_timestamp
+                            else None
                         )
-                        row_start = float(row.get("start_epoch") or 0.0)
-                        actual_offset = (
-                            row_start + decoded.actual_offset - event_epoch
+                        sample = (
+                            samples_by_source_frame.get(source_key)
+                            if source_key is not None
+                            else None
                         )
-                        samples_by_offset[sample_offset] = _RecordedDetectionSample(
-                            offset=actual_offset,
-                            requested_offset=sample_offset,
-                            exact_timestamp=decoded.exact_timestamp,
-                            frame=decoded.frame,
-                            objects=objects,
-                            recording_path=str(row["path"]),
-                        )
-                        samples = [
-                            samples_by_offset[offset]
-                            for offset in planned_offsets
-                            if offset in samples_by_offset
-                        ]
+                        if sample is None:
+                            objects = self._detect_objects(
+                                decoded.frame,
+                                timing=timing,
+                                enrich_faces=False,
+                                workload="refinement",
+                            )
+                            row_start = float(row.get("start_epoch") or 0.0)
+                            actual_offset = (
+                                row_start + decoded.actual_offset - event_epoch
+                            )
+                            sample = _RecordedDetectionSample(
+                                offset=actual_offset,
+                                requested_offset=sample_offset,
+                                exact_timestamp=decoded.exact_timestamp,
+                                frame=decoded.frame,
+                                objects=objects,
+                                recording_path=str(row["path"]),
+                            )
+                            if source_key is not None:
+                                samples_by_source_frame[source_key] = sample
+                        samples_by_offset[sample_offset] = sample
+                        samples = ordered_samples()
                         if _refinement_early_exit_ready(
                             stage_index=stage_index,
                             stage_offsets=stage_offsets,
@@ -1895,11 +1917,7 @@ class RecordedMotionObjectDetector:
                                     len(pending) - sample_index - 1
                                 )
 
-                samples = [
-                    samples_by_offset[offset]
-                    for offset in planned_offsets
-                    if offset in samples_by_offset
-                ]
+                samples = ordered_samples()
                 if samples:
                     selected, objects = _temporal_consensus(
                         samples,
@@ -1924,18 +1942,10 @@ class RecordedMotionObjectDetector:
                                 for sample in samples
                             )
                         )
-                        confirmed_labels = {
-                            str(item.get("label") or "").strip().lower()
-                            for item in objects
-                            if item.get("temporal_consensus") is True
-                        }
-                        unresolved_candidate = any(
-                            _candidate_detection(item)
-                            and not item.get("auxiliary_detection")
-                            and str(item.get("label") or "").strip().lower()
-                            not in confirmed_labels
-                            for sample in samples
-                            for item in sample.objects
+                        unresolved_candidate = not _refinement_stage_complete(
+                            samples,
+                            default_required,
+                            class_confirmations,
                         )
                         if (
                             adaptive_stage
