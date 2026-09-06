@@ -39,6 +39,9 @@ class InferenceSupervisor:
         self._object_route_cursor = 0
         self._device_condition = threading.Condition(threading.Lock())
         self._device_accepting = True
+        self._stopping = False
+        # Only restoration of every affected role may release a rollback fence.
+        self._recovery_roles: set[str] = set()
         self._security_waiting = 0
         self._security_active = 0
         self._initial_waiting = 0
@@ -358,16 +361,24 @@ class InferenceSupervisor:
             self._device_accepting = False
             self._device_condition.notify_all()
         resume_admission = previously_accepting
+        completed = False
         try:
             self._reconfigure_roles_unfenced(config, roles)
+            completed = True
         except InferenceRollbackIncomplete:
             # A partially restored pool must remain fenced until an explicit
             # successful restart/reconfiguration proves it is healthy.
             resume_admission = False
+            with self._device_condition:
+                if not self._stopping:
+                    self._recovery_roles.update(roles)
             raise
         finally:
             with self._device_condition:
-                self._device_accepting = resume_admission
+                if completed and self._recovery_roles:
+                    self._recovery_roles.difference_update(roles)
+                    resume_admission = not self._recovery_roles
+                self._device_accepting = resume_admission and not self._stopping
                 self._device_condition.notify_all()
 
     def _reconfigure_roles_unfenced(
@@ -671,12 +682,17 @@ class InferenceSupervisor:
         depth_ready = self._depth.start()
         ready = object_ready and face_ready and reid_ready and depth_ready
         with self._device_condition:
+            self._stopping = False
+            if ready:
+                self._recovery_roles.clear()
             self._device_accepting = bool(ready)
             self._device_condition.notify_all()
         return ready
 
     def stop(self) -> None:
         with self._device_condition:
+            self._stopping = True
+            self._recovery_roles.clear()
             self._device_accepting = False
             self._device_condition.notify_all()
         failures: list[tuple[str, BaseException]] = []
@@ -818,6 +834,7 @@ class InferenceSupervisor:
                 "error": f"{workload.name.lower()} inference admission timed out",
             }]
         unavailable: list[str] = []
+        engine_unavailable = False
         try:
             workers = self._ordered_object_workers(workload)
             fast_failover = bool(
@@ -826,7 +843,7 @@ class InferenceSupervisor:
             )
             for worker in workers:
                 try:
-                    return list(
+                    result = list(
                         worker.request(
                             "detect",
                             frame=frame,
@@ -845,6 +862,16 @@ class InferenceSupervisor:
                         )
                         or []
                     )
+                    if any(
+                        isinstance(item, dict)
+                        and item.get("status") == "detector_unavailable"
+                        for item in result
+                    ):
+                        # An unloaded engine still answers IPC successfully.
+                        # Try the next eligible worker, just as for a dead one.
+                        engine_unavailable = True
+                        continue
+                    return result
                 except InferenceUnavailable as exc:
                     unavailable.append(str(exc))
                     continue
@@ -857,6 +884,8 @@ class InferenceSupervisor:
                         "status": "detector_unavailable",
                         "error": "Object detection failed in the isolated worker.",
                     }]
+            if engine_unavailable:
+                return [{"status": "detector_unavailable"}]
             error = "; ".join(dict.fromkeys(unavailable)) or "all object inference workers unavailable"
             LOGGER.error("Isolated object detection unavailable: %s", error)
             return [{"status": "detector_unavailable", "error": error}]

@@ -4,6 +4,7 @@ import os
 from multiprocessing import resource_tracker
 from pathlib import Path
 import signal
+import tempfile
 import threading
 import time
 import unittest
@@ -233,6 +234,67 @@ class InferenceSupervisorTest(unittest.TestCase):
             second.request.call_args.kwargs["workload"],
             InferenceWorkload.INCIDENT_INITIAL,
         )
+
+    def test_unloaded_worker_response_reaches_healthy_peer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for method in ("detect_initial", "detect_tracking"):
+                with self.subTest(method=method):
+                    supervisor = InferenceSupervisor(DetectorConfig(
+                        enabled=True,
+                        model_path=str(Path(directory) / "missing.xml"),
+                        object_worker_count=3,
+                    ))
+                    self.addCleanup(supervisor.stop)
+                    reserved, background, healthy = supervisor._object_workers
+                    failed = reserved if method == "detect_initial" else background
+                    # Keep the unloaded child's real ready handshake, IPC and
+                    # detector-unavailable response; only the healthy peer is fake.
+                    self.assertTrue(failed.start())
+                    self.assertFalse(failed.status()["openvino_loaded"])
+                    if method == "detect_initial":
+                        background.request = Mock(return_value=[{"label": "person"}])
+                        expected_peer = background
+                    else:
+                        reserved.request = Mock()
+                        healthy.request = Mock(return_value=[{"label": "person"}])
+                        expected_peer = healthy
+                    with patch.object(failed, "request", wraps=failed.request) as request:
+                        result = getattr(supervisor, method)(
+                            np.zeros((24, 32, 3), dtype=np.uint8)
+                        )
+                    self.assertEqual(result, [{"label": "person"}])
+                    request.assert_called_once()
+                    expected_peer.request.assert_called_once()
+                    if method == "detect_initial":
+                        self.assertEqual(request.call_args.kwargs["timeout"], 3.0)
+                        self.assertEqual(request.call_args.kwargs["admission_timeout"], 0.75)
+                    else:
+                        reserved.request.assert_not_called()
+                    supervisor.stop()
+
+    def test_all_unloaded_workers_preserve_unavailable_response(self) -> None:
+        supervisor = InferenceSupervisor(DetectorConfig(enabled=False, object_worker_count=2))
+        self.addCleanup(supervisor.stop)
+        self.assertTrue(supervisor.start())
+        first, second = supervisor._object_workers
+        with (
+            patch.object(first, "request", wraps=first.request) as first_request,
+            patch.object(second, "request", wraps=second.request) as second_request,
+        ):
+            result = supervisor.detect_initial(np.zeros((24, 32, 3), dtype=np.uint8))
+        self.assertEqual(result, [{"status": "detector_unavailable"}])
+        first_request.assert_called_once()
+        second_request.assert_called_once()
+
+    def test_empty_detection_is_success_without_failover(self) -> None:
+        supervisor = InferenceSupervisor(DetectorConfig(enabled=False, object_worker_count=2))
+        self.addCleanup(supervisor.stop)
+        first, second = supervisor._object_workers
+        first.request = Mock(return_value=[])
+        second.request = Mock()
+
+        self.assertEqual(supervisor.detect_initial(np.zeros((8, 8, 3), dtype=np.uint8)), [])
+        second.request.assert_not_called()
 
     def test_tracking_uses_only_non_reserved_object_worker(self) -> None:
         supervisor = InferenceSupervisor(
@@ -612,6 +674,67 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertEqual(self.supervisor.config.device, "GPU")
         self.assertIs(self.supervisor._face.config, self.supervisor.config)
         self.assertIs(self.supervisor._reid.config, self.supervisor.config)
+
+    def test_recovery_requires_every_incompletely_restored_role(self) -> None:
+        with patch.object(
+            self.supervisor, "_reconfigure_roles_unfenced",
+            side_effect=InferenceRollbackIncomplete("rollback incomplete"),
+        ):
+            with self.assertRaises(InferenceRollbackIncomplete):
+                self.supervisor.reconfigure_roles(self.supervisor.config, {"object", "reid"})
+        with patch.object(self.supervisor, "_reconfigure_roles_unfenced"):
+            for roles, accepting in (({"face"}, False), ({"object"}, False), ({"reid"}, True)):
+                self.supervisor.reconfigure_roles(self.supervisor.config, roles)
+                self.assertEqual(self.supervisor.workload_status()["accepting"], accepting)
+
+    def test_stopped_pool_does_not_reopen_after_role_reconfiguration(self) -> None:
+        with patch.object(
+            self.supervisor, "_reconfigure_roles_unfenced",
+            side_effect=InferenceRollbackIncomplete("rollback incomplete"),
+        ):
+            with self.assertRaises(InferenceRollbackIncomplete):
+                self.supervisor.reconfigure_roles(self.supervisor.config, {"object"})
+        self.supervisor.stop()
+        with patch.object(self.supervisor, "_reconfigure_roles_unfenced"):
+            self.supervisor.reconfigure_roles(self.supervisor.config, {"object"})
+        self.assertFalse(self.supervisor.workload_status()["accepting"])
+
+    def test_stop_during_reconfiguration_keeps_admission_closed(self) -> None:
+        with patch.object(
+            self.supervisor, "_reconfigure_roles_unfenced",
+            side_effect=lambda *_args: self.supervisor.stop(),
+        ):
+            self.supervisor.reconfigure_roles(self.supervisor.config, {"object"})
+        self.assertFalse(self.supervisor.workload_status()["accepting"])
+
+    def test_full_start_clears_incomplete_role_recovery(self) -> None:
+        with patch.object(
+            self.supervisor, "_reconfigure_roles_unfenced",
+            side_effect=InferenceRollbackIncomplete("rollback incomplete"),
+        ):
+            with self.assertRaises(InferenceRollbackIncomplete):
+                self.supervisor.reconfigure_roles(self.supervisor.config, {"object"})
+        self.assertTrue(self.supervisor.start())
+        with patch.object(self.supervisor, "_reconfigure_roles_unfenced"):
+            self.supervisor.reconfigure_roles(self.supervisor.config, {"face"})
+        self.assertTrue(self.supervisor.workload_status()["accepting"])
+
+    def test_depth_crash_fallback_selects_cpu_without_changing_reid(self) -> None:
+        config = DetectorConfig.model_validate({
+            "depth": {"enabled": True, "model_path": "depth.xml", "device": "GPU"},
+            "tracking": {"reid_device": "GPU", "vehicle_reid_device": "GPU"},
+        })
+        worker = _InferenceWorker(config, "depth", {})
+        for _ in range(3):
+            worker._record_dead_worker_locked(-11)
+
+        self.assertTrue(worker.isolation_status()["fallback_active"])
+        payload = worker._active_config_payload()
+        self.assertEqual(payload["depth"]["device"], "CPU")
+        self.assertEqual(payload["tracking"]["reid_device"], "GPU")
+        self.assertEqual(payload["tracking"]["vehicle_reid_device"], "GPU")
+        worker._fallback_until = 0.0
+        self.assertEqual(worker._active_config_payload()["depth"]["device"], "GPU")
 
     def test_object_role_reconfiguration_replaces_live_worker_process(self) -> None:
         self.assertTrue(self.supervisor.start())
