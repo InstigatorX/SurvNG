@@ -44,6 +44,8 @@ class EventStore(
     MAX_COMPACT_WINDOW_ROWS = 50_000
     TRACKING_COMPARISON_HISTORY_PER_CAMERA = 100
     TRACKING_COMPARISON_VERDICTS = {
+        "survng_hybrid_candidate",
+        "ultralytics_tracktrack",
         "survng_hybrid",
         "ultralytics_botsort",
         "ultralytics_deepocsort",

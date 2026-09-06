@@ -1456,6 +1456,24 @@ p {
   gap: 10px !important;
 }
 
+.tracking-comparison-profile select {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-subtle);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 0 7px;
+}
+
+.tracking-comparison-download-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-self: start;
+}
+
 .tracking-comparison-head {
   display: flex;
   align-items: flex-start;
@@ -1473,6 +1491,11 @@ p {
   color: var(--muted);
   font-size: 10px;
   text-align: right;
+}
+
+.tracking-comparison-note {
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .tracking-comparison-grid {
@@ -1514,6 +1537,10 @@ p {
   box-shadow: inset 0 0 0 1px rgba(34, 211, 166, .2);
 }
 
+.tracking-comparison-card.error {
+  border-color: rgba(244, 63, 94, .4);
+}
+
 .tracking-comparison-card>header {
   display: flex;
   justify-content: space-between;
@@ -1551,6 +1578,10 @@ p {
 .tracking-comparison-card dd {
   margin: 0;
   font-weight: 800;
+}
+
+.tracking-comparison-card .tracking-identity-needed {
+  grid-column: 1 / -1;
 }
 
 .tracking-comparison-verdict,

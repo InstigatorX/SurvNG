@@ -46,6 +46,9 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
         registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
+        registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
+        registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
+        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
         runner = TrackingComparisonRunner(
             config=ObjectTrackingConfig(min_confirmations=1, excluded_labels=["face"]),
             detector=DetectorWithFace(),
@@ -64,6 +67,9 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
         registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
+        registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
+        registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
+        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
         config = ObjectTrackingConfig(min_confirmations=1, sample_fps=2.0)
         runner = TrackingComparisonRunner(
             config=config,
@@ -94,6 +100,9 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
         registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
+        registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
+        registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
+        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
         runner = TrackingComparisonRunner(
             config=ObjectTrackingConfig(),
             detector=Detector(),
@@ -116,6 +125,9 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
         registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
+        registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
+        registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
+        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
         runner = TrackingComparisonRunner(
             config=ObjectTrackingConfig(
                 reid_enabled=True,

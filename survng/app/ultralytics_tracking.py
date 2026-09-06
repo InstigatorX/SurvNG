@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
-from types import SimpleNamespace
+from types import FunctionType, MethodType, SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -153,10 +153,83 @@ class _ClassAwareFASTTracker(FASTTracker):
         ]
 
 
+def _session_track_type(base: type) -> type:
+    class SessionTrack(base):
+        _session_count = 0
+
+        @classmethod
+        def next_id(cls) -> int:
+            cls._session_count += 1
+            return cls._session_count
+
+        @classmethod
+        def reset_id(cls) -> None:
+            cls._session_count = 0
+
+    return SessionTrack
+
+
+def _build_session_botsort(args: Any) -> Any:
+    from ultralytics.trackers.bot_sort import BOTSORT, BOTrack
+
+    class _SessionBOTSORT(BOTSORT):
+        def __init__(self, args: Any) -> None:
+            super().__init__(args)
+            self._session_track_type = _session_track_type(BOTrack)
+
+        def init_track(self, results: Any, img: np.ndarray | None = None) -> list[Any]:
+            boxes = parse_bboxes(results)
+            features = self.encoder(img, boxes) if self.encoder is not None and img is not None else [None] * len(boxes)
+            return [self._session_track_type(box, score, label, feature)
+                    for box, score, label, feature in zip(boxes, results.conf, results.cls, features, strict=True)]
+
+        def _init_new_tracks(self, u_detection, detections, activated, refind=None) -> None:
+            allowed = [index for index in u_detection
+                       if int(detections[index].idx) in self._eligible_new_indices]
+            super()._init_new_tracks(allowed, detections, activated, refind)
+
+    return _SessionBOTSORT(args)
+
+
+def _build_session_tracktrack(args: Any) -> Any:
+    from ultralytics.trackers.track_tracker import TRACKTRACK, TTSTrack
+
+    class _SessionTRACKTRACK(TRACKTRACK):
+        def __init__(self, args: Any) -> None:
+            super().__init__(args)
+            self._session_track_type = _session_track_type(TTSTrack)
+            # 8.4.129 constructs TTSTrack inside update rather than exposing an
+            # init_track hook. Bind the unchanged upstream function to a private
+            # globals dictionary; never mutate the module shared by other sessions.
+            upstream = TRACKTRACK.update
+            if "TTSTrack" not in upstream.__code__.co_names:
+                raise RuntimeError("Unsupported TrackTrack API: track construction hook changed")
+            native_nms = upstream.__globals__["_track_aware_nms"]
+
+            def eligible_nms(tracks, detections, tai_thr, threshold):
+                indices = [i for i, detection in enumerate(detections)
+                           if int(detection.idx) in self._eligible_new_indices]
+                result = [False] * len(detections)
+                allowed = native_nms(tracks, [detections[i] for i in indices], tai_thr, threshold)
+                for index, keep in zip(indices, allowed, strict=True):
+                    result[index] = keep
+                return result
+
+            private_globals = dict(upstream.__globals__, TTSTrack=self._session_track_type,
+                                   _track_aware_nms=eligible_nms)
+            update = FunctionType(upstream.__code__, private_globals, upstream.__name__,
+                                  upstream.__defaults__, upstream.__closure__)
+            update.__kwdefaults__ = upstream.__kwdefaults__
+            self.update = MethodType(update, self)
+
+    return _SessionTRACKTRACK(args)
+
+
 class _UltralyticsObjectTrackerAdapter:
     """Translate an upstream tracker into SurvNG's timestamped track contract."""
 
     _CLASS_COORDINATE_STRIDE = 100_000.0
+    _preserve_continuation_detections = False
 
     def update(
         self,
@@ -170,7 +243,7 @@ class _UltralyticsObjectTrackerAdapter:
             (detection, parsed)
             for detection in detections
             if self.config.tracks_label(detection.get("label"))
-            and detection.get("incident_eligible") is not False
+            and (self._preserve_continuation_detections or detection.get("incident_eligible") is not False)
             and (parsed := _box(detection.get("box"))) is not None
         ]
         usable = sorted(usable, key=lambda item: _confidence(item[0]), reverse=True)[
@@ -178,7 +251,17 @@ class _UltralyticsObjectTrackerAdapter:
         ]
         tracker_input = self._results(usable, confirm_new=confirm_new)
         features = self._features(usable) if self.config.appearance_reid_enabled else None
+        if self._preserve_continuation_detections:
+            # Gate only native new-track initialization, after association. Low
+            # confidence/ineligible rows remain available to maintain IDs.
+            self._tracker._eligible_new_indices = {
+                index for index, (detection, _) in enumerate(usable)
+                if detection.get("incident_eligible") is not False
+            }
         output = self._tracker.update(tracker_input, img=None, feats=features)
+        for native in self._tracker.tracked_stracks:
+            if native.frame_id == self._tracker.frame_id:
+                self._native_last_seen[int(native.track_id)] = captured_at
         tracked: list[dict[str, Any]] = []
         for row in np.asarray(output, dtype=np.float32).reshape(-1, 8):
             track_id = int(row[4])
@@ -248,20 +331,24 @@ class _UltralyticsObjectTrackerAdapter:
         return tracked
 
     def _prune_expired_reid_tracks(self, captured_at: float) -> None:
-        if not self.config.appearance_reid_enabled:
-            return
-        retained: list[Any] = []
-        for native in self._tracker.lost_stracks:
-            record = self._records.get(int(native.track_id))
-            if (
-                record is not None
-                and captured_at - record.last_seen > self.config.reid_max_age_seconds
-            ):
-                native.mark_removed()
-                self._tracker.removed_stracks.append(native)
-            else:
-                retained.append(native)
-        self._tracker.lost_stracks = retained
+        for collection_name in ("tracked_stracks", "lost_stracks"):
+            retained: list[Any] = []
+            for native in getattr(self._tracker, collection_name):
+                record = self._records.get(int(native.track_id))
+                # Native unconfirmed tracks may not yet have a public record.
+                last_seen = self._native_last_seen.get(int(native.track_id))
+                if record is not None:
+                    last_seen = record.last_seen
+                label = record.label if record is not None else next(
+                    (name for name, value in self._class_ids.items() if value == native.cls), "")
+                reid = self.config.reid_enabled_for_label(label)
+                retention = max(self.config.lost_timeout_seconds, self.config.reid_max_age_seconds) if reid else self.config.lost_timeout_seconds
+                if last_seen is not None and captured_at - last_seen > retention:
+                    native.mark_removed()
+                    self._tracker.removed_stracks.append(native)
+                else:
+                    retained.append(native)
+            setattr(self._tracker, collection_name, retained)
 
     def has_live_tracks(self, captured_at: float) -> bool:
         return any(
@@ -280,9 +367,19 @@ class _UltralyticsObjectTrackerAdapter:
         ]
 
     def diagnostics(self) -> dict[str, Any]:
-        # Deep OC-SORT owns its association internals. Keep the shared persistence
-        # contract explicit without claiming SurvNG Hybrid diagnostics.
-        return {}
+        return {
+            "motion_timebase": "fixed_replay_cadence",
+            "nominal_sample_fps": self.config.sample_fps,
+            "timestamp_retention": True,
+            "camera_motion_compensation": False,
+            "recovered_pre_nms_detections": False,
+            "native_parameters": {
+                key: value for key, value in vars(self._tracker.args).items()
+                if key not in {"model", "device"} and isinstance(value, (str, int, float, bool))
+            },
+            "appearance_gate": getattr(self, "_appearance_gate", "native_backend_default"),
+            "per_label_appearance_thresholds": False,
+        }
 
     def _results(
         self,
@@ -413,6 +510,7 @@ class UltralyticsDeepOCSortObjectTracker(_UltralyticsObjectTrackerAdapter):
         self._records = {}
         self._class_ids = {}
         self._feature_dimension = 0
+        self._native_last_seen = {}
 
 
 class UltralyticsFastTrackObjectTracker(_UltralyticsObjectTrackerAdapter):
@@ -448,3 +546,61 @@ class UltralyticsFastTrackObjectTracker(_UltralyticsObjectTrackerAdapter):
         self._records = {}
         self._class_ids = {}
         self._feature_dimension = 0
+        self._native_last_seen = {}
+
+
+class UltralyticsBotSortObjectTracker(_UltralyticsObjectTrackerAdapter):
+    """Offline BoT-SORT with supplied embeddings and frame-step motion."""
+
+    _appearance_gate = "shared_minimum_person_vehicle_similarity_threshold"
+    _preserve_continuation_detections = True
+
+    def __init__(self, config: ObjectTrackingConfig, high_confidence_threshold: float) -> None:
+        self.config = config
+        self.high_confidence_threshold = max(config.low_confidence_threshold, float(high_confidence_threshold))
+        retention = max(config.lost_timeout_seconds, config.reid_max_age_seconds) if config.appearance_reid_enabled else config.lost_timeout_seconds
+        thresholds = ([config.reid_match_threshold] if config.reid_enabled else []) + ([config.vehicle_reid_match_threshold] if config.vehicle_reid_enabled else [])
+        self._tracker = _build_session_botsort(SimpleNamespace(
+            track_high_thresh=self.high_confidence_threshold,
+            track_low_thresh=config.low_confidence_threshold,
+            new_track_thresh=self.high_confidence_threshold,
+            track_buffer=max(1, ceil(config.sample_fps * retention)),
+            match_thresh=0.8, fuse_score=True, gmc_method="none",
+            proximity_thresh=0.5,
+            # Upstream compares cosine distance / 2 against 1 - threshold.
+            appearance_thresh=(min(thresholds, default=1.0) + 1.0) / 2.0,
+            with_reid=config.appearance_reid_enabled, model="auto", device="cpu",
+        ))
+        self._records = {}
+        self._class_ids = {}
+        self._feature_dimension = 0
+        self._native_last_seen = {}
+
+
+class UltralyticsTrackTrackObjectTracker(_UltralyticsObjectTrackerAdapter):
+    """Offline TrackTrack; the detector's pre-NMS candidates are unavailable."""
+
+    _appearance_gate = "native_multi_cue_cost_no_survng_similarity_gate"
+    _preserve_continuation_detections = True
+
+    def __init__(self, config: ObjectTrackingConfig, high_confidence_threshold: float) -> None:
+        self.config = config
+        self.high_confidence_threshold = max(config.low_confidence_threshold, float(high_confidence_threshold))
+        retention = max(config.lost_timeout_seconds, config.reid_max_age_seconds) if config.appearance_reid_enabled else config.lost_timeout_seconds
+        self._tracker = _build_session_tracktrack(SimpleNamespace(
+            track_high_thresh=self.high_confidence_threshold,
+            track_low_thresh=config.low_confidence_threshold,
+            # TrackTrack TAI uses a strict > gate, unlike BYTETracker's >=.
+            new_track_thresh=float(np.nextafter(np.float32(self.high_confidence_threshold), np.float32(-np.inf))),
+            track_buffer=max(1, ceil(config.sample_fps * retention)),
+            match_thresh=0.7, lost_match_thr=0.0,
+            iou_weight=0.5, reid_weight=0.5, conf_weight=0.1, angle_weight=0.05,
+            penalty_p=0.2, penalty_q=0.4, reduce_step=0.05, tai_thr=0.55,
+            min_track_len=config.min_confirmations,
+            gmc_method="none", with_reid=config.appearance_reid_enabled,
+            model="auto", device="cpu",
+        ))
+        self._records = {}
+        self._class_ids = {}
+        self._feature_dimension = 0
+        self._native_last_seen = {}

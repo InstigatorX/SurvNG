@@ -1,16 +1,20 @@
 # SurvNG Object Tracking
 
-SurvNG uses one production tracker and one offline comparison engine:
+SurvNG uses one production tracker and an offline evaluation workflow:
 
 - **SurvNG Hybrid** (`survng_hybrid`) is the default.
-- **FastTrack** (`ultralytics_fasttrack`) is used only by the incident
-  Compare workflow.
+- **Hybrid candidate**, **TrackTrack**, and **BoT-SORT** are offline comparison
+  engines. The candidate contains bounded ID-stability repairs; it is not live.
+- Existing FastTrack and Deep OC-SORT results remain readable.
 
-Both engines receive the same OpenVINO detections. Hybrid also receives the
-available SurvNG person and vehicle embeddings; FastTrack intentionally tests a
-lightweight motion-and-occlusion strategy. Compare never changes the production
-tracker. Historic BoT-SORT and Deep OC-SORT verdicts remain readable, but those
-engines are no longer offered for production or new comparisons.
+See [the evaluation guide](docs/tracking-evaluation.md) for saved-input replay,
+annotation, scoring, sampling profiles, and the promotion criteria.
+
+All four comparison engines receive the same saved detections and available
+SurvNG person and vehicle embeddings. Missing optional engines are reported
+individually; Hybrid evaluation and input capture remain available. Compare never changes the production
+tracker. Historical verdicts remain readable. None of the comparison alternatives is
+selectable for production.
 
 ## Why SurvNG Hybrid is the default
 
@@ -43,9 +47,9 @@ index, related-incident suggestions, and cross-camera investigation features.
 This keeps live tracking and later incident intelligence on the same identity
 evidence and model thresholds.
 
-FastTrack does not replace or improve the ReID models. Hybrid provides the
-SurvNG-specific appearance recovery and indexing behavior; FastTrack is a
-deliberately independent comparison of motion continuity and occlusion handling.
+The alternative trackers do not replace or improve the ReID models. Comparison
+uses the same supplied embeddings, with each engine's association behavior and
+appearance gates recorded in its diagnostics.
 
 ### It has a smaller and more predictable runtime footprint
 
@@ -80,36 +84,24 @@ The implementation is maintained and regression-tested with SurvNG's event,
 recording, zone, replay, and persistence behavior. It does not depend on private
 tracker internals from another package.
 
-## Why Compare uses FastTrack
-
-FastTrack supplies a meaningfully different benchmark. It extends a ByteTrack-
-style association path with explicit occlusion detection, bounded motion-state
-rollback, temporary search-box enlargement, and reappearance handling. The
-adapter keeps classes isolated, gives every comparison independent IDs, and
-converts its frame-based retention windows to SurvNG's configured sample rate.
-
 ## How Compare works
 
-The incident viewer's **Compare** action is an offline diagnostic:
+The incident viewer's **Compare** action evaluates a bounded 30-second window.
+Detection and available appearance extraction run once. It retains their exact
+outputs in a checksummed replay bundle, then runs current Hybrid, repaired Hybrid,
+TrackTrack and BoT-SORT independently. Download the replay inputs before leaving
+the viewer to preserve the full input data; history stores compact results only.
 
-1. SurvNG decodes a bounded 30-second recording window beginning at the event.
-2. OpenVINO object detection and appearance extraction run once.
-3. The identical timestamped detections are sent to Hybrid and FastTrack;
-   Hybrid additionally receives SurvNG's available appearance embeddings.
-4. SurvNG renders both paths over the same recording and reports their tracker
-   time, track count, observations, and extra-ID fragmentation signal.
-5. You review the videos and record **Hybrid**, **FastTrack**, or **No clear
-   winner**.
+Select a 2 FPS target, a 0.75 FPS target, or deliberate sample gaps. These profiles
+select saved source frames and preserve timestamps. They do not simulate the
+production adaptive policy or full session/capacity lifecycle. An explicit
+lost-track cutoff diagnostic shows when the backend's live-track predicate first
+becomes false, while offline replay continues to observe possible recovery.
 
-An extra track ID is only a fragmentation warning; without hand-labeled ground
-truth, SurvNG cannot automatically declare an ID switch or a winner. Compare
-does not change the configured live tracker. Only one comparison can run at a
-time, so the longer window cannot multiply into concurrent detector jobs.
-
-Test several difficult incidents from each important camera: partial
-occlusions, distant people, vehicles crossing the full frame, objects entering
-near an edge, night video, and temporary missed detections. Prefer the engine
-that is consistently better across those cases, not the winner of one clip.
+The viewer shows paths, timing, supplied appearance count and a fragmentation
+proxy. Actual identity metrics require human-labeled ground truth and the offline
+CLI described in the evaluation guide. Neither proxy counts nor visual verdicts
+change the live tracker. Only one comparison can run at a time.
 
 ## Production and optional comparison runtime
 
@@ -121,19 +113,19 @@ Use **SurvNG Hybrid** when you want the normal recommended configuration:
 - direct integration with stored tracks and cross-camera intelligence; and
 - stable configuration that SurvNG owns and tests end to end.
 
-Production always uses Hybrid. Install the optional FastTrack comparison
+Production always uses Hybrid. Install the optional comparison
 runtime with:
 
 ```bash
 .venv/bin/pip install -r requirements-ultralytics-tracking.txt
 ```
 
-SurvNG pins a tested version for reproducible installs and accepts compatible
-patch releases on the reviewed 8.4.x tracker API line.
+TrackTrack and BoT-SORT require the tested Ultralytics 8.4.129 API. These
+adapters reuse supplied embeddings and do not download another model.
 
 ## Practical conclusion
 
 Hybrid is purpose-built for how SurvNG obtains, timestamps, stores, and reviews
-detections. FastTrack is an offline diagnostic benchmark, not an automatic
-production upgrade. Accumulated side-by-side evidence helps expose difficult
+detections. The alternative engines are offline evaluation candidates. Any
+production change requires evidence from representative recordings. Accumulated side-by-side evidence helps expose difficult
 camera scenes without allowing a comparison to alter runtime behavior.

@@ -27,6 +27,7 @@ from .incident_utils import event_epoch, event_snapshot_path
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator, guard_manager_generation
 from .tracking_comparison import TRACKING_COMPARISON_IMPLEMENTATIONS
+from .tracking_evaluation import PROFILES
 from .inference_runtime.types import InferenceWorkload
 from .zones import apply_detection_zones, detection_threshold
 
@@ -38,7 +39,7 @@ TRACKING_COMPARISON_MAX_DURATION_SECONDS = 30.0
 
 class TrackingComparisonVerdictRequest(BaseModel):
     verdict: str = Field(
-        pattern=r"^(survng_hybrid|ultralytics_botsort|ultralytics_deepocsort|ultralytics_fasttrack|inconclusive)$"
+        pattern=r"^(survng_hybrid|survng_hybrid_candidate|ultralytics_tracktrack|ultralytics_botsort|ultralytics_deepocsort|ultralytics_fasttrack|inconclusive)$"
     )
 
 
@@ -63,8 +64,9 @@ class DetectionRouteBundle:
 
 def _tracking_comparison_evidence(result: dict[str, Any]) -> dict[str, Any]:
     engines: dict[str, dict[str, Any]] = {}
-    for implementation in TRACKING_COMPARISON_IMPLEMENTATIONS:
-        engine = result.get("engines", {}).get(implementation, {})
+    for implementation, engine in result.get("engines", {}).items():
+        if implementation not in TRACKING_COMPARISON_IMPLEMENTATIONS:
+            continue
         engines[implementation] = {
             key: engine.get(key)
             for key in (
@@ -76,12 +78,21 @@ def _tracking_comparison_evidence(result: dict[str, Any]) -> dict[str, Any]:
                 "processing_ms",
                 "average_ms_per_frame",
                 "labels",
+                "error",
+                "identity_metrics",
+                "simulated_lost_track_cutoff_seconds",
             )
         }
     return {
         key: result.get(key)
         for key in (
             "sample_fps",
+            "sampling_profile",
+            "replay_id",
+            "evaluation_source_sha256",
+            "ultralytics_version",
+            "dependency_versions",
+            "python_version",
             "frames_processed",
             "duration_seconds",
             "frame_width",
@@ -269,9 +280,12 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
         comparison_id: int, payload: TrackingComparisonVerdictRequest
     ) -> dict[str, Any]:
         active_manager = deps.get_manager()
-        comparison = active_manager.events.set_tracking_comparison_verdict(
-            comparison_id, payload.verdict
-        )
+        try:
+            comparison = active_manager.events.set_tracking_comparison_verdict(
+                comparison_id, payload.verdict
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         if comparison is None:
             raise HTTPException(
                 status_code=404, detail="tracking comparison not found"
@@ -286,11 +300,10 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
     @router.post("/api/events/{event_id}/tracking-comparison")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def compare_event_tracking(
-        event_id: int, duration_seconds: float | None = None
+        event_id: int, duration_seconds: float | None = None, sampling_profile: str = "fixed_2fps"
     ) -> dict[str, Any]:
-        dependency = deps.dependency_status()
-        if not dependency["available"]:
-            raise HTTPException(status_code=503, detail=dependency["reason"])
+        if sampling_profile not in PROFILES:
+            raise HTTPException(status_code=422, detail="unknown sampling profile")
         if duration_seconds is not None and not math.isfinite(duration_seconds):
             raise HTTPException(
                 status_code=422, detail="duration_seconds must be finite"
@@ -335,12 +348,12 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
             frames = deps.sample_video_frames(
                 comparison_input,
                 start_epoch=event_epoch(enriched),
-                sample_fps=active_config.detector.tracking.sample_fps,
+                sample_fps=max(2.0, active_config.detector.tracking.sample_fps),
                 duration_seconds=duration,
                 ffmpeg_path=active_config.ffmpeg_path,
                 maximum_width=max([640, *detector_dimensions]),
             )
-            result = runner.run(camera, frames)
+            result = runner.run(camera, frames, sampling_profile=sampling_profile)
             response = {
                 "event_id": event_id,
                 "camera_id": camera.id,

@@ -44,12 +44,14 @@ def detection(
 
 
 class UltralyticsDependencyStatusTest(unittest.TestCase):
-    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_track.registry.Path.is_file", return_value=True)
+    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=SimpleNamespace(submodule_search_locations=["/optional/ultralytics"]))
     @patch("survng.app.object_track.registry.version", return_value="8.4.999")
     def test_compatible_patch_version_is_not_rejected(
         self,
         _version,
         _find_spec,
+        _is_file,
     ) -> None:
         status = ultralytics_deepocsort_dependency_status()
 
@@ -57,32 +59,34 @@ class UltralyticsDependencyStatusTest(unittest.TestCase):
         self.assertFalse(status["is_tested_version"])
         self.assertEqual(status["reason"], "")
 
-    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_track.registry.Path.is_file", return_value=True)
+    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=SimpleNamespace(submodule_search_locations=["/optional/ultralytics"]))
     @patch("survng.app.object_track.registry.version", return_value="8.5.0")
     def test_unreviewed_tracker_api_line_is_rejected(
         self,
         _version,
         _find_spec,
+        _is_file,
     ) -> None:
         status = ultralytics_deepocsort_dependency_status()
 
         self.assertFalse(status["available"])
-        self.assertIn("outside", status["reason"])
+        self.assertIn("unsupported", status["reason"])
 
     @patch("survng.app.object_track.registry.version", return_value="8.4.115")
     def test_deep_ocsort_module_is_required(self, _version) -> None:
-        def find_spec(name: str):
-            return None if name == "ultralytics.trackers.deep_oc_sort" else object()
-
-        with patch("survng.app.object_track.registry.importlib.util.find_spec", side_effect=find_spec):
+        with patch("survng.app.object_track.registry.importlib.util.find_spec",
+                   return_value=SimpleNamespace(submodule_search_locations=["/optional/ultralytics"])), \
+             patch("survng.app.object_track.registry.Path.is_file", return_value=False):
             status = ultralytics_deepocsort_dependency_status()
 
         self.assertFalse(status["available"])
         self.assertIn("does not include Deep OC-SORT", status["reason"])
 
-    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_track.registry.Path.is_file", return_value=True)
+    @patch("survng.app.object_track.registry.importlib.util.find_spec", return_value=SimpleNamespace(submodule_search_locations=["/optional/ultralytics"]))
     @patch("survng.app.object_track.registry.version", return_value="8.4.115")
-    def test_fasttrack_dependency_is_available(self, _version, _find_spec) -> None:
+    def test_fasttrack_dependency_is_available(self, _version, _find_spec, _is_file) -> None:
         status = ultralytics_fasttrack_dependency_status()
 
         self.assertTrue(status["available"])

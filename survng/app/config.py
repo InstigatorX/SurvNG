@@ -653,6 +653,8 @@ class ObjectTrackingConfig(BaseModel):
     def normalize_tracking_implementation(cls, value: object) -> str:
         implementation = str(value or "").strip().lower()
         if implementation in {
+            "survng_hybrid_candidate",
+            "ultralytics_tracktrack",
             "bytetrack",
             "ultralytics_botsort",
             "ultralytics_deepocsort",

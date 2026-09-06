@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import copy
 import json
+import hashlib
+import platform
+from importlib.metadata import PackageNotFoundError, version
 import queue
 import re
 import subprocess
@@ -28,7 +31,9 @@ from .video_frames import DecodedVideoFrame, VideoFrameReference
 
 TRACKING_COMPARISON_IMPLEMENTATIONS = (
     "survng_hybrid",
-    "ultralytics_fasttrack",
+    "survng_hybrid_candidate",
+    "ultralytics_tracktrack",
+    "ultralytics_botsort",
 )
 
 
@@ -348,149 +353,193 @@ class TrackingComparisonRunner:
         self,
         camera: CameraConfig,
         frames: Iterable[tuple[float, np.ndarray]],
+        *,
+        sampling_profile: str = "recorded",
     ) -> dict[str, Any]:
-        trackers: dict[str, Any] = {}
-        initialization_ms: dict[str, float] = {}
-        for implementation in self.IMPLEMENTATIONS:
-            started = time.perf_counter()
-            trackers[implementation] = self.tracker_registry.create(
-                implementation,
-                self.config.model_copy(update={"implementation": implementation}),
-                float(self.detector.config.confidence_threshold),
-            )
-            initialization_ms[implementation] = (time.perf_counter() - started) * 1000.0
-        processing_ms = defaultdict(float)
-        maximum_simultaneous: dict[str, Counter[str]] = {
-            implementation: Counter() for implementation in trackers
-        }
-        frames_processed = 0
-        detection_ms = 0.0
-        appearance_ms = 0.0
-        appearance_failures = 0
-        frame_decode_ms = 0.0
-        first_epoch: float | None = None
-        last_epoch: float | None = None
-        frame_width = 0
-        frame_height = 0
-        exact_timestamp_frames = 0
-
-        frame_iterator = iter(frames)
-        while True:
-            decode_started = time.perf_counter()
-            try:
-                sample = next(frame_iterator)
-            except StopIteration:
-                break
-            captured_at, frame = sample
-            reference = getattr(sample, "reference", None)
-            if reference is not None and reference.exact:
-                exact_timestamp_frames += 1
-            frame_decode_ms += (time.perf_counter() - decode_started) * 1000.0
-            if first_epoch is None:
-                first_epoch = captured_at
-            last_epoch = captured_at
-            frame_height, frame_width = frame.shape[:2]
-            detector_started = time.perf_counter()
-            detect_offline = getattr(self.detector, "detect_offline", self.detector.detect)
-            objects = detect_offline(
-                frame,
-                confidence_threshold=self.config.low_confidence_threshold,
-            )
-            detection_ms += (time.perf_counter() - detector_started) * 1000.0
-            failure = detection_failure(objects)
-            if failure:
-                raise RuntimeError(f"comparison detector failed: {failure}")
-            objects = [
-                item
-                for item in objects
-                if self.config.tracks_label(item.get("label"))
-            ]
-            apply_detection_zones(
-                camera,
-                objects,
-                int(frame_width),
-                int(frame_height),
-                float(self.detector.config.confidence_threshold),
-                bool(getattr(self.detector.config, "require_incident_zone", True)),
-            )
-            appearance_started = time.perf_counter()
-            appearance_failures += self._annotate_appearances(frame, objects)
-            appearance_ms += (time.perf_counter() - appearance_started) * 1000.0
-            for implementation, tracker in trackers.items():
+        from .tracking_evaluation import (MAX_FRAMES, MAX_OBJECTS, MAX_REPLAY_BYTES, canonical_json, portable_detection, replay_digest)
+        samples = []
+        replay_bytes = 0
+        detection_ms = appearance_ms = frame_decode_ms = 0.0
+        appearance_failures = exact_timestamp_frames = 0
+        iterator = iter(frames)
+        try:
+            while True:
                 started = time.perf_counter()
-                tracked = tracker.update(
-                    copy.deepcopy(objects),
-                    captured_at,
-                    confirm_new=frames_processed == 0,
-                )
-                processing_ms[implementation] += (time.perf_counter() - started) * 1000.0
-                counts = Counter(
-                    str(item.get("label"))
-                    for item in tracked
-                    if item.get("label")
-                )
-                for label, count in counts.items():
-                    maximum_simultaneous[implementation][label] = max(
-                        maximum_simultaneous[implementation][label],
-                        count,
-                    )
-            frames_processed += 1
-
-        if frames_processed == 0 or first_epoch is None or last_epoch is None:
+                try:
+                    sample = next(iterator)
+                except StopIteration:
+                    break
+                frame_decode_ms += (time.perf_counter() - started) * 1000.0
+                captured_at, frame = sample
+                if len(samples) >= MAX_FRAMES:
+                    raise ValueError("comparison exceeds 600-frame replay limit")
+                reference = getattr(sample, "reference", None)
+                if reference is not None and reference.exact:
+                    exact_timestamp_frames += 1
+                height, width = frame.shape[:2]
+                started = time.perf_counter()
+                detect = getattr(self.detector, "detect_offline", self.detector.detect)
+                objects = detect(frame, confidence_threshold=self.config.low_confidence_threshold)
+                detection_ms += (time.perf_counter() - started) * 1000.0
+                failure = detection_failure(objects)
+                if failure:
+                    raise RuntimeError(f"comparison detector failed: {failure}")
+                if any(item.get("status") == "inference_deferred" for item in objects):
+                    raise RuntimeError("comparison inference deferred; no empty observation was recorded")
+                objects = [item for item in objects if self.config.tracks_label(item.get("label"))]
+                if len(objects) > MAX_OBJECTS:
+                    raise ValueError("comparison exceeds 100 detections per frame")
+                apply_detection_zones(camera, objects, width, height,
+                    float(self.detector.config.confidence_threshold),
+                    bool(getattr(self.detector.config, "require_incident_zone", True)))
+                started = time.perf_counter()
+                appearance_failures += self._annotate_appearances(frame, objects)
+                appearance_ms += (time.perf_counter() - started) * 1000.0
+                portable_frame = {"frame_index": len(samples), "captured_at": float(captured_at),
+                    "width": int(width), "height": int(height),
+                    "source_pts": bool(reference is not None and reference.exact),
+                    "detections": [portable_detection(item) for item in objects]}
+                replay_bytes += len(canonical_json(portable_frame).encode())
+                if replay_bytes > MAX_REPLAY_BYTES:
+                    raise ValueError("comparison replay exceeds 32 MiB")
+                samples.append(portable_frame)
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                close()
+        if not samples:
             raise RuntimeError("comparison video contained no readable frames")
-
-        engines: dict[str, Any] = {}
-        final_epoch = last_epoch + self.config.lost_timeout_seconds + 0.001
-        for implementation, tracker in trackers.items():
-            started = time.perf_counter()
-            tracker.update([], final_epoch)
-            processing_ms[implementation] += (time.perf_counter() - started) * 1000.0
-            tracks = tracker.summaries(final_epoch)
-            diagnostics_method = getattr(tracker, "diagnostics", None)
-            diagnostics = diagnostics_method() if callable(diagnostics_method) else {}
-            counts = Counter(str(track.get("label")) for track in tracks if track.get("label"))
-            fragment_excess = sum(
-                max(0, count - maximum_simultaneous[implementation].get(label, 0))
-                for label, count in counts.items()
-            )
-            engines[implementation] = {
-                "implementation": implementation,
-                "initialization_ms": round(initialization_ms[implementation], 2),
-                "processing_ms": round(processing_ms[implementation], 2),
-                "average_ms_per_frame": round(processing_ms[implementation] / frames_processed, 3),
-                "track_count": len(tracks),
-                "observations": sum(int(track.get("observations") or 0) for track in tracks),
-                "reid_recoveries": sum(int(track.get("reid_matches") or 0) for track in tracks),
-                "fragmentation_proxy": fragment_excess,
-                "labels": dict(sorted(counts.items())),
-                "tracks": tracks,
-                "reid_diagnostics": diagnostics,
-            }
-
-        return {
-            "sample_fps": self.config.sample_fps,
-            "lost_timeout_seconds": self.config.lost_timeout_seconds,
-            "frames_processed": frames_processed,
-            "frame_width": int(frame_width),
-            "frame_height": int(frame_height),
-            "start_epoch": round(first_epoch, 3),
-            "end_epoch": round(last_epoch, 3),
-            "duration_seconds": round(max(0.0, last_epoch - first_epoch), 3),
-            "timestamp_source": (
-                "source_pts"
-                if exact_timestamp_frames == frames_processed
-                else "mixed_or_estimated"
-            ),
-            "source_pts_frames": exact_timestamp_frames,
-            "detection_ms": round(detection_ms, 2),
-            "average_detection_ms_per_frame": round(detection_ms / frames_processed, 3),
-            "appearance_ms": round(appearance_ms, 2),
-            "average_appearance_ms_per_frame": round(appearance_ms / frames_processed, 3),
-            "appearance_failures": appearance_failures,
-            "frame_decode_ms": round(frame_decode_ms, 2),
-            "average_frame_decode_ms": round(frame_decode_ms / frames_processed, 3),
-            "engines": engines,
+        detector_config = getattr(self.detector, "config", None)
+        detector_identity = {
+            key: str(getattr(detector_config, key))
+            for key in ("model_path", "implementation", "device")
+            if getattr(detector_config, key, None) is not None
         }
+        replay = {"schema_version": 1, "camera_id": camera.id,
+            "detector_identity": detector_identity,
+            "model_identity_note": "Model paths describe capture configuration; saved detections and embeddings are the exact replay inputs.",
+            "tracking_config": self.config.model_dump(mode="json"),
+            "high_confidence_threshold": float(self.detector.config.confidence_threshold),
+            "timestamp_source": "source_pts" if exact_timestamp_frames == len(samples) else "mixed_or_estimated",
+            "source_pts_frames": exact_timestamp_frames,
+            "appearance_source": "shared_supplied_embeddings",
+            "frames": samples}
+        replay["replay_id"] = replay_digest(replay)
+        result = self.replay(replay, sampling_profile=sampling_profile,
+                             tracker_registry=self.tracker_registry, implementations=self.IMPLEMENTATIONS)
+        count = len(samples)
+        result.update(replay=replay, capture_frames_processed=count,
+            detection_ms=round(detection_ms, 2), average_detection_ms_per_frame=round(detection_ms / count, 3),
+            appearance_ms=round(appearance_ms, 2), average_appearance_ms_per_frame=round(appearance_ms / count, 3),
+            appearance_failures=appearance_failures, frame_decode_ms=round(frame_decode_ms, 2),
+            average_frame_decode_ms=round(frame_decode_ms / count, 3))
+        return result
+
+    @staticmethod
+    def replay(
+        replay: dict[str, Any], *, sampling_profile: str = "recorded",
+        labels: dict[str, Any] | None = None,
+        tracker_registry: ObjectTrackerRegistry | None = None,
+        implementations: tuple[str, ...] = TRACKING_COMPARISON_IMPLEMENTATIONS,
+    ) -> dict[str, Any]:
+        from .tracking_evaluation import identity_metrics, selected_frames, validate_labels, validate_replay
+        validate_replay(replay)
+        samples = selected_frames(replay, sampling_profile)
+        if labels is not None:
+            validate_labels(labels, replay, {frame["frame_index"] for frame in samples})
+        config = ObjectTrackingConfig.model_validate(replay["tracking_config"])
+        if sampling_profile != "recorded":
+            config = config.model_copy(update={"sample_fps": .75 if sampling_profile == "fixed_075fps" else 2.0})
+        registry = tracker_registry or build_builtin_object_tracker_registry()
+        engines = {}
+        for implementation in implementations:
+            started = time.perf_counter()
+            try:
+                tracker = registry.create(implementation, config.model_copy(update={"implementation": implementation}),
+                                          replay["high_confidence_threshold"])
+            except Exception as error:
+                # Optional engines must not prevent baseline capture/replay. Do
+                # not expose exception text (paths/URLs may contain credentials).
+                engines[implementation] = {"implementation": implementation,
+                    "error": f"Tracker unavailable ({type(error).__name__}); check the optional runtime on the server."}
+                continue
+            initialization_ms = (time.perf_counter() - started) * 1000.0
+            processing_ms = 0.0
+            simultaneous: Counter = Counter()
+            observations = []
+            cutoff = None
+            ever_live = False
+            try:
+                for position, frame in enumerate(samples):
+                    started = time.perf_counter()
+                    tracked = tracker.update(copy.deepcopy(frame["detections"]), frame["captured_at"], confirm_new=position == 0)
+                    processing_ms += (time.perf_counter() - started) * 1000.0
+                    # Stable per-frame observations are independent of capped
+                    # display histories and are retained for labeled evaluation.
+                    outputs = [{"track_id": int(item["track_id"]), "label": item["label"], "box": item["box"]}
+                               for item in tracked if item.get("track_state") == "confirmed"]
+                    observations.append({"frame_index": frame["frame_index"], "captured_at": frame["captured_at"], "objects": outputs})
+                    counts = Counter(item["label"] for item in outputs)
+                    for label, count in counts.items():
+                        simultaneous[label] = max(simultaneous[label], count)
+                    live = tracker.has_live_tracks(frame["captured_at"])
+                    if ever_live and not live and cutoff is None:
+                        cutoff = frame["captured_at"] - samples[0]["captured_at"]
+                    ever_live = ever_live or live
+                tracks = tracker.summaries(samples[-1]["captured_at"] + config.lost_timeout_seconds + .001)
+                diagnostics = getattr(tracker, "diagnostics", lambda: {})()
+            except Exception as error:
+                engines[implementation] = {"implementation": implementation,
+                    "error": f"Tracker failed ({type(error).__name__}); this engine is excluded from scoring."}
+                continue
+            counts = Counter(item["label"] for item in tracks)
+            engine = {"implementation": implementation,
+                "initialization_ms": round(initialization_ms, 2), "processing_ms": round(processing_ms, 2),
+                "average_ms_per_frame": round(processing_ms / len(samples), 3),
+                "track_count": len(tracks), "observations": sum(len(f["objects"]) for f in observations),
+                "reid_recoveries": (sum(int(t.get("reid_matches") or 0) for t in tracks)
+                                    if implementation.startswith("survng_hybrid") else None),
+                "appearance_input_count": sum(item.get("_tracking_embedding") is not None for f in samples for item in f["detections"]),
+                "fragmentation_proxy": sum(max(0, count - simultaneous[label]) for label, count in counts.items()),
+                "labels": dict(sorted(counts.items())), "tracks": tracks, "reid_diagnostics": diagnostics,
+                "frame_observations": observations,
+                "simulated_lost_track_cutoff_seconds": cutoff,
+                "lifecycle_note": "Backend replay continues after the lost-track predicate; this is not a full production session simulation."}
+            if labels is not None:
+                try:
+                    engine["identity_metrics"] = identity_metrics(observations, labels, replay)
+                except (ValueError, TypeError, KeyError) as error:
+                    engine = {"implementation": implementation,
+                              "error": f"Invalid tracker output for scoring ({type(error).__name__})."}
+            engines[implementation] = engine
+        try:
+            upstream_version = version("ultralytics")
+        except PackageNotFoundError:
+            upstream_version = None
+        dependency_versions = {}
+        for package in ("numpy", "torch", "scipy", "lap", "ultralytics"):
+            try:
+                dependency_versions[package] = version(package)
+            except PackageNotFoundError:
+                dependency_versions[package] = None
+        sources = [Path(__file__), Path(__file__).with_name("ultralytics_tracking.py"),
+                   Path(__file__).with_name("tracking_evaluation.py"),
+                   *sorted(Path(__file__).with_name("object_track").glob("*.py"))]
+        source_hash = hashlib.sha256(b"".join(path.name.encode() + path.read_bytes() for path in sources)).hexdigest()
+        first, last = samples[0], samples[-1]
+        duration = last["captured_at"] - first["captured_at"]
+        return {"sample_fps": config.sample_fps, "sampling_profile": sampling_profile,
+            "sampling_note": "Profiles select saved frames at or after target timestamps; gaps skip seconds 5–9 and 15–21. No adaptive policy is simulated.",
+            "effective_sample_fps": round((len(samples)-1) / duration, 3) if duration else None,
+            "lost_timeout_seconds": config.lost_timeout_seconds, "frames_processed": len(samples),
+            "frame_width": first["width"], "frame_height": first["height"],
+            "start_epoch": first["captured_at"], "end_epoch": last["captured_at"], "duration_seconds": round(duration, 3),
+            "timestamp_source": replay["timestamp_source"],
+            "source_pts_frames": sum(bool(frame.get("source_pts", replay["source_pts_frames"] == len(replay["frames"]))) for frame in samples),
+            "replay_id": replay["replay_id"], "evaluation_source_sha256": source_hash,
+            "ultralytics_version": upstream_version, "appearance_source": replay["appearance_source"],
+            "dependency_versions": dependency_versions, "python_version": platform.python_version(),
+            "engines": engines}
 
     def _annotate_appearances(
         self,
