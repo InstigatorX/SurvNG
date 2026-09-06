@@ -2123,6 +2123,7 @@ class EventStoreTest(unittest.TestCase):
             updated = store.replace_detected_objects(
                 int(event["id"]),
                 json.dumps([{"label": "person", "confidence": 0.9}]),
+                expected_snapshot_path=str(event["snapshot_path"]),
             )
 
         self.assertIsNotNone(updated)
