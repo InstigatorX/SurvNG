@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .motion_pipeline import motion_pipeline_catalog
+from .detector_labels import openvino_package_classes
 
 
 SSE_HEARTBEAT_SECONDS = 15.0
@@ -44,42 +45,6 @@ def detector_model_search_roots(
         if active_path.suffix.lower() == ".xml":
             search_roots.add(active_path.parent)
     return sorted(search_roots)
-
-
-def openvino_package_classes(xml_path: Path) -> tuple[list[str], str, str]:
-    """Load class names from metadata.yaml, then classes.txt beside the IR."""
-    metadata_path = xml_path.parent / "metadata.yaml"
-    classes: list[str] = []
-    task = ""
-    error = ""
-    if metadata_path.exists():
-        try:
-            import yaml
-
-            metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
-            names = metadata.get("names") or {}
-            if isinstance(names, dict):
-                classes = [
-                    str(value)
-                    for _, value in sorted(names.items(), key=lambda entry: int(entry[0]))
-                ]
-            elif isinstance(names, list):
-                classes = [str(value) for value in names]
-            task = str(metadata.get("task") or "")
-        except Exception as exc:
-            error = f"Metadata: {exc}"
-    if not classes:
-        labels_path = xml_path.parent / "classes.txt"
-        if labels_path.exists():
-            try:
-                classes = [
-                    line.strip()
-                    for line in labels_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                ]
-            except Exception as exc:
-                error = error or f"Labels: {exc}"
-    return classes, task, error
 
 
 @dataclass(frozen=True, slots=True)

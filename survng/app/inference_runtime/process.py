@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from ..config import DetectorConfig
+from ..detector_labels import load_detector_labels
 from .types import LOGGER, RESOURCE_TRACKER_STOP_TIMEOUT_SECONDS
 
 
@@ -59,37 +60,6 @@ def stop_multiprocessing_resource_tracker(
     except (AttributeError, ImportError, RuntimeError) as exc:
         LOGGER.warning("multiprocessing resource tracker cleanup unavailable: %s", exc)
         return False
-
-def load_detector_labels(config: DetectorConfig) -> list[str]:
-    labels = list(config.labels)
-    if config.labels_path:
-        labels_path = Path(config.labels_path)
-        if labels_path.exists():
-            labels = [
-                line.strip()
-                for line in labels_path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-    if labels:
-        return labels
-
-    model_path_text = config.resolved_model_path()
-    model_path = Path(model_path_text) if model_path_text else None
-    metadata_path = model_path.parent / "metadata.yaml" if model_path else None
-    if metadata_path is None or not metadata_path.exists():
-        return []
-    try:
-        import yaml
-
-        metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
-        names = metadata.get("names") or {}
-        if isinstance(names, dict):
-            return [str(value) for _, value in sorted(names.items(), key=lambda item: int(item[0]))]
-        if isinstance(names, list):
-            return [str(value) for value in names]
-    except Exception:
-        LOGGER.exception("Failed to load detector labels from %s", metadata_path)
-    return []
 
 def _disable_worker_core_dumps() -> None:
     try:
