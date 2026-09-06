@@ -100,6 +100,8 @@ def test_comparison_uses_identical_corpus_and_reports_disagreements(tmp_path: Pa
     status = runner.status()
     assert status["status"] == "completed"
     assert status["result"]["sample_count"] == 10
+    assert status["result"]["compared_sample_count"] == 10
+    assert status["result"]["failed_sample_count"] == 0
     assert status["result"]["camera_count"] == 2
     assert status["result"]["disagreement_frames"] == 10
     assert status["result"]["baseline"]["label_counts"] == {"person": 10}
@@ -110,3 +112,94 @@ def test_comparison_uses_identical_corpus_and_reports_disagreements(tmp_path: Pa
         "reference_labels": 10,
     }
     assert lease_entries == ["enter", "exit"] * 22
+
+
+@pytest.mark.parametrize(
+    ("baseline_errors", "candidate_errors"),
+    [(set(range(10)), set(range(10))), (set(), set(range(10))), ({0}, {1, 3})],
+)
+def test_failed_inference_pairs_do_not_count_as_agreement_or_recall(
+    tmp_path, baseline_errors, candidate_errors,
+):
+    events = []
+    for index in range(10):
+        snapshot = tmp_path / f"{index}.png"
+        assert cv2.imwrite(str(snapshot), np.full((24, 32, 3), index, dtype=np.uint8))
+        events.append({
+            "id": index + 1, "camera_id": "gate", "snapshot_path": snapshot.name,
+            "objects_json": json.dumps([{"label": "person"}]),
+        })
+    manager = SimpleNamespace(
+        storage_dir=tmp_path,
+        events=SimpleNamespace(recent=lambda _limit: events, motion_audits=lambda **_kwargs: ([], 0)),
+    )
+
+    class Detector:
+        def __init__(self, config):
+            self.candidate = config.model_path == "candidate.xml"
+
+        def status(self):
+            return {"openvino_loaded": True}
+
+        def detect(self, frame, confidence_threshold=None):
+            index = int(frame[0, 0, 0])
+            if index in (candidate_errors if self.candidate else baseline_errors):
+                return [{"status": "inference_error"}]
+            return [{"label": "car" if self.candidate and index == 2 else "person"}]
+
+    runner = ModelEvaluationRunner(lambda: manager, AppConfig)
+    with patch("survng.app.model_evaluation.OpenVinoDetector", Detector):
+        runner._run("baseline.xml", "candidate.xml", 10, 0.25)
+
+    status = runner.status()
+    result = status["result"]
+    compared = 10 - len(baseline_errors | candidate_errors)
+    assert status["status"] == ("completed" if compared else "failed")
+    assert bool(status["error"]) is (not compared)
+    assert result["sample_count"] == 10
+    assert result["compared_sample_count"] == compared
+    assert result["failed_sample_count"] == 10 - compared
+    assert result["baseline"]["errors"] == len(baseline_errors)
+    assert result["candidate"]["errors"] == len(candidate_errors)
+    for model, errors in (("baseline", baseline_errors), ("candidate", candidate_errors)):
+        if len(errors) == 10:
+            assert result[model]["average_ms"] == result[model]["p95_ms"] == 0
+    assert result["disagreement_frames"] == (1 if compared else 0)
+    assert result["agreement_frames"] == (compared - 1 if compared else 0)
+    assert result["stored_evidence_recall"] == {
+        "baseline": 1.0 if compared else None,
+        "candidate": round((compared - 1) / compared, 3) if compared else None,
+        "reference_labels": compared,
+    }
+    if compared:
+        assert [row["source_id"] for row in result["disagreements"]] == [3]
+    else:
+        assert result["disagreements"] == []
+
+
+def test_unreadable_corpus_fails_without_claiming_model_agreement(tmp_path):
+    image = tmp_path / "corrupt.jpg"
+    image.write_bytes(b"not an image")
+    events = [{
+        "id": index + 1, "camera_id": "gate", "snapshot_path": image.name,
+        "objects_json": json.dumps([{"label": "person"}]),
+    } for index in range(10)]
+    manager = SimpleNamespace(
+        storage_dir=tmp_path,
+        events=SimpleNamespace(recent=lambda _limit: events, motion_audits=lambda **_kwargs: ([], 0)),
+    )
+    runner = ModelEvaluationRunner(lambda: manager, AppConfig)
+    with patch("survng.app.model_evaluation.OpenVinoDetector") as detector:
+        detector.return_value.status.return_value = {"openvino_loaded": True}
+        runner._run("baseline.xml", "candidate.xml", 10, 0.25)
+        detector.return_value.detect.assert_not_called()
+    status = runner.status()
+    assert status["status"] == "failed"
+    assert status["error"] == "No images could be compared successfully."
+    result = status["result"]
+    assert result["compared_sample_count"] == 0
+    assert result["failed_sample_count"] == 10
+    assert result["agreement_frames"] == result["disagreement_frames"] == 0
+    for model in ("baseline", "candidate"):
+        assert result[model]["errors"] == 10
+        assert result[model]["average_ms"] == result[model]["p95_ms"] == 0
