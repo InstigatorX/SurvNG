@@ -2655,6 +2655,16 @@ class EventStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid tracking comparison verdict"):
                 store.set_tracking_comparison_verdict(history[0]["id"], "automatic")
 
+    def test_tracking_comparison_rejects_failed_or_absent_engine_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            result = store.save_tracking_comparison(event_id=1, camera_id="gate", event_created_at="now",
+                result={"engines": {"survng_hybrid": {}, "ultralytics_tracktrack": {"error": "unavailable"}}})
+            for verdict in ("ultralytics_tracktrack", "ultralytics_botsort"):
+                with self.assertRaisesRegex(ValueError, "successful engine"):
+                    store.set_tracking_comparison_verdict(result["id"], verdict)
+            self.assertEqual(store.set_tracking_comparison_verdict(result["id"], "survng_hybrid")["verdict"], "survng_hybrid")
+
     def test_tracking_comparison_accepts_deep_ocsort_and_historic_botsort_verdicts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

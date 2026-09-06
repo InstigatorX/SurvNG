@@ -92,6 +92,13 @@ class EventStoreTrackingMixin:
             raise ValueError("invalid tracking comparison verdict")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as conn:
+            row = conn.execute("select result_json from tracking_comparisons where id = ?", (int(comparison_id),)).fetchone()
+            if row is None:
+                return None
+            evidence = json.loads(row["result_json"])
+            engine = evidence.get("engines", {}).get(normalized_verdict)
+            if normalized_verdict != "inconclusive" and (not isinstance(engine, dict) or engine.get("error")):
+                raise ValueError("verdict must name a successful engine in this comparison")
             cursor = conn.execute(
                 "update tracking_comparisons set verdict = ?, reviewed_at = ? where id = ?",
                 (normalized_verdict, now, int(comparison_id)),

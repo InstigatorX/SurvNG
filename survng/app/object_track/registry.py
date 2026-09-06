@@ -3,13 +3,14 @@ from __future__ import annotations
 import importlib.util
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
+from pathlib import Path
 
 from ..config import ObjectTrackingConfig
 from .bytetrack import ByteTrackObjectTracker
 from .types import ObjectTrackerBackend, ObjectTrackerBuilder
 
 
-TESTED_ULTRALYTICS_TRACKING_VERSION = "8.4.115"
+TESTED_ULTRALYTICS_TRACKING_VERSION = "8.4.129"
 MINIMUM_ULTRALYTICS_TRACKING_VERSION = (8, 4, 108)
 MAXIMUM_ULTRALYTICS_TRACKING_VERSION = (8, 5, 0)
 
@@ -37,11 +38,18 @@ def _ultralytics_tracking_dependency_status(
         installed_version = ""
     package_present = importlib.util.find_spec("ultralytics") is not None
     lap_present = importlib.util.find_spec("lap") is not None
-    try:
-        tracker_present = importlib.util.find_spec(module_name) is not None
-    except ModuleNotFoundError:
-        tracker_present = False
+    # find_spec on a dotted module imports its parents (and can initialize
+    # PyTorch or Ultralytics settings). Inspect files under the top-level spec
+    # instead so capability/status requests stay lazy and side-effect free.
+    package_spec = importlib.util.find_spec("ultralytics")
+    relative_module = Path(*module_name.split(".")[1:]).with_suffix(".py")
+    tracker_present = bool(package_spec and any(
+        (Path(location) / relative_module).is_file()
+        for location in (package_spec.submodule_search_locations or [])
+    ))
     version_supported = _ultralytics_tracking_version_supported(installed_version)
+    if tracker_name in {"TrackTrack", "BoT-SORT"}:
+        version_supported = installed_version == TESTED_ULTRALYTICS_TRACKING_VERSION
     available = bool(
         installed_version
         and package_present
@@ -56,10 +64,7 @@ def _ultralytics_tracking_dependency_status(
     elif not tracker_present:
         reason = f"The installed Ultralytics build does not include {tracker_name}."
     elif not version_supported:
-        reason = (
-            f"Ultralytics {installed_version} is outside SurvNG's supported "
-            f"{tracker_name} API range (8.4.108 through the latest 8.4.x release)."
-        )
+        reason = f"Ultralytics {installed_version} is unsupported for {tracker_name}; install the tested version {TESTED_ULTRALYTICS_TRACKING_VERSION}."
     else:
         reason = ""
     return {
@@ -71,7 +76,7 @@ def _ultralytics_tracking_dependency_status(
         "required_version": TESTED_ULTRALYTICS_TRACKING_VERSION,
         "tested_version": TESTED_ULTRALYTICS_TRACKING_VERSION,
         "is_tested_version": installed_version == TESTED_ULTRALYTICS_TRACKING_VERSION,
-        "supported_version_range": ">=8.4.108,<8.5",
+        "supported_version_range": "==8.4.129" if tracker_name in {"TrackTrack", "BoT-SORT"} else ">=8.4.108,<8.5",
         "reason": reason,
     }
 
@@ -91,7 +96,7 @@ def _build_ultralytics_deepocsort(
     config: ObjectTrackingConfig,
     high_confidence_threshold: float,
 ) -> ObjectTrackerBackend:
-    from .ultralytics_tracking import UltralyticsDeepOCSortObjectTracker
+    from ..ultralytics_tracking import UltralyticsDeepOCSortObjectTracker
 
     return UltralyticsDeepOCSortObjectTracker(config, high_confidence_threshold)
 
@@ -99,9 +104,37 @@ def _build_ultralytics_fasttrack(
     config: ObjectTrackingConfig,
     high_confidence_threshold: float,
 ) -> ObjectTrackerBackend:
-    from .ultralytics_tracking import UltralyticsFastTrackObjectTracker
+    from ..ultralytics_tracking import UltralyticsFastTrackObjectTracker
 
     return UltralyticsFastTrackObjectTracker(config, high_confidence_threshold)
+
+def ultralytics_tracktrack_dependency_status() -> dict[str, Any]:
+    return _ultralytics_tracking_dependency_status(
+        tracker_name="TrackTrack", module_name="ultralytics.trackers.track_tracker",
+    )
+
+
+def ultralytics_botsort_dependency_status() -> dict[str, Any]:
+    return _ultralytics_tracking_dependency_status(
+        tracker_name="BoT-SORT", module_name="ultralytics.trackers.bot_sort",
+    )
+
+
+def _build_ultralytics_tracktrack(config: ObjectTrackingConfig, high_confidence_threshold: float) -> ObjectTrackerBackend:
+    status = ultralytics_tracktrack_dependency_status()
+    if not status["available"]:
+        raise RuntimeError(status["reason"])
+    from ..ultralytics_tracking import UltralyticsTrackTrackObjectTracker
+    return UltralyticsTrackTrackObjectTracker(config, high_confidence_threshold)
+
+
+def _build_ultralytics_botsort(config: ObjectTrackingConfig, high_confidence_threshold: float) -> ObjectTrackerBackend:
+    status = ultralytics_botsort_dependency_status()
+    if not status["available"]:
+        raise RuntimeError(status["reason"])
+    from ..ultralytics_tracking import UltralyticsBotSortObjectTracker
+    return UltralyticsBotSortObjectTracker(config, high_confidence_threshold)
+
 
 class ObjectTrackerRegistry:
     def __init__(self) -> None:
@@ -141,6 +174,8 @@ class ObjectTrackerRegistry:
 def build_builtin_object_tracker_registry() -> ObjectTrackerRegistry:
     registry = ObjectTrackerRegistry()
     registry.register("survng_hybrid", ByteTrackObjectTracker)
+    from .candidate import HybridCandidateObjectTracker
+    registry.register("survng_hybrid_candidate", HybridCandidateObjectTracker)
     # Compatibility alias for configurations created before the tracker gained
     # SurvNG-specific geometry and appearance association.
     registry.register("bytetrack", ByteTrackObjectTracker)
@@ -149,4 +184,6 @@ def build_builtin_object_tracker_registry() -> ObjectTrackerRegistry:
     # so production sessions cannot select this implementation.
     registry.register("ultralytics_deepocsort", _build_ultralytics_deepocsort)
     registry.register("ultralytics_fasttrack", _build_ultralytics_fasttrack)
+    registry.register("ultralytics_tracktrack", _build_ultralytics_tracktrack)
+    registry.register("ultralytics_botsort", _build_ultralytics_botsort)
     return registry

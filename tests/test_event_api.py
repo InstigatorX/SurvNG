@@ -793,6 +793,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(sampled_frames.call_args.kwargs["ffmpeg_path"], active_config.ffmpeg_path)
         self.assertEqual(sampled_frames.call_args.kwargs["maximum_width"], 640)
         runner.run.assert_called_once()
+        self.assertEqual(runner.run.call_args.kwargs["sampling_profile"], "fixed_2fps")
         self.assertIs(
             runner.run.call_args.args[1],
             sampled_frames.return_value,
@@ -832,7 +833,7 @@ class EventApiSerializationTest(unittest.TestCase):
             person_reidentifier=object(),
         )
 
-        def run(_camera, _frames):
+        def run(_camera, _frames, **_kwargs):
             main.manager = replacement
             return {
                 "frames_processed": 1,
@@ -857,16 +858,10 @@ class EventApiSerializationTest(unittest.TestCase):
         active_events.save_tracking_comparison.assert_called_once()
         replacement_events.save_tracking_comparison.assert_not_called()
 
-    def test_tracking_comparison_rejects_missing_optional_backend_without_work(self) -> None:
-        with patch.object(
-            main,
-            "ultralytics_fasttrack_dependency_status",
-            return_value={"available": False, "reason": "not installed"},
-        ):
-            with self.assertRaises(HTTPException) as unavailable:
-                main.compare_event_tracking(43)
-
-        self.assertEqual(unavailable.exception.status_code, 503)
+    def test_tracking_comparison_rejects_unknown_sampling_profile(self) -> None:
+        with self.assertRaises(HTTPException) as invalid:
+            main.compare_event_tracking(43, sampling_profile="unbounded")
+        self.assertEqual(invalid.exception.status_code, 422)
 
     def test_tracking_comparison_history_and_verdict_api_use_event_store(self) -> None:
         events = SimpleNamespace(
