@@ -8,6 +8,8 @@ from unittest.mock import patch
 from survng.app.config import ObjectTrackingConfig
 from survng.app.object_track.assignment import maximum_weight_assignment
 from survng.app.object_track.candidate import HybridCandidateObjectTracker
+from survng.app.object_track.hybrid import HybridObjectTracker
+from survng.app.object_track.registry import build_builtin_object_tracker_registry
 from tests import test_object_tracking as existing_contract
 
 
@@ -62,9 +64,20 @@ class MaximumWeightAssignmentTest(unittest.TestCase):
                     self.assertAlmostEqual(sum(weights[row][column] for row, column in actual), optimum)
 
 
-class HybridCandidateRegressionTest(unittest.TestCase):
-    def tracker(self) -> HybridCandidateObjectTracker:
-        return HybridCandidateObjectTracker(ObjectTrackingConfig(), 0.7)
+class HybridProductionRegressionTest(unittest.TestCase):
+    def tracker(self) -> HybridObjectTracker:
+        return HybridObjectTracker(ObjectTrackingConfig(), 0.7)
+
+    def test_registry_uses_promoted_hybrid(self) -> None:
+        tracker = build_builtin_object_tracker_registry().create(
+            "survng_hybrid",
+            ObjectTrackingConfig(),
+            0.7,
+        )
+        self.assertIsInstance(tracker, HybridObjectTracker)
+
+    def test_candidate_name_remains_compatible(self) -> None:
+        self.assertTrue(issubclass(HybridCandidateObjectTracker, HybridObjectTracker))
 
     def test_box_shrink_does_not_collapse_prediction_or_fragment_identity(self) -> None:
         for gap in (1 / 0.75, 2.0):
@@ -128,11 +141,11 @@ class HybridCandidateRegressionTest(unittest.TestCase):
         self.assertEqual([(item["track_id"], item["box"]["x1"]) for item in result], [(1, 220)])
 
 
-class HybridCandidateExistingContractTest(existing_contract.ByteTrackObjectTrackerTest):
+class HybridProductionExistingContractTest(existing_contract.ByteTrackObjectTrackerTest):
     """Run the established seed, high/low, retention and appearance contracts."""
 
     def setUp(self) -> None:
-        tracker_patch = patch.object(existing_contract, "ByteTrackObjectTracker", HybridCandidateObjectTracker)
+        tracker_patch = patch.object(existing_contract, "ByteTrackObjectTracker", HybridObjectTracker)
         tracker_patch.start()
         self.addCleanup(tracker_patch.stop)
         super().setUp()
