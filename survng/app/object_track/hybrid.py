@@ -18,8 +18,8 @@ class HybridObjectTracker(ByteTrackObjectTracker):
     Production association differs in three bounded ways:
 
     * predict center translation while retaining the last measured box size;
-    * recover high-confidence appearance before low-confidence geometry,
-      while keeping relaxed geometry after both confidence passes; and
+    * recover high-confidence appearance before competing low-confidence
+      geometry, while deferring relaxed matches for contested labels; and
     * use maximum-weight one-to-one assignment instead of greedy edge selection.
 
     These changes preserve SurvNG's timestamp-based lifecycle and selective ReID
@@ -60,16 +60,22 @@ class HybridObjectTracker(ByteTrackObjectTracker):
         unmatched_tracks: set[int],
         assignments: dict[int, int],
     ) -> None:
-        # The base update calls this hook exactly twice: high, then low. Delay
-        # relaxed recovery until low candidates are visible so a merely plausible
-        # high-confidence detection cannot steal a track from an exact low-
-        # confidence continuation.
+        # The base update calls this hook exactly twice: high, then low. Wait
+        # for low candidates before deciding which relaxed matches are safe.
         if self._pending_high is None:
             self._pending_high = detections
             return
 
         high = self._pending_high
         self._associate_geometry(high, captured_at, unmatched_tracks, assignments)
+        # Keep cheap single-candidate recovery when no low-confidence detection
+        # of that label could be displaced. Contested labels must wait until
+        # low geometry is evaluated; unrelated labels need no extra ReID work.
+        low_labels = {str(item[1].get("label") or "") for item in detections}
+        self._associate_unambiguous(
+            [item for item in high if str(item[1].get("label") or "") not in low_labels],
+            captured_at, unmatched_tracks, assignments,
+        )
         # Resolve strong high-confidence appearance recovery before a weak
         # low-confidence box can consume the same identity. The existing ReID
         # path applies per-label thresholds and requests each embedding lazily.
