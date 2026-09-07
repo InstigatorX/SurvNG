@@ -18,7 +18,8 @@ class HybridObjectTracker(ByteTrackObjectTracker):
     Production association differs in three bounded ways:
 
     * predict center translation while retaining the last measured box size;
-    * evaluate high and low confidence geometry before relaxed recovery; and
+    * recover high-confidence appearance before competing low-confidence
+      geometry, while deferring relaxed matches for contested labels; and
     * use maximum-weight one-to-one assignment instead of greedy edge selection.
 
     These changes preserve SurvNG's timestamp-based lifecycle and selective ReID
@@ -59,16 +60,26 @@ class HybridObjectTracker(ByteTrackObjectTracker):
         unmatched_tracks: set[int],
         assignments: dict[int, int],
     ) -> None:
-        # The base update calls this hook exactly twice: high, then low. Delay
-        # relaxed recovery until low candidates are visible so a merely plausible
-        # high-confidence detection cannot steal a track from an exact low-
-        # confidence continuation.
+        # The base update calls this hook exactly twice: high, then low. Wait
+        # for low candidates before deciding which relaxed matches are safe.
         if self._pending_high is None:
             self._pending_high = detections
             return
 
         high = self._pending_high
         self._associate_geometry(high, captured_at, unmatched_tracks, assignments)
+        # Keep cheap single-candidate recovery when no low-confidence detection
+        # of that label could be displaced. Contested labels must wait until
+        # low geometry is evaluated; unrelated labels need no extra ReID work.
+        low_labels = {str(item[1].get("label") or "") for item in detections}
+        self._associate_unambiguous(
+            [item for item in high if str(item[1].get("label") or "") not in low_labels],
+            captured_at, unmatched_tracks, assignments,
+        )
+        # Resolve strong high-confidence appearance recovery before a weak
+        # low-confidence box can consume the same identity. The existing ReID
+        # path applies per-label thresholds and requests each embedding lazily.
+        self._associate_appearance(high, captured_at, unmatched_tracks, assignments)
         self._associate_geometry(detections, captured_at, unmatched_tracks, assignments)
         self._associate_unambiguous(
             [*high, *detections],
@@ -76,7 +87,6 @@ class HybridObjectTracker(ByteTrackObjectTracker):
             unmatched_tracks,
             assignments,
         )
-        self._associate_appearance(high, captured_at, unmatched_tracks, assignments)
         self._associate_appearance(detections, captured_at, unmatched_tracks, assignments)
 
     def _associate_geometry(
@@ -110,15 +120,10 @@ class HybridObjectTracker(ByteTrackObjectTracker):
         if maximum_score <= 0.0:
             return
 
-        # Prefer the assignment with the greatest number of valid continuations,
-        # then the highest total geometry score within that cardinality. One
-        # additional valid edge therefore outweighs all possible score deltas.
-        bonus = min(len(track_ids), len(detections)) * maximum_score + 1.0
-        weights = [
-            [score + bonus if score > 0.0 else 0.0 for score in row]
-            for row in scores
-        ]
-        for row, column in maximum_weight_assignment(weights):
+        # Maximize evidence, not match count. Zero-weight dummy assignments
+        # let tracks remain unmatched; a strong continuation must not be traded
+        # for weaker pairs solely to avoid allocating another identity.
+        for row, column in maximum_weight_assignment(scores):
             track_id = track_ids[row]
             index, detection, box = detections[column]
             self._observe_geometry(self._tracks[track_id], detection, captured_at, box)

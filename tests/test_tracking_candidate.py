@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import itertools
+import math
 import random
 import unittest
 from unittest.mock import patch
+
+import numpy as np
 
 from survng.app.config import ObjectTrackingConfig
 from survng.app.object_track.assignment import maximum_weight_assignment
@@ -139,6 +142,116 @@ class HybridProductionRegressionTest(unittest.TestCase):
         result = tracker.update([detection((220, 100, 260, 180)), detection(box, 0.3)], 10.5)
 
         self.assertEqual([(item["track_id"], item["box"]["x1"]) for item in result], [(1, 220)])
+
+
+class HybridIdentityRegressionTest(unittest.TestCase):
+    @staticmethod
+    def object(x: float, *, label: str = "person", confidence: float = 0.9,
+               embedding: list[float] | None = None) -> dict:
+        item = detection((x, 100, x + 40, 180), confidence)
+        item["label"] = label
+        if embedding is not None:
+            item["_tracking_embedding"] = np.asarray(embedding, dtype=np.float32)
+        return item
+
+    def test_exact_continuation_is_not_traded_for_two_weaker_matches(self) -> None:
+        # A remains, B disappears, and C enters. Preserving two old IDs would
+        # assign both visible people the wrong identities and pollute their ReID.
+        for reid_enabled, seed_order, next_order in itertools.product(
+            (False, True), ((200, 255), (255, 200)), ((200, 155), (155, 200)),
+        ):
+            with self.subTest(reid=reid_enabled, seeds=seed_order, following=next_order):
+                tracker = HybridObjectTracker(ObjectTrackingConfig(
+                    reid_enabled=reid_enabled, reid_model_path="person-reid.xml",
+                ), 0.7)
+                embeddings = {200: [1.0, 0.0, 0.0], 255: [0.0, 1.0, 0.0],
+                              155: [0.0, 0.0, 1.0]}
+
+                def observation(x):
+                    return self.object(x, embedding=embeddings[x] if reid_enabled else None)
+
+                first = tracker.update([observation(x) for x in seed_order], 10.0, confirm_new=True)
+                old_ids = {item["box"]["x1"]: item["track_id"] for item in first}
+                tracker.update([observation(x) for x in seed_order], 10.5)
+                result = tracker.update([observation(x) for x in next_order], 12.0)
+
+                self.assertEqual({item["box"]["x1"]: item["track_id"] for item in result},
+                                 {200: old_ids[200], 155: 3})
+                self.assertEqual({item["box"]["x1"]: item["track_state"] for item in result},
+                                 {200: "confirmed", 155: "tentative"})
+                self.assertEqual(tracker._tracks[old_ids[255]].last_seen, 10.5)
+                self.assertEqual(tracker.diagnostics()["association_counts"]["new_track"], 3)
+                if reid_enabled:
+                    for x in seed_order:
+                        np.testing.assert_array_equal(tracker._tracks[old_ids[x]].appearance, embeddings[x])
+
+    def test_high_confidence_reid_precedes_low_geometry_with_per_label_gates(self) -> None:
+        # Lazy appearance work must happen before an exact but low-confidence
+        # false box consumes the real person's or vehicle's track.
+        cases = (("person", 1.0, True), ("person", 0.75, True),
+                 ("car", 0.75, False), ("car", 0.9, True),
+                 ("person", 0.0, False), ("person", None, False))
+        for (label, similarity, recover), reverse in itertools.product(cases, (False, True)):
+            with self.subTest(label=label, similarity=similarity, reverse=reverse):
+                tracker = HybridObjectTracker(ObjectTrackingConfig(
+                    reid_enabled=True, reid_model_path="person-reid.xml",
+                    vehicle_reid_enabled=True, vehicle_reid_model_path="vehicle-reid.xml",
+                    reid_match_threshold=0.7, vehicle_reid_match_threshold=0.8,
+                ), 0.7)
+                for timestamp in (10.0, 10.5):
+                    tracker.update([self.object(200, label=label, embedding=[1.0, 0.0])],
+                                   timestamp, confirm_new=timestamp == 10.0)
+                high = self.object(400, label=label)
+                calls = []
+
+                def provide():
+                    calls.append(high.get("_tracking_embedding_reason"))
+                    if similarity is None:
+                        return None
+                    return np.asarray([similarity, math.sqrt(1.0 - similarity ** 2)], dtype=np.float32)
+
+                high["_tracking_embedding_provider"] = provide
+                low = self.object(200, label=label, confidence=0.3)
+                result = tracker.update([low, high] if reverse else [high, low], 12.0)
+
+                self.assertEqual({item["box"]["x1"]: item["track_id"] for item in result},
+                                 {400: 1} if recover else {400: 2, 200: 1})
+                self.assertEqual(calls, ["geometry_recovery"])
+                self.assertEqual(tracker.diagnostics()["association_counts"]["appearance_recovery"],
+                                 int(recover))
+                self.assertEqual(tracker.diagnostics()["association_counts"]["new_track"],
+                                 1 if recover else 2)
+
+    def test_unambiguous_high_geometry_still_avoids_lazy_reid(self) -> None:
+        tracker = HybridObjectTracker(ObjectTrackingConfig(
+            reid_enabled=True, reid_model_path="person-reid.xml",
+        ), 0.7)
+        tracker.update([self.object(200, embedding=[1.0, 0.0])], 10.0, confirm_new=True)
+        high = self.object(202)
+
+        def unexpected_embedding():
+            self.fail("An ordinary geometry match must not add embedding work")
+
+        high["_tracking_embedding_provider"] = unexpected_embedding
+        result = tracker.update([high, self.object(200, confidence=0.3)], 10.5)
+
+        self.assertEqual([(item["box"]["x1"], item["track_id"]) for item in result], [(202, 1)])
+        self.assertEqual(tracker.diagnostics()["reid_avoided_geometry_matches"], 1)
+
+    def test_completed_track_can_still_be_recovered_once(self) -> None:
+        tracker = HybridObjectTracker(ObjectTrackingConfig(
+            reid_enabled=True, reid_model_path="person-reid.xml",
+        ), 0.7)
+        tracker.update([self.object(200, embedding=[1.0, 0.0])], 10.0, confirm_new=True)
+        tracker.update([], 14.0)
+        self.assertFalse(tracker.has_live_tracks(14.0))
+        result = tracker.update([self.object(400, embedding=[1.0, 0.0]),
+                                 self.object(200, confidence=0.3)], 15.0)
+
+        self.assertEqual([(item["box"]["x1"], item["track_id"]) for item in result], [(400, 1)])
+        self.assertEqual(tracker._tracks[1].reid_matches, 1)
+        self.assertTrue(tracker._tracks[1].reid_recovery_history[0]["resumed_completed_track"])
+        self.assertEqual(tracker.diagnostics()["association_counts"]["new_track"], 1)
 
 
 class HybridProductionExistingContractTest(existing_contract.ByteTrackObjectTrackerTest):
