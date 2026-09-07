@@ -100,6 +100,30 @@ class HybridObjectTracker(ByteTrackObjectTracker):
         if not track_ids or not detections:
             return
 
+        scores = self._geometry_scores(track_ids, detections, captured_at)
+
+        maximum_score = max(map(max, scores), default=0.0)
+        if maximum_score <= 0.0:
+            return
+
+        # Maximize evidence, not match count. Zero-weight dummy assignments
+        # let tracks remain unmatched; a strong continuation must not be traded
+        # for weaker pairs solely to avoid allocating another identity.
+        for row, column in maximum_weight_assignment(scores):
+            track_id = track_ids[row]
+            index, detection, box = detections[column]
+            self._observe_geometry(self._tracks[track_id], detection, captured_at, box)
+            unmatched_tracks.remove(track_id)
+            assignments[index] = track_id
+            self._association_counts["geometry"] += 1
+
+    def _geometry_scores(
+        self,
+        track_ids: list[int],
+        detections: DetectionBatch,
+        captured_at: float,
+    ) -> list[list[float]]:
+        """Build gated geometry scores; offline candidates may refine these."""
         scores = [[0.0] * len(detections) for _ in track_ids]
         for row, track_id in enumerate(track_ids):
             track = self._tracks[track_id]
@@ -116,17 +140,4 @@ class HybridObjectTracker(ByteTrackObjectTracker):
                 if score is not None:
                     scores[row][column] = score
 
-        maximum_score = max(map(max, scores), default=0.0)
-        if maximum_score <= 0.0:
-            return
-
-        # Maximize evidence, not match count. Zero-weight dummy assignments
-        # let tracks remain unmatched; a strong continuation must not be traded
-        # for weaker pairs solely to avoid allocating another identity.
-        for row, column in maximum_weight_assignment(scores):
-            track_id = track_ids[row]
-            index, detection, box = detections[column]
-            self._observe_geometry(self._tracks[track_id], detection, captured_at, box)
-            unmatched_tracks.remove(track_id)
-            assignments[index] = track_id
-            self._association_counts["geometry"] += 1
+        return scores

@@ -79,6 +79,7 @@ jobs:
           scripts/run-tests.sh \
             tests/test_tracking_evaluation.py \
             tests/test_tracking_candidate.py \
+            tests/test_tracking_multicue.py \
             tests/test_tracking_comparison.py \
             tests/test_object_tracking_lifecycle.py \
             tests/test_tracking_frames.py \

@@ -244,7 +244,10 @@ def main() -> None:
     parser.add_argument("--labels", type=Path)
     parser.add_argument("--profile", choices=PROFILES, default="recorded")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--label-template", action="store_true", help="write blank annotation frames instead of executing trackers")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--label-template", action="store_true", help="write blank annotation frames instead of executing trackers")
+    mode.add_argument("--association-cues", action="store_true",
+                      help="compare production Hybrid with offline TrackTrack-inspired association cues; no optional tracker runtime required")
     args = parser.parse_args()
     if args.replay.stat().st_size > MAX_REPLAY_BYTES:
         parser.error("replay exceeds 32 MiB")
@@ -256,7 +259,17 @@ def main() -> None:
         result = {"schema_version": 1, "replay_id": replay["replay_id"], "frames": [{"frame_index": f["frame_index"], "objects": [{"identity": None, "label": d["label"], "box": d["box"]} for d in f["detections"]]} for f in replay["frames"]]}
     else:
         from .tracking_comparison import TrackingComparisonRunner
-        result = TrackingComparisonRunner.replay(replay, sampling_profile=args.profile, labels=json.loads(args.labels.read_text()) if args.labels else None)
+        options = {}
+        if args.association_cues:
+            from .object_track.multicue import IMPLEMENTATION, HybridMultiCueObjectTracker
+            from .object_track.registry import build_builtin_object_tracker_registry
+            # Register on a fresh offline registry only. No production identifier,
+            # saved historical alias, or default Compare engine changes meaning.
+            registry = build_builtin_object_tracker_registry()
+            registry.register(IMPLEMENTATION, HybridMultiCueObjectTracker)
+            options = {"tracker_registry": registry, "implementations": ("survng_hybrid", IMPLEMENTATION)}
+        result = TrackingComparisonRunner.replay(replay, sampling_profile=args.profile,
+            labels=json.loads(args.labels.read_text()) if args.labels else None, **options)
     args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
 
 
