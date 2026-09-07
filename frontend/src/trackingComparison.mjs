@@ -18,8 +18,8 @@ export function trackingEngineLabel(implementation) {
 }
 
 export function trackingComparisonEngines(comparison) {
-  return Object.entries(comparison?.engines || {})
-    .filter(([implementation]) => implementation !== "survng_hybrid_candidate");
+  // New runs contain only active backends. Keep saved historic results visible.
+  return Object.entries(comparison?.engines || {});
 }
 
 export function successfulTrackingComparisonEngines(comparison) {

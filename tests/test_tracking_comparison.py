@@ -31,6 +31,39 @@ class Detector:
 
 
 class TrackingComparisonRunnerTest(unittest.TestCase):
+    def test_new_runs_and_default_replays_execute_only_three_engines(self) -> None:
+        expected = ("survng_hybrid", "ultralytics_tracktrack", "ultralytics_botsort")
+        registry = ObjectTrackerRegistry()
+        for implementation in (*expected, "survng_hybrid_candidate"):
+            registry.register(implementation, ByteTrackObjectTracker)
+        detector = Detector()
+        runner = TrackingComparisonRunner(
+            config=ObjectTrackingConfig(min_confirmations=1),
+            detector=detector,
+            tracker_registry=registry,
+        )
+        with patch.object(registry, "create", wraps=registry.create) as create:
+            result = runner.run(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+                [(100.0, np.zeros((100, 120, 3), dtype=np.uint8))],
+            )
+            self.assertEqual(tuple(call.args[0] for call in create.call_args_list), expected)
+            self.assertEqual(tuple(result["engines"]), expected)
+            self.assertTrue(all("error" not in engine for engine in result["engines"].values()))
+
+            create.reset_mock()
+            replayed = runner.replay(result["replay"], tracker_registry=registry)
+            self.assertEqual(tuple(call.args[0] for call in create.call_args_list), expected)
+            self.assertEqual(tuple(replayed["engines"]), expected)
+
+            # Explicit compatibility replay remains possible, but not automatic.
+            create.reset_mock()
+            historic = runner.replay(result["replay"], tracker_registry=registry,
+                                     implementations=("survng_hybrid_candidate",))
+            self.assertEqual(tuple(call.args[0] for call in create.call_args_list), ("survng_hybrid_candidate",))
+            self.assertEqual(tuple(historic["engines"]), ("survng_hybrid_candidate",))
+            self.assertNotIn("error", historic["engines"]["survng_hybrid_candidate"])
+
     def test_excluded_classes_are_not_in_offline_comparisons(self) -> None:
         class DetectorWithFace(Detector):
             def detect(self, frame, confidence_threshold=None):
