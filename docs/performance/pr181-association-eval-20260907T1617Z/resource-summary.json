@@ -1,0 +1,60 @@
+{
+  "snapshot_count": 14,
+  "min_available_memory_gib": 10.675444602966309,
+  "memory_floor_gib": 1.6,
+  "connected_counts": [
+    13
+  ],
+  "enabled_recording_active_counts": [
+    11
+  ],
+  "queue_depths": [
+    0
+  ],
+  "failed_inferences": [
+    0
+  ],
+  "detector_counter_before": 240,
+  "detector_counter_after": 780,
+  "cpu_psi_avg10_max_percent": 4.05,
+  "memory_psi_avg10_max_percent": 0.0,
+  "new_log_entries": [
+    {
+      "timestamp": "2026-09-07T16:35:02.862228+00:00",
+      "level": "INFO",
+      "logger": "survng.app.recording_media_runtime",
+      "message": "built event clip 63156-0-30000-a3-qsv.mp4 using qsv acceleration (source codec hevc)"
+    },
+    {
+      "timestamp": "2026-09-07T16:35:30.911092+00:00",
+      "level": "INFO",
+      "logger": "survng.app.recording_media_runtime",
+      "message": "built event clip 63346-0-30000-a3-qsv.mp4 using qsv acceleration (source codec h264)"
+    },
+    {
+      "timestamp": "2026-09-07T16:35:56.176108+00:00",
+      "level": "INFO",
+      "logger": "survng.app.recording_media_runtime",
+      "message": "built event clip 64897-0-30000-a3-qsv.mp4 using qsv acceleration (source codec hevc)"
+    },
+    {
+      "timestamp": "2026-09-07T16:36:27.241649+00:00",
+      "level": "INFO",
+      "logger": "survng.app.recording_media_runtime",
+      "message": "built event clip 65548-0-30000-a3-qsv.mp4 using qsv acceleration (source codec hevc)"
+    },
+    {
+      "timestamp": "2026-09-07T16:37:07.361650+00:00",
+      "level": "INFO",
+      "logger": "survng.app.recording_media_runtime",
+      "message": "built event clip 64911-0-30000-a3-qsv.mp4 using qsv acceleration (source codec hevc)"
+    },
+    {
+      "timestamp": "2026-09-07T16:37:40.762654+00:00",
+      "level": "INFO",
+      "logger": "survng.app.recording_media_runtime",
+      "message": "built event clip 64006-0-30000-a3-qsv.mp4 using qsv acceleration (source codec h264)"
+    }
+  ],
+  "coverage_limit": "Before/after capture snapshots, not continuous monitoring. CPU PSI measures CPU waiting pressure, NOT CPU utilization. Service average CPU was not sampled; no fleet CPU/iGPU savings claim."
+}

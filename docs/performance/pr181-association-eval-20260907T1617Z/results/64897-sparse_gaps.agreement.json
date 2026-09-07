@@ -1,0 +1,45 @@
+{
+  "method": "Whole-track maximum-weight one-to-one alignment using shared exact input observation membership, never per-frame ID remapping. IoU>=0.95 same-class overlapping input boxes are ambiguous/excluded from identity membership. This is tracker agreement, NOT identity ground truth.",
+  "candidate_to_baseline_whole_track_map": {
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5
+  },
+  "alignment_row_max_ties": [],
+  "overlap_edges": [
+    {
+      "baseline": 1,
+      "candidate": 1,
+      "shared_observations": 40
+    },
+    {
+      "baseline": 2,
+      "candidate": 2,
+      "shared_observations": 22
+    },
+    {
+      "baseline": 3,
+      "candidate": 3,
+      "shared_observations": 11
+    },
+    {
+      "baseline": 4,
+      "candidate": 4,
+      "shared_observations": 7
+    },
+    {
+      "baseline": 5,
+      "candidate": 5,
+      "shared_observations": 17
+    }
+  ],
+  "split_disagreements": {},
+  "merge_disagreements": {},
+  "ambiguous_observations": [],
+  "unmatched_output_observations": [],
+  "changes": [],
+  "changed_frames": [],
+  "zero_adjustment_disagreement": false
+}

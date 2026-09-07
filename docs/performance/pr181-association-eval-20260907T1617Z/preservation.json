@@ -1,0 +1,55 @@
+{
+  "deployed_checkout_sha": "67e67ad73b7dc950dd55f15cabd4cb6d8f35531d",
+  "deployed_git_status": "",
+  "pid_before": 3257018,
+  "pid_after": 3257018,
+  "instance_before": "4aafae2f5f4ffd06d624088b",
+  "instance_after": "4aafae2f5f4ffd06d624088b",
+  "original_blocked_run_config_sha256": "5cad796144567086aa4531dad7d385d3125f37f8729a42337d2d913ae4761ceb",
+  "resumed_observed_config_sha256": "49b26dd91971e63175027da8c78a7b85da16dbe0f777fb8992dcaa036314a8ac",
+  "final_config_sha256": "49b26dd91971e63175027da8c78a7b85da16dbe0f777fb8992dcaa036314a8ac",
+  "config_file_mtime_utc": "2026-09-07T16:26:09.932309+00:00",
+  "saved_tracking_subtree_unchanged_since_original": true,
+  "external_configuration_change": "Fingerprint changed between original blocked run and resumed execution; mtime 16:26:09Z precedes resume/capture. User supplied an API token during this interval. Full original configuration was deliberately not saved, so not all changed fields can be reconstructed or attributed to token creation.",
+  "task_writes": "Only scratch files and authorized normal Compare cache/history writes. No deployment/configuration edits, restart, or settings changes performed by this task.",
+  "original_archive_sha256_now": "d46f069cfec5f5b51cc37fd8e5ed2577dc48a53e750a7e54045dff98858bfff8",
+  "all_preexisting_comparison_rows_preserved_by_full_content_hash": true,
+  "new_comparison_rows": [
+    {
+      "id": 77,
+      "event_id": 63156,
+      "camera_id": "upper-garage",
+      "sha256": "f8632864f2772ccc90a6a7c3b29e9195307108178de43b5758816a9e052d0fb5"
+    },
+    {
+      "id": 78,
+      "event_id": 63346,
+      "camera_id": "front-door",
+      "sha256": "c29869341a96836a0e20433503a2cbd326e381d87fa4ae338a60fb6acacee7b0"
+    },
+    {
+      "id": 79,
+      "event_id": 64897,
+      "camera_id": "upper-garage",
+      "sha256": "503902db9594e8bfb9a39d99686c6d038cb714b11b642b8f2770de570e1ac6fb"
+    },
+    {
+      "id": 80,
+      "event_id": 65548,
+      "camera_id": "back-middle",
+      "sha256": "77178266f69aa8136427737d301f8a9642fb83ca1dda3c18f342ed7267f3d2b8"
+    },
+    {
+      "id": 81,
+      "event_id": 64911,
+      "camera_id": "back-middle",
+      "sha256": "3600f410dfb7363068cc45d0db6f4ee1adc24c53e160f8037e90ad5d914b9915"
+    },
+    {
+      "id": 82,
+      "event_id": 64006,
+      "camera_id": "gate",
+      "sha256": "88133ccfd4c58f782da79b9390c211bb614fb42fd0db25113e47e804ffeb63d9"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+
+==================================== ERRORS ====================================
+_______________ ERROR collecting tests/test_tracking_multicue.py _______________
+ImportError while importing test module 'SCRATCH/checkout/tests/test_tracking_multicue.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_tracking_multicue.py:20: in <module>
+    from tests import test_tracking_candidate as established
+E   ImportError: cannot import name 'test_tracking_candidate' from 'tests' (SERVICE_VENV/lib/python3.12/site-packages/tests/__init__.py)
+______________ ERROR collecting tests/test_tracking_candidate.py _______________
+ImportError while importing test module 'SCRATCH/checkout/tests/test_tracking_candidate.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_tracking_candidate.py:16: in <module>
+    from tests import test_object_tracking as existing_contract
+E   ImportError: cannot import name 'test_object_tracking' from 'tests' (SERVICE_VENV/lib/python3.12/site-packages/tests/__init__.py)
+=========================== short test summary info ============================
+ERROR tests/test_tracking_multicue.py
+ERROR tests/test_tracking_candidate.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+2 errors in 1.83s

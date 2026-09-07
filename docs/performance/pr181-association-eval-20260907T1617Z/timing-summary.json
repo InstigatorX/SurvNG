@@ -1,0 +1,71 @@
+{
+  "event_id": 63156,
+  "profile": "fixed_2fps",
+  "reason": "Largest initial positive absolute overhead +0.060ms/frame (+32%); bounded repeat checks indicative timing rather than declaring a regression from one sample.",
+  "runs": [
+    {
+      "round": 0,
+      "warmup": true,
+      "order": [
+        "survng_hybrid",
+        "survng_hybrid_multicue"
+      ],
+      "baseline_ms_per_frame": 0.2,
+      "candidate_ms_per_frame": 0.192,
+      "baseline_processing_ms": 11.98,
+      "candidate_processing_ms": 11.51
+    },
+    {
+      "round": 1,
+      "warmup": false,
+      "order": [
+        "survng_hybrid_multicue",
+        "survng_hybrid"
+      ],
+      "baseline_ms_per_frame": 0.168,
+      "candidate_ms_per_frame": 0.185,
+      "baseline_processing_ms": 10.06,
+      "candidate_processing_ms": 11.09
+    },
+    {
+      "round": 2,
+      "warmup": false,
+      "order": [
+        "survng_hybrid",
+        "survng_hybrid_multicue"
+      ],
+      "baseline_ms_per_frame": 0.167,
+      "candidate_ms_per_frame": 0.176,
+      "baseline_processing_ms": 10.0,
+      "candidate_processing_ms": 10.54
+    },
+    {
+      "round": 3,
+      "warmup": false,
+      "order": [
+        "survng_hybrid_multicue",
+        "survng_hybrid"
+      ],
+      "baseline_ms_per_frame": 0.167,
+      "candidate_ms_per_frame": 0.187,
+      "baseline_processing_ms": 10.03,
+      "candidate_processing_ms": 11.22
+    }
+  ],
+  "baseline_median_ms": 0.167,
+  "candidate_median_ms": 0.185,
+  "baseline_range_ms": [
+    0.167,
+    0.168
+  ],
+  "candidate_range_ms": [
+    0.176,
+    0.187
+  ],
+  "paired_deltas_ms": [
+    0.017,
+    0.009,
+    0.02
+  ],
+  "note": "Tracker update/deepcopy wall time, not process CPU or fleet/iGPU utilization. Rounded at source to 0.001ms/frame; tiny absolute differences and 3 rounds limit inference."
+}

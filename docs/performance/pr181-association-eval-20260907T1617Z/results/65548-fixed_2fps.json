@@ -1,0 +1,1796 @@
+{
+  "sample_fps": 2.0,
+  "sampling_profile": "fixed_2fps",
+  "sampling_note": "Profiles select saved frames at or after target timestamps; gaps skip seconds 5\u20139 and 15\u201321. No adaptive policy is simulated.",
+  "effective_sample_fps": 1.988,
+  "lost_timeout_seconds": 4.0,
+  "frames_processed": 60,
+  "frame_width": 640,
+  "frame_height": 362,
+  "start_epoch": 1788733554.662938,
+  "end_epoch": 1788733584.337743,
+  "duration_seconds": 29.675,
+  "timestamp_source": "source_pts",
+  "source_pts_frames": 60,
+  "replay_id": "2ae9f2f6bbec4660368c4bc0c8cc7da1bca1ce6fd353ca4f9401305f0d9b8dc5",
+  "evaluation_source_sha256": "96da2f55f93b940feed3e43268182a2a83df85cb40c24a0ea827e450574867c0",
+  "ultralytics_version": "8.4.115",
+  "appearance_source": "shared_supplied_embeddings",
+  "dependency_versions": {
+    "numpy": "2.4.6",
+    "torch": "2.13.0",
+    "scipy": null,
+    "lap": "0.5.13",
+    "ultralytics": "8.4.115"
+  },
+  "python_version": "3.12.3",
+  "engines": {
+    "survng_hybrid": {
+      "implementation": "survng_hybrid",
+      "initialization_ms": 0.02,
+      "processing_ms": 3.91,
+      "average_ms_per_frame": 0.065,
+      "track_count": 3,
+      "observations": 19,
+      "reid_recoveries": 0,
+      "appearance_input_count": 12,
+      "fragmentation_proxy": 2,
+      "labels": {
+        "car": 3
+      },
+      "tracks": [
+        {
+          "track_id": 1,
+          "label": "car",
+          "state": "lost",
+          "first_seen": "2026-09-06T22:25:54.662938+00:00",
+          "last_seen": "2026-09-06T22:25:57.237743+00:00",
+          "duration_seconds": 2.575,
+          "observations": 6,
+          "max_confidence": 0.9028,
+          "depth_median_m": null,
+          "depth_trend_mps": null,
+          "depth_history": [],
+          "box": {
+            "x1": 387.0,
+            "y1": 61.0,
+            "x2": 428.0,
+            "y2": 80.0
+          },
+          "zones": [],
+          "trajectory": [
+            [
+              1788733554.663,
+              510.5,
+              104.5
+            ],
+            [
+              1788733555.3,
+              488.5,
+              96.5
+            ],
+            [
+              1788733556.013,
+              460.0,
+              86.5
+            ],
+            [
+              1788733556.313,
+              447.0,
+              83.0
+            ],
+            [
+              1788733556.938,
+              422.0,
+              75.0
+            ],
+            [
+              1788733557.238,
+              407.5,
+              70.5
+            ]
+          ],
+          "box_history": [
+            [
+              1788733554.663,
+              494.0,
+              95.0,
+              527.0,
+              114.0
+            ],
+            [
+              1788733555.3,
+              468.0,
+              86.0,
+              509.0,
+              107.0
+            ],
+            [
+              1788733556.013,
+              440.0,
+              76.0,
+              480.0,
+              97.0
+            ],
+            [
+              1788733556.313,
+              427.0,
+              73.0,
+              467.0,
+              93.0
+            ],
+            [
+              1788733556.938,
+              403.0,
+              65.0,
+              441.0,
+              85.0
+            ],
+            [
+              1788733557.238,
+              387.0,
+              61.0,
+              428.0,
+              80.0
+            ]
+          ],
+          "reid_matches": 0,
+          "reid_recovery_history": []
+        },
+        {
+          "track_id": 2,
+          "label": "car",
+          "state": "lost",
+          "first_seen": "2026-09-06T22:26:01.987938+00:00",
+          "last_seen": "2026-09-06T22:26:05.000438+00:00",
+          "duration_seconds": 3.013,
+          "observations": 7,
+          "max_confidence": 0.8774,
+          "depth_median_m": null,
+          "depth_trend_mps": null,
+          "depth_history": [],
+          "box": {
+            "x1": 164.0,
+            "y1": 40.0,
+            "x2": 181.0,
+            "y2": 50.0
+          },
+          "zones": [],
+          "trajectory": [
+            [
+              1788733561.988,
+              238.5,
+              39.5
+            ],
+            [
+              1788733562.325,
+              229.5,
+              39.5
+            ],
+            [
+              1788733562.925,
+              212.5,
+              41.0
+            ],
+            [
+              1788733563.263,
+              206.0,
+              40.5
+            ],
+            [
+              1788733563.988,
+              186.0,
+              42.5
+            ],
+            [
+              1788733564.288,
+              181.5,
+              42.0
+            ],
+            [
+              1788733565.0,
+              172.5,
+              45.0
+            ]
+          ],
+          "box_history": [
+            [
+              1788733561.988,
+              219.0,
+              33.0,
+              258.0,
+              46.0
+            ],
+            [
+              1788733562.325,
+              209.0,
+              33.0,
+              250.0,
+              46.0
+            ],
+            [
+              1788733562.925,
+              192.0,
+              34.0,
+              233.0,
+              48.0
+            ],
+            [
+              1788733563.263,
+              186.0,
+              34.0,
+              226.0,
+              47.0
+            ],
+            [
+              1788733563.988,
+              167.0,
+              35.0,
+              205.0,
+              50.0
+            ],
+            [
+              1788733564.288,
+              165.0,
+              35.0,
+              198.0,
+              49.0
+            ],
+            [
+              1788733565.0,
+              164.0,
+              40.0,
+              181.0,
+              50.0
+            ]
+          ],
+          "reid_matches": 0,
+          "reid_recovery_history": []
+        },
+        {
+          "track_id": 3,
+          "label": "car",
+          "state": "lost",
+          "first_seen": "2026-09-06T22:26:05.937743+00:00",
+          "last_seen": "2026-09-06T22:26:09.312743+00:00",
+          "duration_seconds": 3.375,
+          "observations": 8,
+          "max_confidence": 0.9175,
+          "depth_median_m": null,
+          "depth_trend_mps": null,
+          "depth_history": [],
+          "box": {
+            "x1": 0.0,
+            "y1": 68.0,
+            "x2": 25.0,
+            "y2": 89.0
+          },
+          "zones": [],
+          "trajectory": [
+            [
+              1788733565.938,
+              111.0,
+              54.5
+            ],
+            [
+              1788733566.238,
+              107.0,
+              55.0
+            ],
+            [
+              1788733566.675,
+              97.0,
+              55.0
+            ],
+            [
+              1788733567.313,
+              79.0,
+              59.5
+            ],
+            [
+              1788733567.963,
+              56.0,
+              64.5
+            ],
+            [
+              1788733568.263,
+              41.5,
+              67.5
+            ],
+            [
+              1788733568.675,
+              26.5,
+              73.0
+            ],
+            [
+              1788733569.313,
+              12.5,
+              78.5
+            ]
+          ],
+          "box_history": [
+            [
+              1788733565.938,
+              104.0,
+              50.0,
+              118.0,
+              59.0
+            ],
+            [
+              1788733566.238,
+              95.0,
+              49.0,
+              119.0,
+              61.0
+            ],
+            [
+              1788733566.675,
+              79.0,
+              47.0,
+              115.0,
+              63.0
+            ],
+            [
+              1788733567.313,
+              56.0,
+              49.0,
+              102.0,
+              70.0
+            ],
+            [
+              1788733567.963,
+              34.0,
+              54.0,
+              78.0,
+              75.0
+            ],
+            [
+              1788733568.263,
+              18.0,
+              57.0,
+              65.0,
+              78.0
+            ],
+            [
+              1788733568.675,
+              3.0,
+              62.0,
+              50.0,
+              84.0
+            ],
+            [
+              1788733569.313,
+              0.0,
+              68.0,
+              25.0,
+              89.0
+            ]
+          ],
+          "reid_matches": 0,
+          "reid_recovery_history": []
+        }
+      ],
+      "reid_diagnostics": {
+        "association_counts": {
+          "new_track": 3,
+          "geometry": 18,
+          "appearance_recovery": 0
+        },
+        "reid_avoided_geometry_matches": 0,
+        "reid_avoided_by_label": {}
+      },
+      "frame_observations": [
+        {
+          "frame_index": 0,
+          "captured_at": 1788733554.662938,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 494,
+                "y1": 95,
+                "x2": 527,
+                "y2": 114
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 2,
+          "captured_at": 1788733555.3002431,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 468,
+                "y1": 86,
+                "x2": 509,
+                "y2": 107
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 4,
+          "captured_at": 1788733556.012938,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 440,
+                "y1": 76,
+                "x2": 480,
+                "y2": 97
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 5,
+          "captured_at": 1788733556.312938,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 427,
+                "y1": 73,
+                "x2": 467,
+                "y2": 93
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 7,
+          "captured_at": 1788733556.937743,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 403,
+                "y1": 65,
+                "x2": 441,
+                "y2": 85
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 8,
+          "captured_at": 1788733557.2377431,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 387,
+                "y1": 61,
+                "x2": 428,
+                "y2": 80
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 10,
+          "captured_at": 1788733557.9877431,
+          "objects": []
+        },
+        {
+          "frame_index": 11,
+          "captured_at": 1788733558.287743,
+          "objects": []
+        },
+        {
+          "frame_index": 13,
+          "captured_at": 1788733559.000438,
+          "objects": []
+        },
+        {
+          "frame_index": 14,
+          "captured_at": 1788733559.337743,
+          "objects": []
+        },
+        {
+          "frame_index": 16,
+          "captured_at": 1788733559.937743,
+          "objects": []
+        },
+        {
+          "frame_index": 17,
+          "captured_at": 1788733560.2377431,
+          "objects": []
+        },
+        {
+          "frame_index": 19,
+          "captured_at": 1788733560.9877431,
+          "objects": []
+        },
+        {
+          "frame_index": 20,
+          "captured_at": 1788733561.287743,
+          "objects": []
+        },
+        {
+          "frame_index": 22,
+          "captured_at": 1788733561.987938,
+          "objects": []
+        },
+        {
+          "frame_index": 23,
+          "captured_at": 1788733562.325243,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 209,
+                "y1": 33,
+                "x2": 250,
+                "y2": 46
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 25,
+          "captured_at": 1788733562.9252431,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 192,
+                "y1": 34,
+                "x2": 233,
+                "y2": 48
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 26,
+          "captured_at": 1788733563.262743,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 186,
+                "y1": 34,
+                "x2": 226,
+                "y2": 47
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 28,
+          "captured_at": 1788733563.9877431,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 167,
+                "y1": 35,
+                "x2": 205,
+                "y2": 50
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 29,
+          "captured_at": 1788733564.287743,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 165,
+                "y1": 35,
+                "x2": 198,
+                "y2": 49
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 31,
+          "captured_at": 1788733565.000438,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 164,
+                "y1": 40,
+                "x2": 181,
+                "y2": 50
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 32,
+          "captured_at": 1788733565.337743,
+          "objects": []
+        },
+        {
+          "frame_index": 34,
+          "captured_at": 1788733565.937743,
+          "objects": []
+        },
+        {
+          "frame_index": 35,
+          "captured_at": 1788733566.2377431,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 95,
+                "y1": 49,
+                "x2": 119,
+                "y2": 61
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 36,
+          "captured_at": 1788733566.675438,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 79,
+                "y1": 47,
+                "x2": 115,
+                "y2": 63
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 38,
+          "captured_at": 1788733567.312743,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 56,
+                "y1": 49,
+                "x2": 102,
+                "y2": 70
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 40,
+          "captured_at": 1788733567.962743,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 34,
+                "y1": 54,
+                "x2": 78,
+                "y2": 75
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 41,
+          "captured_at": 1788733568.262743,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 18,
+                "y1": 57,
+                "x2": 65,
+                "y2": 78
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 42,
+          "captured_at": 1788733568.675438,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 3,
+                "y1": 62,
+                "x2": 50,
+                "y2": 84
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 44,
+          "captured_at": 1788733569.312743,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 0,
+                "y1": 68,
+                "x2": 25,
+                "y2": 89
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 46,
+          "captured_at": 1788733569.912743,
+          "objects": []
+        },
+        {
+          "frame_index": 47,
+          "captured_at": 1788733570.325438,
+          "objects": []
+        },
+        {
+          "frame_index": 49,
+          "captured_at": 1788733570.962743,
+          "objects": []
+        },
+        {
+          "frame_index": 50,
+          "captured_at": 1788733571.262743,
+          "objects": []
+        },
+        {
+          "frame_index": 51,
+          "captured_at": 1788733571.662938,
+          "objects": []
+        },
+        {
+          "frame_index": 53,
+          "captured_at": 1788733572.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 55,
+          "captured_at": 1788733572.900243,
+          "objects": []
+        },
+        {
+          "frame_index": 56,
+          "captured_at": 1788733573.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 58,
+          "captured_at": 1788733574.012938,
+          "objects": []
+        },
+        {
+          "frame_index": 59,
+          "captured_at": 1788733574.312938,
+          "objects": []
+        },
+        {
+          "frame_index": 61,
+          "captured_at": 1788733574.950243,
+          "objects": []
+        },
+        {
+          "frame_index": 62,
+          "captured_at": 1788733575.250243,
+          "objects": []
+        },
+        {
+          "frame_index": 63,
+          "captured_at": 1788733575.662938,
+          "objects": []
+        },
+        {
+          "frame_index": 65,
+          "captured_at": 1788733576.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 67,
+          "captured_at": 1788733577.012938,
+          "objects": []
+        },
+        {
+          "frame_index": 68,
+          "captured_at": 1788733577.312938,
+          "objects": []
+        },
+        {
+          "frame_index": 70,
+          "captured_at": 1788733577.950243,
+          "objects": []
+        },
+        {
+          "frame_index": 71,
+          "captured_at": 1788733578.250243,
+          "objects": []
+        },
+        {
+          "frame_index": 72,
+          "captured_at": 1788733578.662938,
+          "objects": []
+        },
+        {
+          "frame_index": 74,
+          "captured_at": 1788733579.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 76,
+          "captured_at": 1788733580.012938,
+          "objects": []
+        },
+        {
+          "frame_index": 77,
+          "captured_at": 1788733580.250243,
+          "objects": []
+        },
+        {
+          "frame_index": 78,
+          "captured_at": 1788733580.662938,
+          "objects": []
+        },
+        {
+          "frame_index": 80,
+          "captured_at": 1788733581.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 82,
+          "captured_at": 1788733582.012938,
+          "objects": []
+        },
+        {
+          "frame_index": 83,
+          "captured_at": 1788733582.312938,
+          "objects": []
+        },
+        {
+          "frame_index": 85,
+          "captured_at": 1788733582.950243,
+          "objects": []
+        },
+        {
+          "frame_index": 86,
+          "captured_at": 1788733583.312743,
+          "objects": []
+        },
+        {
+          "frame_index": 88,
+          "captured_at": 1788733584.000438,
+          "objects": []
+        },
+        {
+          "frame_index": 89,
+          "captured_at": 1788733584.337743,
+          "objects": []
+        }
+      ],
+      "simulated_lost_track_cutoff_seconds": 6.624804973602295,
+      "lifecycle_note": "Backend replay continues after the lost-track predicate; this is not a full production session simulation."
+    },
+    "survng_hybrid_multicue": {
+      "implementation": "survng_hybrid_multicue",
+      "initialization_ms": 0.03,
+      "processing_ms": 4.1,
+      "average_ms_per_frame": 0.068,
+      "track_count": 3,
+      "observations": 19,
+      "reid_recoveries": 0,
+      "appearance_input_count": 12,
+      "fragmentation_proxy": 2,
+      "labels": {
+        "car": 3
+      },
+      "tracks": [
+        {
+          "track_id": 1,
+          "label": "car",
+          "state": "lost",
+          "first_seen": "2026-09-06T22:25:54.662938+00:00",
+          "last_seen": "2026-09-06T22:25:57.237743+00:00",
+          "duration_seconds": 2.575,
+          "observations": 6,
+          "max_confidence": 0.9028,
+          "depth_median_m": null,
+          "depth_trend_mps": null,
+          "depth_history": [],
+          "box": {
+            "x1": 387.0,
+            "y1": 61.0,
+            "x2": 428.0,
+            "y2": 80.0
+          },
+          "zones": [],
+          "trajectory": [
+            [
+              1788733554.663,
+              510.5,
+              104.5
+            ],
+            [
+              1788733555.3,
+              488.5,
+              96.5
+            ],
+            [
+              1788733556.013,
+              460.0,
+              86.5
+            ],
+            [
+              1788733556.313,
+              447.0,
+              83.0
+            ],
+            [
+              1788733556.938,
+              422.0,
+              75.0
+            ],
+            [
+              1788733557.238,
+              407.5,
+              70.5
+            ]
+          ],
+          "box_history": [
+            [
+              1788733554.663,
+              494.0,
+              95.0,
+              527.0,
+              114.0
+            ],
+            [
+              1788733555.3,
+              468.0,
+              86.0,
+              509.0,
+              107.0
+            ],
+            [
+              1788733556.013,
+              440.0,
+              76.0,
+              480.0,
+              97.0
+            ],
+            [
+              1788733556.313,
+              427.0,
+              73.0,
+              467.0,
+              93.0
+            ],
+            [
+              1788733556.938,
+              403.0,
+              65.0,
+              441.0,
+              85.0
+            ],
+            [
+              1788733557.238,
+              387.0,
+              61.0,
+              428.0,
+              80.0
+            ]
+          ],
+          "reid_matches": 0,
+          "reid_recovery_history": []
+        },
+        {
+          "track_id": 2,
+          "label": "car",
+          "state": "lost",
+          "first_seen": "2026-09-06T22:26:01.987938+00:00",
+          "last_seen": "2026-09-06T22:26:05.000438+00:00",
+          "duration_seconds": 3.013,
+          "observations": 7,
+          "max_confidence": 0.8774,
+          "depth_median_m": null,
+          "depth_trend_mps": null,
+          "depth_history": [],
+          "box": {
+            "x1": 164.0,
+            "y1": 40.0,
+            "x2": 181.0,
+            "y2": 50.0
+          },
+          "zones": [],
+          "trajectory": [
+            [
+              1788733561.988,
+              238.5,
+              39.5
+            ],
+            [
+              1788733562.325,
+              229.5,
+              39.5
+            ],
+            [
+              1788733562.925,
+              212.5,
+              41.0
+            ],
+            [
+              1788733563.263,
+              206.0,
+              40.5
+            ],
+            [
+              1788733563.988,
+              186.0,
+              42.5
+            ],
+            [
+              1788733564.288,
+              181.5,
+              42.0
+            ],
+            [
+              1788733565.0,
+              172.5,
+              45.0
+            ]
+          ],
+          "box_history": [
+            [
+              1788733561.988,
+              219.0,
+              33.0,
+              258.0,
+              46.0
+            ],
+            [
+              1788733562.325,
+              209.0,
+              33.0,
+              250.0,
+              46.0
+            ],
+            [
+              1788733562.925,
+              192.0,
+              34.0,
+              233.0,
+              48.0
+            ],
+            [
+              1788733563.263,
+              186.0,
+              34.0,
+              226.0,
+              47.0
+            ],
+            [
+              1788733563.988,
+              167.0,
+              35.0,
+              205.0,
+              50.0
+            ],
+            [
+              1788733564.288,
+              165.0,
+              35.0,
+              198.0,
+              49.0
+            ],
+            [
+              1788733565.0,
+              164.0,
+              40.0,
+              181.0,
+              50.0
+            ]
+          ],
+          "reid_matches": 0,
+          "reid_recovery_history": []
+        },
+        {
+          "track_id": 3,
+          "label": "car",
+          "state": "lost",
+          "first_seen": "2026-09-06T22:26:05.937743+00:00",
+          "last_seen": "2026-09-06T22:26:09.312743+00:00",
+          "duration_seconds": 3.375,
+          "observations": 8,
+          "max_confidence": 0.9175,
+          "depth_median_m": null,
+          "depth_trend_mps": null,
+          "depth_history": [],
+          "box": {
+            "x1": 0.0,
+            "y1": 68.0,
+            "x2": 25.0,
+            "y2": 89.0
+          },
+          "zones": [],
+          "trajectory": [
+            [
+              1788733565.938,
+              111.0,
+              54.5
+            ],
+            [
+              1788733566.238,
+              107.0,
+              55.0
+            ],
+            [
+              1788733566.675,
+              97.0,
+              55.0
+            ],
+            [
+              1788733567.313,
+              79.0,
+              59.5
+            ],
+            [
+              1788733567.963,
+              56.0,
+              64.5
+            ],
+            [
+              1788733568.263,
+              41.5,
+              67.5
+            ],
+            [
+              1788733568.675,
+              26.5,
+              73.0
+            ],
+            [
+              1788733569.313,
+              12.5,
+              78.5
+            ]
+          ],
+          "box_history": [
+            [
+              1788733565.938,
+              104.0,
+              50.0,
+              118.0,
+              59.0
+            ],
+            [
+              1788733566.238,
+              95.0,
+              49.0,
+              119.0,
+              61.0
+            ],
+            [
+              1788733566.675,
+              79.0,
+              47.0,
+              115.0,
+              63.0
+            ],
+            [
+              1788733567.313,
+              56.0,
+              49.0,
+              102.0,
+              70.0
+            ],
+            [
+              1788733567.963,
+              34.0,
+              54.0,
+              78.0,
+              75.0
+            ],
+            [
+              1788733568.263,
+              18.0,
+              57.0,
+              65.0,
+              78.0
+            ],
+            [
+              1788733568.675,
+              3.0,
+              62.0,
+              50.0,
+              84.0
+            ],
+            [
+              1788733569.313,
+              0.0,
+              68.0,
+              25.0,
+              89.0
+            ]
+          ],
+          "reid_matches": 0,
+          "reid_recovery_history": []
+        }
+      ],
+      "reid_diagnostics": {
+        "association_counts": {
+          "new_track": 3,
+          "geometry": 18,
+          "appearance_recovery": 0
+        },
+        "reid_avoided_geometry_matches": 0,
+        "reid_avoided_by_label": {},
+        "association_cues": {
+          "version": "survng_association_cues_v1",
+          "experimental": true,
+          "weights": {
+            "overlap": 0.25,
+            "confidence": 0.1,
+            "direction": 0.05
+          },
+          "scope": "ambiguous_strict_geometry_only",
+          "motion_timebase": "elapsed_seconds",
+          "horizon_seconds": 2.0,
+          "new_track_policy": "unchanged",
+          "appearance_policy": "unchanged_selective_reid",
+          "counts": {
+            "valid_pairs": 18,
+            "ambiguous_pairs": 0,
+            "adjusted_pairs": 0,
+            "confidence_available": 0,
+            "direction_available": 0
+          },
+          "score_totals": {
+            "base_score": 27.150343213721932,
+            "overlap_penalty": 0.0,
+            "confidence_penalty": 0.0,
+            "direction_penalty": 0.0,
+            "final_score": 27.150343213721932
+          },
+          "pair_samples_note": "Last 64 evaluated ambiguous pairs, not necessarily selected assignments.",
+          "pair_samples_truncated": 0,
+          "pair_samples": []
+        }
+      },
+      "frame_observations": [
+        {
+          "frame_index": 0,
+          "captured_at": 1788733554.662938,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 494,
+                "y1": 95,
+                "x2": 527,
+                "y2": 114
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 2,
+          "captured_at": 1788733555.3002431,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 468,
+                "y1": 86,
+                "x2": 509,
+                "y2": 107
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 4,
+          "captured_at": 1788733556.012938,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 440,
+                "y1": 76,
+                "x2": 480,
+                "y2": 97
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 5,
+          "captured_at": 1788733556.312938,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 427,
+                "y1": 73,
+                "x2": 467,
+                "y2": 93
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 7,
+          "captured_at": 1788733556.937743,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 403,
+                "y1": 65,
+                "x2": 441,
+                "y2": 85
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 8,
+          "captured_at": 1788733557.2377431,
+          "objects": [
+            {
+              "track_id": 1,
+              "label": "car",
+              "box": {
+                "x1": 387,
+                "y1": 61,
+                "x2": 428,
+                "y2": 80
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 10,
+          "captured_at": 1788733557.9877431,
+          "objects": []
+        },
+        {
+          "frame_index": 11,
+          "captured_at": 1788733558.287743,
+          "objects": []
+        },
+        {
+          "frame_index": 13,
+          "captured_at": 1788733559.000438,
+          "objects": []
+        },
+        {
+          "frame_index": 14,
+          "captured_at": 1788733559.337743,
+          "objects": []
+        },
+        {
+          "frame_index": 16,
+          "captured_at": 1788733559.937743,
+          "objects": []
+        },
+        {
+          "frame_index": 17,
+          "captured_at": 1788733560.2377431,
+          "objects": []
+        },
+        {
+          "frame_index": 19,
+          "captured_at": 1788733560.9877431,
+          "objects": []
+        },
+        {
+          "frame_index": 20,
+          "captured_at": 1788733561.287743,
+          "objects": []
+        },
+        {
+          "frame_index": 22,
+          "captured_at": 1788733561.987938,
+          "objects": []
+        },
+        {
+          "frame_index": 23,
+          "captured_at": 1788733562.325243,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 209,
+                "y1": 33,
+                "x2": 250,
+                "y2": 46
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 25,
+          "captured_at": 1788733562.9252431,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 192,
+                "y1": 34,
+                "x2": 233,
+                "y2": 48
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 26,
+          "captured_at": 1788733563.262743,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 186,
+                "y1": 34,
+                "x2": 226,
+                "y2": 47
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 28,
+          "captured_at": 1788733563.9877431,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 167,
+                "y1": 35,
+                "x2": 205,
+                "y2": 50
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 29,
+          "captured_at": 1788733564.287743,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 165,
+                "y1": 35,
+                "x2": 198,
+                "y2": 49
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 31,
+          "captured_at": 1788733565.000438,
+          "objects": [
+            {
+              "track_id": 2,
+              "label": "car",
+              "box": {
+                "x1": 164,
+                "y1": 40,
+                "x2": 181,
+                "y2": 50
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 32,
+          "captured_at": 1788733565.337743,
+          "objects": []
+        },
+        {
+          "frame_index": 34,
+          "captured_at": 1788733565.937743,
+          "objects": []
+        },
+        {
+          "frame_index": 35,
+          "captured_at": 1788733566.2377431,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 95,
+                "y1": 49,
+                "x2": 119,
+                "y2": 61
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 36,
+          "captured_at": 1788733566.675438,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 79,
+                "y1": 47,
+                "x2": 115,
+                "y2": 63
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 38,
+          "captured_at": 1788733567.312743,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 56,
+                "y1": 49,
+                "x2": 102,
+                "y2": 70
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 40,
+          "captured_at": 1788733567.962743,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 34,
+                "y1": 54,
+                "x2": 78,
+                "y2": 75
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 41,
+          "captured_at": 1788733568.262743,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 18,
+                "y1": 57,
+                "x2": 65,
+                "y2": 78
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 42,
+          "captured_at": 1788733568.675438,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 3,
+                "y1": 62,
+                "x2": 50,
+                "y2": 84
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 44,
+          "captured_at": 1788733569.312743,
+          "objects": [
+            {
+              "track_id": 3,
+              "label": "car",
+              "box": {
+                "x1": 0,
+                "y1": 68,
+                "x2": 25,
+                "y2": 89
+              }
+            }
+          ]
+        },
+        {
+          "frame_index": 46,
+          "captured_at": 1788733569.912743,
+          "objects": []
+        },
+        {
+          "frame_index": 47,
+          "captured_at": 1788733570.325438,
+          "objects": []
+        },
+        {
+          "frame_index": 49,
+          "captured_at": 1788733570.962743,
+          "objects": []
+        },
+        {
+          "frame_index": 50,
+          "captured_at": 1788733571.262743,
+          "objects": []
+        },
+        {
+          "frame_index": 51,
+          "captured_at": 1788733571.662938,
+          "objects": []
+        },
+        {
+          "frame_index": 53,
+          "captured_at": 1788733572.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 55,
+          "captured_at": 1788733572.900243,
+          "objects": []
+        },
+        {
+          "frame_index": 56,
+          "captured_at": 1788733573.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 58,
+          "captured_at": 1788733574.012938,
+          "objects": []
+        },
+        {
+          "frame_index": 59,
+          "captured_at": 1788733574.312938,
+          "objects": []
+        },
+        {
+          "frame_index": 61,
+          "captured_at": 1788733574.950243,
+          "objects": []
+        },
+        {
+          "frame_index": 62,
+          "captured_at": 1788733575.250243,
+          "objects": []
+        },
+        {
+          "frame_index": 63,
+          "captured_at": 1788733575.662938,
+          "objects": []
+        },
+        {
+          "frame_index": 65,
+          "captured_at": 1788733576.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 67,
+          "captured_at": 1788733577.012938,
+          "objects": []
+        },
+        {
+          "frame_index": 68,
+          "captured_at": 1788733577.312938,
+          "objects": []
+        },
+        {
+          "frame_index": 70,
+          "captured_at": 1788733577.950243,
+          "objects": []
+        },
+        {
+          "frame_index": 71,
+          "captured_at": 1788733578.250243,
+          "objects": []
+        },
+        {
+          "frame_index": 72,
+          "captured_at": 1788733578.662938,
+          "objects": []
+        },
+        {
+          "frame_index": 74,
+          "captured_at": 1788733579.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 76,
+          "captured_at": 1788733580.012938,
+          "objects": []
+        },
+        {
+          "frame_index": 77,
+          "captured_at": 1788733580.250243,
+          "objects": []
+        },
+        {
+          "frame_index": 78,
+          "captured_at": 1788733580.662938,
+          "objects": []
+        },
+        {
+          "frame_index": 80,
+          "captured_at": 1788733581.3002431,
+          "objects": []
+        },
+        {
+          "frame_index": 82,
+          "captured_at": 1788733582.012938,
+          "objects": []
+        },
+        {
+          "frame_index": 83,
+          "captured_at": 1788733582.312938,
+          "objects": []
+        },
+        {
+          "frame_index": 85,
+          "captured_at": 1788733582.950243,
+          "objects": []
+        },
+        {
+          "frame_index": 86,
+          "captured_at": 1788733583.312743,
+          "objects": []
+        },
+        {
+          "frame_index": 88,
+          "captured_at": 1788733584.000438,
+          "objects": []
+        },
+        {
+          "frame_index": 89,
+          "captured_at": 1788733584.337743,
+          "objects": []
+        }
+      ],
+      "simulated_lost_track_cutoff_seconds": 6.624804973602295,
+      "lifecycle_note": "Backend replay continues after the lost-track predicate; this is not a full production session simulation."
+    }
+  }
+}
