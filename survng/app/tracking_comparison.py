@@ -31,7 +31,6 @@ from .video_frames import DecodedVideoFrame, VideoFrameReference
 
 TRACKING_COMPARISON_IMPLEMENTATIONS = (
     "survng_hybrid",
-    "survng_hybrid_candidate",
     "ultralytics_tracktrack",
     "ultralytics_botsort",
 )

@@ -1,6 +1,6 @@
 export const TRACKING_ENGINE_LABELS = {
-  survng_hybrid: "Hybrid (current)",
-  survng_hybrid_candidate: "Hybrid (candidate)",
+  survng_hybrid: "Hybrid",
+  survng_hybrid_candidate: "Hybrid candidate (historic)",
   ultralytics_tracktrack: "TrackTrack",
   ultralytics_botsort: "BoT-SORT",
   ultralytics_fasttrack: "FastTrack (legacy)",
@@ -18,6 +18,7 @@ export function trackingEngineLabel(implementation) {
 }
 
 export function trackingComparisonEngines(comparison) {
+  // New runs contain only active backends. Keep saved historic results visible.
   return Object.entries(comparison?.engines || {});
 }
 
@@ -40,6 +41,9 @@ export function trackingVerdictLabel(verdict) {
 }
 
 export function trackingHistoryVerdictLabel(verdict, result = null) {
+  if (verdict === "survng_hybrid_candidate") {
+    return TRACKING_ENGINE_LABELS.survng_hybrid_candidate;
+  }
   if ((verdict === "ultralytics_botsort" || verdict === "ultralytics_deepocsort") && !result?.replay_id) {
     return `${trackingEngineLabel(verdict)} (historic)`;
   }
