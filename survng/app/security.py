@@ -449,6 +449,7 @@ _CAMERA_CONTROL_SUFFIXES = frozenset({
 # These POST endpoints only query existing media/index data. They use POST to
 # carry bounded search filters and crop geometry, not to mutate SurvNG state.
 _READ_ONLY_POST_PATHS = frozenset({
+    "/api/semantic-search",
     "/api/semantic-search/visual",
     "/api/semantic-search/visual-frame",
 })

@@ -4,7 +4,7 @@ import sqlite3
 import threading
 import uuid
 from pathlib import Path
-from queue import Queue
+from queue import Full, Queue
 from typing import Any, Callable
 
 from ..face_recognition import OpenVinoFaceRecognizer

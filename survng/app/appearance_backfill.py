@@ -15,6 +15,7 @@ import numpy as np
 from .appearance_index import AppearanceIndex
 from .config import ObjectTrackingConfig
 from .incident_utils import event_snapshot_path
+from .inference import InferenceUnavailable
 from .main_database import connect_main_database
 from .media_storage import MediaStorageRegistry
 
@@ -205,8 +206,8 @@ class DeferredAppearanceBackfill:
                 ),
             )
 
-    def _retry(self, event_id: int, reason: str, attempts: int) -> None:
-        if attempts >= 3:
+    def _retry(self, event_id: int, reason: str, attempts: int, *, deferred: bool = False) -> None:
+        if not deferred and attempts >= 3:
             self._finish(event_id, "failed", reason)
             return
         with self._connect() as connection:
@@ -218,7 +219,7 @@ class DeferredAppearanceBackfill:
                 """,
                 (
                     str(reason)[:500],
-                    time.time() + 30.0 * max(1, attempts),
+                    time.time() + min(300.0, 30.0 * max(1, attempts)),
                     datetime.now(timezone.utc).isoformat(),
                     int(event_id),
                 ),
@@ -247,6 +248,8 @@ class DeferredAppearanceBackfill:
         frame_height, frame_width = frame.shape[:2]
         created_at = str(event.get("created_at") or datetime.now(timezone.utc).isoformat())
         records: list[dict[str, Any]] = []
+        deferred_reason = ""
+        failure_reason = ""
         for position, detected in enumerate(objects):
             if (
                 not isinstance(detected, dict)
@@ -255,7 +258,7 @@ class DeferredAppearanceBackfill:
             ):
                 continue
             label = str(detected.get("label") or "").strip().lower()
-            if not label or not self.encoder.supports_label(label):
+            if not label or not self.config.reid_enabled_for_label(label):
                 continue
             box = detected.get("box")
             if not isinstance(box, dict):
@@ -272,16 +275,26 @@ class DeferredAppearanceBackfill:
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(frame_width, x2), min(frame_height, y2)
             pixel_area = max(0, x2 - x1) * max(0, y2 - y1)
-            if pixel_area < self.config.deferred_reid_min_crop_pixels:
+            if min(x2 - x1, y2 - y1) < 8 or pixel_area < self.config.deferred_reid_min_crop_pixels:
                 continue
             crop = frame[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            if not self.encoder.supports_label(label):
+                deferred_reason = f"{label} ReID model is not ready"
+                continue
             identity = self.encoder.model_identity_for_label(label)
-            if crop.size == 0 or identity is None:
+            if identity is None:
+                deferred_reason = f"{label} ReID model identity is not ready"
                 continue
             try:
                 embedding = self.encoder.embed_for_label(label, crop)
+            except InferenceUnavailable as exc:
+                deferred_reason = str(exc)
+                continue
             except Exception as exc:
                 LOGGER.warning("deferred ReID failed for event %d %s: %s", event_id, label, exc)
+                failure_reason = str(exc)
                 continue
             quality = min(1.0, max(0.0, float(detected.get("snapshot_quality_score") or 0.5)))
             records.append({
@@ -297,6 +310,12 @@ class DeferredAppearanceBackfill:
                 "created_at": created_at,
                 "source": "snapshot_backfill",
             })
+        # Publish only complete evidence. A partial append would make has_event
+        # suppress the missing crops on every subsequent attempt.
+        if deferred_reason:
+            return ("deferred", 0, deferred_reason)
+        if failure_reason:
+            return ("failed", 0, failure_reason)
         if not records:
             return ("skipped", 0, "no eligible ReID crop in saved snapshot")
         indexed = self.index.append_event(
@@ -344,8 +363,8 @@ class DeferredAppearanceBackfill:
             indexed = 0
             try:
                 state, indexed, reason = self.process_event(event_id)
-                if state == "failed":
-                    self._retry(event_id, reason, attempts)
+                if state in {"failed", "deferred"}:
+                    self._retry(event_id, reason, attempts, deferred=state == "deferred")
                 else:
                     self._finish(event_id, state, reason, indexed)
             except Exception as exc:
