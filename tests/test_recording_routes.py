@@ -88,6 +88,25 @@ class RecordingRouteLifecycleTests(TestCase):
         self.assertEqual(response.media_type, "video/mp4")
         self.assertEqual(response.headers["cache-control"], "private, max-age=3600")
 
+    def test_mobile_segment_transcodes_only_the_selected_indexed_segment(self) -> None:
+        manager = _Manager("current")
+        row = {"path": "segment.mp4", "start_epoch": 150, "end_epoch": 180, "duration_seconds": 30}
+        manager.recorder.recording_rows_between = lambda *args, **kwargs: [row]
+        calls = []
+        dependencies = replace(_dependencies(lambda: manager),
+            ensure_event_clip=lambda *args, **kwargs: (calls.append((args, kwargs)) or Path("mobile.mp4")))
+        response = create_recording_router(dependencies).handlers["recording_segment"]("gate", 155, "main", mobile=True)
+        event = calls[0][0][1]
+        self.assertEqual(event["_recording_rows"], [row])
+        self.assertEqual(calls[0][1]["after"], 30)
+        self.assertEqual(calls[0][1]["before"], 0)
+        self.assertEqual(response.path, Path("mobile.mp4"))
+
+    def test_mobile_window_disables_browser_cache_for_growing_windows(self) -> None:
+        dependencies = _dependencies(lambda: _Manager("current"))
+        response = create_recording_router(dependencies).handlers["recording_mobile_window"]("gate", 155, "main")
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+
     def test_native_segment_rejects_invalid_epoch_before_lookup(self) -> None:
         dependencies = _dependencies(lambda: _Manager("current"))
         with self.assertRaises(HTTPException) as invalid:

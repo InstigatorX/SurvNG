@@ -1043,7 +1043,38 @@ class RecordingMediaRuntime:
     def _ensure_event_clip(self, event: dict, *, before: float, after: float, source: str='main', active_manager: AppManager | None=None) -> Path:
         selected_manager = active_manager or self.manager
         clip_source = recording_source(source)
-        clip_path = self._event_clip_path(event, before=before, after=after, source=clip_source, active_manager=selected_manager)
+        # Freeze the same input rows for the cache identity and the builder.
+        # Newly finalized segments must create a new artifact for a growing window.
+        window_start = event_epoch(event) - before
+        window_end = event_epoch(event) + after
+        rows = event.get("_recording_rows")
+        if rows is None:
+            rows = selected_manager.recorder.recording_rows_between(
+                str(event.get("camera_id") or ""), window_start, window_end,
+                clip_source, discover_missing=False,
+            )
+        rows = sorted(
+            (dict(row) for row in rows if row.get("start_epoch") is not None
+             and row.get("end_epoch") is not None
+             and float(row["end_epoch"]) > window_start
+             and float(row["start_epoch"]) < window_end),
+            key=lambda row: (float(row["start_epoch"]), str(row.get("path") or "")),
+        )
+        available = []
+        for row in rows:
+            try:
+                path = self._recording_storage_path(row.get("path"), active_manager=selected_manager)
+            except HTTPException:
+                continue
+            available.append({**row, "path": str(path)})
+        rows = available
+        event = {**event, "_recording_rows": rows}
+        revision = hashlib.sha256(json.dumps([
+            [row.get(key) for key in ("path", "size_bytes", "modified_at", "start_epoch", "end_epoch", "duration_seconds")]
+            for row in rows
+        ], separators=(",", ":")).encode()).hexdigest()[:24]
+        base_path = self._event_clip_path(event, before=before, after=after, source=clip_source, active_manager=selected_manager)
+        clip_path = base_path.with_name(f"{base_path.stem}-r{revision}{base_path.suffix}")
         if clip_path.exists() and clip_path.stat().st_size > 0:
             return clip_path
         cache_key = str(clip_path)
@@ -1071,12 +1102,18 @@ class RecordingMediaRuntime:
         window_start = event_created_epoch - window_before
         window_end = event_created_epoch + window_after
         rows: list[dict] = []
-        for candidate in selected_manager.recorder.recording_rows_between(camera_id, window_start, window_end, recording_source(source), discover_missing=False):
+        candidates = event.get("_recording_rows")
+        if candidates is None:
+            candidates = selected_manager.recorder.recording_rows_between(camera_id, window_start, window_end, recording_source(source), discover_missing=False)
+        for candidate in candidates:
             if candidate.get('start_epoch') is None or candidate.get('end_epoch') is None:
                 continue
             try:
                 candidate = {**candidate, 'path': str(self._recording_storage_path(candidate.get('path'), active_manager=selected_manager))}
             except HTTPException:
+                if "_recording_rows" in event:
+                    # Never publish partial bytes under a frozen input revision.
+                    raise
                 continue
             rows.append(candidate)
         rows.sort(key=lambda row: float(row['start_epoch']))

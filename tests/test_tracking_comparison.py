@@ -195,10 +195,10 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         process = SimpleNamespace(
             stdout=BytesIO(payload),
             stderr=BytesIO(
-                b"[showinfo@source] n: 0 pts: 4500 pts_time:0.05 checksum:AAAA\n"
-                b"[showinfo@sampled] n: 0 pts: 0 pts_time:0 checksum:AAAA\n"
-                b"[showinfo@source] n: 1 pts: 45000 pts_time:0.5 checksum:BBBB\n"
-                b"[showinfo@sampled] n: 1 pts: 1 pts_time:0.5 checksum:BBBB\n"
+                b"[showinfo@source] n: 0 pts: 117000 pts_time:1.3 checksum:AAAA\n"
+                b"[showinfo@sampled] n: 0 pts: 3 pts_time:1.5 checksum:AAAA\n"
+                b"[showinfo@source] n: 1 pts: 157500 pts_time:1.75 checksum:BBBB\n"
+                b"[showinfo@sampled] n: 1 pts: 4 pts_time:2 checksum:BBBB\n"
             ),
             wait=Mock(return_value=0),
             poll=Mock(return_value=0),
@@ -229,7 +229,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
 
         self.assertEqual(ffprobe.call_args.args[0][-1], "first-segment.mp4")
         self.assertEqual([epoch for epoch, _frame in frames], [50.05, 50.5])
-        self.assertEqual(frames[1].reference.pts, 45000)
+        self.assertEqual(frames[1].reference.pts, 157500)
         self.assertEqual(frames[1].reference.time_base_den, 90000)
         self.assertEqual([frame.shape for _epoch, frame in frames], [(4, 8, 3), (4, 8, 3)])
         command = popen.call_args.args[0]
@@ -239,7 +239,8 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         )
         self.assertEqual(command[command.index("-f") + 1], "concat")
         self.assertEqual(command[command.index("-safe") + 1], "0")
-        self.assertEqual(command[command.index("-ss") + 1], "1.250")
+        self.assertIn("trim=start=1.250000:end=2.250000", command[command.index("-vf") + 1])
+        self.assertNotIn("-ss", command)
 
     def test_exact_frame_reference_redecodes_the_identified_pts(self) -> None:
         reference = VideoFrameReference(
@@ -277,7 +278,8 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
             "select='eq(pts\\,32871)'",
             command[command.index("-vf") + 1],
         )
-        self.assertEqual(command[command.index("-ss") + 1], "6.000")
+        self.assertNotIn("-ss", command)
+        self.assertNotIn("fps=", command[command.index("-vf") + 1])
 
 
 if __name__ == "__main__":

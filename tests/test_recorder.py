@@ -872,6 +872,37 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(filtered, [rows[0]])
         self.assertEqual(indexed, [str(present)])
 
+    def test_playback_retains_metadata_during_recording_volume_outage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = Recorder("ffmpeg", Path(temporary), segment_seconds=10)
+            clip = recorder.recordings_dir / "gate" / "main" / "clip.mp4"
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"recording")
+            rows = [self._row(clip)]
+            recorder._store_recording_rows("gate", "main", rows)
+            offline = recorder.recordings_dir.with_name("offline")
+            recorder.recordings_dir.rename(offline)
+            self.assertEqual(recorder.discard_missing_recording_rows(rows), [])
+            with recorder._index_connection() as connection:
+                self.assertEqual(connection.execute("SELECT count(*) FROM recordings").fetchone()[0], 1)
+            offline.rename(recorder.recordings_dir)
+            self.assertEqual(recorder.discard_missing_recording_rows(rows), rows)
+
+    def test_rediscovery_preserves_probed_segment_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = Recorder("ffmpeg", Path(temporary), segment_seconds=10)
+            clip = Path(temporary) / "clip.mp4"
+            clip.write_bytes(b"recording")
+            row = self._row(clip)
+            recorder._store_recording_rows("gate", "main", [{**row, "validated": True,
+                "duration_seconds": 12.5, "end_epoch": row["start_epoch"] + 12.5}])
+            recorder._store_recording_rows("gate", "main", [row])
+            with recorder._index_connection() as connection:
+                saved = connection.execute("SELECT * FROM recordings").fetchone()
+            self.assertEqual(saved["duration_seconds"], 12.5)
+            self.assertEqual(saved["end_epoch"], row["start_epoch"] + 12.5)
+            self.assertEqual(saved["validated"], 1)
+
     def test_recording_index_paths_rebase_when_storage_mount_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

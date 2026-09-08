@@ -196,6 +196,19 @@ class ConfigRoutesTest(unittest.TestCase):
         self.save.assert_not_called()
         self.publish.assert_not_called()
 
+    def test_display_name_edit_preserves_camera_identity(self) -> None:
+        endpoint = self.endpoint("/api/config/cameras/{camera_id}", "PUT")
+        result = endpoint("gate", CameraConfig(id="front-gate", name="Front Gate", stream_url="rtsp://gate/main"))
+        self.assertEqual(result["camera"]["id"], "gate")
+        self.assertEqual(self.apply.call_args.args[0].cameras[0].id, "gate")
+
+    def test_full_config_save_preserves_existing_camera_ids(self) -> None:
+        edited = self.config.model_copy(deep=True)
+        edited.cameras[0].name = "Front Gate"
+        self.endpoint("/api/config", "PUT")(edited)
+        self.assertFalse(self.apply.call_args.kwargs["assign_ids"])
+        self.assertEqual(self.apply.call_args.args[0].cameras[0].id, "gate")
+
     def test_probe_capacity_is_bounded_and_released(self) -> None:
         self.assertTrue(self.limiter.acquire(blocking=False))
         endpoint = self.endpoint("/api/config/probe", "POST")

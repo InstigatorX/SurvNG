@@ -334,7 +334,7 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             except ValueError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
             try:
-                effective, result = deps.apply_config(next_config, assign_ids=True)
+                effective, result = deps.apply_config(next_config, assign_ids=False)
             except (OSError, ValueError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
         return {"ok": True, "cameras": len(effective.cameras), **result}
@@ -461,7 +461,9 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             except ValueError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
             used = {item.id for item in next_config.cameras if item.id != camera_id}
-            base_id = slugify_camera_id(camera_settings.name or camera_settings.id)
+            # Existing IDs own recordings, incidents, zones and route references.
+            # A display-name edit must not create a new persistent identity.
+            base_id = existing.id if existing is not None else slugify_camera_id(camera_settings.name or camera_settings.id)
             next_id, suffix = base_id, 2
             while next_id in used:
                 next_id, suffix = f"{base_id}-{suffix}", suffix + 1

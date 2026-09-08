@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import {
+  recordingSegmentAt,
+  recordingSegmentLocalTime,
+  recordingEpochAfterSegment,
   adjustRecordingExportRange,
   describePlaybackError,
   gridPlaybackNeedsSeek,
@@ -115,3 +118,13 @@ assert.equal(isUnsupportedPlaybackError({ code: 4, message: "source unsupported"
 assert.equal(isUnsupportedPlaybackError({ code: 1001, category: 1, message: "network request failed" }), false);
 
 console.log("recording playback tests passed");
+
+// A mobile source is one real recording segment, including leading/interior gaps.
+const mobileRows = [{ start_epoch: 150, end_epoch: 180 }, { start_epoch: 200, end_epoch: 210 }];
+const mobileSegment = recordingSegmentAt(mobileRows, 155);
+assert.deepEqual(mobileSegment, { start_epoch: 150, end_epoch: 180 });
+assert.equal(recordingSegmentLocalTime(mobileSegment, 155, { duration: 30 }), 5);
+assert.equal(recordingSegmentAt(mobileRows, 190), null);
+assert.equal(recordingEpochAfterSegment(mobileSegment, mobileRows), 200);
+assert.equal(recordingEpochAfterSegment(mobileRows[1], mobileRows), null);
+assert.equal(recordingEpochAfterSegment(mobileRows[1], [...mobileRows, { start_epoch: 210, end_epoch: 220 }]), 210.01);

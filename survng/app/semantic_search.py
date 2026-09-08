@@ -9,6 +9,7 @@ import queue
 import itertools
 import multiprocessing
 import time
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -790,6 +791,10 @@ class DisabledSemanticSearch:
     def queue_event(self, event: dict[str, Any]) -> bool:
         return False
 
+    def refresh_event(self, event: dict[str, Any]) -> bool:
+        self.index.delete_event(int(event.get("id") or 0))
+        return self.queue_event(event)
+
     def search_text(self, query: str, **filters: Any) -> list[SemanticSearchHit]:
         raise RuntimeError("semantic search is disabled")
 
@@ -1283,6 +1288,12 @@ class IsolatedOpenVinoManifestEncoder:
             process.terminate()
 
 
+@dataclass
+class _SemanticEventRevision:
+    event: dict[str, Any]
+    valid: bool = True
+
+
 class SemanticSearchService(DisabledSemanticSearch):
     """Low-priority asynchronous incident indexer and text search service."""
 
@@ -1312,6 +1323,10 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._fallback_active = False
         self._encoder_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
+        self._event_revision_lock = threading.RLock()
+        # Tokens are retained by queued/in-flight work, not by process lifetime.
+        self._event_revisions: weakref.WeakValueDictionary[int, _SemanticEventRevision] = weakref.WeakValueDictionary()
+        self._event_store: Any = None
 
     def start(self, event_store: Any, storage_dir: Path, media_storage: MediaStorageRegistry | None = None) -> None:
         with self._lifecycle_lock:
@@ -1323,6 +1338,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             self._drain_queue()
             self._storage_dir = Path(storage_dir)
             self._media_storage = media_storage
+            self._event_store = event_store
             self._stop.clear()
             self._state = "initializing"
             self._bootstrap_thread = threading.Thread(
@@ -1477,7 +1493,8 @@ class SemanticSearchService(DisabledSemanticSearch):
                 objects = semantic_event_objects(event)
                 if not objects:
                     if event_id > 0 and event_id in indexed_event_ids:
-                        self.index.delete_event(event_id)
+                        # Resolve current evidence before acting on a historical snapshot.
+                        self.index_event(event)
                         indexed_event_ids.discard(event_id)
                     continue
                 if self.encoder:
@@ -1506,7 +1523,7 @@ class SemanticSearchService(DisabledSemanticSearch):
                         continue
                     try:
                         self._queue.put(
-                            (1, next(self._queue_sequence), dict(event)),
+                            (1, next(self._queue_sequence), self._revision_event(event)),
                             timeout=0.5,
                         )
                         break
@@ -1518,7 +1535,36 @@ class SemanticSearchService(DisabledSemanticSearch):
             if len(rows) < self.config.backfill_batch_size:
                 return
 
+    def _revision_event(self, event: dict[str, Any], *, refresh: bool = False) -> dict[str, Any]:
+        with self._event_revision_lock:
+            event_id = int(event.get("id") or 0)
+            # Notifications and history pages can arrive out of order. The event
+            # store owns the latest snapshot even after prior tokens expire.
+            getter = getattr(self._event_store, "get", None)
+            latest = getter(event_id) if callable(getter) else event
+            if latest is None:
+                latest = {"id": event_id}
+            current = self._event_revisions.get(event_id)
+            payload = {key: value for key, value in dict(latest).items() if key != "_semantic_revision"}
+            if current is None or refresh or current.event != payload:
+                if current is not None:
+                    current.valid = False
+                current = _SemanticEventRevision(payload)
+                self._event_revisions[event_id] = current
+            return {**current.event, "_semantic_revision": current}
+
+    def refresh_event(self, event: dict[str, Any]) -> bool:
+        """Invalidate queued and in-flight evidence before submitting its replacement."""
+        with self._event_revision_lock:
+            event = self._revision_event(event, refresh=True)
+            self.index.delete_event(int(event.get("id") or 0))
+            return self._queue_event_revision(event)
+
     def queue_event(self, event: dict[str, Any]) -> bool:
+        with self._event_revision_lock:
+            return self._queue_event_revision(self._revision_event(event))
+
+    def _queue_event_revision(self, event: dict[str, Any]) -> bool:
         if (
             self.encoder is None
             or not event.get("snapshot_path")
@@ -1561,34 +1607,39 @@ class SemanticSearchService(DisabledSemanticSearch):
         event_id = int(event.get("id") or 0)
         if event_id <= 0:
             return 0
-        objects = semantic_event_objects(event)
-        if not objects:
-            self.index.delete_event(event_id)
-            return 0
-        identity = self.encoder.identity
-        full_frame_needed = self.config.index_full_frame and not self.index.event_source_indexed(
-            event_id, identity, "full_frame"
-        )
-        crop_candidates = semantic_object_crop_candidates(
-            objects, self.config.max_object_crops_per_event
-        )
-        desired_crop_keys = {
-            semantic_crop_source_key(index, item)
-            for index, item, _coordinates in crop_candidates
-        }
-        existing_crop_keys = self.index.event_source_keys(
-            event_id, identity, "object_crop"
-        )
-        object_crops_needed = (
-            self.config.index_object_crops
-            and bool(desired_crop_keys - existing_crop_keys)
-        )
-        if not full_frame_needed and not object_crops_needed:
-            if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
-                self.index.reconcile_event_source_keys(
-                    event_id, identity, "object_crop", desired_crop_keys
-                )
-            return 0
+        event = event if "_semantic_revision" in event else self._revision_event(event)
+        revision = event["_semantic_revision"]
+        with self._event_revision_lock:
+            if not revision.valid:
+                return 0
+            objects = semantic_event_objects(event)
+            if not objects:
+                self.index.delete_event(event_id)
+                return 0
+            identity = self.encoder.identity
+            full_frame_needed = self.config.index_full_frame and not self.index.event_source_indexed(
+                event_id, identity, "full_frame"
+            )
+            crop_candidates = semantic_object_crop_candidates(
+                objects, self.config.max_object_crops_per_event
+            )
+            desired_crop_keys = {
+                semantic_crop_source_key(index, item)
+                for index, item, _coordinates in crop_candidates
+            }
+            existing_crop_keys = self.index.event_source_keys(
+                event_id, identity, "object_crop"
+            )
+            object_crops_needed = (
+                self.config.index_object_crops
+                and bool(desired_crop_keys - existing_crop_keys)
+            )
+            if not full_frame_needed and not object_crops_needed:
+                if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
+                    self.index.reconcile_event_source_keys(
+                        event_id, identity, "object_crop", desired_crop_keys
+                    )
+                return 0
         try:
             path = event_snapshot_path(self._storage_dir, event, self._media_storage)
         except FileNotFoundError:
@@ -1628,15 +1679,18 @@ class SemanticSearchService(DisabledSemanticSearch):
                 if self.encoder is None:
                     return 0
                 embeddings = self.encoder.encode_images(images)
-            written = self.index.upsert(evidence, embeddings, self.encoder.identity)
-            self._indexed += written
-            if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
-                # Preserve prior searchable evidence until replacements have
-                # encoded successfully, then remove only stale source keys.
-                self.index.reconcile_event_source_keys(
-                    event_id, identity, "object_crop", desired_crop_keys
-                )
-            return written
+            with self._event_revision_lock:
+                if not revision.valid:
+                    return 0
+                written = self.index.upsert(evidence, embeddings, self.encoder.identity)
+                self._indexed += written
+                if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
+                    # Preserve prior searchable evidence until replacements have
+                    # encoded successfully, then remove only stale source keys.
+                    self.index.reconcile_event_source_keys(
+                        event_id, identity, "object_crop", desired_crop_keys
+                    )
+                return written
         return 0
 
     def _index_event(self, event: dict[str, Any]) -> int:
