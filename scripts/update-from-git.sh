@@ -60,15 +60,39 @@ echo "Updating $(git rev-parse --short HEAD) -> $(git rev-parse --short "$UPSTRE
 git pull --ff-only "$REMOTE" "$BRANCH"
 echo "Now at $(git rev-parse --short HEAD)"
 
+# `compose ps` identifies project/service containers, regardless of the -f files
+# passed to that command. Recover the deployment's actual file list instead of
+# treating every available override as enabled.
 compose_files=(-f compose.yaml)
-if [[ -f compose.intel-gpu.yaml ]] && docker compose -f compose.yaml -f compose.intel-gpu.yaml ps --status running --services 2>/dev/null | grep -qx survng; then
-  compose_files+=(-f compose.intel-gpu.yaml)
+running_container=""
+use_lxc=false
+build_target=runtime
+if command -v docker >/dev/null 2>&1; then
+  running_container="$(docker compose -f compose.yaml ps --status running -q survng 2>/dev/null || true)"
 fi
-if [[ -f compose.lxc.yaml ]] && docker compose -f compose.yaml -f compose.lxc.yaml ps --status running --services 2>/dev/null | grep -qx survng; then
-  compose_files+=(-f compose.lxc.yaml)
-fi
-if [[ -f compose.storage.yaml ]]; then
-  compose_files+=(-f compose.storage.yaml)
+if [[ -n "$running_container" ]]; then
+  if [[ "$running_container" == *$'\n'* ]]; then
+    echo "Multiple SurvNG containers found; update the intended Compose deployment explicitly." >&2
+    exit 1
+  fi
+  recorded_files="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$running_container")"
+  if [[ -z "$recorded_files" || "$recorded_files" == "<no value>" ]]; then
+    echo "Cannot determine the running deployment's Compose files; refusing to guess update modes." >&2
+    exit 1
+  fi
+  IFS=',' read -r -a deployment_files <<< "$recorded_files"
+  compose_files=()
+  for compose_file in "${deployment_files[@]}"; do
+    if [[ ! -f "$compose_file" ]]; then
+      echo "Running deployment references a missing Compose file: $compose_file" >&2
+      exit 1
+    fi
+    compose_files+=(-f "$compose_file")
+    case "${compose_file##*/}" in
+      compose.intel-gpu.yaml) build_target=runtime-intel ;;
+      compose.lxc.yaml) use_lxc=true ;;
+    esac
+  done
 fi
 
 if [[ -z "${SURVNG_GIT_SHA:-}" ]] && command -v git >/dev/null 2>&1; then
@@ -76,10 +100,10 @@ if [[ -z "${SURVNG_GIT_SHA:-}" ]] && command -v git >/dev/null 2>&1; then
   export SURVNG_GIT_SHA
 fi
 
-if command -v docker >/dev/null 2>&1 && docker compose "${compose_files[@]}" ps --status running --services 2>/dev/null | grep -qx survng; then
+if [[ -n "$running_container" ]]; then
   echo "Rebuilding running Docker deployment"
-  if [[ " ${compose_files[*]} " == *" compose.lxc.yaml "* ]]; then
-    SURVNG_GIT_SHA="$SURVNG_GIT_SHA" scripts/docker-build-lxc.sh
+  if [[ "$use_lxc" == true ]]; then
+    SURVNG_GIT_SHA="$SURVNG_GIT_SHA" scripts/docker-build-lxc.sh "$build_target"
     docker compose "${compose_files[@]}" up -d --no-build --remove-orphans
   else
     docker compose "${compose_files[@]}" build --pull --build-arg "SURVNG_GIT_SHA=${SURVNG_GIT_SHA}"

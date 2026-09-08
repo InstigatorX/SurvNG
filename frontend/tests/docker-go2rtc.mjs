@@ -17,6 +17,6 @@ assert.match(entrypoint, /SURVNG_GO2RTC/);
 assert.match(entrypoint, /go2rtc -config/);
 assert.match(entrypoint, /Started go2rtc/);
 assert.match(example, /listen: "127\.0\.0\.1:1984"/);
-assert.match(example, /listen: ":8554"/);
+assert.match(example, /listen: "127\.0\.0\.1:8554"/);
 
 console.log("docker go2rtc packaging tests passed");

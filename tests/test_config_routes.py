@@ -19,6 +19,8 @@ from survng.app.config_routes import (
     ConfigRouteDependencies,
     SECRET_PLACEHOLDER,
     create_config_router,
+    redacted_config_payload,
+    restore_config_secrets,
 )
 
 
@@ -78,6 +80,59 @@ class ConfigRoutesTest(unittest.TestCase):
             "main": {"fit": "cover", "focal_x": 50.0, "focal_y": 50.0, "zoom": 1.0},
             "live": {"fit": "cover", "focal_x": 50.0, "focal_y": 50.0, "zoom": 1.0},
         })
+
+    def test_multiple_masked_api_tokens_round_trip_through_config_put(self) -> None:
+        self.config.api_auth.tokens = [
+            ApiTokenConfig(id="one", name="One", token_hash="a" * 64),
+            ApiTokenConfig(id="two", name="Two", token_hash="b" * 64),
+        ]
+        payload = self.endpoint("/api/config", "GET")()
+        payload["base_path"] = "/updated"
+        self.endpoint("/api/config", "PUT")(AppConfig.model_validate(payload))
+        restored = self.apply.call_args.args[0]
+        self.assertEqual([token.token_hash for token in restored.api_auth.tokens], ["a" * 64, "b" * 64])
+        self.assertEqual(restored.base_path, "/updated")
+        payload["api_auth"]["tokens"][1]["id"] = "unknown"
+        with self.assertRaises(HTTPException) as error:
+            self.endpoint("/api/config", "PUT")(AppConfig.model_validate(payload))
+        self.assertEqual(error.exception.status_code, 422)
+
+    def test_url_query_secrets_redact_and_restore_without_reencoding(self) -> None:
+        original = "http://admin:user%40pass@gate/live?channel=0&password=a%26b&token=x+y&token=z%2Bv&API%5FKEY=secret&empty=&flag#view"
+        self.config.cameras[0].stream_url = original
+        self.config.cameras[0].live_stream_url = "http://gate/sub?user=admin&pass=subsecret&quality=high"
+        payload = self.endpoint("/api/config", "GET")()
+        camera = payload["cameras"][0]
+        for secret in ("user%40pass", "a%26b", "x+y", "z%2Bv", "subsecret"):
+            self.assertNotIn(secret, str(camera))
+        self.assertEqual(camera["stream_url"].count(SECRET_PLACEHOLDER), 5)
+        self.endpoint("/api/config", "PUT")(AppConfig.model_validate(payload))
+        restored = self.apply.call_args.args[0].cameras[0]
+        self.assertEqual(restored.stream_url, original)
+        self.assertEqual(restored.live_stream_url, self.config.cameras[0].live_stream_url)
+        camera["stream_url"] = camera["stream_url"].replace("channel=0", "channel=1").replace("token=" + SECRET_PLACEHOLDER, "token=new%2Bsecret", 1)
+        self.endpoint("/api/config/cameras/{camera_id}", "PUT")("gate", CameraConfig.model_validate(camera))
+        updated = self.apply.call_args.args[0].cameras[0].stream_url
+        self.assertIn("channel=1", updated)
+        self.assertIn("token=new%2Bsecret&token=z%2Bv", updated)
+
+    def test_query_placeholders_need_existing_credentials(self) -> None:
+        body = CameraConfig(id="new", name="New", stream_url=f"http://new/live?password={SECRET_PLACEHOLDER}")
+        with self.assertRaises(HTTPException) as error:
+            self.endpoint("/api/config/cameras/{camera_id}", "PUT")("new", body)
+        self.assertEqual(error.exception.status_code, 422)
+        self.config.cameras[0].stream_url = "http://gate/live"
+        body.id = "gate"
+        with self.assertRaises(HTTPException):
+            self.endpoint("/api/config/cameras/{camera_id}", "PUT")("gate", body)
+
+    def test_config_cannot_expose_or_clear_persisted_revocations(self) -> None:
+        self.config.web_auth.revoked_sessions = {"a" * 64: 2_000_000_000}
+        payload = redacted_config_payload(self.config)
+        self.assertNotIn("revoked_sessions", payload["web_auth"])
+        payload["web_auth"]["revoked_sessions"] = {"b" * 64: 2_000_000_000}
+        restored = restore_config_secrets(AppConfig.model_validate(payload), self.config)
+        self.assertEqual(restored.web_auth.revoked_sessions, self.config.web_auth.revoked_sessions)
 
     def test_config_update_reports_runtime_storage_validation_as_422(self) -> None:
         self.apply.side_effect = OSError(

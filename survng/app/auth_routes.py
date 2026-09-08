@@ -23,6 +23,7 @@ from .proxy import ip_is_local
 from .security import (
     SESSION_COOKIE_NAME,
     authenticate_password,
+    authenticate_session,
     encode_session,
     hash_password,
     public_user_payload,
@@ -32,6 +33,7 @@ from .security import (
     session_cookie_value,
     session_times,
     session_ttl_seconds,
+    web_session_revocation,
 )
 
 USERNAME_PATTERN = r"^[A-Za-z][A-Za-z0-9._-]{2,63}$"
@@ -316,6 +318,20 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
             )
         return None
 
+    def _persist_revocation(digest: str, expires: int) -> None:
+        # Apply/persist before acknowledging logout. A failed save must not claim success.
+        with deps.lock:
+            current = deps.get_config()
+            if digest in current.web_auth.revoked_sessions:
+                return
+            next_config = current.model_copy(deep=True)
+            now = int(time.time())
+            next_config.web_auth.revoked_sessions = {
+                key: expiry for key, expiry in current.web_auth.revoked_sessions.items() if expiry > now
+            }
+            next_config.web_auth.revoked_sessions[digest] = expires
+            deps.apply_config(next_config, assign_ids=False)
+
     @router.get("/api/auth/session")
     def get_session(request: Request) -> dict[str, Any]:
         return session_payload(deps.get_config(), current_user(request), client_ip=_client_ip(request))
@@ -350,8 +366,17 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
     @router.post("/api/auth/logout")
     def logout(request: Request) -> JSONResponse:
         token = session_cookie_value(request.headers.get("cookie", ""))
-        if token:
-            revoke_web_session(hashlib.sha256(token.encode("utf-8")).hexdigest())
+        with deps.lock:
+            config = deps.get_config()
+            principal = authenticate_session(
+                request.headers.get("cookie", ""),
+                config.web_auth.model_copy(update={"enabled": True}),
+            )
+            times = session_times(token) if principal is not None else None
+            if times is not None:
+                digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                _persist_revocation(digest, times[1])
+                revoke_web_session(digest)
         response = JSONResponse({"ok": True})
         _clear_session_cookie(response, request, deps.get_config())
         return response
@@ -416,8 +441,11 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
         require_admin(request)
         if len(session_id) != 16 or any(character not in "0123456789abcdef" for character in session_id):
             raise HTTPException(status_code=400, detail="invalid session id")
-        if not revoke_web_session(session_id):
+        revocation = web_session_revocation(session_id)
+        if revocation is None:
             raise HTTPException(status_code=404, detail="session not found")
+        _persist_revocation(*revocation)
+        revoke_web_session(session_id)
         return {"ok": True}
 
     @router.put("/api/auth/settings")
@@ -512,6 +540,8 @@ def create_auth_router(deps: AuthRouteDependencies) -> APIRouter:
                 ttl_seconds=ttl,
                 session_epoch=updated.session_epoch,
             )
+            issued, expires = session_times(token) or (int(time.time()), int(time.time()) + ttl)
+            register_web_session(token, updated.id, issued, expires, _client_ip(request))
             _attach_session_cookie(response, request, token, ttl_seconds=ttl, config=effective)
         return response
 

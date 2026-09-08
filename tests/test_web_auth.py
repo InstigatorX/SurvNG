@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import tempfile
+from pathlib import Path
 import threading
 import time
 import unittest
@@ -9,13 +12,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from survng.app import auth_routes
+from survng.app import auth_routes, security
 from survng.app.auth_routes import (
     AuthRouteDependencies,
     create_auth_router,
     load_or_create_bootstrap_token,
 )
-from survng.app.config import AppConfig, WebAuthConfig, WebUserConfig
+from survng.app.config import AppConfig, WebAuthConfig, WebUserConfig, load_config, save_config
 from survng.app.config_routes import restore_config_secrets
 from survng.app.security import (
     SESSION_COOKIE_NAME,
@@ -150,6 +153,10 @@ class WebAuthConfigTest(unittest.TestCase):
 
 class AuthRouteTest(unittest.TestCase):
     def setUp(self) -> None:
+        for registry in (security._WEB_SESSIONS, security._REVOKED_WEB_SESSIONS):
+            isolated = patch.dict(registry, {}, clear=True)
+            isolated.start()
+            self.addCleanup(isolated.stop)
         self.admin = make_user("alex", role="admin")
         self.viewer = make_user("pat", role="viewer", password="viewer-pass")
         self.config = AppConfig(
@@ -222,6 +229,71 @@ class AuthRouteTest(unittest.TestCase):
         ended = self.client.delete(f"/api/auth/sessions/{sessions[0]['id']}")
         self.assertEqual(ended.status_code, 200)
         self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={token}", self.config.web_auth))
+
+    def _reload_persisted_auth_without_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            save_config(self.config, path, assign_ids=False)
+            self.config = load_config(path)
+        security._WEB_SESSIONS.clear()
+        security._REVOKED_WEB_SESSIONS.clear()
+
+    def test_password_change_cookie_is_listed_and_logout_survives_restart(self) -> None:
+        login = self.client.post("/api/auth/login", json={"username": "alex", "password": "correct-horse"})
+        old = login.cookies.get(SESSION_COOKIE_NAME)
+        self.client.cookies.set(SESSION_COOKIE_NAME, old)
+        changed = self.client.put("/api/auth/users/alex/password", json={"password": "new-password"})
+        self.assertEqual(changed.status_code, 200)
+        token = changed.cookies.get(SESSION_COOKIE_NAME)
+        self.client.cookies.set(SESSION_COOKIE_NAME, token)
+        sessions = self.client.get("/api/auth/sessions").json()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["id"], hashlib.sha256(token.encode()).hexdigest()[:16])
+        other = encode_session("alex", self.config.web_auth.session_key, session_epoch=1)
+        self.assertEqual(self.client.post("/api/auth/logout").status_code, 200)
+        self._reload_persisted_auth_without_memory()
+        for revoked in (old, token):
+            self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={revoked}", self.config.web_auth))
+        self.assertIsNotNone(authenticate_session(f"{SESSION_COOKIE_NAME}={other}", self.config.web_auth))
+
+    def test_logout_revokes_valid_unregistered_cookie_and_prunes_expired(self) -> None:
+        self.config.web_auth.revoked_sessions = {"f" * 64: 1}
+        token = encode_session("alex", self.config.web_auth.session_key)
+        self.client.cookies.set(SESSION_COOKIE_NAME, token)
+        self.assertEqual(self.client.post("/api/auth/logout").status_code, 200)
+        self.assertNotIn("f" * 64, self.config.web_auth.revoked_sessions)
+        self._reload_persisted_auth_without_memory()
+        self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={token}", self.config.web_auth))
+
+    def test_session_termination_survives_restart(self) -> None:
+        login = self.client.post("/api/auth/login", json={"username": "alex", "password": "correct-horse"})
+        token = login.cookies.get(SESSION_COOKIE_NAME)
+        session_id = hashlib.sha256(token.encode()).hexdigest()[:16]
+        self.client.cookies.set(SESSION_COOKIE_NAME, token)
+        ended = self.client.delete(f"/api/auth/sessions/{session_id}")
+        self.assertEqual(ended.status_code, 200)
+        self._reload_persisted_auth_without_memory()
+        self.assertIsNone(authenticate_session(f"{SESSION_COOKIE_NAME}={token}", self.config.web_auth))
+
+    def test_logout_does_not_persist_forged_cookies(self) -> None:
+        self.client.cookies.set(SESSION_COOKIE_NAME, encode_session("alex", "b" * 64))
+        self.assertEqual(self.client.post("/api/auth/logout").status_code, 200)
+        self.apply.assert_not_called()
+        self.assertEqual(self.config.web_auth.revoked_sessions, {})
+
+    def test_logout_does_not_persist_invalidated_user_sessions(self) -> None:
+        for user_id, epoch in (("alex", 99), ("deleted-user", 0)):
+            self.client.cookies.set(SESSION_COOKIE_NAME, encode_session(user_id, self.config.web_auth.session_key, session_epoch=epoch))
+            self.assertEqual(self.client.post("/api/auth/logout").status_code, 200)
+        self.apply.assert_not_called()
+
+    def test_logout_save_failure_does_not_claim_success(self) -> None:
+        token = encode_session("alex", self.config.web_auth.session_key)
+        self.apply.side_effect = OSError("disk unavailable")
+        client = TestClient(self.app, raise_server_exceptions=False)
+        client.cookies.set(SESSION_COOKIE_NAME, token)
+        self.assertEqual(client.post("/api/auth/logout").status_code, 500)
+        self.assertIsNotNone(authenticate_session(f"{SESSION_COOKIE_NAME}={token}", self.config.web_auth))
 
     def test_login_rejects_bad_password(self) -> None:
         response = self.client.post("/api/auth/login", json={"username": "alex", "password": "nope-nope"})

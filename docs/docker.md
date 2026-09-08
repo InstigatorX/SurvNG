@@ -214,7 +214,12 @@ The image includes go2rtc **v1.9.14**. On first start the entrypoint seeds
 `/config/go2rtc.yaml` from `docker/go2rtc.example.yaml` and launches go2rtc
 before SurvNG. With Compose `network_mode: host`, SurvNG reaches the API at
 `127.0.0.1:1984` and restreams at `rtsp://127.0.0.1:8554/...`. Stream ownership
-stays in go2rtc; SurvNG does not invent transcoding aliases.
+stays in go2rtc; SurvNG does not invent transcoding aliases. The bundled RTSP
+listener binds to loopback, because raw RTSP does not use SurvNG browser sign-in.
+Existing installations keep their `/config/go2rtc.yaml`: set `rtsp.listen` to
+`127.0.0.1:8554` there and restart to adopt this boundary. If remote RTSP clients
+are required, explicitly configure go2rtc authentication and network access
+before changing the listener address.
 
 ## Intel OpenVINO GPU and QSV/VA-API
 

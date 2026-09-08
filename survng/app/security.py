@@ -109,6 +109,15 @@ def touch_web_session(token: str, client_ip: str = "") -> None:
                 record.client_ip = client_ip
 
 
+def web_session_revocation(session_id: str) -> tuple[str, int] | None:
+    """Resolve an Access session ID to the full digest for durable revocation."""
+    with _SESSION_REGISTRY_LOCK:
+        _prune_web_sessions(int(time.time()))
+        matches = [(digest, record.expires_at) for digest, record in _WEB_SESSIONS.items()
+                   if digest == session_id or digest.startswith(session_id)]
+        return matches[0] if len(matches) == 1 else None
+
+
 def revoke_web_session(session_id: str) -> bool:
     with _SESSION_REGISTRY_LOCK:
         for digest, record in tuple(_WEB_SESSIONS.items()):
@@ -367,7 +376,7 @@ def authenticate_session(
     if not auth_config.enabled or not auth_config.session_key:
         return None
     token = session_cookie_value(cookie_header)
-    if not token or is_web_session_revoked(token):
+    if not token or is_web_session_revoked(token) or _session_digest(token) in auth_config.revoked_sessions:
         return None
     decoded = decode_session(token, auth_config.session_key)
     if decoded is None:
