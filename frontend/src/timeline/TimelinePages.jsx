@@ -62,6 +62,7 @@ import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
 import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingMobileSegmentUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
+import { NativeRecordingVideo } from "../shared/NativeRecordingVideo.jsx";
 import { DebugDetectionOverlay } from "../shared/evidence.jsx";
 import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
 import { usePollingData } from "../shared/polling.js";
@@ -762,6 +763,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [manifestRetryToken, setManifestRetryToken] = useState(0);
   const [nativeSegment, setNativeSegment] = useState(null);
   const [nativeSegmentRetryToken, setNativeSegmentRetryToken] = useState(0);
+  const [nativePrefetchDetail, setNativePrefetchDetail] = useState(null);
   const [recordingIndexRevision, setRecordingIndexRevision] = useState(0);
   const [followTarget, setFollowTarget] = useState(null);
   const [exportRange, setExportRange] = useState(null);
@@ -838,6 +840,37 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const nativeSegmentUrl = useNativeMobilePlayback && !isAllCameras && activeCameraId && nativeSegment
     ? `${recordingMobileSegmentUrl(activeCameraId, nativeSegment.start_epoch, source)}&reload=${nativeSegmentRetryToken}`
     : "";
+  const nativeScope = `${activeCameraId}:${source}:${dayStart}:${dayEnd}`;
+  const nativeNextEpoch = nativeSegment ? recordingEpochAfterSegment(nativeSegment, timeline) : null;
+  const prefetchedNativeWindow = nativePrefetchDetail?.scope === nativeScope ? nativePrefetchDetail : null;
+  const nativeNextSegment = nativeNextEpoch === null ? null
+    : recordingSegmentAt(playbackTimeline, nativeNextEpoch)
+      || recordingSegmentAt(prefetchedNativeWindow?.rows, nativeNextEpoch);
+  const nativeNextUrl = nativeSegmentUrl && heroPlaying && nativeNextSegment
+    ? `${recordingMobileSegmentUrl(activeCameraId, nativeNextSegment.start_epoch, source)}&reload=${nativeSegmentRetryToken}`
+    : "";
+
+  useEffect(() => {
+    // Warm only the next detail window when playback reaches its boundary.
+    // The standby video can then preload across a 15-minute index boundary too.
+    if (!nativeSegmentUrl || !heroPlaying || nativeNextEpoch === null || nativeNextSegment) return undefined;
+    const controller = new AbortController();
+    const nextWindow = windowAround(nativeNextEpoch);
+    fetch(recordingWindowUrl(activeCameraId, nextWindow.start, nextWindow.end, source), { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return response.json();
+      })
+      .then((payload) => {
+        if (!payload || controller.signal.aborted) return;
+        setNativePrefetchDetail({
+          scope: nativeScope, start: Number(payload.start_epoch), end: Number(payload.end_epoch),
+          rows: payload.recordings || [],
+        });
+      })
+      .catch(() => { /* Foreground loading retains its normal retry/error handling. */ });
+    return () => controller.abort();
+  }, [nativeScope, nativeSegmentUrl, heroPlaying, nativeNextEpoch, Boolean(nativeNextSegment)]);
   const hasPlaybackMedia = Boolean(manifestUrl || nativeSegmentUrl);
   // Keep AI analysis strictly local to an actively playing Timeline video. The
   // overlay's key resets its temporary tracks when the recording scope changes.
@@ -1244,6 +1277,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function completePendingNativeSeek(video) {
+    if (video !== videoRef.current) return;
     const pendingMode = pendingSeekModeRef.current;
     if (pendingMode !== "native-local" && pendingMode !== "native-ready") return;
     clearSeekWatchdog();
@@ -1265,12 +1299,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     clearSeekWatchdog();
     if (!video || !Number.isFinite(localTime)) return;
     const tolerance = recordingSeekToleranceSeconds({ preferNativeHls: true });
+    const requestedSource = video.getAttribute("src");
+    const isCurrent = () => video === videoRef.current && video.getAttribute("src") === requestedSource;
     seekWatchdogRef.current = window.setTimeout(() => {
       seekWatchdogRef.current = null;
-      if (!Number.isFinite(pendingSeekEpochRef.current)) return;
+      if (!isCurrent() || !Number.isFinite(pendingSeekEpochRef.current)) return;
       if (!videoReachedSeekTarget(video, localTime, tolerance)) {
         video.currentTime = localTime;
-        window.setTimeout(() => completePendingNativeSeek(video), 400);
+        seekWatchdogRef.current = window.setTimeout(() => {
+          seekWatchdogRef.current = null;
+          if (isCurrent()) completePendingNativeSeek(video);
+        }, 400);
         return;
       }
       completePendingNativeSeek(video);
@@ -1280,6 +1319,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   function handleNativeSegmentMetadata(event) {
     const video = event.currentTarget;
     if (!nativeSegment) return;
+    clearSeekWatchdog();
     video.playbackRate = normalizedTimelinePlaybackRate(playbackRate);
     if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
     playbackRetryRef.current = { attempts: 0, timer: null };
@@ -1375,8 +1415,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
     if (useNativeMobilePlayback) {
-      const recording = inCurrentWindow ? recordingSegmentAt(playbackTimeline, target) : null;
+      clearSeekWatchdog();
+      if (!autoplay) setHeroPlaying(false);
+      const warmWindow = prefetchedNativeWindow && target >= prefetchedNativeWindow.start && target < prefetchedNativeWindow.end
+        ? prefetchedNativeWindow : null;
+      const recording = (inCurrentWindow ? recordingSegmentAt(playbackTimeline, target) : null)
+        || recordingSegmentAt(warmWindow?.rows, target);
       if (recording) {
+        if (!inCurrentWindow && warmWindow) setPlaybackDetail({ ...warmWindow, revision: ++playbackRequestRef.current });
         const segment = { start_epoch: recording.start_epoch, end_epoch: recording.end_epoch };
         const sameSegment = nativeSegment
           && nativeSegment.start_epoch === segment.start_epoch
@@ -1503,6 +1549,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     gridRefreshCursorRef.current = null;
     setManifestRetryToken(0);
     setNativeSegment(null);
+    setNativePrefetchDetail(null);
     setNativeSegmentRetryToken(0);
     setFollowTarget(null);
     pendingSeekEpochRef.current = null;
@@ -1891,7 +1938,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   function toggleHeroPlayback() {
     const video = videoRef.current;
     if (!video) return;
-    if (!video.paused) {
+    if (!video.paused || (useNativeMobilePlayback && heroSeeking && autoplayRef.current)) {
       autoplayRef.current = false;
       setHeroPlaying(false);
       video.pause();
@@ -2274,12 +2321,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           /> : null}
           {!isAllCameras ? <div className="recording-hero-media">
           {nativeSegmentUrl ? (
-            <video
+            <NativeRecordingVideo
+              key={nativeScope}
               ref={videoRef}
               src={nativeSegmentUrl}
+              nextSrc={nativeNextUrl}
               muted={heroMuted}
-              playsInline
-              preload="auto"
+              playbackRate={normalizedTimelinePlaybackRate(playbackRate)}
               onLoadedMetadata={handleNativeSegmentMetadata}
               onError={(event) => {
                 const error = event.currentTarget.error;
