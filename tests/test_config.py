@@ -143,6 +143,13 @@ class AppConfigTest(unittest.TestCase):
                 ApiTokenConfig(id="ha", name="Other", token_hash="b" * 64),
             ])
 
+    def test_api_auth_rejects_duplicate_real_hashes(self) -> None:
+        with self.assertRaises(ValidationError):
+            ApiAuthConfig(tokens=[
+                ApiTokenConfig(id="one", name="One", token_hash="a" * 64),
+                ApiTokenConfig(id="two", name="Two", token_hash="a" * 64),
+            ])
+
     def test_base_path_is_normalized(self) -> None:
         self.assertEqual(AppConfig(base_path=" cameras/ ").base_path, "/cameras")
         self.assertEqual(AppConfig(base_path="/").base_path, "")

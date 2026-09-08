@@ -9,7 +9,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -19,6 +19,24 @@ from .security import hash_api_token, redact_secret_text
 
 SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__"
 LOGGER = logging.getLogger(__name__)
+_URL_SECRET_KEYS = frozenset({
+    "password", "passwd", "pass", "pwd", "token", "accesstoken", "refreshtoken",
+    "idtoken", "apikey", "key", "secret", "clientsecret", "authorization", "auth",
+})
+
+
+def _url_secret_key(key: str) -> bool:
+    return unquote_plus(key).casefold().replace("_", "").replace("-", "") in _URL_SECRET_KEYS
+
+
+def _query_secrets(query: str) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {}
+    for part in query.split("&"):
+        key, separator, value = part.partition("=")
+        if separator and _url_secret_key(key):
+            values.setdefault(unquote_plus(key).casefold(), []).append(value)
+    return values
+
 
 
 class ConfigProbeRequest(BaseModel):
@@ -70,10 +88,15 @@ def _mask_url_password(value: str | None) -> str | None:
     except ValueError:
         return value
     userinfo, separator, host = parsed.netloc.rpartition("@")
-    if not separator or ":" not in userinfo:
-        return value
-    username, _password = userinfo.split(":", 1)
-    return urlunsplit(parsed._replace(netloc=f"{username}:{SECRET_PLACEHOLDER}@{host}"))
+    if separator and ":" in userinfo:
+        username, _password = userinfo.split(":", 1)
+        parsed = parsed._replace(netloc=f"{username}:{SECRET_PLACEHOLDER}@{host}")
+    # Keep non-secret values and their encoding byte-for-byte (some cameras sign URLs).
+    parts = []
+    for part in parsed.query.split("&"):
+        key, separator, value = part.partition("=")
+        parts.append(f"{key}={SECRET_PLACEHOLDER}" if separator and value and _url_secret_key(key) else part)
+    return urlunsplit(parsed._replace(query="&".join(parts)))
 
 
 def _encoded_url_password(value: str | None) -> str | None:
@@ -88,15 +111,42 @@ def _encoded_url_password(value: str | None) -> str | None:
 
 
 def _restore_url_password(masked: str | None, current: str | None, field: str) -> str | None:
-    if not masked or _encoded_url_password(masked) != SECRET_PLACEHOLDER:
+    if not masked:
         return masked
-    current_password = _encoded_url_password(current)
-    if current_password is None:
-        raise ValueError(f"{field} contains a masked secret without an existing value")
     parsed = urlsplit(masked)
-    userinfo, _separator, host = parsed.netloc.rpartition("@")
-    username, _masked = userinfo.split(":", 1)
-    return urlunsplit(parsed._replace(netloc=f"{username}:{current_password}@{host}"))
+    if _encoded_url_password(masked) == SECRET_PLACEHOLDER:
+        current_password = _encoded_url_password(current)
+        if current_password is None:
+            raise ValueError(f"{field} contains a masked secret without an existing value")
+        userinfo, _separator, host = parsed.netloc.rpartition("@")
+        username, _masked = userinfo.split(":", 1)
+        parsed = parsed._replace(netloc=f"{username}:{current_password}@{host}")
+    existing = _query_secrets(urlsplit(current or "").query)
+    occurrences: dict[str, int] = {}
+    parts = []
+    for part in parsed.query.split("&"):
+        key, separator, value = part.partition("=")
+        if separator and _url_secret_key(key):
+            normalized = unquote_plus(key).casefold()
+            index = occurrences.get(normalized, 0)
+            occurrences[normalized] = index + 1
+            if unquote_plus(value) == SECRET_PLACEHOLDER:
+                values = existing.get(normalized, [])
+                if index >= len(values) or not values[index]:
+                    raise ValueError(f"{field} contains a masked secret without an existing value")
+                part = f"{key}={values[index]}"
+        parts.append(part)
+    return urlunsplit(parsed._replace(query="&".join(parts)))
+
+
+def _url_uses_masked_secret(value: str | None) -> bool:
+    if not value:
+        return False
+    return _encoded_url_password(value) == SECRET_PLACEHOLDER or any(
+        unquote_plus(secret) == SECRET_PLACEHOLDER
+        for values in _query_secrets(urlsplit(value).query).values()
+        for secret in values
+    )
 
 
 def _restore_secret(masked: str, current: str, field: str) -> str:
@@ -110,8 +160,8 @@ def _restore_secret(masked: str, current: str, field: str) -> str:
 def _camera_uses_masked_secret(camera: CameraConfig) -> bool:
     return any(
         (
-            _encoded_url_password(camera.stream_url) == SECRET_PLACEHOLDER,
-            _encoded_url_password(camera.live_stream_url) == SECRET_PLACEHOLDER,
+            _url_uses_masked_secret(camera.stream_url),
+            _url_uses_masked_secret(camera.live_stream_url),
             camera.onvif.password == SECRET_PLACEHOLDER,
         )
     )
@@ -174,6 +224,8 @@ def restore_config_secrets(incoming: AppConfig, current: AppConfig) -> AppConfig
         token.token_hash = existing.token_hash
     if restored.web_auth.session_key == SECRET_PLACEHOLDER:
         restored.web_auth.session_key = current.web_auth.session_key
+    # Browser configuration snapshots cannot undo logout/revocation state.
+    restored.web_auth.revoked_sessions = dict(current.web_auth.revoked_sessions)
     current_users = {user.id: user for user in current.web_auth.users}
     for user in restored.web_auth.users:
         existing_user = current_users.get(user.id)
@@ -228,6 +280,7 @@ def redacted_config_payload(config: AppConfig) -> dict:
         token["token_hash"] = SECRET_PLACEHOLDER
     if payload["web_auth"].get("session_key"):
         payload["web_auth"]["session_key"] = SECRET_PLACEHOLDER
+    payload["web_auth"].pop("revoked_sessions", None)
     for user in payload["web_auth"]["users"]:
         user["password_hash"] = SECRET_PLACEHOLDER
     payload["cameras"] = [redacted_camera_payload(camera) for camera in config.cameras]

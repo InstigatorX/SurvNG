@@ -14,8 +14,9 @@ readonly REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$TARGET" in
   runtime|runtime-intel) ;;
+  --compose) shift ;;
   *)
-    echo "usage: $0 [runtime|runtime-intel]" >&2
+    echo "usage: $0 [runtime|runtime-intel] | --compose [Compose options]" >&2
     exit 2
     ;;
 esac
@@ -60,6 +61,14 @@ done
 GIT_SHA="${SURVNG_GIT_SHA:-$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)}"
 
 docker buildx inspect "$BUILDER_NAME" --bootstrap
+if [[ "$TARGET" == "--compose" ]]; then
+  # Let Compose resolve the deployment's target, image, and override precedence.
+  # Keep the LXC-compatible builder without reconstructing its build settings.
+  docker compose "$@" build --builder "$BUILDER_NAME" --pull \
+    --build-arg "SURVNG_GIT_SHA=${GIT_SHA}"
+  echo "Built Compose deployment with persistent builder $BUILDER_NAME."
+  exit 0
+fi
 docker buildx build \
   --builder "$BUILDER_NAME" \
   --target "$TARGET" \

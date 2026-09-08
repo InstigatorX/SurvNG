@@ -44,7 +44,8 @@ class ApiAuthConfig(BaseModel):
     @model_validator(mode="after")
     def validate_tokens(self) -> "ApiAuthConfig":
         token_ids = [token.id for token in self.tokens]
-        token_hashes = [token.token_hash for token in self.tokens]
+        # Masked values are resolved by the HTTP boundary before persistence.
+        token_hashes = [token.token_hash for token in self.tokens if token.token_hash != "__SURVNG_SECRET_SET__"]
         if len(token_ids) != len(set(token_ids)):
             raise ValueError("API token ids must be unique")
         if len(token_hashes) != len(set(token_hashes)):
@@ -84,6 +85,15 @@ class WebAuthConfig(BaseModel):
     session_key: str = Field(default="", max_length=64, pattern=r"^(?:|[0-9a-f]{64}|__SURVNG_SECRET_SET__)$")
     session_days: int = Field(default=14, ge=1, le=365)
     users: list[WebUserConfig] = Field(default_factory=list)
+    # Server-managed cookie digests; persisted so logout survives process restart.
+    revoked_sessions: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("revoked_sessions")
+    @classmethod
+    def validate_revoked_sessions(cls, value: dict[str, int]) -> dict[str, int]:
+        if any(not re.fullmatch(r"[0-9a-f]{64}", digest) or expires <= 0 for digest, expires in value.items()):
+            raise ValueError("revoked sessions require SHA-256 digests and positive expirations")
+        return value
 
     @model_validator(mode="after")
     def validate_users(self) -> "WebAuthConfig":
