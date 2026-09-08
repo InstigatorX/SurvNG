@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import threading
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
+from survng.app.camera_control import CameraControlService
+from survng.app.camera_startup import CameraStartupCoordinator
 from survng.app.camera_fleet import CameraFleetLifecycle, CameraFleetOperationError
 from survng.app.config import CameraConfig
 
@@ -268,3 +270,107 @@ def test_fleet_construction_rejects_camera_worker_mismatch() -> None:
             startup=Mock(),
             state_publisher=Mock(),
         )
+
+
+def test_queued_admission_restarts_camera_after_successful_power_off(tmp_path):
+    camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate")
+    worker = Mock()
+    running = threading.Event()
+    worker.start.side_effect = running.set
+    worker.stop.side_effect = running.clear
+    worker.live_capture_ready.side_effect = running.is_set
+    recorder = Mock()
+    publisher = Mock()
+    coordinator = CameraStartupCoordinator(recorder_settle_seconds=0)
+    fleet = CameraFleetLifecycle(cameras=[camera], workers={camera.id: worker}, recorder=recorder,
+                                startup=coordinator, state_publisher=publisher)
+    controls = CameraControlService(cameras=[camera], workers={camera.id: worker}, recording=Mock(),
+                                    fleet=fleet, mqtt=Mock(), runtime_monitor=Mock(),
+                                    state_path=tmp_path / "controls.json")
+    tasks = fleet.prepare_startup(camera_enabled={camera.id: True}, recording_enabled={}, detection_enabled={})
+    enabled_snapshot_read = threading.Event()
+    release_admission = threading.Event()
+    original = fleet._admission_enabled
+
+    def paused_initial_check(camera_id):
+        value = original(camera_id)
+        if not enabled_snapshot_read.is_set():
+            enabled_snapshot_read.set()
+            assert release_admission.wait(2)
+        return value
+
+    with patch.object(fleet, "_admission_enabled", side_effect=paused_initial_check):
+        fleet.start_admission(tasks)
+        assert enabled_snapshot_read.wait(2)
+        assert controls.stop_camera(camera.id)
+        assert not running.is_set()
+        release_admission.set()
+        assert coordinator.wait(2)
+    assert controls.camera_enabled(camera.id) is False
+    assert fleet.camera_enabled(camera.id) is False
+    assert coordinator.status()["cameras"][camera.id]["phase"] == "skipped"
+    assert not running.is_set()
+    worker.start.assert_not_called()
+
+
+def test_power_off_waits_for_admitted_start_then_stops_worker() -> None:
+    fleet, workers, _recorder, _startup, _publisher = _fleet()
+    task = fleet.prepare_startup(camera_enabled={}, recording_enabled={}, detection_enabled={})[0]
+    entered = threading.Event()
+    release = threading.Event()
+    disabled = threading.Event()
+    order = []
+
+    def start():
+        entered.set()
+        assert release.wait(2)
+        order.append("start")
+
+    def power_off():
+        assert fleet.set_camera_enabled("gate", False)
+        disabled.set()
+        assert fleet.stop_camera("gate")
+
+    workers["gate"].start.side_effect = start
+    workers["gate"].stop.side_effect = lambda: order.append("stop")
+    starter = threading.Thread(target=task.start_camera)
+    stopper = threading.Thread(target=power_off)
+    starter.start()
+    assert entered.wait(2)
+    stopper.start()
+    try:
+        assert not disabled.wait(0.05)
+    finally:
+        release.set()
+        starter.join(2)
+        stopper.join(2)
+    assert not starter.is_alive() and not stopper.is_alive()
+    assert order == ["start", "stop"]
+    assert not task.is_enabled()
+
+
+def test_cancel_admission_does_not_deadlock_queued_camera_start() -> None:
+    fleet, workers, _recorder, _startup, _publisher = _fleet()
+    fleet.startup = CameraStartupCoordinator(recorder_settle_seconds=0)
+    task = fleet.prepare_startup(camera_enabled={}, recording_enabled={}, detection_enabled={})[0]
+    checked = threading.Event()
+    release = threading.Event()
+    original = fleet._admission_enabled
+
+    def paused_check(camera_id):
+        enabled = original(camera_id)
+        if not checked.is_set():
+            checked.set()
+            assert release.wait(2)
+        return enabled
+
+    with patch.object(fleet, "_admission_enabled", side_effect=paused_check):
+        fleet.start_admission([task])
+        assert checked.wait(2)
+        # Cancellation holds this same lock while it joins admission workers.
+        with fleet._operation_lock:
+            fleet._stopping.set()
+            release.set()
+            fleet.cancel_admission()
+    assert fleet.wait(1)
+    workers["gate"].start.assert_not_called()

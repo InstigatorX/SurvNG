@@ -485,6 +485,40 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(second, first)
         self.assertEqual(probe.call_count, 2)
 
+    def test_storage_failure_releases_start_reservation_and_watchdog_retries(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+        key = (camera.id, "main")
+        for fail_at in ("selection", "mkdir"):
+            with self.subTest(fail_at=fail_at), tempfile.TemporaryDirectory() as tmpdir:
+                recorder = Recorder("ffmpeg", Path(tmpdir))
+                process = Mock(pid=4321, stderr=iter(()))
+                process.poll.return_value = None
+                failure = (
+                    patch.object(recorder, "_camera_dir", side_effect=OSError("offline"))
+                    if fail_at == "selection"
+                    else patch.object(Path, "mkdir", side_effect=OSError("offline"))
+                )
+                with failure, self.assertLogs("survng.app.recorder", level="ERROR"):
+                    recorder.start(camera)
+                self.assertNotIn(key, recorder._starting)
+                self.assertNotIn(key, recorder.processes)
+                retry_at = recorder._retry_after[key]
+                with (
+                    patch("survng.app.recording_process.recorder.time.monotonic", return_value=retry_at + 1),
+                    patch("survng.app.recording_process.recorder.subprocess.Popen", return_value=process) as popen,
+                    patch.object(recorder, "_audio_output_args", return_value=[]),
+                    patch.object(recorder, "_owned_ffmpeg_recorders", return_value={}),
+                    patch.object(recorder, "_kill_pid"),
+                ):
+                    try:
+                        recorder.reconcile({camera.id: camera})
+                        popen.assert_called_once()
+                        self.assertIs(recorder.processes[key][0], process)
+                        self.assertNotIn(key, recorder._starting)
+                        self.assertNotIn(key, recorder._retry_after)
+                    finally:
+                        recorder.stop(camera.id, "main")
+
     @patch.object(Recorder, "_owned_ffmpeg_recorders", return_value={})
     def test_stop_during_start_cancels_new_recorder_before_registration(self, _owned_recorders) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -959,7 +993,7 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             process_list = (
                 " 4321 /run/survng/survng-recorder -f segment "
-                "/srv/recordings/gate/main/%Y-%m-%d/%H/clip.mp4\n"
+                f"{recorder.recordings_dir}/gate/main/%Y-%m-%d/%H/clip.mp4\n"
             )
 
             with patch(
@@ -969,6 +1003,37 @@ class RecorderTest(unittest.TestCase):
                 owned = recorder._owned_ffmpeg_recorders({("gate", "main")})
 
         self.assertEqual(owned, {("gate", "main"): [4321]})
+
+    def test_cleanup_only_targets_outputs_in_this_installations_roots(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="recorder storage ") as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir))
+            second_root = Path(tmpdir) / "second" / "recordings"
+            recorder.recording_roots.append(second_root)
+            own = recorder.recordings_dir
+            template = "%Y-%m-%d/%H/%Y%m%d-%H%M%S%z.mp4"
+            paths = {
+                4101: own / "gate" / "main" / template,
+                4102: own / "gate" / "live" / template,
+                4103: own / "gate" / template,  # legacy main output
+                4104: second_root / "gate" / "main" / template,
+                4201: Path(tmpdir) / "foreign" / "recordings" / "gate" / "main" / template,
+                4202: own / "gate-other" / "main" / template,
+                4203: Path(str(own) + "-other") / "gate" / "main" / template,
+            }
+            process_list = "\n".join(
+                f"{pid} /run/survng/survng-recorder -f segment {output}"
+                for pid, output in paths.items()
+            )
+            # A reference to our path in an input argument is not ownership.
+            process_list += f"\n4204 ffmpeg -i {paths[4101]} -f segment {paths[4201]}"
+            with (
+                patch("survng.app.recording_process.recorder.subprocess.check_output", return_value=process_list),
+                patch.object(recorder, "_kill_pids") as kill,
+            ):
+                owned = recorder._owned_ffmpeg_recorders({("gate", "main"), ("gate", "live")})
+                self.assertEqual(owned, {("gate", "main"): [4101, 4103, 4104], ("gate", "live"): [4102]})
+                recorder.cleanup_stale_recorders({("gate", "main")})
+                kill.assert_called_once_with({4101, 4103, 4104})
 
     def test_stale_recorder_cleanup_terminates_processes_concurrently(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

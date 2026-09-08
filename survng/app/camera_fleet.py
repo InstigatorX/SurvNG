@@ -101,6 +101,7 @@ class CameraFleetLifecycle:
         self._operation_lock = threading.RLock()
         self._stopping = threading.Event()
         self._cameras_by_id = {camera.id: camera for camera in self.cameras}
+        self._camera_start_locks = {camera.id: threading.Lock() for camera in self.cameras}
         self._state_lock = threading.Lock()
         self._camera_enabled = {camera.id: True for camera in self.cameras}
         self._residual_lock = threading.Lock()
@@ -124,9 +125,10 @@ class CameraFleetLifecycle:
         with self._operation_lock:
             if self._stopping.is_set():
                 return False
-            with self._state_lock:
-                if camera_id not in self._camera_enabled:
-                    return False
+            start_lock = self._camera_start_locks.get(camera_id)
+            if start_lock is None:
+                return False
+            with start_lock, self._state_lock:
                 self._camera_enabled[camera_id] = bool(enabled)
                 return True
 
@@ -136,14 +138,19 @@ class CameraFleetLifecycle:
 
     def start_camera(self, camera_id: str) -> bool:
         with self._operation_lock:
-            worker = self.workers.get(camera_id)
-            if (
-                worker is None
-                or self._stopping.is_set()
-                or camera_id in self._closed_workers
-            ):
+            return self._start_admitted_camera(camera_id)
+
+    def _start_admitted_camera(self, camera_id: str) -> bool:
+        # Admission must serialize its final enabled check and worker start with
+        # power changes. Do not acquire _operation_lock here: cancellation holds
+        # that lock while waiting for admission workers to finish.
+        start_lock = self._camera_start_locks.get(camera_id)
+        if start_lock is None:
+            return False
+        with start_lock:
+            if not self._admission_enabled(camera_id) or camera_id in self._closed_workers:
                 return False
-            worker.start()
+            self.workers[camera_id].start()
             return True
 
     def stop_camera(self, camera_id: str) -> bool:
@@ -214,7 +221,9 @@ class CameraFleetLifecycle:
                     is_enabled=lambda camera_id=camera.id: self._admission_enabled(
                         camera_id
                     ),
-                    start_camera=worker.start,
+                    start_camera=lambda camera_id=camera.id: self._start_admitted_camera(
+                        camera_id
+                    ),
                     capture_ready=worker.live_capture_ready,
                     start_recorders=lambda camera=camera: self._start_recorders(
                         camera,
