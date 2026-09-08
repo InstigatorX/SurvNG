@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -136,12 +137,12 @@ class Recorder(RecordingIndexMixin):
                 self.processes.pop(key, None)
             self._starting.add(key)
 
-        camera_dir = self._camera_dir(camera.id, source)
-        camera_dir.mkdir(parents=True, exist_ok=True)
         stop_event = threading.Event()
         keeper: threading.Thread | None = None
         process: subprocess.Popen | None = None
         try:
+            camera_dir = self._camera_dir(camera.id, source).absolute()
+            camera_dir.mkdir(parents=True, exist_ok=True)
             self._ensure_recording_dirs(camera_dir)
             keeper = threading.Thread(target=self._keep_recording_dirs, args=(camera_dir, stop_event), daemon=True)
             keeper.start()
@@ -690,6 +691,18 @@ class Recorder(RecordingIndexMixin):
 
     def _owned_ffmpeg_recorders(self, keys: set[RecorderKey]) -> dict[RecorderKey, list[int]]:
         result: dict[RecorderKey, list[int]] = {key: [] for key in keys}
+        # A camera ID is not an installation boundary. Match the terminal output
+        # under an exact configured root, including legacy main-stream layouts.
+        outputs = {
+            key: [
+                re.compile(
+                    r"(?:^| )" + re.escape(str(directory.absolute()))
+                    + r"/%Y-%m-%d/%H/[^/\s]+\.mp4$"
+                )
+                for directory in self._recording_search_dirs(*key)
+            ]
+            for key in keys
+        }
         try:
             output = subprocess.check_output(["ps", "-eo", "pid=,command="], text=True)
         except (OSError, subprocess.SubprocessError):
@@ -709,15 +722,12 @@ class Recorder(RecordingIndexMixin):
                     "ffmpeg" in executable
                     or Path(executable).name == "survng-recorder"
                 )
-                or "/recordings/" not in command
                 or "%Y-%m-%d" not in command
             ):
                 continue
-            for camera_id, source in keys:
-                source_dir = f"/recordings/{camera_id}/{source}/"
-                legacy_main_dir = f"/recordings/{camera_id}/" if source == "main" else ""
-                if source_dir in command or (legacy_main_dir and legacy_main_dir in command and "/main/" not in command and "/live/" not in command):
-                    result.setdefault((camera_id, source), []).append(pid)
+            for key, patterns in outputs.items():
+                if any(pattern.search(command) for pattern in patterns):
+                    result[key].append(pid)
                     break
         return result
 
