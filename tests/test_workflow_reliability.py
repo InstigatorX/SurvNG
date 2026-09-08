@@ -178,3 +178,74 @@ def test_ineligible_narrow_crop_does_not_suppress_valid_backfill(tmp_path):
     service = DeferredAppearanceBackfill(database, tmp_path, ObjectTrackingConfig(vehicle_reid_enabled=True, vehicle_reid_model_path='vehicle.xml'), SimpleNamespace(get=lambda _: event), index, encoder)
     assert service.process_event(7)[:2] == ('completed', 1)
     assert calls == [(100, 100, 3)]
+
+
+@pytest.mark.parametrize('outcome', ['mixed_unready', 'shed', 'failed', 'invalid_quality', 'completed', 'all_unready'])
+def test_backfill_paces_inference_attempts_before_claiming_more_work(tmp_path, monkeypatch, outcome):
+    database = tmp_path / 'events.db'
+    with sqlite3.connect(database) as con:
+        con.execute('create table events(id integer primary key, created_at text not null)')
+        con.executemany('insert into events values (?, ?)', [(1, 'now'), (2, 'now')])
+    (tmp_path / 'snapshots').mkdir()
+    assert cv2.imwrite(str(tmp_path / 'snapshots/event.jpg'), np.full((100, 200, 3), 127, np.uint8))
+    objects = [
+        {'label': label, 'box': {'x1': 0, 'y1': 0, 'x2': 100, 'y2': 100}}
+        for label in ('person', 'car')
+    ]
+    if outcome == 'invalid_quality':
+        objects[0]['snapshot_quality_score'] = 'invalid'
+    events = SimpleNamespace(get=lambda event_id: {
+        'id': event_id, 'camera_id': 'gate', 'snapshot_path': 'snapshots/event.jpg',
+        'objects_json': json.dumps(objects),
+    })
+    trace = []
+
+    class Encoder:
+        def supports_label(self, label):
+            return outcome != 'all_unready' and not (outcome == 'mixed_unready' and label == 'car')
+
+        def model_identity_for_label(self, label):
+            return dict(model_kind=label, model_fingerprint='test', embedding_size=2, match_threshold=.8)
+
+        def embed_for_label(self, label, crop):
+            trace.append(('embed', label))
+            if outcome == 'shed':
+                raise InferenceUnavailable('shed for incident')
+            if outcome == 'failed':
+                raise RuntimeError('inference failed')
+            return np.array([.6, .8], np.float32)
+
+    config = ObjectTrackingConfig(
+        reid_enabled=True, reid_model_path='person.xml',
+        vehicle_reid_enabled=True, vehicle_reid_model_path='vehicle.xml',
+        deferred_reid_rate_per_minute=6,
+    )
+    index = AppearanceIndex(database)
+    service = DeferredAppearanceBackfill(database, tmp_path, config, events, index, Encoder())
+    for event_id in (1, 2):
+        service.enqueue(event_id, 'gate', delay_seconds=0)
+    claim = service._claim
+
+    def claim_until_empty():
+        row = claim()
+        if row is None:
+            service._stop.set()
+        else:
+            trace.append(('claim', int(row['event_id'])))
+        return row
+
+    monkeypatch.setattr(service, '_claim', claim_until_empty)
+    monkeypatch.setattr(service._stop, 'wait', lambda seconds: trace.append(('wait', seconds)))
+    monkeypatch.setattr(service._wake, 'wait', lambda **kwargs: None)
+    service._run()
+
+    expected_cycle = []
+    if outcome != 'all_unready':
+        expected_cycle.append(('embed', 'person'))
+        if outcome not in {'mixed_unready', 'invalid_quality'}:
+            expected_cycle.append(('embed', 'car'))
+        expected_cycle.append(('wait', 10.0))
+    assert trace == [('claim', 1), *expected_cycle, ('claim', 2), *expected_cycle]
+    expected_state = 'completed' if outcome == 'completed' else 'queued'
+    assert service.status()['counts'] == {expected_state: 2}
+    assert index.has_event(1) == (outcome == 'completed')

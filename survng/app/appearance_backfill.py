@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -225,7 +226,12 @@ class DeferredAppearanceBackfill:
                 ),
             )
 
-    def process_event(self, event_id: int) -> tuple[str, int, str]:
+    def process_event(
+        self,
+        event_id: int,
+        *,
+        on_inference_attempt: Callable[[], None] | None = None,
+    ) -> tuple[str, int, str]:
         if self.index.has_event(event_id):
             return ("skipped", 0, "multi-frame appearance evidence already exists")
         event = self.event_store.get(int(event_id))
@@ -287,6 +293,8 @@ class DeferredAppearanceBackfill:
             if identity is None:
                 deferred_reason = f"{label} ReID model identity is not ready"
                 continue
+            if on_inference_attempt is not None:
+                on_inference_attempt()
             try:
                 embedding = self.encoder.embed_for_label(label, crop)
             except InferenceUnavailable as exc:
@@ -361,8 +369,16 @@ class DeferredAppearanceBackfill:
             event_id = int(job["event_id"])
             attempts = int(job["attempts"] or 0) + 1
             indexed = 0
+            inference_attempted = False
+
+            def mark_inference_attempt() -> None:
+                nonlocal inference_attempted
+                inference_attempted = True
+
             try:
-                state, indexed, reason = self.process_event(event_id)
+                state, indexed, reason = self.process_event(
+                    event_id, on_inference_attempt=mark_inference_attempt
+                )
                 if state in {"failed", "deferred"}:
                     self._retry(event_id, reason, attempts, deferred=state == "deferred")
                 else:
@@ -370,8 +386,11 @@ class DeferredAppearanceBackfill:
             except Exception as exc:
                 LOGGER.exception("deferred appearance backfill crashed for event %d", event_id)
                 self._retry(event_id, str(exc), attempts)
-            if indexed > 0:
-                self._stop.wait(interval)
+            finally:
+                # Deferred or failed publication can still consume inference
+                # capacity. Pace that work before claiming another event.
+                if inference_attempted:
+                    self._stop.wait(interval)
 
     def status(self) -> dict[str, Any]:
         with self._connect() as connection:
