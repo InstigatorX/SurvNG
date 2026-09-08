@@ -103,6 +103,7 @@ def test_manual_correction_invalidates_search_and_updates_clients(manual_detecti
     ], [[1, 0, 0]], identity)
     search = SemanticSearchService(manager.config.semantic_search, index, tmp_path, {})
     search.encoder = SimpleNamespace(identity=identity)
+    search.refresh_event = Mock(wraps=search.refresh_event)
     manager.semantic_search = search
     manager.state_events = Mock()
     manager.mqtt = Mock()
@@ -115,6 +116,7 @@ def test_manual_correction_invalidates_search_and_updates_clients(manual_detecti
     assert result["object_count"] == 0
     persisted = manager.events.get(event["id"])
     assert json.loads(persisted["objects_json"]) == result["objects"]
+    search.refresh_event.assert_called_once_with(persisted)
     assert index.search([1, 0, 0], identity) == []
     manager.state_events.publish.assert_called_once_with(
         "incident", {"event_id": event["id"], "camera_id": "gate", "updated": True},
@@ -122,7 +124,10 @@ def test_manual_correction_invalidates_search_and_updates_clients(manual_detecti
     manager.mqtt.publish.assert_not_called()
     manager.mqtt.track_incident.assert_not_called()
     if objects:
-        assert search._queue.get_nowait()[2] == persisted
+        queued = search._queue.get_nowait()[2]
+        revision = queued.pop("_semantic_revision")
+        assert revision.valid
+        assert queued == persisted
     else:
         assert search._queue.empty()
 

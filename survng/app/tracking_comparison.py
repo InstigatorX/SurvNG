@@ -70,9 +70,9 @@ def sampled_video_frames(
 ) -> Iterator[DecodedVideoFrame]:
     """Sample frames using ``start_epoch`` as the epoch at the seek point.
 
-    FFmpeg resets output timestamps after ``-ss`` on supported builds, so a
-    source PTS is relative to ``start_offset_seconds``. Callers sampling a
-    segment mid-file must pass the wall-clock epoch of that seek point.
+    Source PTS remains file-relative; ``start_epoch`` is the wall-clock epoch
+    of ``start_offset_seconds``. Trimming occurs before timestamp collection
+    so every sampled timestamp corresponds to an emitted image.
     """
     if not ffmpeg_path:
         raise ValueError("ffmpeg_path is required for video frame sampling")
@@ -117,18 +117,21 @@ def _ffmpeg_sampled_video_frames(
     frame_bytes = output_width * output_height * 3
     input_options = ["-f", "concat", "-safe", "0"] if concat_input else []
     duration = max(0.1, float(duration_seconds))
+    offset = max(0.0, float(start_offset_seconds))
     command = [
         ffmpeg_path,
         "-nostdin",
         "-v", "info",
         *input_options,
         "-i", str(path),
-        "-ss", f"{max(0.0, float(start_offset_seconds)):.3f}",
-        "-t", f"{duration:.3f}",
         "-vf", (
+            f"trim=start={offset:.6f}:end={offset + duration:.6f},"
             f"scale={output_width}:{output_height},showinfo@source,"
-            f"fps={max(0.1, float(sample_fps)):.6f},showinfo@sampled"
+            f"fps={max(0.1, float(sample_fps)):.6f},showinfo@sampled,"
+            "setpts=PTS-STARTPTS"
         ),
+        "-t", f"{duration:.6f}",
+        "-fps_mode", "passthrough",
         "-an", "-sn", "-dn",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
@@ -214,7 +217,7 @@ def _ffmpeg_sampled_video_frames(
             if timestamp is None:
                 raise RuntimeError("comparison decoder frame timestamp is unavailable")
             pts, pts_seconds = timestamp
-            captured_at = start_epoch + pts_seconds
+            captured_at = start_epoch + pts_seconds - offset
             yield DecodedVideoFrame(
                 captured_at,
                 frame,
@@ -303,10 +306,9 @@ def video_frame_at_reference(
         "-nostdin",
         "-v", "error",
         "-i", str(reference.source_path),
-        "-ss", f"{max(0.0, reference.seek_offset_seconds):.3f}",
         "-vf", (
             f"select='eq(pts\\,{reference.pts})',"
-            f"scale={output_width}:{output_height},fps=1"
+            f"scale={output_width}:{output_height}"
         ),
         "-frames:v", "1",
         "-an", "-sn", "-dn",

@@ -177,3 +177,24 @@ export function isUnsupportedPlaybackError(error) {
     || /(?:codec|decode|format|media source).*(?:unsupported|not supported)/.test(description)
     || /(?:unsupported|not supported).*(?:codec|decode|format|media source)/.test(description);
 }
+
+export function recordingSegmentAt(rows, epoch) {
+  if (!Number.isFinite(epoch)) return null;
+  const row = (rows || []).find((item) => Number(item.start_epoch) <= epoch && epoch < Number(item.end_epoch));
+  return row ? { start_epoch: Number(row.start_epoch), end_epoch: Number(row.end_epoch) } : null;
+}
+
+export function recordingSegmentLocalTime(segment, epoch, video = null) {
+  if (!segment || !Number.isFinite(epoch)) return null;
+  const indexedDuration = Math.max(0, segment.end_epoch - segment.start_epoch);
+  const mediaDuration = Number(video?.duration);
+  const duration = Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : indexedDuration;
+  return Math.max(0, Math.min(Math.max(0, duration - 0.01), epoch - segment.start_epoch));
+}
+
+export function recordingEpochAfterSegment(segment, ranges) {
+  if (!segment) return null;
+  const end = Number(segment.end_epoch) + 0.01;
+  const next = (ranges || []).find((item) => item.end_epoch > end);
+  return next ? Math.max(end, next.start_epoch) : null;
+}

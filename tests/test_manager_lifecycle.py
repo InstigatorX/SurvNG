@@ -373,8 +373,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             "reason": "cover_promoted",
         })
 
-        manager.semantic_search.index.delete_event.assert_called_once_with(42)
-        manager.semantic_search.queue_event.assert_called_once_with(event)
+        manager.semantic_search.refresh_event.assert_called_once_with(event)
         manager.state_events.publish.assert_called_once_with(
             "incident",
             {

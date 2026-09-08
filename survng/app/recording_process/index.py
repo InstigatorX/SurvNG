@@ -495,11 +495,13 @@ class RecordingIndexMixin:
         """Remove missing indexed files before a playback manifest advertises them."""
         existing: list[dict] = []
         stale_paths: list[str] = []
+        unavailable_roots = self._unavailable_recording_roots()
         for row in rows:
             path = str(row.get("path") or "")
-            if path and Path(path).is_file():
+            presence = path_presence(path) if path else "unknown"
+            if presence == "present":
                 existing.append(row)
-            elif path:
+            elif presence == "missing" and not self._path_under_roots(path, unavailable_roots):
                 stale_paths.append(path)
         self._delete_index_paths(stale_paths)
         return existing
@@ -862,8 +864,10 @@ class RecordingIndexMixin:
                 ON CONFLICT(path) DO UPDATE SET
                     size_bytes=excluded.size_bytes,
                     modified_at=excluded.modified_at,
-                    duration_seconds=excluded.duration_seconds,
-                    end_epoch=excluded.end_epoch,
+                    duration_seconds=CASE WHEN recordings.validated = 1
+                        THEN recordings.duration_seconds ELSE excluded.duration_seconds END,
+                    end_epoch=CASE WHEN recordings.validated = 1
+                        THEN recordings.end_epoch ELSE excluded.end_epoch END,
                     stream_fingerprint=CASE
                         WHEN excluded.fingerprint_checked = 1 THEN excluded.stream_fingerprint
                         ELSE recordings.stream_fingerprint

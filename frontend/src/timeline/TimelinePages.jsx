@@ -37,7 +37,7 @@ import {
 import { browserStorage } from "../storage.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { recordingSegmentAt, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
@@ -60,7 +60,7 @@ import { formatDateTime, formatTimeOnly, formatExportHandleTime, formatBytes, fo
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
 import { preferredStreamSource } from "../shared/cameras.js";
 import { IdentityChip } from "../shared/identity.jsx";
-import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingMobileWindowUrl } from "../shared/mediaUrls.js";
+import { eventThumbnailUrl, recordingDayUrl, recordingWindowUrl, recordingUpdatesUrl, recordingDayHlsUrl, recordingGridDayUrl, recordingGridUpdatesUrl, recordingPreviewUrl, recordingMobileSegmentUrl } from "../shared/mediaUrls.js";
 import { ShakaVideo } from "../shared/media.jsx";
 import { DebugDetectionOverlay } from "../shared/evidence.jsx";
 import { MobileCameraSelect } from "../shared/MobileCameraSelect.jsx";
@@ -836,7 +836,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
   const nativeSegmentUrl = useNativeMobilePlayback && !isAllCameras && activeCameraId && nativeSegment
-    ? `${recordingMobileWindowUrl(activeCameraId, nativeSegment.start_epoch, source)}&reload=${nativeSegmentRetryToken}`
+    ? `${recordingMobileSegmentUrl(activeCameraId, nativeSegment.start_epoch, source)}&reload=${nativeSegmentRetryToken}`
     : "";
   const hasPlaybackMedia = Boolean(manifestUrl || nativeSegmentUrl);
   // Keep AI analysis strictly local to an actively playing Timeline video. The
@@ -1178,19 +1178,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     return clip.media_start + Math.max(0, Math.min(clip.media_end - clip.media_start - 0.01, epoch - clip.start_epoch));
   }
 
-  function nativeSegmentAt(epoch) {
-    if (!Number.isFinite(epoch)) return null;
-    return playbackTimeline.find((item) => item.start_epoch <= epoch && epoch < item.end_epoch) || null;
-  }
-
-  function nativeSegmentLocalTime(segment, epoch, video = null) {
-    if (!segment || !Number.isFinite(epoch)) return null;
-    const indexedDuration = Math.max(0, segment.end_epoch - segment.start_epoch);
-    const mediaDuration = Number(video?.duration);
-    const duration = Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : indexedDuration;
-    return Math.max(0, Math.min(Math.max(0, duration - 0.01), epoch - segment.start_epoch));
-  }
-
   function windowAround(epoch) {
     const windowSeconds = 15 * 60;
     const bucket = Math.floor(Math.max(0, epoch - dayStart) / windowSeconds);
@@ -1302,7 +1289,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const target = Number.isFinite(retained)
       ? Math.max(nativeSegment.start_epoch, Math.min(nativeSegment.end_epoch - 0.01, retained))
       : nativeSegment.start_epoch;
-    const localTime = nativeSegmentLocalTime(nativeSegment, target, video);
+    const localTime = recordingSegmentLocalTime(nativeSegment, target, video);
     const seekRequired = Number.isFinite(localTime) && Math.abs(video.currentTime - localTime) > 0.05;
     desiredEpochRef.current = target;
     setPlayhead(target);
@@ -1326,7 +1313,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   function handleNativeSegmentTimeUpdate(event) {
     if (!nativeSegment) return;
     if (Number.isFinite(pendingSeekEpochRef.current)) {
-      const localTime = nativeSegmentLocalTime(nativeSegment, pendingSeekEpochRef.current, event.currentTarget);
+      const localTime = recordingSegmentLocalTime(nativeSegment, pendingSeekEpochRef.current, event.currentTarget);
       if (videoReachedSeekTarget(event.currentTarget, localTime, recordingSeekToleranceSeconds({ preferNativeHls: true }))) {
         completePendingNativeSeek(event.currentTarget);
       }
@@ -1388,15 +1375,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
     if (useNativeMobilePlayback) {
-      const recording = inCurrentWindow ? nativeSegmentAt(target) : null;
+      const recording = inCurrentWindow ? recordingSegmentAt(playbackTimeline, target) : null;
       if (recording) {
-        const windowStart = Math.floor(target / 120) * 120;
-        const segment = { start_epoch: windowStart, end_epoch: windowStart + 120 };
+        const segment = { start_epoch: recording.start_epoch, end_epoch: recording.end_epoch };
         const sameSegment = nativeSegment
           && nativeSegment.start_epoch === segment.start_epoch
           && nativeSegment.end_epoch === segment.end_epoch;
         if (sameSegment && video && video.readyState >= 1) {
-          const localTime = nativeSegmentLocalTime(segment, target, video);
+          const localTime = recordingSegmentLocalTime(segment, target, video);
           pendingSeekEpochRef.current = target;
           pendingSeekModeRef.current = "native-local";
           playbackRequestRef.current += 1;
@@ -1648,13 +1634,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           const target = Number.isFinite(pendingSeekEpochRef.current)
             ? pendingSeekEpochRef.current
             : desiredEpochRef.current;
-          const segment = rows.find((item) => (
-            Number(item.start_epoch) <= target && target < Number(item.end_epoch)
-          ));
+          const segment = recordingSegmentAt(rows, target);
           if (!segment) throw new Error("No recording segment exists at this time");
           pendingSeekModeRef.current = "native-ready";
-          const windowStart = Math.floor(target / 120) * 120;
-          setNativeSegment({ start_epoch: windowStart, end_epoch: windowStart + 120 });
+          setNativeSegment({ start_epoch: Number(segment.start_epoch), end_epoch: Number(segment.end_epoch) });
         }
       })
       .catch((error) => {
@@ -2158,9 +2141,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const endedSegment = useNativeMobilePlayback ? nativeSegment : playbackTimeline[playbackTimeline.length - 1];
     if (!endedSegment) return;
     const nextEpoch = endedSegment.end_epoch + 0.01;
-    const nextRange = timeline.find((item) => item.end_epoch > nextEpoch);
-    if (nextRange) {
-      playAt(Math.max(nextEpoch, nextRange.start_epoch), true);
+    const nextRecordedEpoch = recordingEpochAfterSegment(endedSegment, timeline);
+    if (nextRecordedEpoch !== null) {
+      playAt(nextRecordedEpoch, true);
       return;
     }
     if (date === today) {

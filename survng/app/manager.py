@@ -1494,8 +1494,7 @@ class AppManager:
                 # Cover changes and manual evidence corrections must refresh
                 # image-derived indexes without reopening an MQTT incident or
                 # emitting another object notification.
-                self.semantic_search.index.delete_event(event_id)
-                self.semantic_search.queue_event(event)
+                self.semantic_search.refresh_event(event)
             self.state_events.publish("incident", payload)
             return
         if event_type == "incident" or (event_type == "object" and payload.get("source") == "manual_openvino"):
@@ -1620,8 +1619,7 @@ class AppManager:
                 if event:
                     # The full-frame and object-crop embeddings must describe
                     # the newly promoted cover, not the original early sample.
-                    self.semantic_search.index.delete_event(event_id)
-                    self.semantic_search.queue_event(event)
+                    self.semantic_search.refresh_event(event)
             # Existing incident clients already use this event to coalesce refreshes.
             self.state_events.publish("incident", {
                 "event_id": payload.get("event_id"),
