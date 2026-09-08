@@ -66,7 +66,6 @@ echo "Now at $(git rev-parse --short HEAD)"
 compose_files=(-f compose.yaml)
 running_container=""
 use_lxc=false
-build_target=runtime
 if command -v docker >/dev/null 2>&1; then
   running_container="$(docker compose -f compose.yaml ps --status running -q survng 2>/dev/null || true)"
 fi
@@ -89,7 +88,6 @@ if [[ -n "$running_container" ]]; then
     fi
     compose_files+=(-f "$compose_file")
     case "${compose_file##*/}" in
-      compose.intel-gpu.yaml) build_target=runtime-intel ;;
       compose.lxc.yaml) use_lxc=true ;;
     esac
   done
@@ -103,7 +101,7 @@ fi
 if [[ -n "$running_container" ]]; then
   echo "Rebuilding running Docker deployment"
   if [[ "$use_lxc" == true ]]; then
-    SURVNG_GIT_SHA="$SURVNG_GIT_SHA" scripts/docker-build-lxc.sh "$build_target"
+    SURVNG_GIT_SHA="$SURVNG_GIT_SHA" scripts/docker-build-lxc.sh --compose "${compose_files[@]}"
     docker compose "${compose_files[@]}" up -d --no-build --remove-orphans
   else
     docker compose "${compose_files[@]}" build --pull --build-arg "SURVNG_GIT_SHA=${SURVNG_GIT_SHA}"
