@@ -29,12 +29,16 @@ _SENSITIVE_KEYS = {
     "api_key", "api_token", "authorization", "cookie", "password", "passwd",
     "secret", "token", "access_token", "refresh_token", "client_secret",
     "private_key", "privkey", "password_hash", "session_key", "web_session_key",
+    "model_xml", "model_bin",
     "snapshot_path", "recording_path", "media_path", "storage_path", "database_path",
     "certificate_path", "key_path", "fullchain_path", "config_path", "log_path",
     "storage_dir", "database_dir", "config_dir", "working_dir", "home_dir", "cwd",
 }
 _ABSOLUTE_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_:/])/(?:home|root|srv|var|tmp|etc|opt|mnt|media|data|run)/[^\s,;]+"
+    # Match absolute paths independently of the host OS, including quoted
+    # paths with spaces. URLs are removed before applying this expression.
+    r"[\"'](?:/|[A-Za-z]:[\\/]|\\\\)[^\"'\n]+[\"']"
+    r"|(?<![A-Za-z0-9_:/])(?:/|[A-Za-z]:[\\/]|\\\\)[^\s,;\"'<>]+"
 )
 _STREAM_URL_RE = re.compile(r"\b(?:rtsp|rtsps|rtmp|http|https)://[^\s,;]+", re.IGNORECASE)
 

@@ -209,8 +209,8 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
     }
   }
 
-  async function saveTls(enabledValue) {
-    setBusy("tls");
+  async function saveTls(enabledValue, restart = false) {
+    setBusy(restart ? "restart" : "tls");
     setError("");
     try {
       const response = await fetch("/api/tls", {
@@ -230,6 +230,11 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
         hostname: payload.hostname || "",
         port: payload.port || 0,
       });
+      if (restart) {
+        const applied = await fetch("/api/tls/apply", { method: "POST" });
+        const result = await applied.json().catch(() => ({}));
+        if (!applied.ok) throw new Error(apiDetail(result, "Could not restart SurvNG"));
+      }
     } catch (caught) {
       setError(caught.message);
     } finally {
@@ -297,16 +302,7 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
 
   async function restartForTls() {
     if (!window.confirm("Restart SurvNG to apply HTTPS? Live view and recording playback will pause briefly.")) return;
-    setBusy("restart");
-    setError("");
-    try {
-      const response = await fetch("/api/tls/apply", { method: "POST" });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(apiDetail(payload, "Could not restart SurvNG"));
-    } catch (caught) {
-      setError(caught.message);
-      setBusy("");
-    }
+    await saveTls(Boolean(tls?.enabled), true);
   }
 
   return (
@@ -464,8 +460,9 @@ export function AccessSettings({ config, updateConfig, commitImmediateConfig, on
           </div>
         ) : <p className="settings-help">No certificate stored yet. Generate a self-signed certificate or upload one from your CA.</p>}
         <div className="preference-action-buttons">
+          <button type="button" onClick={() => void saveTls(Boolean(tls?.enabled))} disabled={Boolean(busy) || !tls}>Save HTTPS settings</button>
           <button type="button" onClick={() => void generateCert()} disabled={Boolean(busy)}><KeyRound size={15} /> Generate self-signed</button>
-          <button type="button" className="primary" onClick={() => void restartForTls()} disabled={busy === "restart"}><ShieldCheck size={15} /> Restart with HTTPS</button>
+          <button type="button" className="primary" onClick={() => void restartForTls()} disabled={Boolean(busy) || !tls}><ShieldCheck size={15} /> Restart with HTTPS</button>
         </div>
         <form className="api-token-create tls-upload-form" onSubmit={uploadCert}>
           <div className="detection-settings-subhead">
