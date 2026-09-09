@@ -51,6 +51,7 @@ function Fixture() {
     const activeFrames = frames.filter((frame) => frame.id === identify(video) && frame.source === currentSource.current);
     return { source: currentSource.current, transport: nativeHls ? "Native HLS" : "Shaka MSE", id: identify(video), time: video?.currentTime || 0,
       rate: video?.playbackRate, duration: Number.isFinite(video?.duration) ? video.duration : null, paused: video?.paused ?? true,
+      muted: video?.muted ?? false, volume: video?.volume ?? 1,
       playIntent: desired.current.playing,
       readyState: video?.readyState ?? 0, seeking: video?.seeking ?? false, ended: video?.ended ?? false,
       metadata: events.filter((event) => event.name === "metadata").length,
@@ -61,12 +62,15 @@ function Fixture() {
     };
   }
   function record(name, video = videoRef.current, extra = {}) {
-    events.push({ name, source: currentSource.current, id: identify(video), time: video?.currentTime || 0, ownsRef: video === videoRef.current, ...extra });
+    events.push({ name, source: currentSource.current, id: identify(video), time: video?.currentTime || 0, muted: video?.muted, ownsRef: video === videoRef.current, ...extra });
     setStatus(snapshot());
   }
   function play() {
     desired.current.playing = true;
-    videoRef.current?.play().catch((failure) => setError({ message: failure.message }));
+    videoRef.current?.play().catch((failure) => {
+      record("play-rejected", videoRef.current, { reason: failure.name, message: failure.message });
+      setError({ message: failure.message });
+    });
   }
   function pause() { desired.current.playing = false; videoRef.current?.pause(); }
   function seek(time, playing = !videoRef.current?.paused) {
@@ -86,7 +90,15 @@ function Fixture() {
     if (targetSource === currentSource.current) seek(target, playing);
     else change({ name, revision: index, seek: target, playing, offline: false });
   }
-  window.hlsFixture = { events, frames, snapshot, video: () => videoRef.current, change, seek, play, pause, error,
+  function delayedWindow(index, playing) {
+    return new Promise((resolve) => window.setTimeout(() => {
+      record("async-window", videoRef.current, { userActivationActive: navigator.userActivation?.isActive ?? null });
+      const changedAt = performance.now();
+      switchWindow(index, playing);
+      resolve(changedAt);
+    }, 6000));
+  }
+  window.hlsFixture = { events, frames, snapshot, video: () => videoRef.current, change, seek, play, pause, delayedWindow, error,
     capabilities: { nativeHls, hevcMse: Boolean(window.MediaSource?.isTypeSupported('video/mp4; codecs="hvc1.1.6.L93.B0"')) },
   };
   useEffect(() => {
@@ -147,7 +159,7 @@ function Fixture() {
       {Object.keys(fixture.playlists).map((name) => <option key={name} value={name}>{({ h264: "H.264 · red / green / blue", hevc: "HEVC · green / blue", mixed: "Mixed H.264 and HEVC", gap: "H.264 with recording-time gap", unknown: "Unknown codec metadata · H.264 discontinuities" })[name] || name}</option>)}
     </select></label>
     <div id="stage" style={{ background: "#050708", margin: "16px 0", width: "100%", aspectRatio: "16/9" }}>
-      <RecordingHlsVideo ref={videoRef} src={src} muted controls playsInline preload="auto" startTime={config.seek} bufferingGoal={40}
+      <RecordingHlsVideo ref={videoRef} src={src} muted={false} controls playsInline preload="auto" startTime={config.seek} bufferingGoal={40}
         style={{ display: "block", width: "100%", height: "100%" }}
         onReady={(_player, video) => {
           record("ready", video);
@@ -178,9 +190,12 @@ function Fixture() {
       <button onClick={() => switchWindow(1, false)}>Window B · paused</button>
       <button onClick={() => switchWindow(0, true)}>Window A · playing</button>
       <button onClick={() => switchWindow(1, true)}>Window B · playing</button>
+      <button onClick={() => delayedWindow(0, true)}>Window A · play after 6s</button>
+      <button onClick={() => delayedWindow(1, true)}>Window B · play after 6s</button>
       {[1, 2, 4].map((rate) => <button key={rate} aria-label={`Playback speed ${rate}×`} onClick={() => { videoRef.current.playbackRate = rate; }}>{rate}×</button>)}
     </div>
     <p role="status">{status.transport} · {status.paused ? "Paused" : "Playing"} · {Number(status.time || 0).toFixed(2)} / {status.duration?.toFixed(2) || "—"} seconds · {status.rate || 1}× · Video {status.id || "—"} · Seeking {status.seeking ? "yes" : "no"} · Metadata {status.metadata || 0} · Ready {status.ready || 0} · Current-source pixel samples {status.activeFrames || 0} · Total pixel samples {status.frames || 0}</p>
+    <p data-testid="sound-status">Video muted: {status.muted ? "yes" : "no"} · Volume: {Math.round((status.volume ?? 1) * 100)}%</p>
     <p data-testid="frame-summary">Sampled colors: {status.frameSummary?.colors.join(" → ") || "—"} · Black pixel samples: {status.frameSummary?.blackFrames || 0} · Largest RVFC playing-frame interval: {status.frameSummary?.maxPlayingIntervalMs ? `${status.frameSummary.maxPlayingIntervalMs} ms` : "—"}</p>
     <p data-testid="sampler-status">RVFC supported: {status.sampler?.rvfcSupported ? "yes" : "no"} · Callbacks: {status.sampler?.callbacks || 0} · RVFC samples: {status.sampler?.rvfcSamples || 0} · Fallback samples: {status.sampler?.fallbackSamples || 0} · Canvas failures: {status.sampler?.canvasErrors || 0} · Last sampling failure: {status.sampler?.lastFailure || "none"}</p>
     <p role="alert">{error ? `Playback error: category ${error.category ?? "—"}, code ${error.code ?? "—"}: ${error.message}` : "No playback errors"}</p>

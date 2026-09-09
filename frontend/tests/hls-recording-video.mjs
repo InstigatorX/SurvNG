@@ -130,7 +130,7 @@ try {
     const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (existsSync(macChrome) ? macChrome : undefined);
     browser = engine === "webkit"
       ? await webkit.launch({ headless: true })
-      : await chromium.launch({ executablePath, headless: true, args: ["--autoplay-policy=no-user-gesture-required"] });
+      : await chromium.launch({ executablePath, headless: true });
     const page = await browser.newPage({ viewport: { width: 1000, height: 900 } });
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -149,6 +149,7 @@ try {
     }
     const initial = await snapshot();
     assert.ok(initial.paused && Math.abs(initial.duration - 30) < 0.5);
+    assert.ok(!initial.muted && initial.volume > 0, "authorization checks must start with an unmuted video");
     await waitColor(0);
     // Native WebKit HLS above 2× may enter I-frame trick-play mode. Timeline's
     // high-speed transport fallback is covered separately; exercise HLS at 2×.
@@ -191,8 +192,8 @@ try {
     await waitColor(1);
     const switched = await snapshot();
     assert.ok(switched.metadata > beforeSwitch.metadata && switched.paused && Math.abs(switched.time - 10.25) < 0.1, "changed playlist must deliver fresh metadata and preserve paused target");
-    if (initial.transport === "Native HLS") assert.notEqual(switched.id, beforeSwitch.id, "native playlist replacement must create a fresh video element");
-    else assert.equal(switched.id, beforeSwitch.id, "Shaka retains its attached video across playlist replacement");
+    assert.equal(switched.id, initial.id, "playlist changes must retain the initially authorized video element");
+    assert.equal(switched.muted, false, "playlist changes must not silently mute playback");
 
     await page.getByRole("button", { name: "Simulate network failure", exact: true }).click();
     await page.waitForFunction(() => window.hlsFixture.error?.category === 1, null, { timeout: 30000 });
@@ -203,25 +204,36 @@ try {
     assert.ok((await snapshot()).paused, "network recovery retains pause intent");
 
     // Revisit the exact same two playlist URLs repeatedly, like scrubbing back
-    // and forth between timeline windows. Native video identity changes only
-    // at the window boundary; seeks and recording segments keep that identity.
+    // and forth between timeline windows. Keep the initial gesture's video,
+    // including when unmuted playback starts asynchronously in another window.
     const errorsBeforeWindows = await page.evaluate(() => window.hlsFixture.events.filter((event) => event.name === "error").length);
     for (const [windowName, playing, target, channel] of [["B", false, 20.25, 2], ["A", true, 10.25, 1], ["B", true, 20.25, 2], ["A", false, 10.25, 1]]) {
       const before = await snapshot();
-      await page.getByRole("button", { name: `Window ${windowName} · ${playing ? "playing" : "paused"}`, exact: true }).click();
-      await page.waitForFunction(({ ready, target, playing }) => {
-        const value = window.hlsFixture.snapshot();
-        return value.ready > ready && value.readyState >= 2 && !value.seeking && value.paused === !playing
-          && (playing ? value.time > target + 0.2 && value.time < target + 2 : Math.abs(value.time - target) < 0.1)
-          && value.activeFrames > 0;
-      }, { ready: before.ready, target, playing });
+      // Avoid another automation evaluation/gesture between the delayed source
+      // change and playback settling: observe both inside this browser task.
+      await page.evaluate(async ({ index, ready, target, playing }) => {
+        const changedAt = await window.hlsFixture.delayedWindow(index, playing);
+        await new Promise((resolveReady, reject) => {
+          const deadline = performance.now() + 20000;
+          const check = () => {
+            const value = window.hlsFixture.snapshot();
+            if (window.hlsFixture.error) { reject(new Error(window.hlsFixture.error.message)); return; }
+            if (value.ready > ready && value.readyState >= 2 && !value.seeking && value.paused === !playing
+              && (playing ? value.time > target + 0.2 && value.time < target + 2 : Math.abs(value.time - target) < 0.1)
+              && value.activeFrames > 0 && value.lastActiveFrame?.wallTime >= changedAt) { resolveReady(); return; }
+            if (performance.now() >= deadline) { reject(new Error(`Window did not settle: ${JSON.stringify(value)}`)); return; }
+            window.setTimeout(check, 50);
+          };
+          check();
+        });
+      }, { index: windowName === "A" ? 0 : 1, ready: before.ready, target, playing });
       await waitColor(channel);
       const loaded = await snapshot();
       assert.notEqual(loaded.source, before.source, "alternating windows must load distinct playlist URLs");
       assert.ok(loaded.metadata > before.metadata, "every revisited window must deliver fresh metadata");
-      if (initial.transport === "Native HLS") assert.notEqual(loaded.id, before.id, "native HLS must replace the video when revisiting a window");
-      else assert.equal(loaded.id, before.id, "Shaka must keep its attached video while changing windows");
-      assert.equal(loaded.lastActiveFrame.id, loaded.id, "pixel samples must observe the new active element");
+      assert.equal(loaded.id, initial.id, "every window must reuse the initially authorized DOM video");
+      assert.equal(loaded.muted, false, "asynchronous window playback must stay unmuted");
+      assert.equal(loaded.lastActiveFrame.id, loaded.id, "pixel samples must observe the authorized active element");
       assert.equal(loaded.lastActiveFrame.source, loaded.source, "decoded-frame evidence belongs to the loaded window");
 
       await page.evaluate(() => window.hlsFixture.seek(9.75, false));
@@ -249,6 +261,8 @@ try {
       assert.equal(await page.evaluate(() => window.hlsFixture.events.filter((event) => event.name === "error").length), errorsBeforeWindows, "repeated window seeks must not produce playback errors");
       await page.getByRole("button", { name: "Pause", exact: true }).click();
     }
+    assert.ok(await page.evaluate(() => window.hlsFixture.events.filter((event) => event.name === "async-window").every((event) => event.userActivationActive !== true)), "delayed window loads must run outside transient user activation where observable");
+    assert.equal(await page.evaluate(() => window.hlsFixture.events.filter((event) => event.name === "play-rejected").length), 0, "unmuted play requests must not be rejected after playlist changes");
 
     // Gap/discontinuity exports exercise production timestamp continuity while
     // codec-changing fixtures remain explicit because HEVC availability varies.
@@ -266,7 +280,9 @@ try {
     }
     assert.deepEqual(pageErrors, [], "no uncaught browser errors");
     assert.ok(await page.evaluate(() => window.hlsFixture.events.every((event) => event.ownsRef)), "callbacks must use the forwarded DOM video");
-    console.log(`HLS recording browser tests passed: ${initial.transport} at ${continuousRate}×; continuous 10-second clips, repeated window replacement and paused/playing seeks, fresh metadata, network retry${extras.length ? `, ${extras.join(", ")}` : ""}.`);
+    assert.ok(await page.evaluate(() => window.hlsFixture.events.filter((event) => event.name === "play").every((event) => event.muted === false)), "all observed playback must remain unmuted");
+    console.log(`HLS recording browser tests passed: ${initial.transport} at ${continuousRate}×; one unmuted video, asynchronous playlist changes, paused/playing seeks, fresh metadata, network retry${extras.length ? `, ${extras.join(", ")}` : ""}.`);
+    console.log("Desktop browser results do not establish physical iOS playback authorization; verify the unmuted delayed-window controls on device.");
     if (process.env.HLS_RECORDING_HEVC !== "1") console.log("HEVC/mixed automated coverage not requested; use HLS_RECORDING_HEVC=1 on a compatible browser, or the visible codec selector.");
   }
 } finally {

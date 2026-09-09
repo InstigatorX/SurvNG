@@ -10,8 +10,8 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
   onReady, onError, ...videoProps
 }, forwardedRef) {
   const videoRef = useRef(null);
-  const callbacks = useRef({ onReady, onError });
-  callbacks.current = { onReady, onError };
+  const callbacks = useRef({ src, onReady, onError });
+  callbacks.current = { src, onReady, onError };
   const [nativeHls] = useState(supportsNativeRecordingHls);
   useImperativeHandle(forwardedRef, () => videoRef.current);
 
@@ -22,9 +22,13 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
     let checking = false;
     let disposed = false;
     let timer;
-    const ready = () => callbacks.current.onReady?.(null, video);
+    const isCurrent = () => !disposed && callbacks.current.src === src
+      && videoRef.current === video && video.getAttribute("src") === src;
+    const ready = () => {
+      if (isCurrent() && video.readyState >= 1) callbacks.current.onReady?.(null, video);
+    };
     const failed = async () => {
-      if (checking) return;
+      if (checking || !isCurrent() || !video.error) return;
       checking = true;
       const error = { code: video.error?.code, message: video.error?.message || "HLS playback failed" };
       // Safari also reports format errors for inaccessible playlists. Do not
@@ -44,22 +48,25 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
           window.clearTimeout(timer);
         }
       }
-      if (!disposed && videoRef.current === video && video.getAttribute("src") === src) {
+      if (isCurrent()) {
         callbacks.current.onError?.(error);
       }
       checking = false;
     };
     video.addEventListener("loadedmetadata", ready);
     video.addEventListener("error", failed);
-    // React's development effect replay may have released this same node.
-    if (video.getAttribute("src") !== src) video.setAttribute("src", src);
+    // Own source changes here so cleanup releases the previous playlist before
+    // loading the next one. Keep the element that received the user's play gesture.
+    video.setAttribute("src", src);
+    video.load();
     return () => {
       disposed = true;
       video.removeEventListener("loadedmetadata", ready);
       video.removeEventListener("error", failed);
       controller.abort();
       window.clearTimeout(timer);
-      // Release the captured outgoing resource, never the replacement ref.
+      // Reset the media resource, including stale buffers and pending seeks,
+      // without replacing the element or its Safari playback permission.
       video.pause();
       video.removeAttribute("src");
       video.load();
@@ -67,10 +74,7 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
   }, [nativeHls, src]);
 
   return nativeHls
-    // Safari can retain the previous HLS window's buffered ranges and remain
-    // seeking forever when its source changes. Reset only at playlist/window
-    // changes; all recording fragments within that playlist share one player.
-    ? <video key={src} {...videoProps} ref={videoRef} src={src} />
+    ? <video {...videoProps} ref={videoRef} />
     : <ShakaVideo {...videoProps} ref={videoRef} src={src} mimeType={mimeType}
       startTime={startTime} bufferingGoal={bufferingGoal} onReady={onReady} onError={onError} />;
 });
