@@ -163,7 +163,7 @@ try {
     assert.equal(crossed.metadata, initial.metadata, "crossing clip boundaries must not reload media metadata");
     const frames = await page.evaluate(() => window.hlsFixture.frames);
     for (const channel of [0, 1, 2]) assert.ok(frames.some((frame) => frame.rgb[channel] > 100 && frame.rgb.every((value, i) => i === channel || value < 70)), `playback must decode color ${channel} across boundaries`);
-    assert.ok(frames.every((frame) => Math.max(...frame.rgb) > 70), "decoded output must not contain black transition frames");
+    assert.ok(frames.every((frame) => Math.max(...frame.rgb) > 70), "decoded pixel samples must not be black");
     const playingFrames = frames.filter((frame) => !frame.paused && frame.playRun > 0);
     assert.ok(playingFrames.every((frame, index) => index === 0 || frame.time >= playingFrames[index - 1].time - 0.1), "media time must not wrap to earlier recordings at a segment boundary");
     assert.equal(await page.evaluate(() => window.hlsFixture.events.filter((event) => event.name === "error").length), 0, "normal HLS playback must not emit playback errors");
@@ -191,6 +191,8 @@ try {
     await waitColor(1);
     const switched = await snapshot();
     assert.ok(switched.metadata > beforeSwitch.metadata && switched.paused && Math.abs(switched.time - 10.25) < 0.1, "changed playlist must deliver fresh metadata and preserve paused target");
+    if (initial.transport === "Native HLS") assert.notEqual(switched.id, beforeSwitch.id, "native playlist replacement must create a fresh video element");
+    else assert.equal(switched.id, beforeSwitch.id, "Shaka retains its attached video across playlist replacement");
 
     await page.getByRole("button", { name: "Simulate network failure", exact: true }).click();
     await page.waitForFunction(() => window.hlsFixture.error?.category === 1, null, { timeout: 30000 });
@@ -199,6 +201,54 @@ try {
     await page.waitForFunction((ready) => window.hlsFixture.snapshot().ready > ready && !window.hlsFixture.error, switched.ready);
     await waitColor(1);
     assert.ok((await snapshot()).paused, "network recovery retains pause intent");
+
+    // Revisit the exact same two playlist URLs repeatedly, like scrubbing back
+    // and forth between timeline windows. Native video identity changes only
+    // at the window boundary; seeks and recording segments keep that identity.
+    const errorsBeforeWindows = await page.evaluate(() => window.hlsFixture.events.filter((event) => event.name === "error").length);
+    for (const [windowName, playing, target, channel] of [["B", false, 20.25, 2], ["A", true, 10.25, 1], ["B", true, 20.25, 2], ["A", false, 10.25, 1]]) {
+      const before = await snapshot();
+      await page.getByRole("button", { name: `Window ${windowName} · ${playing ? "playing" : "paused"}`, exact: true }).click();
+      await page.waitForFunction(({ ready, target, playing }) => {
+        const value = window.hlsFixture.snapshot();
+        return value.ready > ready && value.readyState >= 2 && !value.seeking && value.paused === !playing
+          && (playing ? value.time > target + 0.2 && value.time < target + 2 : Math.abs(value.time - target) < 0.1)
+          && value.activeFrames > 0;
+      }, { ready: before.ready, target, playing });
+      await waitColor(channel);
+      const loaded = await snapshot();
+      assert.notEqual(loaded.source, before.source, "alternating windows must load distinct playlist URLs");
+      assert.ok(loaded.metadata > before.metadata, "every revisited window must deliver fresh metadata");
+      if (initial.transport === "Native HLS") assert.notEqual(loaded.id, before.id, "native HLS must replace the video when revisiting a window");
+      else assert.equal(loaded.id, before.id, "Shaka must keep its attached video while changing windows");
+      assert.equal(loaded.lastActiveFrame.id, loaded.id, "pixel samples must observe the new active element");
+      assert.equal(loaded.lastActiveFrame.source, loaded.source, "decoded-frame evidence belongs to the loaded window");
+
+      await page.evaluate(() => window.hlsFixture.seek(9.75, false));
+      await page.waitForFunction(() => {
+        const value = window.hlsFixture.snapshot();
+        return value.paused && !value.seeking && Math.abs(value.time - 9.75) < 0.1;
+      });
+      await waitColor(0);
+      await page.evaluate(() => window.hlsFixture.seek(10.25, false));
+      await page.waitForFunction(() => {
+        const value = window.hlsFixture.snapshot();
+        return value.paused && !value.seeking && Math.abs(value.time - 10.25) < 0.1;
+      });
+      await waitColor(1);
+
+      await page.evaluate(() => window.hlsFixture.seek(9.75, true));
+      await page.waitForFunction(() => {
+        const value = window.hlsFixture.snapshot();
+        return !value.paused && !value.seeking && value.time > 10.4 && value.time < 12;
+      });
+      await waitColor(1);
+      const progressed = await snapshot();
+      assert.equal(progressed.id, loaded.id, "paused seeks and playing segment crossings must retain the window's video");
+      assert.equal(progressed.metadata, loaded.metadata, "seeking within a playlist must not reload metadata");
+      assert.equal(await page.evaluate(() => window.hlsFixture.events.filter((event) => event.name === "error").length), errorsBeforeWindows, "repeated window seeks must not produce playback errors");
+      await page.getByRole("button", { name: "Pause", exact: true }).click();
+    }
 
     // Gap/discontinuity exports exercise production timestamp continuity while
     // codec-changing fixtures remain explicit because HEVC availability varies.
@@ -216,7 +266,7 @@ try {
     }
     assert.deepEqual(pageErrors, [], "no uncaught browser errors");
     assert.ok(await page.evaluate(() => window.hlsFixture.events.every((event) => event.ownsRef)), "callbacks must use the forwarded DOM video");
-    console.log(`HLS recording browser tests passed: ${initial.transport} at ${continuousRate}×; continuous 10-second clips, boundary seeks, fresh metadata, network retry${extras.length ? `, ${extras.join(", ")}` : ""}.`);
+    console.log(`HLS recording browser tests passed: ${initial.transport} at ${continuousRate}×; continuous 10-second clips, repeated window replacement and paused/playing seeks, fresh metadata, network retry${extras.length ? `, ${extras.join(", ")}` : ""}.`);
     if (process.env.HLS_RECORDING_HEVC !== "1") console.log("HEVC/mixed automated coverage not requested; use HLS_RECORDING_HEVC=1 on a compatible browser, or the visible codec selector.");
   }
 } finally {

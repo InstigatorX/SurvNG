@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { recordingPlaybackTransport, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt } from "../src/recordingPlayback.mjs";
+import { recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, playbackRowsCoverEpoch } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
   assert.equal(isRecordingCompatibilityError(error), true, JSON.stringify(error));
@@ -159,6 +159,7 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
     originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate", playbackRate: 2, normalizedTimelinePlaybackRate: (rate) => rate,
     playbackRetryRef: { current: { attempts: 0 } }, pendingSeekEpochRef: { current: 2005 },
     desiredEpochRef: { current: 2005 }, snapToRecording: (value) => value,
+    loadedPlaybackWindow: { start: 1000, end: 1900 },
     playbackTimeline: [{ start_epoch: 1000, end_epoch: 1010 }], playbackRowsCoverEpoch: () => false,
     epochToPlaybackMediaTime: () => { throw new Error("Old window must not clamp pending seek"); },
   });
@@ -166,6 +167,76 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
   context.handleRecordingReady(null, video);
   assert.equal(context.pendingSeekEpochRef.current, 2005);
   assert.equal(context.desiredEpochRef.current, 2005);
+}
+
+// Availability merges small gaps between files. A seek inside such a gap in
+// the loaded window must snap to media and release subsequent playhead updates.
+{
+  const video = { playbackRate: 1, currentTime: 0, paused: true, fastSeek() { throw new Error("Native HLS must use an exact seek"); } };
+  const playheads = [];
+  const plays = [];
+  const context = vm.createContext({
+    Number, Math, performance, nativeHls: true, videoRef: { current: video }, useSegmentPlayback: false,
+    transport: "hls", requestedTransport: "hls", originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate",
+    playbackRate: 1, normalizedTimelinePlaybackRate: (rate) => rate,
+    playbackRetryRef: { current: { attempts: 0 } }, pendingSeekEpochRef: { current: 1005.1 },
+    pendingSeekModeRef: { current: "window" }, desiredEpochRef: { current: 1005.1 },
+    loadedPlaybackWindow: { start: 1000, end: 1900 },
+    playbackTimeline: [
+      { start_epoch: 1000, end_epoch: 1005, media_start: 0, media_end: 5 },
+      { start_epoch: 1005.2, end_epoch: 1010, media_start: 5, media_end: 9.8 },
+    ],
+    playbackRowsCoverEpoch, snapToRecording: (value) => value,
+    autoplayRef: { current: true }, ignorePauseUntilRef: {}, ignorePauseAfterSeekMs: () => 900,
+    shouldResumePlaybackAfterSeek: ({ autoplay }) => autoplay,
+    requestRecordingPlay: (element) => plays.push(element),
+    seekVideoToTime,
+    setPlayhead: (epoch) => playheads.push(epoch), setPlaybackNotice() {}, setPlaybackError() {},
+    setPlaybackErrorStage() {}, setHeroSeeking() {}, clearSeekWatchdog() {}, scheduleSeekWatchdog() {},
+  });
+  const mappings = source.slice(source.indexOf("  function mediaTimeToEpoch("), source.indexOf("  function windowAround("));
+  const completion = source.slice(source.indexOf("  function completePendingRecordingSeek("), source.indexOf("  function completePendingNativeSeek("));
+  const timeUpdate = source.slice(source.indexOf("  function handleRecordingTimeUpdate("), source.indexOf("  function handleRecordingSeeked("));
+  vm.runInContext(mappings + readyHandler + completion + timeUpdate, context);
+  context.handleRecordingReady(null, video);
+  assert.equal(context.pendingSeekModeRef.current, "window-ready", "a gap in the loaded window must not leave readiness waiting forever");
+  assert.equal(video.currentTime, 5, "seek to the next playable segment boundary");
+  video.seeking = true;
+  context.completePendingRecordingSeek(video);
+  assert.equal(context.pendingSeekModeRef.current, "window-ready", "watchdog must not declare a still-seeking native video ready");
+  video.seeking = false;
+  context.completePendingRecordingSeek(video);
+  assert.equal(context.pendingSeekEpochRef.current, null);
+  assert.equal(context.pendingSeekModeRef.current, null);
+  assert.equal(context.desiredEpochRef.current, 1005.2);
+  assert.equal(plays.length, 1, "preserve the scrub's playback intent");
+  video.currentTime = 6;
+  context.handleRecordingTimeUpdate({ currentTarget: video });
+  assert.equal(playheads.at(-1), 1006.2, "playhead updates must resume after the gap seek");
+}
+
+// Subsequent scrubs within the current native HLS playlist must also bypass
+// Safari fastSeek, not just the initial metadata/ready seek.
+{
+  const video = { currentTime: 0, paused: false, fastSeek() { throw new Error("Repeated native HLS scrub used fastSeek"); } };
+  const context = vm.createContext({
+    Number, nativeHls: true, useSegmentPlayback: false, isAllCameras: false, activeCameraId: "gate",
+    timelineView: { startEpoch: 1000, endEpoch: 1900 }, loadedPlaybackWindow: { start: 1000, end: 1900 },
+    playbackTimeline: [{ start_epoch: 1000, end_epoch: 1010 }], playbackRowsCoverEpoch,
+    snapToRecording: (time) => time, windowAround: () => ({ start: 1000, end: 1900 }),
+    videoRef: { current: video }, autoplayRef: {}, pendingSeekEpochRef: {}, pendingSeekModeRef: {}, desiredEpochRef: {},
+    playbackRequestRef: { current: 0 }, epochToPlaybackMediaTime: (epoch) => epoch - 1000, seekVideoToTime,
+    setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
+    setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {},
+  });
+  const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport("));
+  vm.runInContext(playAt, context);
+  for (const target of [1002, 1008, 1004]) {
+    context.playAt(target, true);
+    assert.equal(video.currentTime, target - 1000);
+    assert.equal(context.pendingSeekModeRef.current, "local");
+    assert.equal(context.pendingSeekEpochRef.current, target);
+  }
 }
 
 // A fresh camera/day starts with its requested default rather than carrying a

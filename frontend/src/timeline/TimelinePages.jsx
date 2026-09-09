@@ -1300,7 +1300,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function completePendingRecordingSeek(video) {
-    if (video !== videoRef.current) return;
+    if (video !== videoRef.current || video.seeking) return;
     const pendingMode = pendingSeekModeRef.current;
     if (pendingMode !== "local" && pendingMode !== "window-ready") return;
     clearSeekWatchdog();
@@ -1508,7 +1508,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       setPlaybackNotice(autoplay ? "Seeking..." : "");
       // Start playback in the user-gesture window; Safari often pauses again while seeking.
       if (autoplay && video.paused) requestRecordingPlay(video, false);
-      seekVideoToTime(video, mediaTime);
+      seekVideoToTime(video, mediaTime, { allowFastSeek: !nativeHls });
       scheduleSeekWatchdog(video, mediaTime);
       if (!autoplay) setPlaybackNotice("");
     } else {
@@ -1938,15 +1938,18 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       : desiredEpochRef.current;
     const target = Number.isFinite(retained) ? snapToRecording(retained) : snapToRecording(Date.now() / 1000);
     // A speed change can mount HLS while a seek's new index window is pending.
-    // The outgoing window must not clamp or complete that pending seek.
-    if (!playbackRowsCoverEpoch(playbackTimeline, target)) return;
+    // Reject that old window, but allow gaps within the requested window: the
+    // day overview merges short gaps and epochToPlaybackMediaTime snaps them
+    // to recorded footage. Requiring exact row coverage leaves seeks pending.
+    if (!loadedPlaybackWindow || !Number.isFinite(target)
+      || target < loadedPlaybackWindow.start || target >= loadedPlaybackWindow.end) return;
     const mediaTime = epochToPlaybackMediaTime(target);
     const seekRequired = Number.isFinite(mediaTime) && Math.abs(video.currentTime - mediaTime) > 0.05;
     if (seekRequired) {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "window-ready";
       setPlaybackNotice("Seeking...");
-      seekVideoToTime(video, mediaTime);
+      seekVideoToTime(video, mediaTime, { allowFastSeek: !nativeHls });
       scheduleSeekWatchdog(video, mediaTime);
     }
     if (Number.isFinite(target)) {

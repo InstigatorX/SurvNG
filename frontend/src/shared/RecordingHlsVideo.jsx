@@ -51,17 +51,26 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
     };
     video.addEventListener("loadedmetadata", ready);
     video.addEventListener("error", failed);
+    // React's development effect replay may have released this same node.
+    if (video.getAttribute("src") !== src) video.setAttribute("src", src);
     return () => {
       disposed = true;
       video.removeEventListener("loadedmetadata", ready);
       video.removeEventListener("error", failed);
       controller.abort();
       window.clearTimeout(timer);
+      // Release the captured outgoing resource, never the replacement ref.
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
     };
   }, [nativeHls, src]);
 
   return nativeHls
-    ? <video {...videoProps} ref={videoRef} src={src} />
+    // Safari can retain the previous HLS window's buffered ranges and remain
+    // seeking forever when its source changes. Reset only at playlist/window
+    // changes; all recording fragments within that playlist share one player.
+    ? <video key={src} {...videoProps} ref={videoRef} src={src} />
     : <ShakaVideo {...videoProps} ref={videoRef} src={src} mimeType={mimeType}
       startTime={startTime} bufferingGoal={bufferingGoal} onReady={onReady} onError={onError} />;
 });
