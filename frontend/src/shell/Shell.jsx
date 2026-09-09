@@ -30,6 +30,7 @@ import { formatBytes, formatMilliseconds, formatRate } from "../shared/format.js
 import { useStoredState, useModalFocus } from "../shared/hooks.js";
 import { useAppEvents } from "../shared/events.js";
 import { useRuntimeState } from "../shared/runtimeState.jsx";
+import { RecordingHealthBar } from "./RecordingHealthBar.jsx";
 
 export const WORKSPACE_ICONS = Object.freeze({
   live: Video,
@@ -60,7 +61,6 @@ export function MobileMoreSheet({ links, page, session = null, onClose }) {
     </div>
   ), document.body);
 }
-
 export function Shell({ page, theme, recordingContext, session = null, onSignOut = null, children }) {
   const shellRef = useRef(null);
   const topbarRef = useRef(null);
@@ -165,7 +165,7 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
           <input ref={headerSearchRef} value={headerSearchQuery} onChange={(event) => setHeaderSearchQuery(event.target.value)} placeholder="Search incidents..." aria-label="Search incidents semantically" />
           <kbd>/</kbd>
         </form>
-        <div className="workspace-system-bar" aria-label="System status"><LiveHeaderStats /></div>
+        <div className="workspace-system-bar" aria-label={page === "live" || page === "timeline" ? "Recording health" : "System status"}>{page === "live" || page === "timeline" ? <RecordingHealthBar /> : <LiveHeaderStats />}</div>
       </header>
       <div className="workspace-content"><h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>{children}</div>
       <nav className="mobile-workspace-nav" aria-label="Primary">

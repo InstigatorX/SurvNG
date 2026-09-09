@@ -35,6 +35,7 @@ import {
   X,
 } from "lucide-react";
 import { browserStorage } from "../storage.mjs";
+import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
 import { recordingSegmentAt, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
@@ -773,6 +774,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [exportJob, setExportJob] = useState(null);
   const [exportError, setExportError] = useState("");
   const [exportSubmitting, setExportSubmitting] = useState(false);
+  const [clipPreviewing, setClipPreviewing] = useState(false);
+  const clipPreviewEndRef = useRef(null);
   const [gridPlaying, setGridPlaying] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState(initialView.eventId);
   const [trailEventIds, setTrailEventIds] = useState(() => (
@@ -1129,6 +1132,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }, 1_000, exportIsActive(exportJob), { restartKey: exportJob?.id || "" });
 
   useEffect(() => {
+    cancelClipPreview();
     setExportRange(null);
     setExportJob(null);
     setExportError("");
@@ -1362,6 +1366,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const epoch = nativeSegment.start_epoch + Math.max(0, Number(event.currentTarget.currentTime) || 0);
     desiredEpochRef.current = epoch;
     setPlayhead(epoch);
+    finishClipPreviewAtEnd(event.currentTarget, epoch);
   }
 
   function requestRecordingPlay(video, showBlocked = true) {
@@ -1929,6 +1934,34 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!Number.isFinite(epoch)) return;
     desiredEpochRef.current = epoch;
     setPlayhead(epoch);
+    finishClipPreviewAtEnd(event.currentTarget, epoch);
+  }
+
+  function finishClipPreviewAtEnd(video, epoch) {
+    if (!clipPreviewReachedEnd(epoch, clipPreviewEndRef.current)) return false;
+    cancelClipPreview({ pause: true, notice: "Clip preview complete", video });
+    return true;
+  }
+
+  function cancelClipPreview({ pause = false, notice = "", video = videoRef.current } = {}) {
+    const active = Number.isFinite(clipPreviewEndRef.current);
+    clipPreviewEndRef.current = null;
+    if (active) setClipPreviewing(false);
+    if (pause) {
+      autoplayRef.current = false;
+      setHeroPlaying(false);
+      video?.pause();
+    }
+    if (notice || active) setPlaybackNotice(notice);
+  }
+
+  function handleRecordingEnded(event) {
+    const video = event?.currentTarget;
+    const epoch = useNativeMobilePlayback && nativeSegment
+      ? nativeSegment.start_epoch + Math.max(0, Number(video?.currentTime) || 0)
+      : mediaTimeToEpoch(Number(video?.currentTime));
+    if (finishClipPreviewAtEnd(video, epoch)) return;
+    continueRecordingPlayback();
   }
 
   function handleRecordingSeeked(event) {
@@ -1939,6 +1972,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const video = videoRef.current;
     if (!video) return;
     if (!video.paused || (useNativeMobilePlayback && heroSeeking && autoplayRef.current)) {
+      if (typeof cancelClipPreview === "function") cancelClipPreview();
       autoplayRef.current = false;
       setHeroPlaying(false);
       video.pause();
@@ -2110,6 +2144,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function skipPlayback(seconds, playing = autoplayRef.current || heroPlaying) {
+    cancelClipPreview();
     const video = videoRef.current;
     let currentEpoch = Number.isFinite(playhead) ? playhead : desiredEpochRef.current;
     if (!isAllCameras && video && Number.isFinite(video.currentTime)) {
@@ -2209,6 +2244,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   function toggleExport() {
     if (exportJob && ["queued", "running", "cancelling"].includes(exportJob.status)) return;
     if (exportRange) {
+      cancelClipPreview();
       setExportRange(null);
       setExportJob(null);
       setExportError("");
@@ -2225,8 +2261,37 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   const exportActive = Boolean(exportJob && ["queued", "running", "cancelling"].includes(exportJob.status));
 
+  function setClipBoundary(kind) {
+    if (!exportRange || exportJob) return;
+    const next = setClipBoundaryAtPlayhead({
+      range: exportRange,
+      kind,
+      playhead,
+      startEpoch: timelineView.startEpoch,
+      endEpoch: timelineView.endEpoch,
+    });
+    if (next !== exportRange) {
+      cancelClipPreview();
+      setExportRange(next);
+    }
+  }
+
+  function jumpToClipBoundary(epoch) {
+    cancelClipPreview();
+    playAt(epoch, false);
+  }
+
+  function previewClip() {
+    if (!exportRange || !clipRangeIsValid(exportRange, timelineView.startEpoch, timelineView.endEpoch)) return;
+    clipPreviewEndRef.current = exportRange.end;
+    setClipPreviewing(true);
+    setPlaybackNotice("Previewing selected clip");
+    playAt(exportRange.start, true);
+  }
+
   async function startExport() {
     if (!activeCameraId || !exportRange || exportSubmitting) return;
+    cancelClipPreview();
     setExportSubmitting(true);
     setExportError("");
     try {
@@ -2335,7 +2400,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
               onTimeUpdate={handleNativeSegmentTimeUpdate}
               onSeeked={(event) => completePendingNativeSeek(event.currentTarget)}
-              onEnded={continueRecordingPlayback}
+              onEnded={handleRecordingEnded}
               onPlay={() => {
                 autoplayRef.current = true;
                 setHeroPlaying(true);
@@ -2345,6 +2410,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               onPause={(event) => {
                 if (performance.now() < ignorePauseUntilRef.current) return;
                 if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                  cancelClipPreview();
                   autoplayRef.current = false;
                   setHeroPlaying(false);
                 }
@@ -2366,7 +2432,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               onError={handleRecordingError}
               onTimeUpdate={handleRecordingTimeUpdate}
               onSeeked={handleRecordingSeeked}
-              onEnded={continueRecordingPlayback}
+              onEnded={handleRecordingEnded}
               onPlay={() => {
                 autoplayRef.current = true;
                 setHeroPlaying(true);
@@ -2376,6 +2442,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               onPause={(event) => {
                 if (performance.now() < ignorePauseUntilRef.current) return;
                 if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                  cancelClipPreview();
                   autoplayRef.current = false;
                   setHeroPlaying(false);
                 }
@@ -2552,10 +2619,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             playhead={playhead ?? dayStart}
             timeZone={timeZone}
             windowHours={incidentRangeHours}
-            onSeek={(epoch) => playAt(epoch, true)}
+            onSeek={(epoch) => { cancelClipPreview(); playAt(epoch, true); }}
             onPanViewport={panTimelineViewport}
             exportRange={isAllCameras ? null : exportRange}
-            onExportRangeChange={isAllCameras || exportJob ? null : setExportRange}
+            onExportRangeChange={isAllCameras || exportJob ? null : (nextRange) => { cancelClipPreview(); setExportRange(nextRange); }}
           />
           {exportRange ? (
             <section className="recordings-v2-export-panel" aria-label="Export recording">
@@ -2567,6 +2634,19 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
                 <span><b>Start</b>{formatDateTime(exportRange.start, timeZone)}</span>
                 <span><b>End</b>{formatDateTime(exportRange.end, timeZone)}</span>
                 <span><b>Length</b>{formatDuration(exportRange.end - exportRange.start)}</span>
+              </div>
+              <div className="recordings-v2-clip-composer" aria-label="Clip selection controls">
+                <div className="recordings-v2-clip-composer-heading">
+                  <span><Camera size={14} />{cameras.find((camera) => camera.id === activeCameraId)?.name || activeCameraId}</span>
+                  <small>Choose within {formatTimeOnly(timelineView.startEpoch, timeZone)}–{formatTimeOnly(timelineView.endEpoch, timeZone)}. Minimum 1 sec.</small>
+                </div>
+                <div className="recordings-v2-clip-boundaries">
+                  <button type="button" onClick={() => jumpToClipBoundary(exportRange.start)} disabled={Boolean(exportJob)} title="Jump to selected start"><SkipBack size={14} />Start</button>
+                  <button type="button" onClick={() => setClipBoundary("start")} disabled={Boolean(exportJob) || !canSetClipBoundaryAtPlayhead({ range: exportRange, kind: "start", playhead, startEpoch: timelineView.startEpoch, endEpoch: timelineView.endEpoch })}>Set start here</button>
+                  <button type="button" onClick={() => setClipBoundary("end")} disabled={Boolean(exportJob) || !canSetClipBoundaryAtPlayhead({ range: exportRange, kind: "end", playhead, startEpoch: timelineView.startEpoch, endEpoch: timelineView.endEpoch })}>Set end here</button>
+                  <button type="button" onClick={() => jumpToClipBoundary(exportRange.end)} disabled={Boolean(exportJob)} title="Jump to selected end">End<SkipForward size={14} /></button>
+                  {clipPreviewing ? <button type="button" className="active" onClick={() => cancelClipPreview({ pause: true, notice: "Clip preview stopped" })}><Pause size={14} />Stop preview</button> : <button type="button" onClick={previewClip} disabled={Boolean(exportJob) || !clipRangeIsValid(exportRange, timelineView.startEpoch, timelineView.endEpoch)}><Play size={14} fill="currentColor" />Preview clip</button>}
+                </div>
               </div>
               <div className="recordings-v2-export-options">
                 <label className="export-name-field"><span>Name</span><input value={exportLabel} onChange={(event) => setExportLabel(event.target.value)} placeholder="Optional export name" maxLength="120" disabled={Boolean(exportJob)} /></label>
