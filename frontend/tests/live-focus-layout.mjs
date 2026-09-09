@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { focusLiveMosaicLayout, focusedLiveCameraId } from "../src/liveFocusLayout.mjs";
+import { UNIFORM_LIVE_TILE_ASPECT, uniformLiveGridLayout } from "../src/liveWorkspace.mjs";
 
 const cameras = [{ id: "front" }, { id: "drive" }, { id: "gate" }];
 
@@ -24,6 +25,19 @@ assert.ok(layout[1].width / layout[1].height > 1.7);
 
 const five = focusLiveMosaicLayout([...cameras, { id: "garage" }, { id: "yard" }], 1000, 600, "front");
 assert.equal(five[1].width, five[2].width);
+const automatic = uniformLiveGridLayout(cameras, 952, 766);
+const childGeometry = (tiles) => tiles.slice(1).map(({ x, y, width, height }) => ({ x, y, width, height }));
+for (const primaryAspect of [9 / 16, 1, 4 / 3, 32 / 9]) {
+  const mixed = focusLiveMosaicLayout(cameras, 952, 766, "drive", 4, primaryAspect);
+  assert.deepEqual(childGeometry(mixed), childGeometry(layout), "changing the primary aspect must not reshape or move the children");
+  assert.ok(Math.abs(mixed[0].width / mixed[0].height - primaryAspect) < 1e-10, "primary retains its own aspect");
+  for (const child of mixed.slice(1)) {
+    assert.ok(Math.abs(child.width / child.height - UNIFORM_LIVE_TILE_ASPECT) < 1e-10);
+    assert.ok(Math.abs(child.width / child.height - automatic[0].width / automatic[0].height) < 1e-10, "children use Automatic's crop viewport");
+    const primary = mixed[0];
+    assert.equal(primary.x < child.x + child.width && primary.x + primary.width > child.x && primary.y < child.y + child.height && primary.y + primary.height > child.y, false);
+  }
+}
 for (const candidate of [layout, five]) {
   const bounds = candidate === layout ? { width: 952, height: 766 } : { width: 1000, height: 600 };
   for (const tile of candidate) {

@@ -14,8 +14,9 @@ export function orderedLiveCamerasForFocus(cameras, focusedCameraId, mobile) {
 }
 
 export const LIVE_DENSITY_OPTIONS = Object.freeze(["fit", "4", "6", "9", "16", "25"]);
+export const UNIFORM_LIVE_TILE_ASPECT = 16 / 9;
 
-export function uniformLiveGridLayout(cameras, width, height, gap = 4, aspect = 16 / 9) {
+export function uniformLiveGridLayout(cameras, width, height, gap = 4, aspect = UNIFORM_LIVE_TILE_ASPECT) {
   const items = [...(cameras || [])];
   const availableWidth = Number(width);
   const availableHeight = Number(height);

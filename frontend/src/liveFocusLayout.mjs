@@ -1,3 +1,5 @@
+import { UNIFORM_LIVE_TILE_ASPECT } from "./liveWorkspace.mjs";
+
 export function focusedLiveCameraId(cameras, storedCameraId) {
   const ids = (cameras || []).map((camera) => String(camera?.id || "")).filter(Boolean);
   const stored = String(storedCameraId || "");
@@ -28,19 +30,19 @@ function packedCells(columns, supportCount) {
   return { cells, rows: Math.max(2, row) };
 }
 
-export function focusLiveMosaicLayout(cameras, width, height, storedCameraId, gap = 4, preferredAspect = 16 / 9) {
+export function focusLiveMosaicLayout(cameras, width, height, storedCameraId, gap = 4, preferredAspect = UNIFORM_LIVE_TILE_ASPECT) {
   const items = [...(cameras || [])];
   const availableWidth = Number(width);
   const availableHeight = Number(height);
   const requestedGap = Number(gap);
   const requestedAspect = Number(preferredAspect);
   const gutter = Number.isFinite(requestedGap) ? Math.max(0, requestedGap) : 0;
-  const aspect = Number.isFinite(requestedAspect) && requestedAspect > 0 ? requestedAspect : 16 / 9;
+  const primaryAspect = Number.isFinite(requestedAspect) && requestedAspect > 0 ? requestedAspect : UNIFORM_LIVE_TILE_ASPECT;
   if (!items.length || !Number.isFinite(availableWidth) || !Number.isFinite(availableHeight) || !(availableWidth > 0) || !(availableHeight > 0)) return [];
 
   const primaryId = focusedLiveCameraId(items, storedCameraId);
   if (items.length === 1) {
-    return [{ camera: items[0], primary: true, ...fitAspect(availableWidth, availableHeight, aspect) }];
+    return [{ camera: items[0], primary: true, ...fitAspect(availableWidth, availableHeight, primaryAspect) }];
   }
 
   const primary = items.find((camera) => String(camera.id) === primaryId);
@@ -51,8 +53,10 @@ export function focusLiveMosaicLayout(cameras, width, height, storedCameraId, ga
     const widthPerCell = (availableWidth - gutter * (columns - 1)) / columns;
     const heightPerCell = (availableHeight - gutter * (packed.rows - 1)) / packed.rows;
     if (!(widthPerCell > 0) || !(heightPerCell > 0)) continue;
-    const cellWidth = Math.min(widthPerCell, heightPerCell * aspect);
-    const cellHeight = cellWidth / aspect;
+    // Children use Automatic's uniform crop viewport, independent of the
+    // primary stream's aspect. Camera framing still controls the crop itself.
+    const cellWidth = Math.min(widthPerCell, heightPerCell * UNIFORM_LIVE_TILE_ASPECT);
+    const cellHeight = cellWidth / UNIFORM_LIVE_TILE_ASPECT;
     const candidate = {
       columns,
       rows: packed.rows,
@@ -69,9 +73,10 @@ export function focusLiveMosaicLayout(cameras, width, height, storedCameraId, ga
   const gridHeight = best.rows * best.cellHeight + gutter * (best.rows - 1);
   const offsetX = Math.max(0, (availableWidth - gridWidth) / 2);
   const offsetY = Math.max(0, (availableHeight - gridHeight) / 2);
+  const primaryFrame = fitAspect(best.primaryWidth, best.primaryHeight, primaryAspect);
 
   return [
-    { camera: primary, primary: true, x: offsetX, y: offsetY, width: best.primaryWidth, height: best.primaryHeight },
+    { camera: primary, primary: true, ...primaryFrame, x: offsetX + primaryFrame.x, y: offsetY + primaryFrame.y },
     ...supports.map((camera, index) => ({
       camera,
       primary: false,
