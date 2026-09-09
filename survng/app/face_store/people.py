@@ -818,9 +818,12 @@ class FaceStorePeopleMixin:
         """Prioritize actionable unknowns and ambiguous suggestions."""
         resolved_limit = max(1, min(int(limit), 500))
         fingerprint, threshold = self._unknown_cluster_policy()
+        membership_where, membership_values = self._unknown_cluster_membership_where(
+            fingerprint, threshold,
+        )
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 select o.*, candidate.name as candidate_person_name,
                     m.cluster_id as unknown_cluster_id,
                     coalesce(cluster_stats.cluster_size, 1) as cluster_size
@@ -829,8 +832,7 @@ class FaceStorePeopleMixin:
                 left join face_unknown_members m
                     on m.observation_id = o.id
                     and m.model_fingerprint != ''
-                    and m.model_fingerprint = ?
-                    and abs(m.policy_threshold - ?) < 0.000001
+                    and {membership_where}
                     and m.generation = (
                         select coalesce(max(current_members.generation), 0)
                         from face_unknown_members current_members
@@ -838,18 +840,18 @@ class FaceStorePeopleMixin:
                             and abs(current_members.policy_threshold - ?) < 0.000001
                     )
                 left join (
-                    select cluster_id, count(*) as cluster_size
-                    from face_unknown_members
-                    where model_fingerprint != ''
-                        and model_fingerprint = ?
-                        and abs(policy_threshold - ?) < 0.000001
-                        and generation = (
+                    select m.cluster_id, count(*) as cluster_size
+                    from face_unknown_members m
+                    join face_observations o on o.id = m.observation_id
+                    where m.model_fingerprint != ''
+                        and {membership_where}
+                        and m.generation = (
                             select coalesce(max(current_members.generation), 0)
                             from face_unknown_members current_members
                             where current_members.model_fingerprint = ?
                                 and abs(current_members.policy_threshold - ?) < 0.000001
                         )
-                    group by cluster_id
+                    group by m.cluster_id
                 ) cluster_stats on cluster_stats.cluster_id = m.cluster_id
                 where o.canonical = 1
                     and o.person_id is null
@@ -859,8 +861,8 @@ class FaceStorePeopleMixin:
                 limit ?
                 """,
                 (
-                    fingerprint, threshold, fingerprint, threshold,
-                    fingerprint, threshold, fingerprint, threshold,
+                    *membership_values, fingerprint, threshold,
+                    *membership_values, fingerprint, threshold,
                     FACE_OUTCOME_EMBEDDED, max(resolved_limit * 4, 200),
                 ),
             ).fetchall()
