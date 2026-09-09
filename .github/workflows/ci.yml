@@ -35,7 +35,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt pytest anyio
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
       - name: Run focused Python tests
         run: |
           scripts/run-tests.sh \
@@ -44,7 +44,6 @@ jobs:
             tests/test_app_lifespan.py \
             tests/test_frontend_routes.py \
             tests/test_recorder.py \
-            tests/test_face_store.py \
             tests/test_calibration.py \
             tests/test_live_delivery.py \
             tests/test_detector*.py \
@@ -55,6 +54,13 @@ jobs:
             tests/test_object_tracking.py \
             tests/test_camera_worker.py \
             tests/test_config_reload.py
+      - name: Run face and identity regression tests
+        run: |
+          scripts/run-tests.sh \
+            tests/test_face*.py \
+            tests/test_identity*.py \
+            tests/test_unknown_identity*.py \
+            tests/test_timeline_identity.py
       - name: Run local observability regression tests
         run: scripts/run-tests.sh tests/test_local_observability.py tests/test_camera_status.py
       - name: Run motion subsystem regression tests
