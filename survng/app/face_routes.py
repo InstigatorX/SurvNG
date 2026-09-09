@@ -413,6 +413,8 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
             except ValueError as exc:
                 status_code = 404 if "not found" in str(exc).lower() else 409
                 raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         return with_manager(create)
 
@@ -565,7 +567,7 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
                     observation_id,
                     payload.pinned,
                 )
-            except ValueError as exc:
+            except (ValueError, RuntimeError) as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             if observation is None:
                 raise HTTPException(status_code=404, detail="face observation not found")

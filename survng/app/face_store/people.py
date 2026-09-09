@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -11,6 +12,46 @@ from .quality import FACE_OUTCOME_EMBEDDED, LOGGER
 
 
 class FaceStorePeopleMixin:
+    def _pin_reference_locked(
+        self,
+        connection: sqlite3.Connection,
+        observation_id: int,
+        *,
+        automatic: bool,
+        person_id: int | None = None,
+    ) -> bool:
+        """Pin only retained media, inside the caller's write transaction."""
+        row = connection.execute(
+            "select person_id, review_status, snapshot_path from face_observations where id = ?",
+            (observation_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row["person_id"] is None
+            or row["review_status"] != "confirmed"
+            or (person_id is not None and row["person_id"] != person_id)
+        ):
+            return False
+        if not row["snapshot_path"] or connection.execute(
+            "select 1 from media_deletion_claims where path = ?",
+            (str(row["snapshot_path"]),),
+        ).fetchone() is not None:
+            if automatic:
+                return False
+            raise RuntimeError("face snapshot is unavailable or currently being removed")
+        connection.execute(
+            """
+            update face_observations
+            set reference_auto_pinned = case
+                    when ? and reference_pinned = 1 and reference_auto_pinned = 0 then 0
+                    else ? end,
+                reference_pinned = 1
+            where id = ?
+            """,
+            (int(automatic), int(automatic), observation_id),
+        )
+        return True
+
     def bootstrap_person_references(
         self,
         person_id: int,
@@ -21,12 +62,16 @@ class FaceStorePeopleMixin:
         """Auto-pin a small high-quality gallery from already confirmed faces."""
         target = max(1, min(int(target_count), 8))
         with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
             rows = connection.execute(
                 """
                 select id, camera_id, quality_score, observed_at,
                     reference_pinned, coalesce(reference_auto_pinned, 0) as reference_auto_pinned
                 from face_observations
                 where person_id = ? and review_status = 'confirmed' and canonical = 1
+                    and snapshot_path != ''
+                    and not exists (select 1 from media_deletion_claims
+                        where path = face_observations.snapshot_path)
                 order by observed_at desc, id desc
                 """,
                 (person_id,),
@@ -85,13 +130,8 @@ class FaceStorePeopleMixin:
             )
             explicit_ids = {int(row["id"]) for row in explicit}
             for observation_id in sorted(selected_ids - explicit_ids):
-                connection.execute(
-                    """
-                    update face_observations
-                    set reference_pinned = 1, reference_auto_pinned = 1
-                    where id = ? and person_id = ? and review_status = 'confirmed'
-                    """,
-                    (observation_id, person_id),
+                self._pin_reference_locked(
+                    connection, observation_id, automatic=True, person_id=person_id,
                 )
 
         self._invalidate_reference_gallery()
@@ -362,29 +402,35 @@ class FaceStorePeopleMixin:
 
         if apply and improved:
             with self._lock, self._connect() as connection:
+                connection.execute("begin immediate")
+                # Selection runs outside the writer lock. Do not overwrite a
+                # subsequent operator decision or apply a partially stale set.
+                for row in rows:
+                    current = connection.execute(
+                        """select person_id, review_status, canonical,
+                            reference_pinned, reference_auto_pinned
+                        from face_observations where id = ?""",
+                        (int(row["id"]),),
+                    ).fetchone()
+                    if current is None or tuple(current) != (
+                        int(person_id), "confirmed", 1,
+                        row["reference_pinned"], row["reference_auto_pinned"],
+                    ):
+                        raise RuntimeError("face gallery changed; retry optimization")
+                for observation_id in selected:
+                    if not self._pin_reference_locked(
+                        connection, observation_id, automatic=True, person_id=int(person_id),
+                    ):
+                        raise RuntimeError("face snapshot is unavailable or currently being removed")
                 connection.execute(
-                    """
+                    f"""
                     update face_observations
-                    set reference_pinned = 0,
-                        reference_auto_pinned = 0
-                    where person_id = ?
-                        and canonical = 1
-                        and review_status = 'confirmed'
-                        and reference_auto_pinned = 1
+                    set reference_pinned = 0, reference_auto_pinned = 0
+                    where person_id = ? and canonical = 1
+                        and review_status = 'confirmed' and reference_auto_pinned = 1
+                        and id not in ({','.join('?' for _ in selected)})
                     """,
-                    (int(person_id),),
-                )
-                connection.executemany(
-                    """
-                    update face_observations
-                    set reference_pinned = 1,
-                        reference_auto_pinned = 1
-                    where id = ?
-                        and person_id = ?
-                        and canonical = 1
-                        and review_status = 'confirmed'
-                    """,
-                    ((observation_id, int(person_id)) for observation_id in selected),
+                    (int(person_id), *selected),
                 )
             self._invalidate_reference_gallery()
             self.request_match_refresh()
@@ -676,20 +722,30 @@ class FaceStorePeopleMixin:
             return {"person_id": int(person_id), "target_count": target, "before": before, "after": before, "added": 0}
 
         candidates = self.gallery_candidates(int(person_id), limit=100)
-        selected_ids = [int(item["id"]) for item in candidates[: target - before]]
-        if selected_ids:
-            with self._lock, self._connect() as connection:
-                connection.executemany(
-                    """
-                    update face_observations
-                    set reference_pinned = 1, reference_auto_pinned = 1
-                    where id = ? and person_id = ? and canonical = 1
-                        and review_status = 'confirmed'
-                    """,
-                    ((observation_id, int(person_id)) for observation_id in selected_ids),
-                )
-            self._invalidate_reference_gallery()
-            self.request_match_refresh()
+        selected_ids: list[int] = []
+        with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
+            current_count = int(connection.execute(
+                """select count(*) from face_observations
+                where person_id = ? and canonical = 1 and reference_pinned = 1""",
+                (int(person_id),),
+            ).fetchone()[0])
+            for item in candidates:
+                if current_count >= target:
+                    break
+                row = connection.execute(
+                    "select canonical, reference_pinned from face_observations where id = ?",
+                    (int(item["id"]),),
+                ).fetchone()
+                if row is None or not row["canonical"] or row["reference_pinned"]:
+                    continue
+                if self._pin_reference_locked(
+                    connection, int(item["id"]), automatic=True, person_id=int(person_id),
+                ):
+                    current_count += 1
+                    selected_ids.append(int(item["id"]))
+        self._invalidate_reference_gallery()
+        self.request_match_refresh()
 
         with self._connect() as connection:
             after = int(connection.execute(
@@ -1167,6 +1223,7 @@ class FaceStorePeopleMixin:
             raise ValueError("person name is required")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
             if connection.execute(
                 "select 1 from face_people where lower(name) = lower(?)",
                 (name,),
@@ -1194,6 +1251,10 @@ class FaceStorePeopleMixin:
                         where id = ?""",
                     (person_id, observation_id),
                 )
+                if not self._pin_reference_locked(
+                    connection, observation_id, automatic=True, person_id=person_id,
+                ):
+                    raise RuntimeError("face snapshot is unavailable or currently being removed")
         if observation_id is not None:
             self._invalidate_reference_gallery()
             self._queue_recognition(observation_id)
@@ -1314,17 +1375,14 @@ class FaceStorePeopleMixin:
                 return None
             if row["person_id"] is None or row["review_status"] != "confirmed":
                 raise ValueError("only manually confirmed faces can be pinned as references")
-            if pinned and row["snapshot_path"]:
-                deleting = connection.execute(
-                    "select 1 from media_deletion_claims where path = ?",
-                    (str(row["snapshot_path"]),),
-                ).fetchone()
-                if deleting is not None:
-                    raise RuntimeError("face snapshot is currently being removed")
-            connection.execute(
-                "update face_observations set reference_pinned = ?, reference_auto_pinned = 0 where id = ?",
-                (1 if pinned else 0, observation_id),
-            )
+            if pinned:
+                self._pin_reference_locked(connection, observation_id, automatic=False)
+            else:
+                connection.execute(
+                    "update face_observations set reference_pinned = 0, reference_auto_pinned = 0 where id = ?",
+                    (observation_id,),
+                )
+
         self._invalidate_reference_gallery()
         self.request_match_refresh()
         return self.observation(observation_id)
