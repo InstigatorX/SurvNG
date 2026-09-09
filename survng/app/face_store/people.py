@@ -251,7 +251,10 @@ class FaceStorePeopleMixin:
             rows = connection.execute(
                 """
                 select o.id, o.camera_id, o.quality_score, o.embedding_blob,
-                    o.reference_pinned, o.reference_auto_pinned
+                    o.reference_pinned, o.reference_auto_pinned,
+                    (o.snapshot_path != '' and not exists (
+                        select 1 from media_deletion_claims where path = o.snapshot_path
+                    )) as reference_available
                 from face_observations o
                 where o.canonical = 1
                     and o.person_id = ?
@@ -302,6 +305,18 @@ class FaceStorePeopleMixin:
                 "sample_count": len(samples),
                 "applied": False,
                 "reason": "not_enough_samples",
+            }
+
+        # Retained embeddings remain useful held-out evidence after their media
+        # expires, but only available snapshots can become pinned references.
+        available_samples = [(row, vector) for row, vector in samples if row["reference_available"]]
+        if not available_samples:
+            return {
+                "person_id": int(person["id"]),
+                "name": str(person["name"] or ""),
+                "sample_count": len(samples),
+                "applied": False,
+                "reason": "no_available_references",
             }
 
         def aggregate(query, refs):
@@ -356,11 +371,11 @@ class FaceStorePeopleMixin:
 
         current_ids = [
             int(row["id"])
-            for row, _vector in samples
+            for row, _vector in available_samples
             if bool(row["reference_pinned"])
         ]
         if not current_ids:
-            current_ids = [int(samples[0][0]["id"])]
+            current_ids = [int(available_samples[0][0]["id"])]
 
         current_ids = current_ids[:limit]
         baseline = evaluate(current_ids)
@@ -368,7 +383,7 @@ class FaceStorePeopleMixin:
         selected = list(current_ids)
         candidate_ids = [
             int(row["id"])
-            for row, _vector in samples
+            for row, _vector in available_samples
             if int(row["id"]) not in selected
         ]
 
@@ -1161,12 +1176,13 @@ class FaceStorePeopleMixin:
                         (int(person_id), observation_id),
                     )
                 else:
+                    # Clearing a confirmed face must survive automatic refresh,
+                    # just like rejecting a suggestion or automatic assignment.
                     rejected_person_id = (
                         int(row["candidate_person_id"])
                         if row["candidate_person_id"] is not None
                         else int(row["person_id"])
                         if row["person_id"] is not None
-                        and str(row["review_status"] or "") == "auto_identified"
                         else None
                     )
                     if rejected_person_id is not None:
@@ -1280,13 +1296,14 @@ class FaceStorePeopleMixin:
             ).fetchone()
             if current is None:
                 return None
+            # Keep manual clears durable until the operator assigns this person
+            # again; a gallery refresh can immediately re-match the same track.
             rejected_person_id = (
                 int(current["candidate_person_id"])
                 if person_id is None and current["candidate_person_id"] is not None
                 else int(current["person_id"])
                 if person_id is None
                 and current["person_id"] is not None
-                and str(current["review_status"] or "") == "auto_identified"
                 else None
             )
             if person_id is not None:

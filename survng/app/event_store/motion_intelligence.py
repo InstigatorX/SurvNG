@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..incident_utils import portable_media_path
+from ..incident_utils import portable_media_path, snapshot_deletion_claimed
 
 
 class EventStoreMotionIntelligenceMixin:
@@ -66,6 +66,11 @@ class EventStoreMotionIntelligenceMixin:
         replaced_snapshot = ""
         persisted_snapshot = snapshot_path
         with self._lock, self._connect() as conn:
+            if snapshot_path:
+                conn.execute("begin immediate")
+                if snapshot_deletion_claimed(conn, self.storage_dir, snapshot_path):
+                    snapshot_path = ""
+                    persisted_snapshot = ""
             for fingerprint, configuration_json in pipeline_configurations.items():
                 conn.execute(
                     """

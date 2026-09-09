@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..incident_utils import event_snapshot_path, portable_media_path
+from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from .quality import parse_face_box
 
 
@@ -54,6 +54,10 @@ class FaceStoreIngestMixin:
                     continue
                 quality_payload = dict(candidate.get("quality") or {})
                 quality_payload["collector_score"] = max(0.0, min(1.0, quality_score))
+                if not connection.in_transaction:
+                    connection.execute("begin immediate")
+                if snapshot_deletion_claimed(connection, self.storage_dir, snapshot_path):
+                    continue
                 cursor = connection.execute(
                     """
                     insert or ignore into face_observations (
@@ -186,6 +190,10 @@ class FaceStoreIngestMixin:
                     except (TypeError, ValueError):
                         continue
                     if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+                        continue
+                    if not connection.in_transaction:
+                        connection.execute("begin immediate")
+                    if snapshot_deletion_claimed(connection, self.storage_dir, snapshot_path):
                         continue
                     cursor = connection.execute(
                         """
