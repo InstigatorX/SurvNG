@@ -114,15 +114,32 @@ class FaceStoreRecognitionMixin:
         model_fingerprint = str(recognizer_status.get("model_fingerprint") or "")
         if not model_fingerprint:
             return
+        identity_updates: list[dict[str, Any]] = []
         with self._lock, self._connect() as connection:
+            # Retention limits canonical observations, each of which may own
+            # several candidate crops. Refresh complete tracks so reconciliation
+            # cannot combine new matches with stale siblings at a row limit.
             embedded_rows = connection.execute(
                 """
-                select id, embedding_blob from face_observations
-                where person_id is null and recognition_pending = 0
-                    and embedding_model = ? and embedding_blob is not null
-                order by observed_at desc limit ?
+                with selected as (
+                    select id, event_id, candidate_track_id from face_observations
+                    where canonical = 1 and (person_id is null or review_status = 'auto_identified')
+                    order by observed_at desc, id desc limit ?
+                )
+                select o.id, o.event_id, o.candidate_track_id, o.embedding_blob
+                from face_observations o
+                where (o.person_id is null or (o.review_status = 'auto_identified' and o.candidate_track_id != ''))
+                    and o.recognition_pending = 0
+                    and o.embedding_model = ? and o.embedding_blob is not null
+                    and exists (
+                        select 1 from selected s where o.id = s.id or (
+                            s.candidate_track_id != '' and o.event_id = s.event_id
+                            and o.candidate_track_id = s.candidate_track_id
+                        )
+                    )
+                order by o.observed_at desc, o.id
                 """,
-                (model_fingerprint, self.max_observations),
+                (self.max_observations, model_fingerprint),
             ).fetchall()
             for row in embedded_rows:
                 try:
@@ -148,7 +165,7 @@ class FaceStoreRecognitionMixin:
                     update face_observations
                     set candidate_person_id = ?, candidate_confidence = ?,
                         match_details_json = ?
-                    where id = ? and person_id is null
+                    where id = ? and (person_id is null or review_status = 'auto_identified')
                     """,
                     (
                         match.person_id,
@@ -167,19 +184,29 @@ class FaceStoreRecognitionMixin:
                         int(row["id"]),
                     ),
                 )
+            # Withdraw stale automatic identities even for tracks whose jobs
+            # cannot fit in this bounded queue-admission pass.
+            stale_tracks = connection.execute(
+                """select distinct event_id, candidate_track_id from face_observations
+                where (person_id is null or review_status = 'auto_identified')
+                    and candidate_track_id != '' and embedding_blob is not null
+                    and embedding_model != ?""",
+                (model_fingerprint,),
+            ).fetchall()
             connection.execute(
                 """
                 update face_observations
                 set recognition_pending = 1, recognition_outcome = ?
-                where person_id is null and embedding_blob is not null
+                where (person_id is null or (review_status = 'auto_identified' and candidate_track_id != ''))
+                    and embedding_blob is not null
                     and embedding_model != ?
                 """,
                 (FACE_OUTCOME_PENDING, model_fingerprint),
             )
             pending_rows = connection.execute(
                 """
-                select id from face_observations
-                where person_id is null and (
+                select id, event_id, candidate_track_id from face_observations
+                where (person_id is null or (review_status = 'auto_identified' and candidate_track_id != '')) and (
                     recognition_pending = 1
                     or (embedding_blob is not null and embedding_model != ?)
                 )
@@ -187,6 +214,13 @@ class FaceStoreRecognitionMixin:
                 """,
                 (model_fingerprint, self.max_observations),
             ).fetchall()
+            touched_tracks = {
+                (int(row["event_id"]), str(row["candidate_track_id"]))
+                for row in [*embedded_rows, *pending_rows, *stale_tracks] if row["candidate_track_id"]
+            }
+            for event_id, track_id in sorted(touched_tracks):
+                identity_updates.extend(self._reconcile_candidate_track(connection, event_id, track_id))
+        self._emit_reconciled_identity_updates(identity_updates)
         for row in pending_rows:
             self._queue_recognition(int(row["id"]))
 
@@ -314,6 +348,13 @@ class FaceStoreRecognitionMixin:
             embedding = embedding / norm
             now = datetime.now(timezone.utc).isoformat()
             with self._lock, self._connect() as connection:
+                # Inference runs outside the lock; an operator may have reviewed
+                # this row (or retention removed it) while it was running.
+                row = connection.execute(
+                    "select * from face_observations where id = ?", (observation_id,)
+                ).fetchone()
+                if row is None:
+                    return False
                 match = self._match_result(
                     connection,
                     observation_id,
@@ -396,28 +437,28 @@ class FaceStoreRecognitionMixin:
                         observation_id,
                     ),
                 )
-                current = connection.execute(
-                    "select person_id, review_status from face_observations where id = ?",
-                    (observation_id,),
-                ).fetchone()
                 track_id = str(row["candidate_track_id"] or "")
+                identity_updates = []
                 if track_id:
-                    self._reconcile_candidate_track(
-                        connection,
-                        int(row["event_id"]),
-                        track_id,
+                    identity_updates = self._reconcile_candidate_track(
+                        connection, int(row["event_id"]), track_id,
                     )
-            if (
-                row["person_id"] is None
-                and current is not None
-                and current["person_id"] is not None
-            ):
-                source = (
-                    "auto_recognition"
-                    if str(current["review_status"] or "") == "auto_identified"
-                    else "recognition"
-                )
-                self._emit_identity_update(observation_id, source=source)
+                    current = connection.execute(
+                        """select person_id, review_status from face_observations
+                        where event_id = ? and candidate_track_id = ? and canonical = 1""",
+                        (int(row["event_id"]), track_id),
+                    ).fetchone()
+                else:
+                    current = connection.execute(
+                        "select person_id, review_status from face_observations where id = ?",
+                        (observation_id,),
+                    ).fetchone()
+                    if row["person_id"] is None and current is not None and current["person_id"] is not None:
+                        identity_updates.append({
+                            "observation_id": observation_id,
+                            "source": "auto_recognition" if current["review_status"] == "auto_identified" else "recognition",
+                        })
+            self._emit_reconciled_identity_updates(identity_updates)
             if row["person_id"] is not None:
                 self._invalidate_reference_gallery()
             return current is not None and current["person_id"] is not None
@@ -444,7 +485,14 @@ class FaceStoreRecognitionMixin:
                         observation_id,
                     ),
                 )
-            return False
+                identity_updates = []
+                track_id = str(row["candidate_track_id"] or "")
+                if track_id:
+                    identity_updates = self._reconcile_candidate_track(
+                        connection, int(row["event_id"]), track_id,
+                    )
+            self._emit_reconciled_identity_updates(identity_updates)
+            return bool(identity_updates)
 
     def _mark_exact_embedding_duplicate_locked(
         self,
@@ -588,31 +636,79 @@ class FaceStoreRecognitionMixin:
         connection: sqlite3.Connection,
         event_id: int,
         track_id: str,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
+        """Rebuild the display/automatic decision from durable candidate evidence.
+
+        Callers publish returned identity changes only after their transaction
+        commits. Suggestions and automatic assignments are outputs, never votes.
+        """
         rows = connection.execute(
             """
-            select id, person_id, candidate_person_id, candidate_confidence,
-                match_confidence, review_status,
-                quality_score, recognition_pending, recognition_error,
-                match_details_json
-            from face_observations
-            where event_id = ? and candidate_track_id = ?
-            order by candidate_rank, id
+            select o.*, p.name as person_name
+            from face_observations o
+            left join face_people p on p.id = o.person_id
+            where o.event_id = ? and o.candidate_track_id = ?
+            order by o.candidate_rank, o.id
             """,
             (event_id, track_id),
         ).fetchall()
         if not rows:
-            return
+            return []
+        rejected_people = {
+            int(row["person_id"])
+            for row in connection.execute(
+                """select r.person_id from face_rejections r
+                join face_observations o on o.id = r.observation_id
+                where o.event_id = ? and o.candidate_track_id = ?""",
+                (event_id, track_id),
+            ).fetchall()
+        }
         completed = [
             row for row in rows
-            if not bool(row["recognition_pending"]) and not str(row["recognition_error"] or "")
+            if not bool(row["recognition_pending"])
+            and not str(row["recognition_error"] or "")
+            and row["recognition_outcome"] not in (FACE_OUTCOME_FAILED, FACE_OUTCOME_TOO_SMALL)
         ]
+        evidence: dict[int, dict[str, Any]] = {}
         votes: dict[int, list[sqlite3.Row]] = {}
         for row in completed:
-            person_id = row["person_id"] or row["candidate_person_id"]
-            confidence = row["match_confidence"] if row["person_id"] is not None else row["candidate_confidence"]
-            if person_id is not None and confidence is not None:
-                votes.setdefault(int(person_id), []).append(row)
+            details = self._candidate_match_details(row)
+            # Older rows may predate saved match details. Preserve any remaining
+            # suggestion before clearing display columns; never infer a vote from
+            # an operator assignment or an aggregate automatic confidence.
+            if not details and row["candidate_person_id"] is not None:
+                details = {
+                    "person_id": row["candidate_person_id"],
+                    "score": row["candidate_confidence"],
+                }
+                connection.execute(
+                    "update face_observations set match_details_json = ? where id = ?",
+                    (json.dumps(details, separators=(",", ":")), int(row["id"])),
+                )
+            evidence[int(row["id"])] = details
+            person_id, score = details.get("person_id"), details.get("score")
+            if (
+                isinstance(person_id, int) and person_id not in rejected_people
+                and isinstance(score, (int, float)) and math.isfinite(score)
+            ):
+                votes.setdefault(person_id, []).append(row)
+
+        if votes:
+            # Deletion clears public identity columns immediately, but a queued
+            # gallery refresh may not yet have replaced the saved raw matches.
+            existing_people = {
+                int(row["id"])
+                for row in connection.execute(
+                    f"select id from face_people where id in ({','.join('?' for _ in votes)})",
+                    tuple(votes),
+                ).fetchall()
+            }
+            votes = {person_id: support for person_id, support in votes.items() if person_id in existing_people}
+
+        def confidence(row: sqlite3.Row) -> float:
+            score = evidence.get(int(row["id"]), {}).get("score")
+            return float(score) if isinstance(score, (int, float)) and math.isfinite(score) else 0.0
+
         winner_id: int | None = None
         support: list[sqlite3.Row] = []
         if votes:
@@ -620,21 +716,30 @@ class FaceStoreRecognitionMixin:
                 votes.items(),
                 key=lambda item: (
                     len(item[1]),
-                    sum(self._row_identity_confidence(row) for row in item[1]) / len(item[1]),
+                    sum(confidence(row) for row in item[1]) / len(item[1]),
+                    -item[0],
                 ),
             )
         consensus_score = (
-            sum(self._row_identity_confidence(row) for row in support) / len(support)
+            sum(confidence(row) for row in support) / len(support)
             if support else None
         )
+        protected = [
+            row for row in rows
+            if row["review_status"] in ("confirmed", "rejected")
+            or bool(row["reference_pinned"])
+            or (row["person_id"] is not None and row["review_status"] != "auto_identified")
+        ]
         canonical = max(
-            support or completed or rows,
+            protected or support or completed or rows,
             key=lambda row: (
-                0.55 * float(row["quality_score"] or 0.0)
-                + 0.45 * self._row_identity_confidence(row),
+                int(row["person_id"] is not None and row["review_status"] != "auto_identified"),
+                int(bool(row["reference_pinned"])),
+                0.55 * float(row["quality_score"] or 0.0) + 0.45 * confidence(row),
                 -int(row["id"]),
             ),
         )
+        canonical_id = int(canonical["id"])
         consensus = {
             "candidate_count": len(rows),
             "processed_count": len(completed),
@@ -642,26 +747,11 @@ class FaceStoreRecognitionMixin:
             "person_id": winner_id,
             "score": round(consensus_score, 4) if consensus_score is not None else None,
         }
-        connection.execute(
-            "update face_observations set canonical = 0 where event_id = ? and candidate_track_id = ?",
-            (event_id, track_id),
-        )
-        connection.execute(
-            "update face_observations set canonical = 1, consensus_json = ? where id = ?",
-            (json.dumps(consensus, separators=(",", ":")), int(canonical["id"])),
-        )
-        connection.execute(
-            """
-            update face_observations
-            set candidate_person_id = null, candidate_confidence = null
-            where event_id = ? and candidate_track_id = ? and id != ?
-                and person_id is null
-            """,
-            (event_id, track_id, int(canonical["id"])),
-        )
         recognizer = self.recognizer
         auto_identify = bool(
-            recognizer is not None
+            not protected
+            and not any(bool(row["recognition_pending"]) for row in rows)
+            and recognizer is not None
             and getattr(recognizer.config, "face_auto_identify_enabled", False)
             and winner_id is not None
             and len(support) >= 2
@@ -670,36 +760,84 @@ class FaceStoreRecognitionMixin:
             and consensus_score >= getattr(recognizer.config, "face_auto_identify_threshold", 1.0)
             and all(self._candidate_auto_eligible(row, recognizer) for row in support)
         )
+        # Refinement or a gallery refresh may invalidate an earlier automatic
+        # result. Operator decisions above remain untouched.
+        connection.execute(
+            """update face_observations
+            set person_id = null, review_status = 'unknown',
+                match_confidence = null, auto_identified = 0
+            where event_id = ? and candidate_track_id = ?
+                and review_status = 'auto_identified' and reference_pinned = 0""",
+            (event_id, track_id),
+        )
+        connection.execute(
+            """update face_observations
+            set canonical = 0, candidate_person_id = null, candidate_confidence = null
+            where event_id = ? and candidate_track_id = ?""",
+            (event_id, track_id),
+        )
+        connection.execute(
+            """update face_observations set canonical = 1, consensus_json = ?,
+                candidate_person_id = case when person_id is null then ? else null end,
+                candidate_confidence = case when person_id is null then ? else null end
+            where id = ?""",
+            (json.dumps(consensus, separators=(",", ":")), winner_id, consensus_score, canonical_id),
+        )
         if auto_identify:
             connection.execute(
-                """
-                update face_observations
+                """update face_observations
                 set person_id = ?, review_status = 'auto_identified',
                     match_confidence = ?, auto_identified = 1,
                     candidate_person_id = null, candidate_confidence = null
-                where id = ? and person_id is null
-                """,
-                (winner_id, consensus_score, int(canonical["id"])),
+                where id = ? and person_id is null""",
+                (winner_id, consensus_score, canonical_id),
             )
+        current_ids = {
+            int(row["id"]): row["person_id"]
+            for row in connection.execute(
+                "select id, person_id from face_observations where event_id = ? and candidate_track_id = ?",
+                (event_id, track_id),
+            ).fetchall()
+        }
+        return [
+            {
+                "observation_id": int(row["id"]),
+                "source": "auto_recognition",
+                "previous_person_id": row["person_id"],
+                "previous_person_name": str(row["person_name"] or ""),
+                "previous_review_status": str(row["review_status"] or ""),
+            }
+            for row in rows if row["person_id"] != current_ids[int(row["id"])]
+        ]
+
+    def _emit_reconciled_identity_updates(self, updates: list[dict[str, Any]]) -> None:
+        for update in updates:
+            self._emit_identity_update(**update)
 
     @staticmethod
-    def _row_identity_confidence(row: sqlite3.Row) -> float:
-        value = row["match_confidence"] if row["person_id"] is not None else row["candidate_confidence"]
-        return float(value or 0.0)
-
-    @staticmethod
-    def _candidate_auto_eligible(
-        row: sqlite3.Row,
-        recognizer: OpenVinoFaceRecognizer,
-    ) -> bool:
+    def _candidate_match_details(row: sqlite3.Row) -> dict[str, Any]:
         try:
             details = json.loads(row["match_details_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
-            return False
+            return {}
+        return details if isinstance(details, dict) else {}
+
+    @classmethod
+    def _candidate_auto_eligible(
+        cls,
+        row: sqlite3.Row,
+        recognizer: OpenVinoFaceRecognizer,
+    ) -> bool:
+        details = cls._candidate_match_details(row)
+        score = details.get("score")
+        runner_up = details.get("runner_up_score")
+        margin = details.get("margin")
+        references = details.get("reference_ids")
         return bool(
-            float(details.get("margin") or 0.0)
-            >= getattr(recognizer.config, "face_auto_identify_margin", 1.0)
-            and len(details.get("reference_ids") or ()) >= 3
+            all(isinstance(value, (int, float)) and math.isfinite(value)
+                for value in (score, runner_up, margin))
+            and margin >= getattr(recognizer.config, "face_auto_identify_margin", 1.0)
+            and isinstance(references, list) and len(references) >= 3
             and float(row["quality_score"] or 0.0) >= 0.45
         )
 
@@ -739,7 +877,14 @@ class FaceStoreRecognitionMixin:
         rejected_people = {
             int(row["person_id"])
             for row in connection.execute(
-                "select person_id from face_rejections where observation_id = ?",
+                """select r.person_id from face_rejections r
+                join face_observations rejected on rejected.id = r.observation_id
+                join face_observations target on target.id = ?
+                where rejected.id = target.id or (
+                    target.candidate_track_id != ''
+                    and rejected.event_id = target.event_id
+                    and rejected.candidate_track_id = target.candidate_track_id
+                )""",
                 (observation_id,),
             ).fetchall()
         }
