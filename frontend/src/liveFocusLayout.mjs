@@ -17,19 +17,6 @@ function fitAspect(width, height, aspect) {
   };
 }
 
-function packedCells(columns, supportCount) {
-  const occupied = new Set(["0:0", "0:1", "1:0", "1:1"]);
-  const cells = [];
-  let row = 0;
-  while (cells.length < supportCount) {
-    for (let column = 0; column < columns && cells.length < supportCount; column += 1) {
-      if (!occupied.has(`${row}:${column}`)) cells.push({ column, row });
-    }
-    row += 1;
-  }
-  return { cells, rows: Math.max(2, row) };
-}
-
 export function focusLiveMosaicLayout(cameras, width, height, storedCameraId, gap = 4, preferredAspect = UNIFORM_LIVE_TILE_ASPECT) {
   const items = [...(cameras || [])];
   const availableWidth = Number(width);
@@ -47,43 +34,58 @@ export function focusLiveMosaicLayout(cameras, width, height, storedCameraId, ga
 
   const primary = items.find((camera) => String(camera.id) === primaryId);
   const supports = items.filter((camera) => String(camera.id) !== primaryId);
+  const count = supports.length;
+  const childAspect = UNIFORM_LIVE_TILE_ASPECT;
   let best = null;
-  for (let columns = 2; columns <= 6; columns += 1) {
-    const packed = packedCells(columns, supports.length);
-    const widthPerCell = (availableWidth - gutter * (columns - 1)) / columns;
-    const heightPerCell = (availableHeight - gutter * (packed.rows - 1)) / packed.rows;
-    if (!(widthPerCell > 0) || !(heightPerCell > 0)) continue;
-    // Children use Automatic's uniform crop viewport, independent of the
-    // primary stream's aspect. Camera framing still controls the crop itself.
-    const cellWidth = Math.min(widthPerCell, heightPerCell * UNIFORM_LIVE_TILE_ASPECT);
-    const cellHeight = cellWidth / UNIFORM_LIVE_TILE_ASPECT;
-    const candidate = {
-      columns,
-      rows: packed.rows,
-      cells: packed.cells,
-      cellWidth,
-      cellHeight,
-      primaryWidth: cellWidth * 2 + gutter,
-      primaryHeight: cellHeight * 2 + gutter,
-    };
-    if (!best || candidate.primaryWidth * candidate.primaryHeight > best.primaryWidth * best.primaryHeight) best = candidate;
+  // Match the primary's height to a stack of child rows. Its width follows
+  // its own aspect; remaining children can fill rows beneath the top band.
+  // Bound the search for large installations while allowing long single rows.
+  const maxRows = Math.min(count + 1, 16);
+  const maxColumns = Math.min(count, 16);
+  for (let primaryRows = 1; primaryRows <= maxRows; primaryRows += 1) {
+    for (let sideColumns = 0; sideColumns <= maxColumns; sideColumns += 1) {
+      const sideCount = Math.min(count, primaryRows * sideColumns);
+      const belowCount = count - sideCount;
+      for (let belowColumns = belowCount ? 1 : 0; belowColumns <= (belowCount ? Math.min(belowCount, maxColumns) : 0); belowColumns += 1) {
+        const belowRows = belowCount ? Math.ceil(belowCount / belowColumns) : 0;
+        const rows = primaryRows + belowRows;
+        const topGapWidth = primaryAspect * (primaryRows - 1) * gutter + sideColumns * gutter;
+        const topHeightLimit = (availableWidth - topGapWidth) / (primaryAspect * primaryRows + sideColumns * childAspect);
+        const belowHeightLimit = belowCount ? (availableWidth - (belowColumns - 1) * gutter) / (belowColumns * childAspect) : Infinity;
+        const cellHeight = Math.min(topHeightLimit, belowHeightLimit, (availableHeight - (rows - 1) * gutter) / rows);
+        if (!(cellHeight > 0)) continue;
+        const cellWidth = cellHeight * childAspect;
+        const primaryHeight = primaryRows * cellHeight + (primaryRows - 1) * gutter;
+        const primaryWidth = primaryHeight * primaryAspect;
+        const primaryArea = primaryWidth * primaryHeight;
+        const childArea = cellWidth * cellHeight;
+        // A primary is worth roughly four child panes. Maximize the usable
+        // size of both, so neither a tiny primary nor tiny children can win.
+        const usableArea = Math.min(childArea, primaryArea / 4);
+        const filledArea = primaryArea + count * childArea;
+        if (!best || usableArea > best.usableArea + 0.001 || (Math.abs(usableArea - best.usableArea) <= 0.001 && filledArea > best.filledArea)) {
+          best = { sideColumns, sideCount, belowColumns, belowCount, cellWidth, cellHeight, primaryWidth, primaryHeight, usableArea, filledArea,
+            width: Math.max(primaryWidth + (sideColumns ? sideColumns * (cellWidth + gutter) : 0), belowColumns * (cellWidth + gutter) - (belowCount ? gutter : 0)),
+            height: rows * cellHeight + (rows - 1) * gutter };
+        }
+      }
+    }
   }
   if (!best) return [];
-  const gridWidth = best.columns * best.cellWidth + gutter * (best.columns - 1);
-  const gridHeight = best.rows * best.cellHeight + gutter * (best.rows - 1);
-  const offsetX = Math.max(0, (availableWidth - gridWidth) / 2);
-  const offsetY = Math.max(0, (availableHeight - gridHeight) / 2);
-  const primaryFrame = fitAspect(best.primaryWidth, best.primaryHeight, primaryAspect);
-
+  const offsetX = Math.max(0, (availableWidth - best.width) / 2);
+  const offsetY = Math.max(0, (availableHeight - best.height) / 2);
   return [
-    { camera: primary, primary: true, ...primaryFrame, x: offsetX + primaryFrame.x, y: offsetY + primaryFrame.y },
-    ...supports.map((camera, index) => ({
-      camera,
-      primary: false,
-      x: offsetX + best.cells[index].column * (best.cellWidth + gutter),
-      y: offsetY + best.cells[index].row * (best.cellHeight + gutter),
-      width: best.cellWidth,
-      height: best.cellHeight,
-    })),
+    { camera: primary, primary: true, x: offsetX, y: offsetY, width: best.primaryWidth, height: best.primaryHeight },
+    ...supports.map((camera, index) => {
+      const beside = index < best.sideCount;
+      const localIndex = beside ? index : index - best.sideCount;
+      const columns = beside ? best.sideColumns : best.belowColumns;
+      return {
+        camera, primary: false,
+        x: offsetX + (beside ? best.primaryWidth + gutter : 0) + (localIndex % columns) * (best.cellWidth + gutter),
+        y: offsetY + (beside ? 0 : best.primaryHeight + gutter) + Math.floor(localIndex / columns) * (best.cellHeight + gutter),
+        width: best.cellWidth, height: best.cellHeight,
+      };
+    }),
   ];
 }

@@ -29,7 +29,7 @@ const automatic = uniformLiveGridLayout(cameras, 952, 766);
 const childGeometry = (tiles) => tiles.slice(1).map(({ x, y, width, height }) => ({ x, y, width, height }));
 for (const primaryAspect of [9 / 16, 1, 4 / 3, 32 / 9]) {
   const mixed = focusLiveMosaicLayout(cameras, 952, 766, "drive", 4, primaryAspect);
-  assert.deepEqual(childGeometry(mixed), childGeometry(layout), "changing the primary aspect must not reshape or move the children");
+  assert.notDeepEqual(childGeometry(mixed), childGeometry(layout), "children should repack around the primary aspect");
   assert.ok(Math.abs(mixed[0].width / mixed[0].height - primaryAspect) < 1e-10, "primary retains its own aspect");
   for (const child of mixed.slice(1)) {
     assert.ok(Math.abs(child.width / child.height - UNIFORM_LIVE_TILE_ASPECT) < 1e-10);
@@ -51,6 +51,38 @@ for (const candidate of [layout, five]) {
       const b = candidate[right];
       const overlaps = a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
       assert.equal(overlaps, false, `${a.camera.id} and ${b.camera.id} should not overlap`);
+    }
+  }
+}
+
+const many = Array.from({ length: 64 }, (_, index) => ({ id: String(index), live_view: { live: { focal_x: index, zoom: 1 + index / 100 } } }));
+const portrait = focusLiveMosaicLayout(many.slice(0, 13), 1618, 914, "0", 4, 3 / 4);
+assert.ok(portrait[0].height > 600, "the screenshot's portrait primary must grow beyond its old four-cell slot");
+assert.ok(portrait[0].width > 450);
+assert.ok(Math.abs(portrait[1].x - portrait[0].x - portrait[0].width - 4) < 1e-8, "children start beside the actual primary edge, with no reserved blank slot");
+for (const count of [2, 3, 6, 13, 25, 64]) {
+  for (const [width, height] of [[952, 766], [1618, 914], [1024, 400], [400, 1000]]) {
+    for (const aspect of [9 / 16, 3 / 4, 1, 4 / 3, 16 / 9, 32 / 9]) {
+      const tiles = focusLiveMosaicLayout(many.slice(0, count), width, height, "1", 4, aspect);
+      assert.equal(tiles.length, count);
+      assert.equal(tiles[0].camera.id, "1");
+      assert.ok(Math.abs(tiles[0].width / tiles[0].height - aspect) < 1e-8);
+      for (const tile of tiles) {
+        assert.equal(tile.camera, many[Number(tile.camera.id)], "repacking preserves each camera and its saved framing");
+        assert.ok(tile.x >= -1e-8 && tile.y >= -1e-8 && tile.width > 0 && tile.height > 0);
+        assert.ok(tile.x + tile.width <= width + 1e-8 && tile.y + tile.height <= height + 1e-8);
+        if (!tile.primary) {
+          assert.ok(Math.abs(tile.width / tile.height - UNIFORM_LIVE_TILE_ASPECT) < 1e-8);
+          assert.equal(tile.width, tiles[1].width);
+          assert.equal(tile.height, tiles[1].height);
+        }
+      }
+      for (let i = 0; i < tiles.length; i += 1) {
+        for (let j = i + 1; j < tiles.length; j += 1) {
+          const a = tiles[i], b = tiles[j];
+          assert.equal(a.x < b.x + b.width - 1e-8 && a.x + a.width > b.x + 1e-8 && a.y < b.y + b.height - 1e-8 && a.y + a.height > b.y + 1e-8, false, "no overlapping panes");
+        }
+      }
     }
   }
 }

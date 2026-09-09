@@ -12,8 +12,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = mkdtempSync(join(tmpdir(), "survng-workspace-preview-"));
 const start = Math.floor(Date.now() / 1000) - 300;
 const duration = 600;
-const names = ["Driveway", "Front door", "Side gate", "Garden", "Garage", "Workshop"];
-const ids = ["driveway", "front-door", "side-gate", "garden", "garage", "workshop"];
+const baseNames = ["Driveway", "Front door", "Side gate", "Garden", "Garage", "Workshop"];
+const cameraCount = Math.max(1, Math.min(64, Math.floor(Number(process.env.PREVIEW_CAMERA_COUNT) || 6)));
+const primaryAspect = Math.max(0.25, Math.min(4, Number(process.env.PREVIEW_PRIMARY_ASPECT) || 16 / 9));
+const names = Array.from({ length: cameraCount }, (_, index) => baseNames[index] || `Camera ${index + 1}`);
+const ids = names.map((name) => name.toLowerCase().replaceAll(" ", "-"));
+const cameraWidth = (index) => index === 0 ? Math.round(720 * primaryAspect) : 1280;
 const jobs = new Map();
 const clients = new Set();
 let scenario = "healthy";
@@ -37,7 +41,7 @@ function cameras() {
     expected_enabled: true, recording_configured: true, recording_enabled: true,
     recording: !(scenario === "recording-failure" && index === 2), sub_recording: true,
     record_sub_enabled: true, detection_enabled: false, last_motion_at: null,
-    width: 1280, height: 720,
+    width: cameraWidth(index), height: 720,
   }));
 }
 
@@ -51,8 +55,8 @@ function system() {
       used_bytes: total * (100 - freePercent) / 100, used_percent: 100 - freePercent,
       sampled_at: new Date().toISOString() },
     detector: { enabled: false, loaded_backend: "preview" },
-    cameras: { total: 6, enabled: 6, online: 6, recording_expected: 6,
-      recording: scenario === "recording-failure" ? 5 : 6 },
+    cameras: { total: cameraCount, enabled: cameraCount, online: cameraCount, recording_expected: cameraCount,
+      recording: scenario === "recording-failure" && cameraCount > 2 ? cameraCount - 1 : cameraCount },
   };
 }
 
@@ -67,7 +71,7 @@ function emit() {
 function snapshot(id) {
   const index = Math.max(0, ids.indexOf(id));
   const skies = ["#789aa9", "#a9b7bc", "#859a91", "#6f9986", "#8f9299", "#7f8b9a"];
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><rect width="1280" height="720" fill="${skies[index]}"/><path d="M0 310 170 160 420 330 800 120 1280 340V720H0Z" fill="#53695d"/><path d="M0 460H1280V720H0Z" fill="#4a5054"/><path d="M500 400H780L1100 720H160Z" fill="#929391"/><path d="M30 350 260 210 480 350V570H30Z" fill="#d9d4c7"/><rect x="80" y="380" width="300" height="170" fill="#777f80"/><path d="M890 360 1080 230 1250 360V540H890Z" fill="#b1b7ab"/><rect x="940" y="390" width="210" height="140" fill="#596663"/><path d="M400 600h420" stroke="#c6cbcc" stroke-width="6"/><text x="32" y="670" fill="white" font-family="sans-serif" font-size="32">${names[index]} · synthetic preview</text></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${cameraWidth(index)}" height="720" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid slice"><rect width="1280" height="720" fill="${skies[index % skies.length]}"/><path d="M0 310 170 160 420 330 800 120 1280 340V720H0Z" fill="#53695d"/><path d="M0 460H1280V720H0Z" fill="#4a5054"/><path d="M500 400H780L1100 720H160Z" fill="#929391"/><path d="M30 350 260 210 480 350V570H30Z" fill="#d9d4c7"/><rect x="80" y="380" width="300" height="170" fill="#777f80"/><path d="M890 360 1080 230 1250 360V540H890Z" fill="#b1b7ab"/><rect x="940" y="390" width="210" height="140" fill="#596663"/><path d="M400 600h420" stroke="#c6cbcc" stroke-width="6"/><text x="32" y="670" fill="white" font-family="sans-serif" font-size="32">${names[index]} · synthetic preview</text></svg>`;
 }
 
 function json(res, value, status = 200) {
