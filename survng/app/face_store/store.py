@@ -441,26 +441,84 @@ class FaceStore(
                     self._recognition_thread = None
 
     def _delete_face_snapshots(self, paths: list[Path], reason: str) -> None:
-        for path in paths:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                LOGGER.debug("could not remove %s face candidate %s", reason, path)
+        if not paths:
+            return
+        # Discarded payloads can reuse a retained path. Serialize the final
+        # ownership check with database writers, including event ingestion.
+        with self._connect() as connection:
+            connection.execute("begin immediate")
+            tables = {str(row[0]) for row in connection.execute(
+                "select name from sqlite_master where type = 'table'"
+            )}
+            for path in set(paths):
+                raw_paths = (portable_media_path(self.storage_dir, path), str(path))
+                if any(
+                    connection.execute(
+                        f"select 1 from {table} where snapshot_path in (?, ?) limit 1",
+                        raw_paths,
+                    ).fetchone() is not None
+                    for table in ("face_observations", "events", "motion_audits")
+                    if table in tables
+                ):
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    LOGGER.debug("could not remove %s face candidate %s", reason, path)
+
+    def _prunable_face_group_locked(
+        self, connection: sqlite3.Connection, observation_id: int,
+    ) -> list[sqlite3.Row]:
+        """Expand a source to its hidden duplicates and owned temporal crops.
+
+        A reviewed/pinned child or another visible track representative keeps
+        the source alive; this avoids orphaning protected evidence or changing
+        which surviving face represents a track.
+        """
+        pending = [observation_id]
+        rows: dict[int, sqlite3.Row] = {}
+        while pending:
+            current_id = pending.pop()
+            if current_id in rows:
+                continue
+            row = connection.execute(
+                """select id, event_id, candidate_track_id, snapshot_path,
+                    person_id, review_status, reference_pinned, canonical
+                from face_observations where id = ?""", (current_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            if row["reference_pinned"] or (current_id != observation_id and (
+                row["person_id"] is not None or row["review_status"] != "unknown"
+                or row["canonical"]
+            )):
+                return []
+            rows[current_id] = row
+            pending.extend(int(item[0]) for item in connection.execute(
+                "select id from face_observations where duplicate_of_observation_id = ?",
+                (current_id,),
+            ))
+            if row["candidate_track_id"]:
+                pending.extend(int(item[0]) for item in connection.execute(
+                    "select id from face_observations where event_id = ? and candidate_track_id = ?",
+                    (row["event_id"], row["candidate_track_id"]),
+                ))
+        return list(rows.values())
 
     def _prune_locked(
         self,
         connection: sqlite3.Connection,
         deferred_paths: list[Path] | None = None,
     ) -> int:
+        if not connection.in_transaction:
+            connection.execute("begin immediate")
         total = int(connection.execute(
             "select count(*) from face_observations where canonical = 1"
         ).fetchone()[0])
         excess = total - self.max_observations
-        if excess <= 0:
-            return 0
         selected = connection.execute(
             """
-            select id, event_id, candidate_track_id from face_observations
+            select id, canonical from face_observations
             where canonical = 1 and reference_pinned = 0 and id not in (
                 select id from (
                     select id, row_number() over (
@@ -473,27 +531,31 @@ class FaceStore(
             order by observed_at asc, id asc
             limit ?
             """,
-            (excess,),
+            (total if excess > 0 else 0,),
+        ).fetchall()
+        # Repair old unreviewed duplicates left behind by earlier pruning.
+        orphans = connection.execute(
+            """select id, canonical from face_observations o
+            where canonical = 0 and duplicate_of_observation_id is not null
+                and person_id is null and review_status = 'unknown' and reference_pinned = 0
+                and not exists (select 1 from face_observations source
+                    where source.id = o.duplicate_of_observation_id)"""
         ).fetchall()
         remove_ids: set[int] = set()
         candidate_paths: list[str] = []
-        for row in selected:
-            track_id = str(row["candidate_track_id"] or "")
-            if not track_id:
-                remove_ids.add(int(row["id"]))
+        for row in [*selected, *orphans]:
+            if row["canonical"] and excess <= 0:
                 continue
-            group = connection.execute(
-                """
-                select id, snapshot_path, reference_pinned
-                from face_observations
-                where event_id = ? and candidate_track_id = ?
-                """,
-                (int(row["event_id"]), track_id),
-            ).fetchall()
-            if any(bool(item["reference_pinned"]) for item in group):
-                continue
+            group = self._prunable_face_group_locked(connection, int(row["id"]))
+            if group:
+                excess -= int(row["canonical"])
             remove_ids.update(int(item["id"]) for item in group)
-            candidate_paths.extend(str(item["snapshot_path"] or "") for item in group)
+            # Legacy faces share their event's image; only temporal candidates
+            # own the crops that face retention is allowed to unlink.
+            candidate_paths.extend(
+                str(item["snapshot_path"] or "") for item in group
+                if item["candidate_track_id"]
+            )
         if remove_ids:
             connection.executemany("delete from face_observations where id = ?", ((item,) for item in remove_ids))
             # Commit the authoritative database removal before deleting the
