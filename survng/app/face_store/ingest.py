@@ -23,6 +23,7 @@ class FaceStoreIngestMixin:
             return 0
         inserted = 0
         recognition_ids: list[int] = []
+        identity_updates: list[dict[str, Any]] = []
         touched_tracks: set[str] = set()
         discarded_paths: list[Path] = []
         now = datetime.now(timezone.utc).isoformat()
@@ -113,7 +114,7 @@ class FaceStoreIngestMixin:
                             ))
                         except (FileNotFoundError, PermissionError, OSError, RuntimeError):
                             continue
-                self._reconcile_candidate_track(connection, event_id, track_id)
+                identity_updates.extend(self._reconcile_candidate_track(connection, event_id, track_id))
             self._prune_locked(connection, discarded_paths)
             if recognition_ids:
                 retained_ids = {
@@ -128,6 +129,7 @@ class FaceStoreIngestMixin:
                     for observation_id in recognition_ids
                     if observation_id in retained_ids
                 ]
+        self._emit_reconciled_identity_updates(identity_updates)
         for discarded_path in discarded_paths:
             self._delete_face_snapshots([discarded_path], "superseded")
         for observation_id in recognition_ids:
