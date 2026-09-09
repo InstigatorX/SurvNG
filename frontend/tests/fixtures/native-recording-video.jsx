@@ -16,7 +16,9 @@ function Fixture() {
   current.current = config;
   function record(name, event) {
     const target = event.currentTarget;
-    events.push({ name, id: id(target), src: target.getAttribute("src"), time: target.currentTime, ownsRef: target === video.current });
+    events.push({ name, id: id(target), src: target.getAttribute("src"), time: target.currentTime, rate: target.playbackRate, ownsRef: target === video.current,
+      ...(name === "error" ? { errorCode: target.error?.code ?? null, errorMessage: target.error?.message || "" } : {}),
+    });
   }
   window.harness = {
     configure: (patch) => configure((value) => ({ ...value, ...patch })),
@@ -27,6 +29,8 @@ function Fixture() {
       id: id(element), src: element.getAttribute("src"), activeRef: element === video.current,
       visible: getComputedStyle(element).visibility === "visible", ready: element.readyState,
       paused: element.paused, muted: element.muted, time: element.currentTime, seeking: element.seeking,
+      rate: element.playbackRate, ended: element.ended, duration: Number.isFinite(element.duration) ? element.duration : null,
+      errorCode: element.error?.code ?? null, errorMessage: element.error?.message || "",
     })),
   };
   useEffect(() => {
@@ -48,10 +52,21 @@ function Fixture() {
       onEnded={(event) => {
         record("ended", event);
         if (current.current.advance && current.current.nextSrc) configure((value) => ({ ...value, src: value.nextSrc, nextSrc: "", seek: 0 }));
+        else configure((value) => ({ ...value, playing: false, advance: false }));
       }}
     />
   </div>
     <button onClick={() => configure({ src: "/clips/red.mp4", nextSrc: "/clips/green.mp4", muted: true, playbackRate: 1, seek: 0, playing: false, advance: false })}>Load first and preload next</button>
+    <button onClick={() => {
+      configure({ src: "/clips/red.mp4", nextSrc: "/clips/green.mp4", muted: true, playbackRate: 4, seek: 0, playing: true, advance: true });
+      // If red is already loaded, no metadata event will replay. Start that
+      // element here; a new source starts through onLoadedMetadata instead.
+      if (video.current?.getAttribute("src") === "/clips/red.mp4" && video.current.readyState >= 1) {
+        video.current.currentTime = 0;
+        video.current.playbackRate = 4;
+        video.current.play().catch(() => {});
+      }
+    }}>Play both clips at 4×</button>
     <button onClick={() => {
       configure((value) => ({ ...value, playing: true, advance: true }));
       video.current.currentTime = video.current.duration - .2;
@@ -65,6 +80,8 @@ function Fixture() {
     <button onClick={() => configure((value) => ({ ...value, src: "/clips/green-latest.mp4", nextSrc: "", seek: .6, playing: false, advance: false }))}>Supersede with green</button>
     <button onClick={() => configure((value) => ({ ...value, src: "/clips/broken.mp4", nextSrc: "", playing: false, advance: false }))}>Fail next clip</button>
     <pre aria-label="Video buffer status">{status}</pre>
+    <pre aria-label="Playback completion events">{JSON.stringify(events.filter((event) => event.name === "ended"), null, 2)}</pre>
+    <pre aria-label="Playback error events">{JSON.stringify(events.filter((event) => event.name === "error"), null, 2)}</pre>
   </>;
 }
 

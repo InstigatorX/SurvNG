@@ -26,7 +26,7 @@ from .config import AppConfig, slugify_camera_id
 from .incident_utils import event_epoch
 from .manager import AppManager
 from .media_exports import MediaExportManager
-from .recording_media import concatenated_clip_timing, event_clip_window, playback_segment_duration
+from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, playback_segment_duration
 from .recording_routes import recording_source
 from .security import redact_secret_text
 
@@ -561,7 +561,7 @@ class RecordingMediaRuntime:
 
     def _recording_fmp4_files(self, path: Path, duration: float, media_offset: float, origin: str='playback') -> tuple[Path, Path]:
         stat = path.stat()
-        fingerprint = f'v3:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}'
+        fingerprint = f'v{RECORDING_FMP4_VERSION}:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}'
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:24]
         cache_dir = self.manager.storage_dir / 'playback-cache' / 'fmp4' / cache_key
         init_path = cache_dir / 'init.mp4'
@@ -580,7 +580,13 @@ class RecordingMediaRuntime:
             cache_dir.mkdir(parents=True, exist_ok=True)
             temp_dir = Path(tempfile.mkdtemp(prefix='fmp4-', dir=cache_dir))
             codec = self._probe_video_codec(path)
-            command = [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-output_ts_offset', f'{media_offset:.3f}']
+            # Remux each source in its local timeline, then shift tfdt once below.
+            # FFmpeg also carries output_ts_offset in the init edit lists. With
+            # tfdt repair it shifts playback twice when a later segment uses its
+            # own init (for example, after a codec change).
+            # Preserve decoder preroll too: automatic negative-timestamp shifting
+            # adds per-source A/V edit offsets that native HLS can turn into gaps.
+            command = [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
             if codec in {'hevc', 'h265'}:
                 command.extend(['-tag:v', 'hvc1'])
             command.extend(['-f', 'hls', '-hls_time', '300', '-hls_list_size', '0', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'), str(temp_dir / 'index.m3u8')])

@@ -11,8 +11,8 @@ export function loadShaka() {
   return shakaImport;
 }
 
-// Touch browsers are considerably more reliable with a normal MP4 resource
-// than with an fMP4 HLS playlist through MSE.  Timeline uses the same policy.
+// Incident playback retains its mobile MP4 compatibility policy. Timeline
+// defaults to HLS, with buffered MP4 for fast play or codec compatibility.
 export function prefersNativeMobilePlayback() {
   return PREFER_NATIVE_HLS
     || (typeof window !== "undefined" && Boolean(window.matchMedia?.("(pointer: coarse)").matches));

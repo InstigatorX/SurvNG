@@ -7,6 +7,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+# Bump when fragment bytes change so disk and browser caches expire together.
+RECORDING_FMP4_VERSION = 5
+
 
 def event_clip_window(
     configured_before: float,

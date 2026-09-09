@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 from types import SimpleNamespace
 from unittest import TestCase
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException
 
@@ -13,6 +14,7 @@ from survng.app.recording_routes import (
     create_recording_router,
 )
 from survng.app.manager_access import ManagerAccessCoordinator
+from survng.app.recording_media import RECORDING_FMP4_VERSION
 
 
 class _Recorder:
@@ -70,6 +72,40 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
+    def test_day_and_event_playlists_version_every_fragment_url(self) -> None:
+        manager = _Manager("current")
+        manager.events.get = lambda _event_id: {
+            "id": 1, "camera_id": "gate", "created_at": "1970-01-01T00:01:45+00:00",
+        }
+        rows = [{
+            "name": f"segment-{index}.mp4", "start_epoch": 100 + index * 5,
+            "end_epoch": 105 + index * 5, "duration_seconds": 5,
+            "stream_fingerprint": "",  # exercise every independent init too
+        } for index in range(2)]
+        dependencies = replace(
+            _dependencies(lambda: manager),
+            recording_day_rows=lambda *_args, **_kwargs: rows,
+        )
+        handlers = create_recording_router(dependencies).handlers
+        for kind, response in (
+            ("day", handlers["recording_day_hls_playlist"]("gate", 100, 110)),
+            ("event", handlers["event_stream"](1)),
+        ):
+            with self.subTest(kind=kind):
+                urls = []
+                for line in response.body.decode().splitlines():
+                    if line.startswith("#EXT-X-MAP:"):
+                        urls.append(line.split('URI="', 1)[1].split('"', 1)[0])
+                    elif line and not line.startswith("#"):
+                        urls.append(line)
+                self.assertEqual(len(urls), 4)
+                for url in urls:
+                    query = parse_qs(urlparse(url).query)
+                    self.assertEqual(query["v"], [str(RECORDING_FMP4_VERSION)])
+                    self.assertIn(query["media_offset"], (["0.000"], ["5.000"]))
+                    if kind == "event":
+                        self.assertEqual(query["trim_end"], ["true"])
+
     def test_native_segment_uses_indexed_epoch_lookup(self) -> None:
         manager = _Manager("current")
         requested: list[tuple[object, ...]] = []
