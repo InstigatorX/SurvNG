@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..durable_payload import durable_json_dumps
-from ..incident_utils import event_snapshot_path, portable_media_path
+from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry
 from .calibration import EventStoreCalibrationMixin
@@ -291,6 +291,11 @@ class EventStore(
         duplicate_route_admission: dict[str, Any] | None = None
         canonical_detection_intent_id = str(detection_intent_id or "")
         with self._lock, self._connect() as conn:
+            if snapshot_path:
+                conn.execute("begin immediate")
+                if snapshot_deletion_claimed(conn, self.storage_dir, snapshot_path):
+                    snapshot_path = ""
+                    snapshot_size_bytes = 0
             # A route admission is the authoritative identity for a routed
             # occurrence.  Resolve it before checking the intent ID: a
             # coalesced camera-primary batch can carry the route job's stable
@@ -864,6 +869,10 @@ class EventStore(
         portable_recording = portable_media_path(self.storage_dir, recording_path)
         replaced_snapshot = ""
         with self._lock, self._connect() as conn:
+            if portable_snapshot:
+                conn.execute("begin immediate")
+                if snapshot_deletion_claimed(conn, self.storage_dir, portable_snapshot):
+                    return None
             row = conn.execute(
                 "select objects_json, snapshot_path, snapshot_size_bytes, recording_path from events where id = ?",
                 (event_id,),
@@ -938,6 +947,9 @@ class EventStore(
         matched = 0
         updated = None
         with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            if snapshot_deletion_claimed(conn, self.storage_dir, portable_snapshot):
+                return None
             row = conn.execute(
                 "select objects_json, snapshot_path from events where id = ?",
                 (event_id,),
@@ -1071,6 +1083,9 @@ class EventStore(
         replaced_snapshot = ""
         snapshot_size_bytes = self._snapshot_file_size(portable_snapshot)
         with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            if snapshot_deletion_claimed(conn, self.storage_dir, portable_snapshot):
+                return None
             row = conn.execute(
                 "select objects_json, snapshot_path, recording_path from events where id = ?",
                 (event_id,),

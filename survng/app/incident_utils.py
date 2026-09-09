@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,32 @@ SNAPSHOT_MEDIA_TYPES = {
 }
 MEDIA_DIRECTORIES = ("snapshots", "motion_samples", "recordings")
 DEFAULT_INCIDENT_GAP_SECONDS = 45
+
+
+def media_path_aliases(storage_dir: Path, raw_path: str | Path) -> tuple[str, ...]:
+    """Compare portable and absolute media references without filesystem I/O."""
+    if not str(raw_path):
+        return ()
+    path = Path(os.path.normpath(str(raw_path)))
+    root = Path(os.path.abspath(storage_dir))
+    absolute = path if path.is_absolute() else root / path
+    aliases = {str(path), str(absolute)}
+    try:
+        aliases.add(absolute.relative_to(root).as_posix())
+    except ValueError:
+        pass
+    return tuple(sorted(aliases))
+
+
+def snapshot_deletion_claimed(
+    connection: sqlite3.Connection, storage_dir: Path, raw_path: str | Path,
+) -> bool:
+    """Check deletion ownership inside the adopting caller's write transaction."""
+    aliases = media_path_aliases(storage_dir, raw_path)
+    return bool(aliases and connection.execute(
+        f"select 1 from media_deletion_claims where path in ({','.join('?' for _ in aliases)})",
+        aliases,
+    ).fetchone() is not None)
 
 
 def snapshot_media_type(path: Path) -> str:

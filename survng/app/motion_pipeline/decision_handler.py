@@ -931,6 +931,7 @@ class MotionDecisionHandler:
             stored_objects.append({"status": "face_evidence_pending"})
         route_origin = _route_origin(qualification)
         route_admission_duplicate = False
+        snapshot_adoption_refused = False
         if existing_event_id is None:
             event = self.events.add_event(
                 camera_id=self.camera_id,
@@ -952,6 +953,9 @@ class MotionDecisionHandler:
                 ),
             )
             event_id = int(event["id"])
+            if event.get("snapshot_path") == "":
+                snapshot_adoption_refused = bool(snapshot_path)
+                snapshot_path = ""
             event_created = bool(event.get("created", True))
             route_admission_duplicate = bool(
                 route_origin is not None and not event_created
@@ -970,12 +974,23 @@ class MotionDecisionHandler:
         else:
             event_id = int(existing_event_id)
             event_created = False
-            self.events.refine_event_evidence(
+            refined_event = self.events.refine_event_evidence(
                 event_id,
                 snapshot_path=snapshot_path,
                 recording_path=recording_path,
                 objects_json=self.object_serializer(stored_objects),
             )
+            if refined_event is None:
+                qualification["refinement_evidence_preserved"] = True
+                return MotionDecisionOutcome(
+                    event_id=event_id,
+                    snapshot_path="",
+                    object_detected=None,
+                    detected_objects=(),
+                    rejection_reason="refinement_unavailable_preserved",
+                    refinement_pending=False,
+                    processing_timing=processing_timing,
+                )
         if route_origin is not None and self.route_admission_callback is not None:
             try:
                 self.route_admission_callback(
@@ -1049,7 +1064,7 @@ class MotionDecisionHandler:
         tracking_seed_objects = tuple(
             detected
             for detected in eligible_objects
-            if detected.get("snapshot_visible") is not False
+            if not snapshot_adoption_refused and detected.get("snapshot_visible") is not False
         )
         return MotionDecisionOutcome(
             event_id=event_id,

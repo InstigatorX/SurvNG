@@ -112,16 +112,39 @@ def test_optimizer_claim_failure_rolls_back_gallery_changes(tmp_path):
     with faces._connect() as connection:
         connection.execute("update events set created_at = ? where id = (select event_id from face_observations where id = ?)", (OLD, target))
     original = events._snapshot_path_for_retention
+    claimed = threading.Event()
+    release = threading.Event()
+    retained = []
+    worker = None
+    median = np.median
 
     def during_claim(raw_path):
-        with pytest.raises(RuntimeError, match="being removed"):
-            faces.optimize_person_gallery(person, max_references=2, apply=True)
-        assert faces.observation(ids[0])["reference_pinned"]
-        assert not faces.observation(target)["reference_pinned"]
+        claimed.set()
+        assert release.wait(5)
         return original(raw_path)
 
-    with patch.object(events, "_snapshot_path_for_retention", side_effect=during_claim):
-        assert events.apply_snapshot_retention(CUTOFF, 10)["deleted_files"] == 1
+    def claim_after_selection(values):
+        nonlocal worker
+        if worker is None:
+            worker = threading.Thread(target=lambda: retained.append(events.apply_snapshot_retention(CUTOFF, 10)))
+            worker.start()
+            assert claimed.wait(5)
+        return median(values)
+
+    with patch.object(events, "_snapshot_path_for_retention", side_effect=during_claim), patch(
+        "survng.app.face_store.people.np.median", side_effect=claim_after_selection,
+    ):
+        try:
+            with pytest.raises(RuntimeError, match="being removed"):
+                faces.optimize_person_gallery(person, max_references=2, apply=True)
+            assert faces.observation(ids[0])["reference_pinned"]
+            assert not faces.observation(target)["reference_pinned"]
+        finally:
+            release.set()
+            if worker is not None:
+                worker.join(5)
+                assert not worker.is_alive()
+    assert retained[0]["deleted_files"] == 1
 
 
 def test_optimizer_revalidates_operator_pin_changes(tmp_path):
