@@ -37,3 +37,5 @@ The control page switches between healthy, recording-failure, low-storage, and u
 Run `npm test` for the frontend unit suite and `npm run build` for a production build. Focused coverage includes mosaic bounds/overlap and focus fallback, clip boundary validation, and health classification/freshness.
 
 Browser checks use real media playback with generated footage. The preview's export endpoint simulates job progress and returns the full sample video; it does **not** encode the selected interval. Real camera transport, recorder recovery, exact exported clip contents, and backend export failures still require a trial against a running SurvNG instance. No capture, storage, or export backend behavior is changed by this branch.
+
+The clip composer is available in desktop Timeline. Phones retain v1.2's simplified recording player; adding clip export to that view is outside this experiment.
