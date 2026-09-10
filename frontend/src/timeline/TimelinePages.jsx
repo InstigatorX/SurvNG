@@ -491,6 +491,17 @@ export function TimelineDatePicker({ value, max, onChange }) {
 
   return (
     <div className={`recordings-v2-date-picker${open ? " open" : ""}`}>
+      <input
+        className="recordings-mobile-date"
+        type="date"
+        aria-label="Recording day"
+        value={value}
+        max={max}
+        onChange={(event) => {
+          const next = event.target.value;
+          if (next && (!max || next <= max)) onChange(next);
+        }}
+      />
       <button
         ref={rootRef}
         type="button"
@@ -1303,6 +1314,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (video !== videoRef.current || video.seeking) return;
     const pendingMode = pendingSeekModeRef.current;
     if (pendingMode !== "local" && pendingMode !== "window-ready") return;
+    // A delayed seeked event can belong to the previous scrub on this same video.
+    const target = epochToPlaybackMediaTime(pendingSeekEpochRef.current);
+    if (!videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds())) return;
     clearSeekWatchdog();
     const epoch = mediaTimeToEpoch(video.currentTime);
     if (Number.isFinite(epoch)) {
@@ -1520,10 +1534,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function panTimelineViewport(deltaSeconds) {
-    const next = timelinePanViewport(dayStart, dayEnd, timelineView, deltaSeconds);
-    if (next.startEpoch === timelineView.startEpoch) return;
     setFollowPlayhead(false);
-    setTimelineViewportAnchor((next.startEpoch + next.endEpoch) / 2);
+    // Several touch moves can arrive before React renders the next viewport.
+    setTimelineViewportAnchor((anchor) => {
+      const center = Number.isFinite(anchor) ? anchor : (timelineView.startEpoch + timelineView.endEpoch) / 2;
+      const current = timelineViewport(dayStart, dayEnd, center, incidentRangeHours);
+      const next = timelinePanViewport(dayStart, dayEnd, current, deltaSeconds);
+      return (next.startEpoch + next.endEpoch) / 2;
+    });
   }
 
   function returnToPlayhead() {
@@ -2600,6 +2618,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         </div>
 
         <div className="recordings-v2-controls">
+          <div className="recordings-mobile-time-navigation">
+            <button type="button" aria-label="Earlier time range" disabled={timelineView.startEpoch <= dayStart} onClick={() => panTimelineViewport(-(timelineView.endEpoch - timelineView.startEpoch) / 2)}><ChevronLeft size={18} /></button>
+            <select aria-label="Visible time span" value={incidentRangeHours} onChange={(event) => { checkpointTimelineView(); setIncidentRangeHours(Number(event.target.value)); }}>
+              {[[1, "1 hour"], [2, "2 hours"], [4, "4 hours"], [8, "8 hours"], [12, "12 hours"], [24, "Full day"]].map(([hours, label]) => <option key={hours} value={hours}>{label}</option>)}
+            </select>
+            <button type="button" aria-label="Later time range" disabled={timelineView.endEpoch >= dayEnd} onClick={() => panTimelineViewport((timelineView.endEpoch - timelineView.startEpoch) / 2)}><ChevronRight size={18} /></button>
+            <button type="button" disabled={followPlayhead || !Number.isFinite(playhead)} onClick={returnToPlayhead}>Playhead</button>
+          </div>
           <div className="recordings-v2-timeline-toolbar">
             <div className="recordings-v2-incidents-tools">
               <span className="recordings-v2-filter-label" title="Evidence" aria-label="Evidence"><SlidersHorizontal size={14} /></span>
@@ -3455,15 +3481,19 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       width: rect.width,
       startX: pointerX,
       startValue: value,
-      lastX: pointerX,
+      lastX: event.clientX,
+      originX: event.clientX,
+      mode: event.pointerType === "touch" && onPanViewport ? "pending-pan" : "seek",
     };
     dragRef.current = drag;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    // A touch tap seeks; a horizontal swipe browses without reloading playback.
+    if (drag.mode === "pending-pan") return;
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
     if (previewManifestUrl && !prefersJpegScrubPreview()) setLocalPreviewEnabled(true);
     setScrubbing(true);
     updateDraft(value, true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-    event.preventDefault();
     schedulePreview(value, true);
   }
 
@@ -3471,6 +3501,13 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
+    if (drag.mode !== "seek") {
+      if (drag.mode === "pending-pan" && Math.abs(event.clientX - drag.originX) < 8) return;
+      drag.mode = "pan";
+      onPanViewport(((drag.lastX - event.clientX) / drag.width) * duration);
+      drag.lastX = event.clientX;
+      return;
+    }
     updateDraft(pointerValue(event, drag), true);
   }
 
@@ -3484,7 +3521,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     dragRef.current = null;
     if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
     previewTimerRef.current = null;
-    if (cancelled) {
+    if (cancelled || drag.mode === "pan") {
       updateDraft(offset);
       setScrubbing(false);
       hidePreviewAfterDelay();

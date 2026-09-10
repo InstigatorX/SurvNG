@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, playbackRowsCoverEpoch } from "../src/recordingPlayback.mjs";
+import { recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
   assert.equal(isRecordingCompatibilityError(error), true, JSON.stringify(error));
@@ -176,7 +176,7 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
   const playheads = [];
   const plays = [];
   const context = vm.createContext({
-    Number, Math, performance, nativeHls: true, videoRef: { current: video }, useSegmentPlayback: false,
+    Number, Math, performance, videoReachedSeekTarget, recordingSeekToleranceSeconds, nativeHls: true, videoRef: { current: video }, useSegmentPlayback: false,
     transport: "hls", requestedTransport: "hls", originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate",
     playbackRate: 1, normalizedTimelinePlaybackRate: (rate) => rate,
     playbackRetryRef: { current: { attempts: 0 } }, pendingSeekEpochRef: { current: 1005.1 },
@@ -205,6 +205,11 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
   context.completePendingRecordingSeek(video);
   assert.equal(context.pendingSeekModeRef.current, "window-ready", "watchdog must not declare a still-seeking native video ready");
   video.seeking = false;
+  video.currentTime = 0;
+  context.completePendingRecordingSeek(video);
+  assert.equal(context.pendingSeekModeRef.current, "window-ready", "a late seeked event at the old position must not acknowledge the new seek");
+  assert.equal(plays.length, 0, "do not resume the wrong footage");
+  video.currentTime = 5;
   context.completePendingRecordingSeek(video);
   assert.equal(context.pendingSeekEpochRef.current, null);
   assert.equal(context.pendingSeekModeRef.current, null);
