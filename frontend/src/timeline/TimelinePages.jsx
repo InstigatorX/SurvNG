@@ -34,6 +34,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
+import { liveFramingStyle } from "../liveFraming.mjs";
 import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
@@ -320,7 +321,7 @@ export function RecordingCompanionStrip({ cameras, routes, activeCameraId, sourc
     data-camera-count={companions.length}
     aria-label="Linked camera previews"
   >
-    {companions.map((camera) => <button key={camera.id} type="button" onClick={() => onSelect(camera.id)} aria-label={`Show ${camera.name} recording at the current time`}>
+    {companions.map((camera) => <button key={camera.id} type="button" style={liveFramingStyle(camera, source)} onClick={() => onSelect(camera.id)} aria-label={`Show ${camera.name} recording at the current time`}>
       <img src={recordingPreviewUrl(camera.id, previewEpoch, source)} alt="" loading="lazy" decoding="async" />
       <span><i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />{camera.name}</span>
     </button>)}

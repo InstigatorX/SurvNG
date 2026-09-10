@@ -387,7 +387,10 @@
   }
 
   .recording-selected-companions button {
-    flex: 0 0 118px !important;
+    flex: 0 0 auto !important;
+    width: auto;
+    height: 100%;
+    aspect-ratio: 16 / 9;
   }
 
   .recordings-v2-player.all-camera-grid .recording-grid-tile:not(:first-child),

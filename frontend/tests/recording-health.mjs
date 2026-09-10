@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { recordingHealth } from "../src/recordingHealth.mjs";
+import { recordingHealth, recordingHealthContext } from "../src/recordingHealth.mjs";
 
 const now = 1_000_000;
 const base = (overrides = {}) => ({
@@ -62,4 +62,20 @@ assert.equal(result.storage.state, "unavailable", "invalid totals cannot fall ba
 
 result = recordingHealth(base({ system: { storage: { available: true, free_bytes: 10, total_bytes: 100 } } }));
 assert.equal(result.storage.state, "warning");
+assert.match(recordingHealthContext(result).attention[0], /10.0% free.*15% cleanup threshold/);
+result = recordingHealth(base({ system: { storage: { available: true, free_bytes: 3, total_bytes: 100 } } }));
+assert.match(recordingHealthContext(result).attention[0], /3.0% free.*5% emergency threshold/);
+result = recordingHealth(base({ appConfig: { cameras: [{ id: "gate", name: "Side gate", record: true, record_sub: true }] }, cameras: [{ id: "gate", recording: false, sub_recording: true }] }));
+assert.deepEqual(recordingHealthContext(result).attention, ["Side gate: missing main stream."]);
+assert.match(recordingHealthContext(result).recording[0], /0 of 1 expected cameras/);
+result = recordingHealth(base({ camerasUpdatedAt: now - 90_001, systemUpdatedAt: now - 90_001 }));
+assert.equal(recordingHealthContext(result).attention.length, 2);
+assert.ok(recordingHealthContext(result).attention.every((reason) => reason.includes("unavailable or stale")));
+assert.ok(!recordingHealthContext(result).storage[0].includes("20.0%"), "stale storage must not be described as current");
+result = recordingHealth(base({ system: { ...base().system, lifecycle: "starting", detector: { enabled: true, loaded_backend: null } } }));
+assert.equal(result.issues, 1, "system health remains visible on every workspace");
+assert.deepEqual(recordingHealthContext(result).attention, ["System is starting.", "Detection is enabled but its backend is not loaded."]);
+result = recordingHealth(base({ appConfig: { cameras: [{ id: "paused", record: true }] }, cameras: [{ id: "paused", recording_enabled: false }] }));
+assert.match(recordingHealthContext(result).recording[1], /1 paused or disabled camera is excluded/);
+assert.deepEqual(recordingHealthContext(result).attention, []);
 console.log("recording health tests passed");

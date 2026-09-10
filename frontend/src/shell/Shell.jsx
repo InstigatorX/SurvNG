@@ -1,21 +1,15 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  Activity,
-  Camera,
   CircleHelp,
   Clock3,
   Cog,
-  Cpu,
   Download,
   Gauge,
-  HardDrive,
   Search,
   LogOut,
-  Monitor,
   PanelLeftClose,
   PanelLeftOpen,
-  ShieldCheck,
   Siren,
   Sun,
   Users,
@@ -23,13 +17,9 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { useVisiblePolling } from "../visibilityPolling.mjs";
-import { DESKTOP_PRIMARY_WORKSPACES, MOBILE_PRIMARY_WORKSPACES, systemHealthState, workspaceDefinition, workspaceHref } from "../workspaceNavigation.mjs";
-import { appUrl, recordingsHref, fetch } from "../shared/api.js";
-import { formatBytes, formatMilliseconds, formatRate } from "../shared/format.js";
+import { DESKTOP_PRIMARY_WORKSPACES, MOBILE_PRIMARY_WORKSPACES, workspaceDefinition, workspaceHref } from "../workspaceNavigation.mjs";
+import { appUrl, recordingsHref } from "../shared/api.js";
 import { useStoredState, useModalFocus } from "../shared/hooks.js";
-import { useAppEvents } from "../shared/events.js";
-import { useRuntimeState } from "../shared/runtimeState.jsx";
 import { RecordingHealthBar } from "./RecordingHealthBar.jsx";
 
 export const WORKSPACE_ICONS = Object.freeze({
@@ -165,7 +155,7 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
           <input ref={headerSearchRef} value={headerSearchQuery} onChange={(event) => setHeaderSearchQuery(event.target.value)} placeholder="Search incidents..." aria-label="Search incidents semantically" />
           <kbd>/</kbd>
         </form>
-        <div className="workspace-system-bar" aria-label={page === "live" || page === "timeline" ? "Recording health" : "System status"}>{page === "live" || page === "timeline" ? <RecordingHealthBar /> : <LiveHeaderStats />}</div>
+        <div className="workspace-system-bar" aria-label="System status"><RecordingHealthBar /></div>
       </header>
       <div className="workspace-content"><h1 ref={workspaceHeadingRef} className="sr-only" tabIndex={-1}>SurvNG — {workspaceDefinition(page)?.label || "Workspace"}</h1>{children}</div>
       <nav className="mobile-workspace-nav" aria-label="Primary">
@@ -173,100 +163,6 @@ export function Shell({ page, theme, recordingContext, session = null, onSignOut
         <button ref={mobileMoreButtonRef} type="button" className={!mobilePrimaryIds.has(page) || mobileMoreOpen ? "active" : ""} onClick={() => setMobileMoreOpen((current) => !current)} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-panel"><Rows3 size={21} /><span>More</span></button>
       </nav>
       {mobileMoreOpen ? <MobileMoreSheet links={moreLinks} page={page} session={session} onClose={() => setMobileMoreOpen(false)} /> : null}
-    </div>
-  );
-}
-export function LiveHeaderStats() {
-  const runtimeState = useRuntimeState();
-  const [stats, setStats] = useState({
-    lifecycle: "",
-    resources: null,
-    storage: null,
-    detector: null,
-    cameras: null,
-  });
-
-  async function loadSystem() {
-    try {
-      const systemResponse = await fetch("/api/system/status");
-      if (!systemResponse.ok) return;
-      const system = await systemResponse.json();
-      setStats((current) => ({
-        ...current,
-        lifecycle: system.lifecycle || "",
-        resources: system.resources || null,
-        storage: system.storage || null,
-        detector: system.detector || null,
-        cameras: system.cameras || null,
-      }));
-    } catch {
-      // Keep the last known status; the next event or interval retries.
-    }
-  }
-
-  useAppEvents(({ type, data }) => {
-    if (type === "system_state") {
-      setStats((current) => ({
-        ...current,
-        lifecycle: data.lifecycle || current.lifecycle,
-        resources: data.resources || null,
-        storage: data.storage || null,
-        detector: data.detector || null,
-        cameras: data.cameras || null,
-      }));
-    }
-  });
-
-  useVisiblePolling(loadSystem, 60_000, !runtimeState);
-
-  useEffect(() => {
-    if (runtimeState?.system) setStats((current) => ({ ...current, ...runtimeState.system }));
-  }, [runtimeState?.system]);
-
-  const detector = stats.detector || {};
-  const runtime = detector.runtime || {};
-  const inferenceStages = runtime.stages || {};
-  const isolation = detector.isolation || {};
-  const inferenceWorkers = detector.workers || {};
-  const objectWorker = inferenceWorkers.object || isolation;
-  const faceWorker = inferenceWorkers.face || {};
-  const lastStages = inferenceStages.last_ms || {};
-  const averageStages = inferenceStages.average_ms || {};
-  const storageLabel = stats.storage ? `${formatBytes(stats.storage.free_bytes)} free` : "--";
-  const memoryLabel = stats.resources ? formatBytes(stats.resources.application_memory_bytes) : "--";
-  const cpuLabel = Number.isFinite(stats.resources?.cpu_load_percent) ? `${stats.resources.cpu_load_percent.toFixed(1)}%` : "--";
-  const cameraLabel = stats.cameras ? `${stats.cameras.recording}/${stats.cameras.total} rec` : "--";
-  const { severity: healthSeverity, label: healthLabel } = systemHealthState({
-    lifecycle: stats.lifecycle,
-    storage: stats.storage,
-    detector: stats.detector,
-    cameras: stats.cameras,
-  });
-
-  return (
-    <div className="header-stats" aria-label="System summary">
-      <span className={`header-stat header-health ${healthSeverity}`}><ShieldCheck size={15} /><small>System</small><strong>{healthLabel}</strong></span>
-      <span className="header-stat"><HardDrive size={15} /><small>Storage</small><strong>{storageLabel}</strong></span>
-      <span className="header-stat"><Monitor size={15} /><small>Memory</small><strong>{memoryLabel}</strong></span>
-      <span className="header-stat"><Activity size={15} /><small>CPU</small><strong>{cpuLabel}</strong></span>
-      <span className="header-stat infer-stat" tabIndex={0}>
-        <Cpu size={15} /><small>Infer</small><strong>{formatMilliseconds(runtime.last_inference_ms)}</strong>
-        <span className="infer-tooltip" role="tooltip">
-          <span className="infer-tooltip-head"><strong>OpenVINO latency</strong><small>{detector.loaded_device || detector.configured_device || "device"} · {detector.performance_hint || "default"}</small></span>
-          <span className="infer-tooltip-summary">
-            <span><small>Average</small><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong></span>
-            <span><small>Detection rate</small><strong>{formatRate(runtime.detection_fps)} det/s</strong></span>
-          </span>
-          <span className="infer-tooltip-row labels"><b>Stage</b><b>Last</b><b>Average</b></span>
-          {[["Queue", "queue"], ["Preprocess", "preprocess"], ["Accelerator", "inference"], ["Postprocess", "postprocess"], ["Total", "total"]].map(([label, key]) => (
-            <span className="infer-tooltip-row" key={key}><span>{label}</span><strong>{formatMilliseconds(lastStages[key])}</strong><strong>{formatMilliseconds(averageStages[key])}</strong></span>
-          ))}
-          <span className="infer-tooltip-foot">{objectWorker.configured_workers || 1} detector process{(objectWorker.configured_workers || 1) === 1 ? "" : "es"} · mmap {detector.mmap_enabled ? "on" : "off"} · cache {detector.cache_enabled ? "on" : "off"} · warm-up {formatMilliseconds(detector.warmup_ms)}</span>
-          <span className="infer-tooltip-foot">object {objectWorker.configured_workers > 1 ? `${objectWorker.alive_workers || 0}/${objectWorker.configured_workers} online` : objectWorker.worker_alive ? `#${objectWorker.worker_pid}` : "offline"} · {objectWorker.configured_device || detector.configured_device || "device"} · {objectWorker.pending_requests || 0} queued · restarts {objectWorker.restart_count ?? 0}{objectWorker.fallback_active ? " · CPU fallback" : ""}</span>
-          <span className="infer-tooltip-foot">face {faceWorker.enabled ? (faceWorker.worker_alive ? `#${faceWorker.worker_pid}` : "offline") : "disabled"} · {faceWorker.configured_device || "AUTO"} · gen {faceWorker.generation ?? "--"} · restarts {faceWorker.restart_count ?? 0}{faceWorker.fallback_active ? " · CPU fallback" : ""}</span>
-        </span>
-      </span>
-      <span className="header-stat"><Camera size={15} /><small>Cameras</small><strong>{cameraLabel}</strong></span>
     </div>
   );
 }

@@ -134,7 +134,7 @@ server = await createServer({
       if (path === "/api/auth/session") return json(res, { enabled: false, user: null });
       if (scenario === "unavailable" && ["/api/cameras", "/api/system/status"].includes(path)) return json(res, { detail: "Preview status unavailable" }, 503);
       if (path === "/api/cameras") return json(res, cameras());
-      if (path === "/api/config") return json(res, { cameras: ids.map((id, index) => ({ id, name: names[index], record: true, record_sub: true })), retention: { minimum_free_percent: 15, emergency_free_percent: 5 }, detector: { tracking: {} } });
+      if (path === "/api/config") return json(res, { cameras: ids.map((id, index) => ({ id, name: names[index], record: true, record_sub: true, live_view: { main: { fit: "cover", focal_x: 70, focal_y: 40, zoom: 1.25 }, live: { fit: "cover", focal_x: 30, focal_y: 60, zoom: 1.5 } } })), retention: { minimum_free_percent: 15, emergency_free_percent: 5 }, detector: { tracking: { camera_transition_routes: ids.slice(1).map((id) => ({ from_camera: ids[0], to_camera: id, bidirectional: true })) } } });
       if (path === "/api/system/status") return json(res, system());
       if (path === "/api/incidents/feed") return json(res, { items: [], facets: { camera_ids: [], labels: [], zones: [] }, has_more: false });
       if (path === "/api/semantic-search/status") return json(res, { enabled: false, state: "disabled" });

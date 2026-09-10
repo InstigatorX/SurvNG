@@ -55,10 +55,38 @@ export function recordingHealth({ cameras, appConfig, system, camerasUpdatedAt, 
   }
   const cameraIssue = !cameraDataKnown || rows.some((row) => row.state === "attention" || row.state === "unavailable");
   const storageIssue = systemFresh && storageState !== "healthy";
-  const issues = Number(cameraIssue) + Number(!systemFresh || storageIssue);
+  const systemReasons = [];
+  if (systemFresh) {
+    if (system?.lifecycle && system.lifecycle !== "running") systemReasons.push(`System is ${String(system.lifecycle).replaceAll("_", " ")}.`);
+    if (system?.detector && system.detector.enabled !== false && !system.detector.loaded_backend) systemReasons.push("Detection is enabled but its backend is not loaded.");
+    if (finite(system?.cameras?.enabled) && finite(system?.cameras?.online) && system.cameras.enabled > system.cameras.online) systemReasons.push(`${system.cameras.online} of ${system.cameras.enabled} enabled cameras are online.`);
+  }
+  const issues = Number(cameraIssue) + Number(!systemFresh || storageIssue) + Number(systemReasons.length > 0);
   return {
-    rows, expectedCount: expectedRows.length, activeCount, issues, cameraFresh, cameraDataKnown, systemFresh,
+    rows, systemReasons, expectedCount: expectedRows.length, activeCount, issues, cameraFresh, cameraDataKnown, systemFresh,
     storage: { ...storage, state: storageState, freePercent, warningPercent, emergencyPercent },
     uptimeSeconds: system?.uptime_seconds,
+  };
+}
+
+// Use the same explanations in hover cards and the touch-accessible Details panel.
+export function recordingHealthContext(health) {
+  const cameraReasons = !health.cameraDataKnown
+    ? ["Camera status or configuration is unavailable or stale; recording cannot be confirmed."]
+    : health.rows.filter((row) => row.state === "attention" || row.state === "unavailable")
+      .map((row) => `${row.name}: missing ${row.missing.join(" and ") || "runtime status"}.`);
+  const storage = health.storage;
+  const storageReason = storage.state === "unavailable"
+    ? !health.systemFresh ? "System status is unavailable or stale; free storage cannot be confirmed." : "Storage status is unavailable; free space cannot be confirmed."
+    : storage.state === "critical" ? `Storage is critically low: ${storage.freePercent.toFixed(1)}% free, at or below the ${storage.emergencyPercent}% emergency threshold.`
+    : storage.state === "warning" ? `Storage has ${storage.freePercent.toFixed(1)}% free, at or below the ${storage.warningPercent}% cleanup threshold.`
+    : `Storage has ${storage.freePercent.toFixed(1)}% free, above the ${storage.warningPercent}% cleanup threshold.`;
+  const excluded = health.rows.filter((row) => row.state === "paused" || row.state === "disabled").length;
+  return {
+    recording: [health.cameraDataKnown ? `${health.activeCount} of ${health.expectedCount} expected cameras have all configured recording streams active.` : cameraReasons[0],
+      ...(health.cameraDataKnown ? cameraReasons : []),
+      ...(excluded ? [`${excluded} paused or disabled camera${excluded === 1 ? " is" : "s are"} excluded from the recording count.`] : [])],
+    storage: [storageReason, `Cleanup threshold: ${storage.warningPercent}% free. Emergency threshold: ${storage.emergencyPercent}% free.`],
+    attention: [...cameraReasons, ...(storage.state !== "healthy" ? [storageReason] : []), ...health.systemReasons],
   };
 }
