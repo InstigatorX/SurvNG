@@ -78,7 +78,19 @@ def decode_times(runtime, media):
     return values
 
 
-@pytest.mark.parametrize("segment_index,offset", [(0, 2.0), (1, 7.25)])
+def segment_indexes(runtime, media):
+    data = media.read_bytes()
+    indexes = {}
+    for kind, _, payload, end in runtime._mp4_boxes(data):
+        if kind != b"sidx":
+            continue
+        track, scale = struct.unpack_from(">II", data, payload + 4)
+        timestamp = struct.unpack_from(">Q" if data[payload] else ">I", data, payload + 12)[0]
+        indexes[track] = (scale, timestamp)
+    return indexes
+
+
+@pytest.mark.parametrize("segment_index,offset", [(0, 2.0), (1, 7.25), (1, 130.0)])
 def test_fragment_offset_is_applied_once_to_every_track(recording_fragments, segment_index, offset):
     root, _ffmpeg, ffprobe, runtime = recording_fragments
     source = root / f"segment-{segment_index:02d}.mp4"
@@ -90,6 +102,11 @@ def test_fragment_offset_is_applied_once_to_every_track(recording_fragments, seg
     assert initial_times.keys() == shifted_times.keys() == timescales.keys()
     for track, scale in timescales.items():
         assert shifted_times[track] == [value + round(offset * scale) for value in initial_times[track]]
+    initial_indexes = segment_indexes(runtime, initial_media)
+    shifted_indexes = segment_indexes(runtime, shifted_media)
+    assert initial_indexes.keys() == shifted_indexes.keys() == timescales.keys()
+    for track, (scale, timestamp) in initial_indexes.items():
+        assert shifted_indexes[track] == (scale, timestamp + round(offset * scale))
     initial = fragment_packets(root, ffprobe, initial_init, initial_media, f"initial-{segment_index}.mp4")
     shifted = fragment_packets(root, ffprobe, shifted_init, shifted_media, f"shifted-{segment_index}.mp4")
     assert len(initial["packets"]) == len(shifted["packets"])
@@ -109,6 +126,41 @@ def test_remux_version_invalidates_disk_cache(recording_fragments, monkeypatch):
     after = runtime._recording_fmp4_files(source, 2, 0)
     assert before[0].parent != after[0].parent
     assert all(path.is_file() for path in (*before, *after))
+
+
+@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_sidx_uses_its_own_timescale_and_preserves_byte_references(
+    recording_fragments, tmp_path, version, overflow,
+):
+    root, _ffmpeg, _ffprobe, runtime = recording_fragments
+    init, media = runtime._recording_fmp4_files(root / "segment-01.mp4", 2, 0)
+    scale = 1000
+    assert scale not in runtime._mp4_track_timescales(init.read_bytes()).values()
+    value_format = ">QQ" if version else ">II"
+    earliest = (1 << (64 if version else 32)) - 1 if overflow else 123
+    # Include a byte offset and a reference entry: neither changes when shifting
+    # the timeline, and version 0 boxes must retain their original size.
+    payload = (bytes([version, 0, 0, 0]) + struct.pack(">II", 1, scale)
+               + struct.pack(value_format, earliest, 52)
+               + struct.pack(">HHIII", 0, 1, 1234, 2000, 0x90000000))
+    index = struct.pack(">I4s", len(payload) + 8, b"sidx") + payload
+    data = media.read_bytes()
+    remaining = b"".join(data[start:end] for kind, start, _, end in runtime._mp4_boxes(data) if kind != b"sidx")
+    target = tmp_path / "indexed.m4s"
+    target.write_bytes(index + remaining)
+    if overflow:
+        with pytest.raises(RuntimeError, match=f"exceeds version {version} sidx"):
+            runtime._offset_fmp4_timestamps(init, target, 7.25)
+        assert target.read_bytes() == index + remaining
+        return
+    runtime._offset_fmp4_timestamps(init, target, 7.25)
+    updated = target.read_bytes()
+    timestamp_end = 20 + (8 if version else 4)
+    assert segment_indexes(runtime, target) == {1: (scale, 7373)}
+    assert len(updated) == len(index + remaining)
+    assert updated[:20] == index[:20]
+    assert updated[timestamp_end:len(index)] == index[timestamp_end:]
 
 
 @pytest.mark.parametrize("codec,b_frames", [("h264", 0), ("h264", 2), ("hevc", 2)])

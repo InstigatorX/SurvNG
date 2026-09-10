@@ -411,6 +411,26 @@ class RecordingMediaRuntime:
         adjusted = 0
         with media_path.open('r+b') as media_file, mmap.mmap(media_file.fileno(), 0) as data:
             for box_type, _, payload, box_end in self._mp4_boxes(data):
+                if box_type == b'sidx':
+                    # The seek index and media must describe the same timeline.
+                    # Its timescale is independent of the track's mdhd timescale;
+                    # retain the original presentation/decode timing difference.
+                    if payload + 4 > box_end or data[payload] not in (0, 1):
+                        raise RuntimeError('fragment has an invalid sidx version')
+                    version = data[payload]
+                    if payload + (32 if version == 1 else 24) > box_end:
+                        raise RuntimeError('fragment has a truncated sidx box')
+                    timescale = struct.unpack_from('>I', data, payload + 8)[0]
+                    if not timescale:
+                        raise RuntimeError('fragment sidx has no timescale')
+                    value_format = '>Q' if version == 1 else '>I'
+                    value_offset = payload + 12
+                    current = struct.unpack_from(value_format, data, value_offset)[0]
+                    next_value = current + round(seconds * timescale)
+                    if next_value >= 1 << (64 if version == 1 else 32):
+                        raise RuntimeError(f'fragment timestamp exceeds version {version} sidx')
+                    struct.pack_into(value_format, data, value_offset, next_value)
+                    continue
                 if box_type != b'moof':
                     continue
                 for child_type, _, child_payload, child_end in self._mp4_boxes(data, payload, box_end):
@@ -580,7 +600,7 @@ class RecordingMediaRuntime:
             cache_dir.mkdir(parents=True, exist_ok=True)
             temp_dir = Path(tempfile.mkdtemp(prefix='fmp4-', dir=cache_dir))
             codec = self._probe_video_codec(path)
-            # Remux each source in its local timeline, then shift tfdt once below.
+            # Remux each source locally, then shift tfdt and sidx once below.
             # FFmpeg also carries output_ts_offset in the init edit lists. With
             # tfdt repair it shifts playback twice when a later segment uses its
             # own init (for example, after a codec change).
