@@ -223,6 +223,8 @@ Type=simple
 User=survng
 Group=survng
 NoNewPrivileges=true
+RuntimeDirectory=survng
+RuntimeDirectoryMode=0700
 WorkingDirectory=${SURVNG_ROOT}
 ExecStart=${SURVNG_ROOT}/.venv/bin/uvicorn survng.app.main:app --host 0.0.0.0 --port 8088 --loop asyncio --timeout-graceful-shutdown 30
 ExecStop=-/bin/kill -USR1 \$MAINPID
@@ -233,6 +235,7 @@ Environment=PYTHONFAULTHANDLER=1
 Environment=TZ=${SURVNG_TZ}
 Environment=SURVNG_REPO_ROOT=${SURVNG_ROOT}
 Environment=SURVNG_CONFIG_PATH=${SURVNG_ROOT}/config.json
+Environment=SURVNG_OBSERVABILITY_SOCKET=/run/survng/observability.sock
 Environment=MALLOC_ARENA_MAX=16
 KillSignal=SIGTERM
 KillMode=mixed
@@ -258,6 +261,23 @@ Uvicorn drains.
 
 The checked-in `deploy/survng.service` is the historical root/`/root/SurvNG`
 unit. New installs should use the unit written above.
+
+Both units let systemd create `/run/survng` with mode `0700` and ownership
+matching the service's `User` and `Group` (root for the historical unit).
+For an existing unit, add these settings once with `sudo systemctl edit survng.service`:
+
+```ini
+[Service]
+RuntimeDirectory=survng
+RuntimeDirectoryMode=0700
+Environment=SURVNG_OBSERVABILITY_SOCKET=/run/survng/observability.sock
+```
+
+Then run `sudo systemctl daemon-reload` and restart the service. Do not repeatedly
+chown the directory to root when running the service as another user. SurvNG
+also repairs legacy `0755` permissions on its own `/run/survng` directory at
+startup, so existing root deployments do not require manual chmod after code
+updates. Custom socket directories and foreign-owned paths remain protected.
 
 ## 9. Open SurvNG
 

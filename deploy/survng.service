@@ -7,6 +7,8 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+RuntimeDirectory=survng
+RuntimeDirectoryMode=0700
 WorkingDirectory=/root/SurvNG
 ExecStart=/root/SurvNG/.venv/bin/python -m survng.app --host 0.0.0.0 --port 8088 --loop asyncio --timeout-graceful-shutdown 30
 # Ask SurvNG to release scarce camera PullPoint slots before Uvicorn starts
