@@ -66,12 +66,10 @@ class CameraMediaService:
         self.time_ns = time_ns
         self.sleeper = sleeper
         self.media_storage = media_storage
-        self.snapshots_dir = (
-            media_storage.directory("snapshots", camera.id, camera.id)
-            if media_storage is not None
-            else storage_dir / "snapshots" / camera.id
-        )
-        self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        # Camera construction and live JPEGs must work even when media storage
+        # is below its reserve or offline. Select a writable root per save.
+        self.snapshots_dir = storage_dir / "snapshots" / camera.id
+        self._snapshot_storage_failed = False
 
     def snapshot(self, source: str = "live") -> bytes | None:
         frame = self.frame_provider(source)
@@ -133,12 +131,12 @@ class CameraMediaService:
         result: MotionQualificationResult,
         frame: Any,
     ) -> str:
-        directory = (
-            self.media_storage.directory("motion_audits", self.camera.id, self.camera.id)
-            if self.media_storage is not None
-            else self.storage_dir / "motion_samples" / self.camera.id
-        )
         try:
+            directory = (
+                self.media_storage.directory("motion_audits", self.camera.id, self.camera.id)
+                if self.media_storage is not None
+                else self.storage_dir / "motion_samples" / self.camera.id
+            )
             directory.mkdir(parents=True, exist_ok=True)
             stamp = event_at.strftime("%Y%m%d-%H%M%S-%f")
             path = self.image_writer.write(
@@ -193,10 +191,25 @@ class CameraMediaService:
         captured_at = self._utc(event_at or self.utc_now())
         event_stamp = captured_at.strftime("%Y%m%d-%H%M%S-%f")
         stamp = f"{event_stamp}-{self.time_ns() % 1_000_000_000:09d}"
-        path = self.image_writer.write(self.snapshots_dir, stamp, frame)
-        if path is None:
-            LOGGER.warning("failed to encode snapshot for %s", self.camera.id)
+        try:
+            directory = (
+                self.media_storage.directory("snapshots", self.camera.id, self.camera.id)
+                if self.media_storage is not None
+                else self.snapshots_dir
+            )
+            path = self.image_writer.write(directory, stamp, frame)
+        except OSError as error:
+            if not self._snapshot_storage_failed:
+                LOGGER.warning("snapshot storage unavailable for %s: %s", self.camera.id, error)
+            self._snapshot_storage_failed = True
             return ""
+        if path is None:
+            LOGGER.warning("failed to save snapshot for %s", self.camera.id)
+            return ""
+        self.snapshots_dir = directory
+        if self._snapshot_storage_failed:
+            LOGGER.info("snapshot storage recovered for %s", self.camera.id)
+            self._snapshot_storage_failed = False
         return str(path)
 
     def _prune_rejected_samples(self, directory: Path) -> None:

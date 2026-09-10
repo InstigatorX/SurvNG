@@ -35,6 +35,14 @@ class FakeRecorder:
 
 
 class MediaExportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        capacity = patch(
+            "survng.app.media_storage.shutil.disk_usage",
+            return_value=SimpleNamespace(total=1000, used=500, free=500),
+        )
+        capacity.start()
+        self.addCleanup(capacity.stop)
+
     def test_exports_follow_role_specific_media_location(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -59,8 +67,101 @@ class MediaExportTest(unittest.TestCase):
             )
 
             self.assertEqual(manager.exports_dir, external / "exports")
+            self.assertFalse(manager.exports_dir.exists())
+            self.assertEqual(manager._prepare_output_directory(), external / "exports")
             self.assertTrue(manager.recording_dir.is_dir())
             self.assertTrue(manager.timelapse_dir.is_dir())
+
+    def test_full_storage_allows_startup_and_export_worker_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            media_roots = [root / "first", root / "second"]
+            for media_root in media_roots:
+                media_root.mkdir()
+            registry = MediaStorageRegistry(root / "storage", MediaStorageConfig(
+                locations=[MediaStorageLocationConfig(
+                    id=path.name, path=str(path), roles=["exports"], reserve_percent=15,
+                ) for path in media_roots],
+            ))
+            segment = root / "segment.mp4"
+            segment.write_bytes(b"source")
+            recorder = FakeRecorder([{
+                "path": str(segment), "start_epoch": 100.0, "end_epoch": 110.0,
+                "duration_seconds": 10.0,
+            }])
+            free_bytes = {path: 130 for path in media_roots}
+
+            def usage(path: Path) -> SimpleNamespace:
+                free = free_bytes[Path(path)]
+                return SimpleNamespace(total=1000, used=1000 - free, free=free)
+
+            def wait_for_job(manager: MediaExportManager, job_id: str) -> dict:
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    job = manager.store.get(job_id)
+                    if job and job["status"] in {"completed", "failed"}:
+                        return job
+                    time.sleep(0.01)
+                self.fail("export worker did not finish the job")
+
+            payload = {
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            }
+            with patch("survng.app.media_storage.shutil.disk_usage", side_effect=usage):
+                manager = MediaExportManager(
+                    root / "storage", root / "database", recorder=lambda: recorder,
+                    ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+                    media_storage=registry,
+                )
+                manager._build_recording = Mock(return_value=(segment, []))
+                self.assertTrue(all(not (path / "exports").exists() for path in media_roots))
+                manager.start()
+                try:
+                    failed = wait_for_job(manager, str(manager.create(payload)["id"]))
+                    self.assertEqual(failed["status"], "failed")
+                    self.assertIn("no writable media location supports exports", failed["error"])
+                    manager._build_recording.assert_not_called()
+                    self.assertTrue(manager.is_running())
+                    self.assertFalse((root / "storage" / "exports").exists())
+                    self.assertTrue(all(not (path / "exports").exists() for path in media_roots))
+
+                    free_bytes[media_roots[1]] = 500
+                    completed = wait_for_job(manager, str(manager.create(payload)["id"]))
+                    self.assertEqual(completed["status"], "completed", completed["error"])
+                    output, _ = manager.output_path(str(completed["id"]))
+                    self.assertEqual(output.parent, media_roots[1] / "exports" / "recording")
+                    manifest = media_roots[1] / "exports" / "manifests" / f"{completed['id']}.json"
+                    self.assertTrue(manifest.exists())
+                    self.assertFalse((media_roots[0] / "exports").exists())
+                    manager._delete_job_files(completed)
+                    self.assertFalse(output.exists())
+                    self.assertFalse(manifest.exists())
+                finally:
+                    self.assertTrue(manager.stop())
+
+    def test_missing_media_mount_allows_export_worker_startup_without_creating_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            missing = root / "unmounted" / "media"
+            registry = MediaStorageRegistry(root / "storage", MediaStorageConfig(
+                locations=[MediaStorageLocationConfig(
+                    id="archive", path=str(missing), roles=["exports"], require_mount=True,
+                )],
+            ))
+            manager = MediaExportManager(
+                root / "storage", root / "database", recorder=lambda: FakeRecorder([]),
+                ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+                media_storage=registry,
+            )
+            manager.start()
+            try:
+                self.assertTrue(manager.is_running())
+                self.assertFalse(missing.exists())
+                self.assertFalse((root / "storage").exists())
+                self.assertEqual(manager.list(), [])
+            finally:
+                self.assertTrue(manager.stop())
 
     def test_historical_export_remains_accessible_across_configured_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -445,6 +546,7 @@ class MediaExportTest(unittest.TestCase):
                 "kind": "recording", "camera_id": "gate", "source": "main",
                 "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
             })
+            manager.recording_dir.mkdir(parents=True)
             output = manager.recording_dir / "result.mp4"
             output.write_bytes(b"media")
             manager.store.update(
@@ -473,6 +575,7 @@ class MediaExportTest(unittest.TestCase):
                 "kind": "recording", "camera_id": "gate", "source": "main",
                 "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
             })
+            manager.recording_dir.mkdir(parents=True)
             output = manager.recording_dir / "protected.mp4"
             output.write_bytes(b"protected-media")
             manager.store.update(
@@ -504,6 +607,7 @@ class MediaExportTest(unittest.TestCase):
                 "kind": "timelapse", "camera_id": "gate", "source": "main",
                 "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
             })
+            manager.timelapse_dir.mkdir(parents=True)
             output = manager.timelapse_dir / "protected.mp4"
             output.write_bytes(b"media")
             manager.store.update(
@@ -666,6 +770,8 @@ class MediaExportTest(unittest.TestCase):
                 "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
             })
             manager.store.update(str(job["id"]), status="running", phase="Finalizing")
+            manager.recording_dir.mkdir(parents=True)
+            manager.manifest_dir.mkdir(parents=True)
             orphan = manager.recording_dir / f"{job['id']}-gate-19700101-000140-recording.mp4"
             orphan.write_bytes(b"published before crash")
             manifest = manager.manifest_dir / f"{job['id']}.json"

@@ -1,4 +1,5 @@
 import shutil
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,13 @@ from survng.app.config import (
     primary_media_storage,
 )
 from survng.app.media_storage import MediaStorageRegistry
+
+
+@pytest.fixture(autouse=True)
+def available_test_capacity():
+    # Placement tests must not depend on the developer/CI disk's reserve state.
+    with patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, free=500)):
+        yield
 
 
 def test_primary_location_uses_configured_media_root(tmp_path: Path) -> None:
@@ -101,6 +109,22 @@ def test_selection_error_explains_unwritable_location(tmp_path: Path) -> None:
     with patch("survng.app.media_storage.os.access", return_value=False):
         with pytest.raises(OSError, match="Media 1: directory is not writable"):
             registry.choose("snapshots", "gate")
+
+
+def test_reserve_rejection_explains_free_space_on_a_writable_disk(tmp_path: Path) -> None:
+    registry = MediaStorageRegistry(tmp_path, MediaStorageConfig(locations=[
+        MediaStorageLocationConfig(id="media1", name="Media 1", path=str(tmp_path), reserve_percent=15),
+    ]))
+    with patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, free=140)):
+        status = registry.status("media1")
+        assert status.state == "full"
+        assert status.free_bytes == 140
+        assert status.usable_bytes == 0
+        with pytest.raises(OSError, match=r"Media 1: free space 140 bytes is at or below the 15% reserve \(150 bytes\)"):
+            registry.choose("snapshots", "gate")
+    with patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, free=151)):
+        assert registry.choose("snapshots", "gate").writable
+        assert registry.status("media1").error == ""
 
 
 def test_configuration_rejects_duplicate_paths(tmp_path: Path) -> None:

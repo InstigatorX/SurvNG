@@ -4,7 +4,8 @@ import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -24,6 +25,7 @@ def _service(
     random_value: float = 0.0,
     stopped: list[bool] | None = None,
     detector: Mock | None = None,
+    media_storage: MediaStorageRegistry | None = None,
 ) -> CameraMediaService:
     camera = CameraConfig(
         id="gate",
@@ -43,6 +45,7 @@ def _service(
         utc_now=lambda: datetime(2026, 8, 6, 12, tzinfo=timezone.utc),
         time_ns=lambda: 123456789,
         sleeper=lambda _delay: None,
+        media_storage=media_storage,
     )
 
 
@@ -59,7 +62,7 @@ def test_snapshot_returns_decodable_jpeg_without_persisting_it() -> None:
         decoded = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
         assert decoded is not None
         assert decoded.shape == (24, 32, 3)
-        assert list(service.snapshots_dir.iterdir()) == []
+        assert not service.snapshots_dir.exists()
 
 
 def test_durable_images_follow_role_specific_media_locations() -> None:
@@ -68,11 +71,9 @@ def test_durable_images_follow_role_specific_media_locations() -> None:
         media = root / "media"
         media.mkdir()
         registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
-            MediaStorageLocationConfig(id="images", path=str(media), roles=["snapshots", "motion_audits"]),
+            MediaStorageLocationConfig(id="images", path=str(media), roles=["snapshots", "motion_audits"], reserve_percent=0),
         ]))
-        service = _service(root / "metadata", frame=np.zeros((8, 8, 3), dtype=np.uint8))
-        service.media_storage = registry
-        service.snapshots_dir = registry.directory("snapshots", "gate", "gate")
+        service = _service(root / "metadata", frame=np.zeros((8, 8, 3), dtype=np.uint8), media_storage=registry)
 
         snapshot = service.write_snapshot(np.zeros((8, 8, 3), dtype=np.uint8))
         audit = service.sample_rejected_motion(
@@ -82,6 +83,39 @@ def test_durable_images_follow_role_specific_media_locations() -> None:
 
         assert Path(snapshot).is_relative_to(media / "snapshots")
         assert Path(audit).is_relative_to(media / "motion_samples")
+
+
+def test_camera_media_starts_below_reserve_and_recovers_without_restart(tmp_path, caplog) -> None:
+    first, second = tmp_path / "media1", tmp_path / "media2"
+    first.mkdir()
+    second.mkdir()
+    metadata = tmp_path / "metadata"
+    registry = MediaStorageRegistry(metadata, MediaStorageConfig(locations=[
+        MediaStorageLocationConfig(id="first", path=str(first), reserve_percent=15),
+        MediaStorageLocationConfig(id="second", path=str(second), reserve_percent=15),
+    ]))
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    event_at = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    result = MotionQualificationResult(False, 0.4, 0.5, "low_score", 2, {})
+    with patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, free=140)):
+        service = _service(metadata, frame=frame, media_storage=registry)
+        assert service.snapshot() is not None, "live JPEGs do not need durable storage"
+        assert service.write_snapshot(frame) == ""
+        assert service.write_snapshot(frame) == ""
+        assert service.sample_rejected_motion(event_at, result) == ""
+    assert sum("snapshot storage unavailable" in record.message for record in caplog.records) == 1
+    assert not metadata.exists(), "do not redirect media to the metadata/root filesystem"
+    assert list(first.iterdir()) == []
+    assert list(second.iterdir()) == []
+    with patch("survng.app.media_storage.shutil.disk_usage", side_effect=lambda path: SimpleNamespace(total=1000, free=400 if path == second else 140)):
+        stored = service.write_snapshot(frame)
+    assert Path(stored).is_file()
+    assert Path(stored).is_relative_to(second / "snapshots")
+    # Once the selected disk fills, the next save must select another eligible root.
+    with patch("survng.app.media_storage.shutil.disk_usage", side_effect=lambda path: SimpleNamespace(total=1000, free=400 if path == first else 140)):
+        relocated = service.write_snapshot(frame)
+    assert Path(relocated).is_file()
+    assert Path(relocated).is_relative_to(first / "snapshots")
 
 
 def test_mjpeg_normalizes_source_and_stops_without_an_extra_frame() -> None:
@@ -183,4 +217,4 @@ def test_recorded_motion_detection_is_delegated_unchanged() -> None:
         result = service.detect_recorded_motion(event_at)
 
         assert result is expected
-        detector.detect.assert_called_once_with(event_at)
+        detector.detect.assert_called_once_with(event_at, None)

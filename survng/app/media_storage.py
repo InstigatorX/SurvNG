@@ -143,6 +143,11 @@ class MediaStorageRegistry:
         return MediaLocationStatus(
             **base,
             state="online" if usable > 0 else "full",
+            error=(
+                f"free space {usage.free} bytes is at or below the "
+                f"{location.reserve_percent:g}% reserve ({reserve} bytes)"
+                if usable == 0 else ""
+            ),
             total_bytes=usage.total,
             free_bytes=usage.free,
             usable_bytes=usable,

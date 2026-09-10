@@ -369,17 +369,21 @@ class MediaExportManager:
         self.storage_dir = storage_dir.resolve()
         self.database_dir = database_dir.resolve()
         self.media_storage = media_storage
-        self.exports_dir = (
-            media_storage.directory("exports", "exports")
+        # Reading existing exports must work even when every destination is
+        # below its free-space reserve. Select writable storage per job.
+        self.export_roots = (
+            media_storage.configured_roots_for("exports")
             if media_storage is not None
-            else self.storage_dir / "exports"
+            else [self.storage_dir / "exports"]
         )
+        if not self.export_roots:
+            raise ValueError("at least one media location must support exports")
+        self.exports_dir = self.export_roots[0]
         self.recording_dir = self.exports_dir / "recording"
         self.timelapse_dir = self.exports_dir / "timelapse"
         self.manifest_dir = self.exports_dir / "manifests"
         self.work_dir = self.database_dir / "export-work"
-        for directory in (self.recording_dir, self.timelapse_dir, self.manifest_dir, self.work_dir):
-            directory.mkdir(parents=True, exist_ok=True)
+        self.work_dir.mkdir(parents=True, exist_ok=True)
         self._recorder = recorder
         self._ffmpeg_path = ffmpeg_path
         self._hardware_backend = hardware_backend
@@ -614,7 +618,10 @@ class MediaExportManager:
             self._delete_job_files(claimed)
             self.store.delete(str(claimed["id"]))
         cutoff = time.time() - 3600
-        for path in itertools.islice(self.exports_dir.rglob("*.partial"), 250):
+        partials = itertools.chain.from_iterable(
+            root.rglob("*.partial") for root in self.export_roots
+        )
+        for path in itertools.islice(partials, 250):
             try:
                 if path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
@@ -690,6 +697,7 @@ class MediaExportManager:
     def _execute(self, job: dict[str, object], cancel: threading.Event) -> None:
         job_id = str(job["id"])
         self.store.update(job_id, status="running", phase="Reading recording index", progress=3, started_at=_utc_now())
+        exports_dir = self._prepare_output_directory()
         recorder = self._recorder()
         rows = recorder.recording_rows_between(
             str(job["camera_id"]),
@@ -715,7 +723,7 @@ class MediaExportManager:
             if cancel.is_set() or self._stop.is_set():
                 raise InterruptedError
             self.store.update(job_id, phase="Finalizing", progress=92)
-            final_path, output_name = self._publish(job, output, cancel)
+            final_path, output_name = self._publish(job, output, cancel, exports_dir=exports_dir)
             if cancel.is_set() or self._stop.is_set():
                 final_path.unlink(missing_ok=True)
                 raise InterruptedError
@@ -731,7 +739,7 @@ class MediaExportManager:
                 "generated_at": _utc_now(),
                 "output_name": output_name,
             }
-            self._write_manifest(job_id, manifest)
+            self._write_manifest(job_id, manifest, exports_dir=exports_dir)
             if cancel.is_set() or self._stop.is_set():
                 raise InterruptedError
             expires = datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)
@@ -750,7 +758,7 @@ class MediaExportManager:
         except BaseException:
             if final_path is not None:
                 final_path.unlink(missing_ok=True)
-            (self.manifest_dir / f"{job_id}.json").unlink(missing_ok=True)
+            (exports_dir / "manifests" / f"{job_id}.json").unlink(missing_ok=True)
             raise
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -1234,17 +1242,29 @@ class MediaExportManager:
                 groups[-1].append(row)
         return groups, gaps
 
+    def _prepare_output_directory(self) -> Path:
+        root = (
+            self.media_storage.directory("exports", "exports")
+            if self.media_storage is not None else self.exports_dir
+        )
+        for kind in ("recording", "timelapse", "manifests"):
+            (root / kind).mkdir(parents=True, exist_ok=True)
+        return root
+
     def _publish(
         self,
         job: dict[str, object],
         source: Path,
         cancel: threading.Event,
+        *,
+        exports_dir: Path | None = None,
     ) -> tuple[Path, str]:
+        exports_dir = exports_dir or self._prepare_output_directory()
         timestamp = datetime.fromtimestamp(float(job["start_epoch"]), timezone.utc).strftime("%Y%m%d-%H%M%S")
         camera = _safe_component(str(job["camera_id"]))
         suffix = source.suffix.lower() if source.suffix else ".mp4"
         name = f"{camera}-{timestamp}-{str(job['kind'])}{suffix}"
-        destination_dir = self.recording_dir if job["kind"] == "recording" else self.timelapse_dir
+        destination_dir = exports_dir / ("recording" if job["kind"] == "recording" else "timelapse")
         final = destination_dir / f"{job['id']}-{name}"
         partial = final.with_suffix(final.suffix + ".partial")
         try:
@@ -1267,8 +1287,11 @@ class MediaExportManager:
             raise
         return final, name
 
-    def _write_manifest(self, job_id: str, payload: dict[str, object]) -> None:
-        final = self.manifest_dir / f"{job_id}.json"
+    def _write_manifest(
+        self, job_id: str, payload: dict[str, object], *, exports_dir: Path
+    ) -> None:
+        manifest_dir = exports_dir / "manifests"
+        final = manifest_dir / f"{job_id}.json"
         temporary = final.with_suffix(".json.partial")
         try:
             with temporary.open("w", encoding="utf-8") as handle:
@@ -1276,7 +1299,7 @@ class MediaExportManager:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, final)
-            self._sync_directory(self.manifest_dir)
+            self._sync_directory(manifest_dir)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -1302,17 +1325,22 @@ class MediaExportManager:
     def _cleanup_interrupted_artifacts(self) -> None:
         """Remove final files published before an interrupted DB transition."""
         for job_id in self.store.interrupted_cleanup_ids():
-            for directory in (self.recording_dir, self.timelapse_dir):
-                for path in directory.glob(f"{job_id}-*"):
-                    try:
-                        if path.is_file():
-                            path.unlink()
-                    except OSError:
-                        LOGGER.warning("could not remove interrupted export artifact: %s", path)
+            for root in self.export_roots:
+                for kind in ("recording", "timelapse"):
+                    for path in (root / kind).glob(f"{job_id}-*"):
+                        try:
+                            if path.is_file():
+                                path.unlink()
+                        except OSError:
+                            LOGGER.warning("could not remove interrupted export artifact: %s", path)
+            self._delete_manifests(job_id)
+
+    def _delete_manifests(self, job_id: str) -> None:
+        for root in self.export_roots:
             try:
-                (self.manifest_dir / f"{job_id}.json").unlink(missing_ok=True)
+                (root / "manifests" / f"{job_id}.json").unlink(missing_ok=True)
             except OSError:
-                LOGGER.warning("could not remove interrupted export manifest: %s", job_id)
+                LOGGER.warning("could not remove export manifest: %s", job_id)
 
     def _delete_job_files(self, job: dict[str, object]) -> None:
         raw = str(job.get("output_path") or "")
@@ -1327,7 +1355,7 @@ class MediaExportManager:
                 path.unlink(missing_ok=True)
             except (OSError, ValueError):
                 LOGGER.warning("refused to delete export path outside export storage: %s", raw)
-        (self.manifest_dir / f"{job['id']}.json").unlink(missing_ok=True)
+        self._delete_manifests(str(job["id"]))
 
     def _finish_cancelled(self, job_id: str) -> None:
         self.store.update(

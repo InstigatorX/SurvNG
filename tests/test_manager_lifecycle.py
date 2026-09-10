@@ -705,6 +705,28 @@ class ManagerLifecycleTest(unittest.TestCase):
         self.assertIsNone(manager.recorder._index_thread)
         self.assertIsNone(manager.recorder._watchdog_thread)
 
+    def test_manager_with_camera_starts_below_media_reserve(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, used=860, free=140)),
+        ):
+            root = Path(temporary)
+            media = root / "media"
+            media.mkdir()
+            manager = AppManager(AppConfig(
+                storage_dir=str(media),
+                database_dir=str(root / "database"),
+                cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main", enabled=False)],
+            ))
+            try:
+                manager.start_all()
+                self.assertTrue(manager._started)
+                self.assertIn("gate", manager.workers)
+                self.assertEqual(manager.media_storage.status("primary").state, "full")
+                self.assertFalse((media / "snapshots").exists())
+            finally:
+                manager.stop_all()
+
     def test_constructor_failure_closes_services_created_before_workers(self) -> None:
         inference = Mock()
         inference.detector = Mock()
