@@ -69,7 +69,8 @@ class Recorder(RecordingIndexMixin):
         if not self.recording_roots:
             raise ValueError("at least one media location must support recordings")
         self.recordings_dir = self.recording_roots[0]
-        self.recordings_dir.mkdir(parents=True, exist_ok=True)
+        # Media may be full or disconnected at startup. Create its directories
+        # only when starting a recording, inside the existing retry boundary.
         resolved_index_dir = index_dir or storage_dir
         resolved_index_dir.mkdir(parents=True, exist_ok=True)
         self.index_path = resolved_index_dir / "recordings.sqlite3"

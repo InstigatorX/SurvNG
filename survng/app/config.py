@@ -434,6 +434,7 @@ class MediaStorageLocationConfig(BaseModel):
     roles: list[MediaStorageRole] = Field(
         default_factory=lambda: list(ALL_MEDIA_STORAGE_ROLES)
     )
+    # Retention trigger, never a capacity admission limit for media writes.
     reserve_percent: float = Field(default=15.0, ge=0.0, le=95.0)
     priority: int = Field(default=100, ge=1, le=1000)
     require_mount: bool = False

@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from survng.app.config import AppConfig, CameraConfig
+from survng.app.config import AppConfig, CameraConfig, MediaStorageConfig, MediaStorageLocationConfig
 from survng.app.camera_fleet import CameraFleetLifecycle
 from survng.app.camera_control import CameraControlService
 from survng.app.camera_startup import CameraStartupCoordinator
@@ -704,6 +704,60 @@ class ManagerLifecycleTest(unittest.TestCase):
         self.assertFalse(manager.runtime_monitor.running)
         self.assertIsNone(manager.recorder._index_thread)
         self.assertIsNone(manager.recorder._watchdog_thread)
+
+    def test_manager_with_camera_starts_below_media_reserve(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, used=860, free=140)),
+        ):
+            root = Path(temporary)
+            media = root / "media"
+            media.mkdir()
+            manager = AppManager(AppConfig(
+                storage_dir=str(media),
+                database_dir=str(root / "database"),
+                cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main", enabled=False)],
+            ))
+            try:
+                manager.start_all()
+                self.assertTrue(manager._started)
+                self.assertIn("gate", manager.workers)
+                self.assertEqual(manager.media_storage.status("primary").state, "low_space")
+                self.assertFalse((media / "snapshots").exists())
+            finally:
+                manager.stop_all()
+
+    def test_manager_starts_with_full_or_disconnected_external_media(self) -> None:
+        for disconnected in (False, True):
+            with self.subTest(disconnected=disconnected), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                media = root / "external" / "media"
+                if not disconnected:
+                    media.mkdir(parents=True)
+                config = AppConfig(
+                    storage_dir=str(root / "local"),
+                    database_dir=str(root / "database"),
+                    media_storage=MediaStorageConfig(locations=[MediaStorageLocationConfig(
+                        id="external", path=str(media), require_mount=disconnected,
+                    )]),
+                    cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main", enabled=False)],
+                )
+                with (
+                    patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, used=1000, free=0)),
+                    patch("survng.app.media_storage.os.path.ismount", return_value=False),
+                ):
+                    manager = AppManager(config)
+                    try:
+                        manager.start_all()
+                        self.assertTrue(manager._started)
+                        self.assertEqual(manager.media_storage.status("external").state, "not_mounted" if disconnected else "full")
+                        self.assertFalse((media / "recordings").exists())
+                        self.assertFalse((media / "snapshots").exists())
+                        self.assertFalse((media / "exports").exists())
+                        if disconnected:
+                            self.assertFalse(media.exists())
+                    finally:
+                        manager.stop_all()
 
     def test_constructor_failure_closes_services_created_before_workers(self) -> None:
         inference = Mock()

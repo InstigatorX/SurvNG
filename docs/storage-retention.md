@@ -10,12 +10,21 @@ transient playback work remain on local application storage.
 Each location has an immutable ID, filesystem path, accepted media roles,
 reserve percentage, priority, enabled state, and optional mount requirement.
 `balanced` placement chooses the eligible location with the greatest weighted
-usable space; `priority` placement prefers the highest-priority eligible
+free space; `priority` placement prefers the highest-priority eligible
 location. Placement is sticky for a camera/source or media role while that
 location remains writable, so SurvNG does not bounce an active stream between
 filesystems. New writes fail over when a location becomes unavailable or
-reaches its reserve. Existing indexed media remains readable from every
-configured location.
+reports zero available space. The reserve is a cleanup trigger, never a write
+barrier: recordings, snapshots, clips, and exports remain writable below it.
+Admin reports this state as **Low space · writes continue**, separate from
+full, read-only, or missing storage. Existing indexed media remains readable
+from every configured location.
+
+Media directories are created when a writer needs them, so full or disconnected
+media does not prevent application startup when local application storage is
+available. Recording failures use the watchdog retry; subsequent image saves
+and new export jobs reselect a writable location. An interrupted recording or
+a failed snapshot/export is not reconstructed automatically.
 
 The retention worker removes indexed MP4 files inside configured recording-role
 directories and clean incident images inside configured snapshot-role
@@ -48,7 +57,12 @@ the index-only dry-run projection, current growth rate, estimated headroom,
 eligible bytes, and per-camera recording/snapshot usage. **Recalculate** refreshes the plan without
 deleting anything. **Clean Up Now** requires confirmation and starts bounded,
 oldest-first cleanup. Enabling automatic cleanup applies the same guarded plan
-in the background.
+in the background. Low-space notifications from media placement wake this one
+shared worker while saves continue; they never enable automatic deletion.
+During idle periods, lightweight capacity checks run every 10 seconds to catch
+pressure from recorders that keep the same output location. Cleanup signals
+coalesce across cameras. If no eligible data can be reclaimed, pressure retries
+back off from one minute to 15 minutes; operator requests remain immediate.
 
 The worker uses local SQLite recording and event indexes and does not walk
 media directories during normal operation. Legacy event rows without a cached

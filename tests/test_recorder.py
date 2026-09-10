@@ -8,6 +8,7 @@ import unittest
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from survng.app.config import CameraConfig, MediaStorageConfig, MediaStorageLocationConfig
@@ -484,6 +485,41 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(first, ["-map", "0:a:0?", "-c:a", "copy"])
         self.assertEqual(second, first)
         self.assertEqual(probe.call_count, 2)
+
+    def test_recorder_starts_below_reserve_and_fails_over_only_when_full(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / "first", root / "second"
+            first.mkdir()
+            second.mkdir()
+            registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(placement="priority", locations=[
+                MediaStorageLocationConfig(id="first", path=str(first), priority=200),
+                MediaStorageLocationConfig(id="second", path=str(second)),
+            ]))
+            recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+            free = {first: 140, second: 140}
+            processes = [Mock(pid=4321, stderr=iter(())), Mock(pid=4322, stderr=iter(()))]
+            for process in processes:
+                process.poll.return_value = None
+            with (
+                patch("survng.app.media_storage.shutil.disk_usage", side_effect=lambda path: SimpleNamespace(total=1000, free=free[path])),
+                patch("survng.app.recording_process.recorder.subprocess.Popen", side_effect=processes) as popen,
+                patch.object(recorder, "_audio_output_args", return_value=[]),
+                patch.object(recorder, "_owned_ffmpeg_recorders", return_value={}),
+                patch.object(recorder, "_kill_pid"),
+            ):
+                try:
+                    recorder.start(camera)
+                    self.assertEqual(popen.call_count, 1)
+                    self.assertIn(str(first / "recordings"), popen.call_args.args[0][-1])
+                    free[first] = 0
+                    processes[0].poll.return_value = 1
+                    recorder.reconcile({camera.id: camera})
+                    self.assertEqual(popen.call_count, 2)
+                    self.assertIn(str(second / "recordings"), popen.call_args.args[0][-1])
+                finally:
+                    recorder.stop(camera.id, "main")
 
     def test_storage_failure_releases_start_reservation_and_watchdog_retries(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
