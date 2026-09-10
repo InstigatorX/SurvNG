@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { incidentGalleryPageSize } from "../src/incidentNavigation.mjs";
 
-// Gallery capacity fits complete thumbnail rows and stays bounded. These
-// dimensions include the results area only, below the toolbar and rail header.
-assert.equal(incidentGalleryPageSize({ width: 1440, height: 720 }), 15);
-assert.equal(incidentGalleryPageSize({ width: 1024, height: 640 }), 12);
-assert.equal(incidentGalleryPageSize({ width: 768, height: 580 }), 6);
-assert.equal(incidentGalleryPageSize({ width: 240, height: 100 }), 1);
-assert.equal(incidentGalleryPageSize({ width: 7680, height: 4320 }), 60);
-assert.equal(incidentGalleryPageSize({ width: 0, height: 0 }), 12);
-assert.equal(incidentGalleryPageSize({}), 12);
+// Preferences read from browser storage and native selects arrive as strings.
+for (const size of [25, 50, 100]) {
+  assert.equal(incidentGalleryPageSize(size), size);
+  assert.equal(incidentGalleryPageSize(String(size)), size);
+}
+for (const invalid of [undefined, null, "", "bad", 0, -25, 60, 1000, 50.5]) {
+  assert.equal(incidentGalleryPageSize(invalid), 25);
+}
 
-console.log("incident gallery capacity tests passed");
+console.log("incident gallery page-size tests passed");

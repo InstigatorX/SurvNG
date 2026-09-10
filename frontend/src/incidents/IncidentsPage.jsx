@@ -82,6 +82,8 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const incidentRailListRef = useRef(null);
   const incidentGalleryToggleRef = useRef(null);
   const [galleryExpanded, setGalleryExpanded] = useState(false);
+  const [storedGalleryPageSize, setStoredGalleryPageSize] = useStoredState("survng.incidentGalleryPageSize.v1", 25);
+  const galleryPageSize = incidentGalleryPageSize(storedGalleryPageSize);
   const [incidentPageSize, setIncidentPageSize] = useState(12);
   const retainedGallerySelectionRef = useRef(null);
   const galleryPageAnchorRef = useRef(null);
@@ -267,7 +269,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
       const width = rect.width;
       const height = rect.height;
       const pageSize = galleryExpanded
-        ? incidentGalleryPageSize({ width, height })
+        ? galleryPageSize
         : incidentThumbnailPageSize({ width, height, density: incidentDensity,
           ...(incidentDensity === "comfortable" ? { columns: 2, gap: 6, horizontalPadding: 16 } : {}) });
       const paging = incidentPagingRef.current;
@@ -290,7 +292,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     const observer = new ResizeObserver(scheduleResize);
     observer.observe(rail);
     return () => { observer.disconnect(); window.clearTimeout(resizeTimer); };
-  }, [mobileView, galleryExpanded, incidentDensity]);
+  }, [mobileView, galleryExpanded, incidentDensity, galleryPageSize]);
 
   function refresh() {
     refreshBase();
@@ -606,6 +608,15 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     if (galleryExpanded) changeGallery(false, incident);
   }
 
+  function selectGalleryPageSize(value) {
+    retainedGallerySelectionRef.current = focusedIncident;
+    const paging = incidentPagingRef.current;
+    const index = paging.items.findIndex((item) => sameIncidentId(item.id, focusedIncident?.id));
+    galleryPageAnchorRef.current = paging.offset + Math.max(0, index);
+    setStoredGalleryPageSize(incidentGalleryPageSize(value));
+    if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+  }
+
   function changeIncidentPage(page) {
     retainedGallerySelectionRef.current = null;
     galleryPageAnchorRef.current = null;
@@ -737,6 +748,16 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                   {galleryExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
                   {galleryExpanded ? "Collapse gallery" : "Expand gallery"}
                 </button>
+                {galleryExpanded ? (
+                  <label className="incident-gallery-page-size">
+                    <span>Images per page</span>
+                    <select aria-label="Gallery images per page" value={galleryPageSize} onChange={(event) => selectGalleryPageSize(event.target.value)}>
+                      <option value={25}>25</option>
+                      <option value={50}>50</option>
+                      <option value={100}>100</option>
+                    </select>
+                  </label>
+                ) : null}
                 <div className="density-control" aria-label="Thumbnail density" hidden={galleryExpanded}>
                   <button type="button" className={incidentDensity === "compact" ? "active" : ""} aria-pressed={incidentDensity === "compact"} onClick={() => setIncidentDensity("compact")} title="List view" aria-label="List view"><Rows3 size={15} /></button>
                   <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Grid view" aria-label="Grid view"><Grid2X2 size={15} /></button>

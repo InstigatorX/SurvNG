@@ -19,9 +19,11 @@ Filters and the standard list/grid preference carry through. The focused viewer
 stays mounted during expansion; gallery tiles remain snapshots, with no extra
 video players. Reduced-motion preferences disable the transition.
 
-The gallery loads a bounded page sized for the available area. Resizing settles
-before changing the request limit and page together; selection anchors the new
-page. The original phone incident layout is retained.
+The expanded gallery's **Images per page** selector offers **25**, **50**, and
+**100**, defaults to 25, and remembers the choice in this browser. Extra rows
+scroll within the gallery. The request limit and page change together with the
+selected incident anchoring the new page. Collapsing restores the standard
+rail's automatic sizing. The original phone incident layout is retained.
 
 The preview control page includes **Incidents** with 96 synthetic examples,
 camera/object filters, pagination, and detail snapshots. **Motion** provides an
@@ -31,7 +33,7 @@ preview's start date/time, so selecting a different day may return no results.
 Review on the test server: expand/collapse from a later results page; select a
 tile near the gallery's end; check the selected incident and filters after
 collapse; repeat rapidly and use Escape. Check tablet Details and reduced-motion
-settings. Automated checks cover gallery capacity and existing incident
+settings. Automated checks cover gallery page-size preferences and existing incident
 navigation, with a production build. Visual/browser animation checks were blocked
 by the execution environment's local-preview access restriction.
 
