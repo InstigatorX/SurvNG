@@ -370,7 +370,7 @@ class MediaExportManager:
         self.database_dir = database_dir.resolve()
         self.media_storage = media_storage
         # Reading existing exports must work even when every destination is
-        # below its free-space reserve. Select writable storage per job.
+        # full or offline. Select writable storage per job.
         self.export_roots = (
             media_storage.configured_roots_for("exports")
             if media_storage is not None

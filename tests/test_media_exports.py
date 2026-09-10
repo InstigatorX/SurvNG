@@ -89,7 +89,7 @@ class MediaExportTest(unittest.TestCase):
                 "path": str(segment), "start_epoch": 100.0, "end_epoch": 110.0,
                 "duration_seconds": 10.0,
             }])
-            free_bytes = {path: 130 for path in media_roots}
+            free_bytes = {path: 0 for path in media_roots}
 
             def usage(path: Path) -> SimpleNamespace:
                 free = free_bytes[Path(path)]
@@ -126,7 +126,7 @@ class MediaExportTest(unittest.TestCase):
                     self.assertFalse((root / "storage" / "exports").exists())
                     self.assertTrue(all(not (path / "exports").exists() for path in media_roots))
 
-                    free_bytes[media_roots[1]] = 500
+                    free_bytes[media_roots[1]] = 130
                     completed = wait_for_job(manager, str(manager.create(payload)["id"]))
                     self.assertEqual(completed["status"], "completed", completed["error"])
                     output, _ = manager.output_path(str(completed["id"]))

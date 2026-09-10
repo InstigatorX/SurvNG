@@ -67,7 +67,7 @@ class CameraMediaService:
         self.sleeper = sleeper
         self.media_storage = media_storage
         # Camera construction and live JPEGs must work even when media storage
-        # is below its reserve or offline. Select a writable root per save.
+        # is full or offline. Select a writable root per save.
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
         self._snapshot_storage_failed = False
 

@@ -10,12 +10,13 @@ import stat
 import threading
 import time
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
 from .config import MediaStorageConfig, MediaStorageLocationConfig, MediaStorageRole
 
-LocationState = Literal["online", "unavailable", "not_mounted", "read_only", "full"]
+LocationState = Literal["online", "low_space", "unavailable", "not_mounted", "read_only", "full"]
 PathPresence = Literal["present", "missing", "unknown"]
 
 
@@ -52,7 +53,11 @@ class MediaLocationStatus:
 
     @property
     def writable(self) -> bool:
-        return self.state == "online"
+        return self.state in {"online", "low_space"}
+
+    @property
+    def below_reserve(self) -> bool:
+        return self.state in {"low_space", "full"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +95,7 @@ class MediaStorageRegistry:
         self.config = config
         self._lock = threading.RLock()
         self._assignments: dict[tuple[str, str], str] = {}
+        self._pressure_callback: Callable[[], None] | None = None
         configured = list(config.locations)
         if not configured:
             raise ValueError("media_storage.locations requires at least one location")
@@ -142,11 +148,10 @@ class MediaStorageRegistry:
         usable = max(0, usage.free - reserve)
         return MediaLocationStatus(
             **base,
-            state="online" if usable > 0 else "full",
+            state="full" if usage.free <= 0 else "low_space" if usable == 0 else "online",
             error=(
-                f"free space {usage.free} bytes is at or below the "
-                f"{location.reserve_percent:g}% reserve ({reserve} bytes)"
-                if usable == 0 else ""
+                "filesystem reports no available space"
+                if usage.free <= 0 else ""
             ),
             total_bytes=usage.total,
             free_bytes=usage.free,
@@ -226,10 +231,21 @@ class MediaStorageRegistry:
         directory = self.ROLE_DIRECTORIES[role]
         return [item.path / directory for item in statuses]
 
+    def set_pressure_callback(self, callback: Callable[[], None] | None) -> None:
+        """Register the shared retention worker's nonblocking wakeup."""
+        with self._lock:
+            self._pressure_callback = callback
+
     def choose(self, role: MediaStorageRole, assignment_key: str) -> MediaLocationStatus:
         cache_key = (role, assignment_key)
+        snapshot = self.health_snapshot()
         with self._lock:
-            snapshot = self.health_snapshot()
+            pressure_callback = self._pressure_callback
+        # Notification must not do cleanup or acquire the registry lock: writes
+        # continue while the one retention worker reclaims eligible footage.
+        if pressure_callback is not None and any(item.below_reserve for item in snapshot.locations):
+            pressure_callback()
+        with self._lock:
             previous = self._assignments.get(cache_key)
             if previous is not None:
                 status = self.status(previous, snapshot=snapshot)
@@ -248,7 +264,7 @@ class MediaStorageRegistry:
                 suffix = f" ({details})" if details else ""
                 raise OSError(f"no writable media location supports {role}{suffix}")
             if self.config.placement == "priority":
-                selected = max(candidates, key=lambda item: (item.priority, item.usable_bytes, item.id))
+                selected = max(candidates, key=lambda item: (item.priority, item.free_bytes, item.id))
             else:
                 def balanced_score(item: MediaLocationStatus) -> tuple[float, int, str]:
                     digest = hashlib.sha256(
@@ -257,7 +273,7 @@ class MediaStorageRegistry:
                     unit = (int.from_bytes(digest[:8], "big") + 1) / (2**64 + 1)
                     weight = max(
                         1.0,
-                        item.usable_bytes * max(1, item.priority) / 100.0,
+                        item.free_bytes * max(1, item.priority) / 100.0,
                     )
                     return (weight / -math.log(unit), item.priority, item.id)
 
@@ -330,6 +346,8 @@ class MediaStorageRegistry:
                     "path": str(item.path),
                     "roles": list(item.roles),
                     "state": item.state,
+                    "writable": item.writable,
+                    "below_reserve": item.below_reserve,
                     "total_bytes": item.total_bytes,
                     "free_bytes": item.free_bytes,
                     "usable_bytes": item.usable_bytes,

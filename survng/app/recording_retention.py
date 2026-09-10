@@ -29,6 +29,7 @@ RETENTION_RETRY_SECONDS = 10
 RETENTION_INITIAL_DELAY_SECONDS = 5
 RETENTION_BATCH_TIME_BUDGET_SECONDS = 10.0
 RETENTION_FAILURE_RETRY_MAX_SECONDS = 15 * 60
+RETENTION_PRESSURE_IDLE_RETRY_SECONDS = 60
 
 
 class RecordingRetentionService:
@@ -63,8 +64,12 @@ class RecordingRetentionService:
         self._run_lock = threading.Lock()
         self._requested_apply = False
         self._cleanup_active = False
+        self._manual_cleanup_active = False
         self._force_plan = True
         self._last_plan_monotonic = 0.0
+        self._pressure_pending = False
+        self._next_pressure_plan_monotonic = 0.0
+        self._pressure_idle_cycles = 0
         self._quota_reclaim_remaining = 0
         self._free_reclaim_remaining: dict[str, int] = {}
         self._planned_reclaim_remaining = 0
@@ -88,10 +93,62 @@ class RecordingRetentionService:
             "last_run": None,
         }
 
+        if self.media_storage is not None:
+            self.media_storage.set_pressure_callback(self.notify_storage_pressure)
+
+    def notify_storage_pressure(self) -> None:
+        """Queue automatic retention; never perform storage work on a writer."""
+        with self._state_lock:
+            now = time.monotonic()
+            if (
+                not self.config.enabled or not self.config.automatic_cleanup
+                or self._pressure_pending or self._cleanup_active
+                or self._status["state"] in {"planning", "cleaning", "waiting", "error"}
+                or now < self._next_pressure_plan_monotonic
+            ):
+                return
+            self._pressure_pending = True
+            self._next_pressure_plan_monotonic = now + RETENTION_RETRY_SECONDS
+            self._force_plan = True
+            self._status = {**self._status, "state": "queued"}
+        self._wake.set()
+
+    def _wait_for_cycle(self, wait_seconds: float) -> None:
+        # Long-lived ffmpeg processes do not select another storage destination
+        # per segment. Sample capacity while idle without scanning the index.
+        deadline = time.monotonic() + wait_seconds
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if self._wake.wait(min(remaining, RETENTION_RETRY_SECONDS)):
+                self._wake.clear()
+                return
+            if time.monotonic() >= deadline:
+                return
+            with self._state_lock:
+                probe_pressure = (
+                    self.config.enabled and self.config.automatic_cleanup
+                    and not self._cleanup_active
+                    and time.monotonic() >= self._next_pressure_plan_monotonic
+                )
+            if probe_pressure:
+                try:
+                    if self._storage_below_minimum():
+                        self.notify_storage_pressure()
+                    else:
+                        with self._state_lock:
+                            self._pressure_idle_cycles = 0
+                except OSError:
+                    LOGGER.warning("could not sample media capacity for retention", exc_info=True)
+
     def start(self, cameras: Sequence[CameraConfig]) -> None:
         with self._state_lock:
             self._cameras = {camera.id: camera for camera in cameras}
             self._force_plan = True
+            self._next_pressure_plan_monotonic = 0.0
+            self._pressure_idle_cycles = 0
+            self._status = {**self._status, "state": "queued", "error": ""}
         self._stop.clear()
         if self._thread is not None and self._thread.is_alive():
             self._wake.set()
@@ -355,7 +412,7 @@ class RecordingRetentionService:
                 location = locations_by_id[location_id]
                 location["effective_minimum_free_percent"] = minimum_percent
                 location["effective_target_free_percent"] = target_percent
-            if item["state"] == "full" or item["free_percent"] <= minimum_percent:
+            if item["state"] in {"low_space", "full"} or item["free_percent"] <= minimum_percent:
                 pressured_locations.extend(item["location_ids"])
                 target_free = round(item["total_bytes"] * target_percent / 100)
                 item["reclaim_bytes"] = max(0, target_free - item["free_bytes"])
@@ -409,7 +466,7 @@ class RecordingRetentionService:
                     for item in location_usage
                 ),
                 "degraded": any(
-                    item["state"] not in {"online", "full"}
+                    item["state"] not in {"online", "low_space", "full"}
                     for item in location_usage
                 ),
                 "locations": location_usage,
@@ -629,19 +686,22 @@ class RecordingRetentionService:
     def _loop(self) -> None:
         wait_seconds = float(RETENTION_INITIAL_DELAY_SECONDS)
         while not self._stop.is_set():
-            self._wake.wait(wait_seconds)
-            self._wake.clear()
+            self._wait_for_cycle(wait_seconds)
             if self._stop.is_set():
                 return
             with self._state_lock:
+                pressure_cycle = self._pressure_pending
+                self._pressure_pending = False
                 requested_apply = self._requested_apply
                 self._requested_apply = False
                 cleanup_active = self._cleanup_active
+                manual_cleanup_active = self._manual_cleanup_active
                 force_plan = self._force_plan
                 self._force_plan = False
                 cached_plan = copy.deepcopy(self._status.get("plan"))
-            apply = requested_apply or cleanup_active or (
-                self.config.enabled and self.config.automatic_cleanup
+            automatic_apply = self.config.enabled and self.config.automatic_cleanup
+            apply = requested_apply or automatic_apply or (
+                cleanup_active and manual_cleanup_active
             )
             sampled_monotonic = time.monotonic()
             plan_due = bool(
@@ -650,7 +710,9 @@ class RecordingRetentionService:
                 or sampled_monotonic - self._last_plan_monotonic
                 >= RETENTION_PLAN_INTERVAL_SECONDS
             )
-            if not plan_due and self._storage_below_minimum():
+            if not plan_due and not cleanup_active and self._storage_below_minimum():
+                # Scheduled dry-run cycles must still project new disk pressure;
+                # active bounded batches keep their existing cached plan.
                 plan_due = True
             if not plan_due and not apply:
                 with self._state_lock:
@@ -743,6 +805,18 @@ class RecordingRetentionService:
                     result["refreshed_at"] = plan["generated_at"]
                 with self._state_lock:
                     self._cleanup_active = should_continue
+                    self._manual_cleanup_active = should_continue and (
+                        requested_apply or manual_cleanup_active
+                    )
+                    if result["deleted_files"] or result["missing_files"]:
+                        self._pressure_idle_cycles = 0
+                        self._next_pressure_plan_monotonic = time.monotonic() + RETENTION_RETRY_SECONDS
+                    elif pressure_cycle:
+                        self._pressure_idle_cycles = min(5, self._pressure_idle_cycles + 1)
+                        self._next_pressure_plan_monotonic = time.monotonic() + min(
+                            RETENTION_FAILURE_RETRY_MAX_SECONDS,
+                            RETENTION_PRESSURE_IDLE_RETRY_SECONDS * 2 ** (self._pressure_idle_cycles - 1),
+                        )
                     progress = (
                         self._cleanup_progress(time.time())
                         if self._cleanup_started_epoch is not None
@@ -837,9 +911,9 @@ class RecordingRetentionService:
         return any(
             int(item["total_bytes"]) > 0
             and (
-                item["state"] == "full"
+                item["state"] in {"low_space", "full"}
                 or item["free_percent"]
-                < max(
+                <= max(
                     float(self.config.minimum_free_percent),
                     float(item.get("reserve_percent") or 0.0),
                 )
@@ -948,6 +1022,8 @@ class RecordingRetentionService:
             )
             if str(location.get("state")) == "full":
                 item["state"] = "full"
+            elif str(location.get("state")) == "low_space" and item["state"] != "full":
+                item["state"] = "low_space"
         return list(grouped.values())
 
     def _normalized_protected_paths(self) -> set[str]:

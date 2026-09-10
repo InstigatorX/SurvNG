@@ -85,7 +85,7 @@ def test_durable_images_follow_role_specific_media_locations() -> None:
         assert Path(audit).is_relative_to(media / "motion_samples")
 
 
-def test_camera_media_starts_below_reserve_and_recovers_without_restart(tmp_path, caplog) -> None:
+def test_camera_media_starts_when_full_and_recovers_below_reserve(tmp_path, caplog) -> None:
     first, second = tmp_path / "media1", tmp_path / "media2"
     first.mkdir()
     second.mkdir()
@@ -97,7 +97,7 @@ def test_camera_media_starts_below_reserve_and_recovers_without_restart(tmp_path
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
     event_at = datetime(2026, 8, 6, tzinfo=timezone.utc)
     result = MotionQualificationResult(False, 0.4, 0.5, "low_score", 2, {})
-    with patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, free=140)):
+    with patch("survng.app.media_storage.shutil.disk_usage", return_value=SimpleNamespace(total=1000, free=0)):
         service = _service(metadata, frame=frame, media_storage=registry)
         assert service.snapshot() is not None, "live JPEGs do not need durable storage"
         assert service.write_snapshot(frame) == ""
@@ -107,12 +107,12 @@ def test_camera_media_starts_below_reserve_and_recovers_without_restart(tmp_path
     assert not metadata.exists(), "do not redirect media to the metadata/root filesystem"
     assert list(first.iterdir()) == []
     assert list(second.iterdir()) == []
-    with patch("survng.app.media_storage.shutil.disk_usage", side_effect=lambda path: SimpleNamespace(total=1000, free=400 if path == second else 140)):
+    with patch("survng.app.media_storage.shutil.disk_usage", side_effect=lambda path: SimpleNamespace(total=1000, free=140 if path == second else 0)):
         stored = service.write_snapshot(frame)
     assert Path(stored).is_file()
     assert Path(stored).is_relative_to(second / "snapshots")
     # Once the selected disk fills, the next save must select another eligible root.
-    with patch("survng.app.media_storage.shutil.disk_usage", side_effect=lambda path: SimpleNamespace(total=1000, free=400 if path == first else 140)):
+    with patch("survng.app.media_storage.shutil.disk_usage", side_effect=lambda path: SimpleNamespace(total=1000, free=1 if path == first else 0)):
         relocated = service.write_snapshot(frame)
     assert Path(relocated).is_file()
     assert Path(relocated).is_relative_to(first / "snapshots")
