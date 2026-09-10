@@ -469,3 +469,15 @@ export function incidentThumbnailPageSize({ width, height, density, columns: req
   const rowHeight = Math.max(44, Number.isFinite(Number(requestedRowHeight)) ? Number(requestedRowHeight) : compact ? 78 : 98);
   return Math.max(1, Math.floor((safeHeight + gap) / (rowHeight + gap)));
 }
+
+export function incidentGalleryPageSize({ width, height }) {
+  // Match the gallery's 240px minimum tiles, 8px gaps/padding, 16:9 image
+  // and 56px caption/border. Keep the request bounded even on large displays.
+  const safeWidth = Math.max(0, Number(width) || 0);
+  const safeHeight = Math.max(0, Number(height) || 0);
+  if (!safeWidth || !safeHeight) return 12;
+  const columns = Math.max(1, Math.floor((safeWidth - 8) / 248));
+  const cardWidth = Math.max(1, (safeWidth - 16 - (columns - 1) * 8) / columns);
+  const rows = Math.max(1, Math.floor((safeHeight - 8) / (cardWidth * 9 / 16 + 64)));
+  return Math.min(60, columns * rows);
+}

@@ -97,7 +97,114 @@
 }
 
 .incidents-desktop-page.with-inspector .incidents-desktop-workspace {
+  --incident-rail-width: 306px;
+  position: relative;
   grid-template-columns: 306px minmax(0, 1fr) 278px;
+}
+
+/* Expand the existing rail over the workspace. The investigation keeps its
+ * size and mounted media, avoiding a second viewer or a playback restart. */
+.incidents-desktop-workspace > .incident-rail {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 20;
+  width: var(--incident-rail-width);
+  transition: width 320ms cubic-bezier(.22, .8, .25, 1);
+}
+
+.incidents-desktop-workspace > .incident-investigation {
+  grid-column: 2;
+}
+
+.incidents-desktop-workspace > .incident-inspector {
+  grid-column: 3;
+}
+
+.gallery-expanded .incidents-desktop-workspace > .incident-rail {
+  width: 100%;
+  border-right: 0;
+}
+
+.gallery-expanded .incident-inspector {
+  visibility: hidden;
+}
+
+.incident-gallery-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 7px;
+  font-size: 11px;
+}
+
+.incident-rail-head .density-control[hidden] {
+  display: none;
+}
+
+.gallery-expanded .incident-rail .incident-rail-list {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px !important;
+  padding: 8px;
+}
+
+.gallery-expanded .incident-rail .live-activity-item {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.gallery-expanded .incident-rail .live-activity-select {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  gap: 0;
+  padding: 0;
+}
+
+.gallery-expanded .incident-rail .live-activity-item.selected {
+  border-color: var(--accent);
+}
+
+.gallery-expanded .incident-rail .live-activity-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 0;
+}
+
+.gallery-expanded .incident-rail .live-activity-copy {
+  position: relative;
+  min-height: 54px;
+  gap: 3px;
+  padding: 8px 86px 8px 9px;
+}
+
+.gallery-expanded .incident-rail .live-activity-copy b,
+.gallery-expanded .incident-rail .live-activity-copy time {
+  font-size: 11px;
+}
+
+.gallery-expanded .incident-rail .live-activity-kind {
+  display: flex;
+  position: absolute;
+  right: 8px;
+  bottom: 9px;
+}
+
+.gallery-expanded .incident-rail .live-activity-trigger {
+  top: 6px;
+  right: 6px;
+  bottom: auto;
+}
+
+.gallery-expanded .incident-rail-list > .empty-state {
+  grid-column: 1 / -1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .incidents-desktop-workspace > .incident-rail {
+    transition: none;
+  }
 }
 
 .incident-investigation {
@@ -275,6 +382,7 @@
   }
 
   .incidents-desktop-page.with-inspector .incidents-desktop-workspace {
+    --incident-rail-width: 280px;
     grid-template-columns: 280px minmax(0, 1fr);
   }
 }

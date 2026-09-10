@@ -6,12 +6,14 @@ import {
   ChevronLeft,
   ChevronRight,
   Grid2X2,
+  Maximize2,
+  Minimize2,
   Search,
   Rows3,
 } from "lucide-react";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
-import { incidentDetailQuery, incidentSelectionHref, incidentThumbnailPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
+import { incidentDetailQuery, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
@@ -78,6 +80,12 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
   const incidentRailListRef = useRef(null);
+  const incidentGalleryToggleRef = useRef(null);
+  const [galleryExpanded, setGalleryExpanded] = useState(false);
+  const [incidentPageSize, setIncidentPageSize] = useState(12);
+  const retainedGallerySelectionRef = useRef(null);
+  const galleryPageAnchorRef = useRef(null);
+  const incidentPagingRef = useRef(null);
   const [incidentRailSize, setIncidentRailSize] = useState({ width: 0, height: 0 });
   const [desktopAnalysisMode, setDesktopAnalysisMode] = useStoredState("survng.incidentDesktopAnalysis.v1", "clean");
   const [desktopDepthLayer, setDesktopDepthLayer] = useStoredState("survng.incidentDesktopDepthLayer.v1", "both");
@@ -94,14 +102,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
   const incidentRailReady = mobileView || (incidentRailSize.width > 0 && incidentRailSize.height > 0);
-  const incidentsPerPage = mobileView
-    ? 12
-    : incidentThumbnailPageSize({
-      ...incidentRailSize,
-      density: incidentDensity,
-      ...(incidentDensity === "comfortable" ? { columns: 2, gap: 6, horizontalPadding: 16 } : {}),
-    });
-  const previousIncidentsPerPageRef = useRef(incidentsPerPage);
+  const incidentsPerPage = mobileView ? 12 : incidentPageSize;
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
   const incidentObjectOptions = incidentFacets.labels || [];
@@ -133,6 +134,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     : incidentResultSource;
   const sameIncidentId = (left, right) => left != null && right != null && String(left) === String(right);
   const explicitlyFocusedSummary = visibleIncidents.find((incident) => sameIncidentId(incident.id, expandedIncidentId))
+    || (sameIncidentId(retainedGallerySelectionRef.current?.id, expandedIncidentId) ? retainedGallerySelectionRef.current : null)
     || (sameIncidentId(linkedIncidentDetail?.id, expandedIncidentId) ? linkedIncidentDetail : null);
   // While a deep-linked event_ids bootstrap is in flight, avoid auto-focusing the first
   // gallery row (that clobbers the deep link URL and can leave a blank investigation).
@@ -168,6 +170,12 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
+  incidentPagingRef.current = {
+    // The old page stays visible while the next request is in flight. Anchor
+    // its actual offset if the user toggles the gallery before that load ends.
+    offset: semanticIncidentActive ? incidentPage * incidentsPerPage : Number(new URLSearchParams(incidentLoadedQueryRef.current).get("offset")) || 0,
+    pageSize: incidentsPerPage, items: visibleIncidents, selectedId: focusedIncident?.id,
+  };
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
   }, [displayedIncident, tabletInspectorOpen]);
@@ -252,15 +260,37 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     if (mobileView) return undefined;
     const rail = incidentRailListRef.current;
     if (!rail) return undefined;
+    let resizeTimer;
     function updateRailSize() {
       const rect = rail.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) setIncidentRailSize({ width: rect.width, height: rect.height });
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const width = rect.width;
+      const height = rect.height;
+      const pageSize = galleryExpanded
+        ? incidentGalleryPageSize({ width, height })
+        : incidentThumbnailPageSize({ width, height, density: incidentDensity,
+          ...(incidentDensity === "comfortable" ? { columns: 2, gap: 6, horizontalPadding: 16 } : {}) });
+      const paging = incidentPagingRef.current;
+      if (paging.pageSize !== pageSize) {
+        const selectedIndex = paging.items.findIndex((item) => sameIncidentId(item.id, paging.selectedId));
+        const anchor = galleryPageAnchorRef.current ?? (paging.offset + Math.max(0, selectedIndex));
+        // Change limit and offset together, after layout settles, so animation
+        // frames cannot each start another incident search.
+        setIncidentPage(Math.floor(anchor / pageSize));
+        setIncidentPageSize(pageSize);
+      }
+      galleryPageAnchorRef.current = null;
+      setIncidentRailSize({ width, height });
     }
-    updateRailSize();
-    const observer = new ResizeObserver(updateRailSize);
+    function scheduleResize() {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(updateRailSize, 100);
+    }
+    scheduleResize();
+    const observer = new ResizeObserver(scheduleResize);
     observer.observe(rail);
-    return () => observer.disconnect();
-  }, [mobileView]);
+    return () => { observer.disconnect(); window.clearTimeout(resizeTimer); };
+  }, [mobileView, galleryExpanded, incidentDensity]);
 
   function refresh() {
     refreshBase();
@@ -273,6 +303,8 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     event?.preventDefault();
     const queryText = String(requestedQuery || "").trim();
     if (!queryText) return;
+    retainedGallerySelectionRef.current = null;
+    galleryPageAnchorRef.current = null;
     semanticIncidentRequestRef.current?.abort();
     const controller = new AbortController();
     semanticIncidentRequestRef.current = controller;
@@ -334,6 +366,8 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   }
 
   function resetSemanticIncidentSearch() {
+    retainedGallerySelectionRef.current = null;
+    galleryPageAnchorRef.current = null;
     semanticIncidentRequestRef.current?.abort();
     semanticIncidentRequestRef.current = null;
     setSemanticIncidentQuery("");
@@ -449,6 +483,9 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
         if (cancelled) return;
         incidentLoadedQueryRef.current = queryKey;
         const items = payload.items || [];
+        if (items.some((item) => sameIncidentId(item.id, retainedGallerySelectionRef.current?.id))) {
+          retainedGallerySelectionRef.current = null;
+        }
         setIncidents(items);
         setIncidentTotal(Number(payload.total || 0));
         setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
@@ -473,16 +510,10 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentPage, incidentsPerPage, incidentRefreshToken, incidentRailReady]);
 
   useEffect(() => {
+    retainedGallerySelectionRef.current = null;
+    galleryPageAnchorRef.current = null;
     setIncidentPage(0);
   }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPersonFilter, incidentDay, incidentDensity]);
-
-  useEffect(() => {
-    const previousPageSize = previousIncidentsPerPageRef.current;
-    if (previousPageSize !== incidentsPerPage) {
-      setIncidentPage((page) => Math.floor(page * previousPageSize / incidentsPerPage));
-      previousIncidentsPerPageRef.current = incidentsPerPage;
-    }
-  }, [incidentsPerPage]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -535,6 +566,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   useEffect(() => {
     if (expandedIncidentId
+      && !sameIncidentId(retainedGallerySelectionRef.current?.id, expandedIncidentId)
       && !sameIncidentId(linkedIncidentDetail?.id, expandedIncidentId)
       && !visibleIncidents.some((incident) => sameIncidentId(incident.id, expandedIncidentId))) {
       setExpandedIncidentId(null);
@@ -543,6 +575,12 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   useEffect(() => {
     function onKey(keyEvent) {
+      if (keyEvent.defaultPrevented || selectedFace || tabletInspectorOpen) return;
+      if (keyEvent.key === "Escape" && galleryExpanded && !selectedEvent) {
+        keyEvent.preventDefault();
+        changeGallery(false);
+        return;
+      }
       if (keyEvent.key === "Escape" && expandedIncidentId && !selectedEvent) {
         keyEvent.preventDefault();
         setExpandedIncidentId(null);
@@ -550,7 +588,30 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [expandedIncidentId, selectedEvent]);
+  }, [expandedIncidentId, selectedEvent, galleryExpanded, selectedFace, tabletInspectorOpen, focusedIncident]);
+
+  function changeGallery(expanded, selectedIncident = focusedIncident) {
+    retainedGallerySelectionRef.current = selectedIncident;
+    const paging = incidentPagingRef.current;
+    const index = paging.items.findIndex((item) => sameIncidentId(item.id, selectedIncident?.id));
+    galleryPageAnchorRef.current = paging.offset + Math.max(0, index);
+    setTabletInspectorOpen(false);
+    setGalleryExpanded(expanded);
+    if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+    incidentGalleryToggleRef.current?.focus({ preventScroll: true });
+  }
+
+  function selectGalleryIncident(incident) {
+    toggleIncident(incident.id);
+    if (galleryExpanded) changeGallery(false, incident);
+  }
+
+  function changeIncidentPage(page) {
+    retainedGallerySelectionRef.current = null;
+    galleryPageAnchorRef.current = null;
+    setIncidentPage(page);
+    if (incidentRailListRef.current) incidentRailListRef.current.scrollTop = 0;
+  }
 
   function toggleIncident(incidentId) {
     if (mobileView) {
@@ -615,7 +676,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   }
 
   useEffect(() => {
-    if (mobileView || selectedEvent) return undefined;
+    if (mobileView || selectedEvent || galleryExpanded) return undefined;
     function onIncidentArrow(event) {
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))) return;
@@ -630,7 +691,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     }
     window.addEventListener("keydown", onIncidentArrow);
     return () => window.removeEventListener("keydown", onIncidentArrow);
-  }, [mobileView, selectedEvent, focusedIndex, visibleIncidents]);
+  }, [mobileView, selectedEvent, galleryExpanded, focusedIndex, visibleIncidents]);
 
   const semanticIncidentControl = (
     <div className={`incident-semantic-search ${semanticIncidentActive ? "active" : ""} ${semanticIncidentError ? "error" : ""}`}>
@@ -646,7 +707,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   if (!mobileView) {
     return (
-      <main className="incidents-desktop-page with-inspector">
+      <main className={`incidents-desktop-page with-inspector${galleryExpanded ? " gallery-expanded" : ""}`}>
         <section className="bento-card incidents-desktop-shell">
           <div className="incidents-desktop-toolbar">
             <div className="incidents-command-primary">
@@ -672,17 +733,20 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
           <div className="incidents-desktop-workspace">
             <aside className={`incident-rail ${incidentDensity}`}>
               <div className="incident-rail-head">
-                <strong>Incidents</strong>
-                <div className="density-control" aria-label="Thumbnail density">
+                <button ref={incidentGalleryToggleRef} type="button" className="incident-gallery-toggle" aria-expanded={galleryExpanded} aria-controls="incident-results" onClick={() => changeGallery(!galleryExpanded)}>
+                  {galleryExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                  {galleryExpanded ? "Collapse gallery" : "Expand gallery"}
+                </button>
+                <div className="density-control" aria-label="Thumbnail density" hidden={galleryExpanded}>
                   <button type="button" className={incidentDensity === "compact" ? "active" : ""} aria-pressed={incidentDensity === "compact"} onClick={() => setIncidentDensity("compact")} title="List view" aria-label="List view"><Rows3 size={15} /></button>
                   <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Grid view" aria-label="Grid view"><Grid2X2 size={15} /></button>
                 </div>
               </div>
-              <div className="incident-rail-list" ref={incidentRailListRef}>
+              <div id="incident-results" className="incident-rail-list" ref={incidentRailListRef} aria-label="Incidents">
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} onSelect={(selectedIncident) => toggleIncident(selectedIncident.id)} onOpenOverlay={openIncidentOverlay} />
+                  <IncidentListItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={sameIncidentId(incident.id, focusedIncident?.id)} thumbnailAnnotations={thumbnailAnnotations} thumbnailObjectFocus={thumbnailObjectFocus} thumbnailObjectFocusZoom={thumbnailObjectFocusZoom} onSelect={selectGalleryIncident} onOpenOverlay={galleryExpanded ? selectGalleryIncident : openIncidentOverlay} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? (
                   <div className="empty-state">
@@ -695,13 +759,13 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 ) : null}
               </div>
               <div className={`incident-pager ${displayedIncidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={displayedIncidentTotal <= incidentsPerPage}>
-                <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
+                <button type="button" onClick={() => changeIncidentPage(Math.max(0, incidentPage - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
                 <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-                <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
+                <button type="button" onClick={() => changeIncidentPage(Math.min(incidentPageCount - 1, incidentPage + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
               </div>
             </aside>
 
-            <section className="incident-investigation">
+            <section className="incident-investigation" inert={galleryExpanded} aria-hidden={galleryExpanded}>
               <div className="incident-desktop-focus">
                 <div className="incident-focus-actions">
                   <button ref={tabletInspectorToggleRef} type="button" className="incident-inspector-toggle" onClick={() => setTabletInspectorOpen((open) => !open)} aria-expanded={tabletInspectorOpen} aria-controls="incident-inspector" disabled={!displayedIncident}>Details</button>

@@ -9,6 +9,32 @@ This experiment brings four concepts from the Velador camera workspace demo into
 - **4 — Playback to clip.** Select a camera in Timeline and open Export. Seek to the desired points and use **Set start here** and **Set end here**, or adjust the existing selection handles. Start/End jump to the boundaries. **Preview clip** plays the selection and pauses at its end; Stop preview pauses immediately. The existing export job and download flow follows the selection. A clip must be at least one second and remain inside the displayed timeline bounds.
 - **5 — Persistent health.** Live and Timeline show actual versus expected recording cameras, free storage, and an attention indicator. Details identify missing main/substreams, deliberately paused cameras, and unavailable status. Storage uses the configured cleanup/emergency thresholds. Status older than 90 seconds is treated as stale. The panel reuses shared snapshots and adds no network polling.
 
+## Incident gallery prototype
+
+On desktop and tablet, **Expand gallery** in the Incidents rail expands the
+existing thumbnail list across the workspace with a 320ms opening/closing
+transition. **Collapse gallery** or Escape returns to the standard investigation
+layout. Selecting a gallery tile opens that incident in the standard layout.
+Filters and the standard list/grid preference carry through. The focused viewer
+stays mounted during expansion; gallery tiles remain snapshots, with no extra
+video players. Reduced-motion preferences disable the transition.
+
+The gallery loads a bounded page sized for the available area. Resizing settles
+before changing the request limit and page together; selection anchors the new
+page. The original phone incident layout is retained.
+
+The preview control page includes **Incidents** with 96 synthetic examples,
+camera/object filters, pagination, and detail snapshots. **Motion** provides an
+empty state; the unavailable scenario provides a search error. Examples use the
+preview's start date/time, so selecting a different day may return no results.
+
+Review on the test server: expand/collapse from a later results page; select a
+tile near the gallery's end; check the selected incident and filters after
+collapse; repeat rapidly and use Escape. Check tablet Details and reduced-motion
+settings. Automated checks cover gallery capacity and existing incident
+navigation, with a production build. Visual/browser animation checks were blocked
+by the execution environment's local-preview access restriction.
+
 ## Run the isolated preview
 
 Requires Node, npm, and FFmpeg. From the repository:
