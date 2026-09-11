@@ -257,6 +257,10 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
       event.preventDefault();
       return;
     }
+    if (mobileView && !mobilePrimary) {
+      onMakePrimary?.(camera);
+      return;
+    }
     onOpen(camera);
   }
 
@@ -508,7 +512,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
             <CameraTileStatus status={currentRecordingStatus} />
             <CameraTileStatus status={currentDetectionStatus} />
             <span className={`camera-tile-live-state ${cameraConnectivity === "reconnecting" ? "attention" : ""}`}>{cameraTileLiveState(camera)}</span>
-            <button
+            {!mobileView ? <button
               type="button"
               ref={controlMenuButtonRef}
               className="camera-tile-menu"
@@ -516,7 +520,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
               aria-expanded={controlMenuOpen}
               aria-haspopup="true"
               onClick={() => setControlMenuOpen((open) => !open)}
-            >⋮</button>
+            >⋮</button> : null}
           </span>
         </div>
         {!camera.running ? (
@@ -565,9 +569,9 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
           onPointerUp={endHoldPreview}
           onPointerCancel={endHoldPreview}
           onContextMenu={blockBrowserHoldMenu}
-          aria-label={mobileView ? `Open ${camera.name} live view. Press and hold to preview.` : `Open ${camera.name} live view`}
+          aria-label={mobileView ? `${mobilePrimary ? `Open ${camera.name} live view` : `Make ${camera.name} the primary camera`}. Press and hold to preview.` : `Open ${camera.name} live view`}
         />
-        <div className="camera-tile-quick-actions" role="group" aria-label={`${camera.name} quick actions`}>
+        {!mobileView ? <div className="camera-tile-quick-actions" role="group" aria-label={`${camera.name} quick actions`}>
           {dragHandleProps.onPointerDown ? <button
             type="button"
             className="camera-tile-quick-action camera-tile-move-action"
@@ -596,9 +600,9 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
             <Video size={14} aria-hidden="true" />
             <span>Review footage</span>
           </a>
-        </div>
+        </div> : null}
         <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
-        {controlMenuOpen ? <div className="camera-tile-control-menu" role="group" aria-label={`${camera.name} controls`}>
+        {!mobileView && controlMenuOpen ? <div className="camera-tile-control-menu" role="group" aria-label={`${camera.name} controls`}>
           <div className="tile-controls">
             {dragHandleProps.onPointerDown ? <button
               type="button"
@@ -896,7 +900,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
   const liveIncidentGalleryRef = useRef(null);
   const liveIncidentZoneRef = useRef(null);
   const [liveIncidentGallerySize, setLiveIncidentGallerySize] = useState({ width: 0, height: 0 });
-  const liveIncidentGalleryReady = mobileLiveView || (liveIncidentGallerySize.width > 0 && liveIncidentGallerySize.height > 0);
+  const liveIncidentGalleryReady = !mobileLiveView && liveIncidentGallerySize.width > 0 && liveIncidentGallerySize.height > 0;
   const incidentsPerPage = mobileLiveView
     ? 5
     : liveIncidentGalleryReady
@@ -1124,7 +1128,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     observer.observe(zone);
     observer.observe(gallery);
     return () => observer.disconnect();
-  }, []);
+  }, [mobileLiveView]);
 
   function saveCustomLayout(order, sizes) {
     setCustomLayoutValue(JSON.stringify({ version: 1, order, sizes }));
@@ -1622,7 +1626,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
           )) : null}
         </div>
       </section>
-      <section className="bento-card events-zone" ref={liveIncidentZoneRef}>
+      {!mobileLiveView ? <section className="bento-card events-zone" ref={liveIncidentZoneRef}>
         <div className="section-head compact incident-head">
           <div><h2>Recent Activity</h2></div>
           <div className="incident-head-actions">
@@ -1689,7 +1693,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
           </div>
           <a href={appUrl("/incidents")}>View all incidents <ChevronRight size={14} /></a>
         </div>
-      </section>
+      </section> : null}
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
       {expandedCamera ? (
         <LiveCameraOverlay

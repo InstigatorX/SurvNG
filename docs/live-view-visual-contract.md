@@ -40,13 +40,17 @@ following geometry and interaction rules are product requirements.
 
 ## Mobile composition
 
-- Live starts with one primary camera, then a compact secondary-camera rail,
-  followed by Recent Activity. One stable keyed camera tree owns all media.
-- Camera selection changes focus without changing the meaning of tapping the
-  video, which always opens the existing live overlay.
+- Live keeps the primary camera pinned at the top while secondary cameras
+  scroll below it within the available viewport. Recent Activity is omitted
+  on mobile. One stable keyed camera tree owns all media.
+- Tapping a secondary camera promotes it to primary. Tapping the primary
+  camera opens the existing live overlay.
+- Camera tiles omit quick-action buttons and the controls menu on mobile,
+  keeping camera names and status indicators visible.
 - Press-and-hold on a camera (touch or stylus) opens a transient live preview
-  with enter motion; releasing closes it with exit motion. A normal tap still
-  opens the sticky live overlay. Mouse pointers keep click-to-open only.
+  with enter motion; releasing closes it with exit motion without promoting
+  the camera. Mouse pointers use the same primary/secondary selection behavior
+  without hold preview.
 - Mobile uses the same names and status colors as desktop. Controls are at least
   44 CSS pixels and clear the bottom navigation and safe area.
 

@@ -499,9 +499,59 @@
 }
 
 @media (max-width: 760px) {
+  .app-shell.page-live {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-shell.page-live>.topbar {
+    flex-shrink: 0;
+  }
+
+  .page-live .workspace-content {
+    flex: 1;
+    overflow: hidden;
+  }
+
   .live-grid {
     gap: 0;
     padding: 0;
+  }
+
+  .page-live .live-grid {
+    height: 100%;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .page-live .live-grid>.camera-zone {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .page-live .camera-grid.live-camera-grid {
+    height: 100%;
+    grid-auto-rows: max-content;
+    align-content: start;
+    align-items: start;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+
+  .page-live .live-camera-grid .camera-tile.mobile-primary {
+    position: sticky;
+    top: 0 !important;
+    z-index: 10;
+    background: var(--panel-solid);
+    box-shadow: 0 -7px var(--panel-solid), 0 7px var(--panel-solid);
+  }
+
+  .page-live .live-camera-grid .camera-tile.mobile-primary .video-frame {
+    max-height: 45dvh;
   }
 
   .live-command-bar {
