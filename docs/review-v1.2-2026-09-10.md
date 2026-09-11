@@ -43,3 +43,15 @@ The validation results above were captured before the user-requested commit and 
 - Clear the seeking indicator when window loading fails.
 
 Validation: 66 frontend unit test files passed. Chromium and WebKit full Timeline fixtures passed, including delayed window loading, outgoing end events, cached revisits, and linked-camera autoplay at the retained time. Chromium additionally exercised real touch dragging of the fine scrubber; WebKit mobile layout was visually checked. Native MP4 and HLS lifecycle coverage was rerun. These automated engines do not establish physical iPhone autoplay policy or camera-specific codec behavior.
+
+## Camera-switch latency: independent expert review and implementation
+
+An independent specialist reproduced 9.768 seconds of MP4-header reads across 89 Upper Garage segments; the primary investigation measured 17 seconds on another cold window versus 23 ms for its index query. Exact video duration differs from the index's availability estimate, so skipping header resolution without retaining that duration would corrupt HLS offsets.
+
+The implementation adds one nullable `playback_duration_seconds` column to the existing index. The existing metadata worker receives only recent finalized recordings; legacy windows populate metadata on demand. A stable size/mtime identity is checked before reuse and before conditional persistence. Replaced files invalidate derived metadata. No archive-wide backfill, new service, or new worker pool is introduced.
+
+An isolated test using the actual implementation and 90 production recording paths, with a temporary index, reopened the index and resolved identical metadata in 1.4 ms with zero header reads. This measures metadata preparation, not end-to-end iPhone playback latency. A first request for legacy metadata can still require header reads.
+
+The new WebKit test failed before the frontend fix: a camera switch emitted a new-camera playlist before its own window loaded. Scoping HLS and native playback details to camera/source/day removes this premature request. The independent final diff review found no remaining blockers.
+
+Final validation: 2,407 Python tests and 233 subtests passed; 18 optional-dependency tests skipped, with the existing Starlette/httpx deprecation warning. All 66 frontend unit files, Chromium/WebKit Timeline fixtures, production frontend build, and diff whitespace checks passed. Independent review used one GPT-5.6-Sol specialist for theory validation and read-only diff review; implementation and integration remained with the primary agent.

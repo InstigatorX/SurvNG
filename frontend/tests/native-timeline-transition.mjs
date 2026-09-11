@@ -100,3 +100,21 @@ for (const recycle of [false, true]) {
 }
 
 console.log("native Timeline handoff, pause intent, and stale seek tests passed");
+
+// A camera change renders once before its reset effect. Never turn the old
+// segment into a request for the new camera while its scoped detail is absent.
+{
+  const urlSource = source.slice(source.indexOf("  const nativeSegmentUrl ="), source.indexOf("  const nativeNextEpoch ="));
+  for (const loadedPlaybackWindow of [null, { scope: "yard:main:today" }]) {
+    const urls = [];
+    const context = vm.createContext({
+      useSegmentPlayback: true, isAllCameras: false, activeCameraId: "yard",
+      loadedPlaybackWindow, nativeSegment: { start_epoch: 100 }, source: "main",
+      useTranscodedPlayback: false, nativeSegmentRetryToken: 0,
+      recordingSegmentUrl: (...args) => { urls.push(args); return "segment.mp4"; },
+    });
+    vm.runInContext(`${urlSource}\nglobalThis.result = nativeSegmentUrl;`, context);
+    assert.equal(urls.length, loadedPlaybackWindow ? 1 : 0);
+    assert.equal(Boolean(context.result), Boolean(loadedPlaybackWindow));
+  }
+}

@@ -852,12 +852,12 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     return recordingPlaybackTimeline(recordings);
   }, [recordings]);
   latestAvailabilityRef.current = timeline[timeline.length - 1]?.end_epoch ?? null;
-  const playbackTimeline = useMemo(() => {
-    if (!playbackDetail) return [];
-    return recordingPlaybackTimeline(playbackDetail.rows);
-  }, [playbackDetail]);
-  const loadedPlaybackWindow = playbackDetail;
   const nativeScope = `${activeCameraId}:${source}:${dayStart}:${dayEnd}`;
+  const playbackTimeline = useMemo(() => {
+    if (playbackDetail?.scope !== nativeScope) return [];
+    return recordingPlaybackTimeline(playbackDetail.rows);
+  }, [playbackDetail, nativeScope]);
+  const loadedPlaybackWindow = playbackDetail?.scope === nativeScope ? playbackDetail : null;
   const requestedTransport = recordingPlaybackTransport({
     nativeHls, rate: playbackRate, incompatible: transcodeScope === nativeScope, preferOriginal: originalScope === nativeScope,
   });
@@ -868,7 +868,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const manifestUrl = !useSegmentPlayback && !isAllCameras && activeCameraId && playbackDetail && playbackTimeline.length
     ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
-  const nativeSegmentUrl = useSegmentPlayback && !isAllCameras && activeCameraId && nativeSegment
+  const nativeSegmentUrl = useSegmentPlayback && !isAllCameras && activeCameraId && loadedPlaybackWindow && nativeSegment
     ? `${recordingSegmentUrl(activeCameraId, nativeSegment.start_epoch, source, useTranscodedPlayback)}&reload=${nativeSegmentRetryToken}`
     : "";
   const nativeNextEpoch = nativeSegment ? recordingEpochAfterSegment(nativeSegment, timeline) : null;
@@ -1782,6 +1782,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           setPlayhead(playableEpoch);
         }
         setPlaybackDetail({
+          scope: nativeScope,
           start: Number(payload.start_epoch),
           end: Number(payload.end_epoch),
           rows,

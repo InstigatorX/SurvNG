@@ -12,6 +12,7 @@ from survng.app.recording_media import hls_map_transition, mp4_stream_fingerprin
 from survng.app import recording_media_runtime
 from survng.app.recording_media_runtime import RecordingMediaRuntime
 from survng.app.recording_routes import create_recording_router
+from survng.app.recorder import Recorder
 
 
 @pytest.fixture(scope="module")
@@ -271,6 +272,7 @@ def test_first_playback_window_resolves_estimates_before_publishing_playlist(rec
         discard_missing_recording_rows=lambda rows: rows,
         lease_recordings_for_playback=lambda _rows: None,
         queue_stream_fingerprints=lambda _rows: None,
+        resolve_recording_playback_metadata=Recorder("ffmpeg", root / "metadata-test").resolve_recording_playback_metadata,
     )
     manager = SimpleNamespace(recorder=recorder, camera=lambda _id: object())
     monkeypatch.setattr(runtime.deps, "get_manager", lambda: manager)

@@ -15,7 +15,7 @@ from typing import Callable
 
 from ..config import CameraConfig, RecordingRetentionConfig
 from ..media_storage import path_presence
-from ..recording_media import mp4_stream_fingerprint
+from ..recording_media import mp4_playback_metadata, mp4_stream_fingerprint
 
 
 LOGGER = logging.getLogger("survng.app.recorder")
@@ -53,6 +53,7 @@ class RecordingIndexMixin:
                     validated INTEGER NOT NULL DEFAULT 0,
                     stream_fingerprint TEXT NOT NULL DEFAULT '',
                     fingerprint_checked INTEGER NOT NULL DEFAULT 0,
+                    playback_duration_seconds REAL,
                     location_id TEXT NOT NULL DEFAULT 'default'
                 )
                 """
@@ -89,6 +90,8 @@ class RecordingIndexMixin:
                     WHERE stream_fingerprint != ''
                     """
                 )
+            if "playback_duration_seconds" not in columns:
+                connection.execute("ALTER TABLE recordings ADD COLUMN playback_duration_seconds REAL")
             if "location_id" not in columns:
                 connection.execute(
                     "ALTER TABLE recordings ADD COLUMN location_id TEXT NOT NULL DEFAULT 'default'"
@@ -355,7 +358,7 @@ class RecordingIndexMixin:
                 """
                 SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds,
                        end_epoch, source, playable, health_error, validated,
-                       stream_fingerprint, fingerprint_checked, location_id
+                       stream_fingerprint, fingerprint_checked, playback_duration_seconds, location_id
                 FROM recordings
                 WHERE camera_id = ? AND source = ? AND playable = 1
                 ORDER BY start_epoch DESC LIMIT ?
@@ -385,7 +388,7 @@ class RecordingIndexMixin:
                     """
                     SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, source,
                            playable, health_error, stream_fingerprint, fingerprint_checked,
-                           location_id
+                           playback_duration_seconds, location_id
                     FROM recordings
                     WHERE camera_id = ? AND source = ? AND playable = 1 AND end_epoch > ? AND start_epoch < ?
                     ORDER BY start_epoch
@@ -815,6 +818,7 @@ class RecordingIndexMixin:
     def _store_recording_rows(self, camera_id: str, source: str, rows: list[dict], validate_new: bool = False) -> None:
         if not rows:
             return
+        new_metadata_rows = []
         if validate_new:
             with self._index_connection() as connection:
                 existing = {
@@ -835,6 +839,7 @@ class RecordingIndexMixin:
                     row["validated"] = True
                     row["stream_fingerprint"] = mp4_stream_fingerprint(Path(row["path"]))
                     row["fingerprint_checked"] = True
+                    new_metadata_rows.append(row)
                     if duration is not None and row.get("start_epoch") is not None:
                         row["duration_seconds"] = duration
                         row["end_epoch"] = float(row["start_epoch"]) + duration
@@ -864,19 +869,32 @@ class RecordingIndexMixin:
                 ON CONFLICT(path) DO UPDATE SET
                     size_bytes=excluded.size_bytes,
                     modified_at=excluded.modified_at,
-                    duration_seconds=CASE WHEN recordings.validated = 1
+                    duration_seconds=CASE WHEN recordings.validated = 1 AND recordings.size_bytes = excluded.size_bytes AND recordings.modified_at = excluded.modified_at
                         THEN recordings.duration_seconds ELSE excluded.duration_seconds END,
-                    end_epoch=CASE WHEN recordings.validated = 1
+                    end_epoch=CASE WHEN recordings.validated = 1 AND recordings.size_bytes = excluded.size_bytes AND recordings.modified_at = excluded.modified_at
                         THEN recordings.end_epoch ELSE excluded.end_epoch END,
+                    playback_duration_seconds=CASE
+                        WHEN recordings.size_bytes = excluded.size_bytes AND recordings.modified_at = excluded.modified_at
+                        THEN recordings.playback_duration_seconds ELSE NULL END,
+                    validated=CASE WHEN recordings.size_bytes = excluded.size_bytes AND recordings.modified_at = excluded.modified_at
+                        THEN recordings.validated ELSE 0 END,
+                    playable=CASE WHEN recordings.size_bytes = excluded.size_bytes AND recordings.modified_at = excluded.modified_at
+                        THEN recordings.playable ELSE excluded.playable END,
+                    health_error=CASE WHEN recordings.size_bytes = excluded.size_bytes AND recordings.modified_at = excluded.modified_at
+                        THEN recordings.health_error ELSE '' END,
                     stream_fingerprint=CASE
+                        WHEN recordings.size_bytes != excluded.size_bytes OR recordings.modified_at != excluded.modified_at THEN ''
                         WHEN excluded.fingerprint_checked = 1 THEN excluded.stream_fingerprint
                         ELSE recordings.stream_fingerprint
                     END,
-                    fingerprint_checked=MAX(recordings.fingerprint_checked, excluded.fingerprint_checked),
+                    fingerprint_checked=CASE WHEN recordings.size_bytes = excluded.size_bytes AND recordings.modified_at = excluded.modified_at
+                        THEN MAX(recordings.fingerprint_checked, excluded.fingerprint_checked) ELSE 0 END,
                     location_id=excluded.location_id
                 """,
                 values,
             )
+        if new_metadata_rows:
+            self.resolve_recording_playback_metadata(new_metadata_rows)
 
     def start_indexer(self, cameras: list[CameraConfig]) -> None:
         self._rebase_recording_index_paths()
@@ -1270,6 +1288,9 @@ class RecordingIndexMixin:
                     files = self._recent_hour_recording_files(camera_id, source)
                 rows = self._recording_rows_for_files(camera_id, source, files)
                 self._store_recording_rows(camera_id, source, rows)
+                if not full:
+                    cutoff = time.time() - max(60.0, self.segment_seconds * 6)
+                    self.queue_stream_fingerprints([row for row in rows if row["start_epoch"] >= cutoff])
                 if full and enumeration_complete:
                     self._prune_recording_index(camera_id, source, files)
             except Exception:
@@ -1284,13 +1305,69 @@ class RecordingIndexMixin:
             self._validate_index_batch()
             self._backfill_stream_fingerprints()
 
-    def queue_stream_fingerprints(self, rows: list[dict]) -> None:
-        with self._fingerprint_lock:
-            for row in rows:
-                if int(row.get("fingerprint_checked") or 0):
+    def resolve_recording_playback_metadata(self, rows: list[dict]) -> None:
+        """Resolve video sample duration and persist only a stable indexed file identity."""
+        updates = []
+        for row in rows:
+            path = Path(row["path"])
+            try:
+                before = path.stat()
+            except OSError:
+                continue
+            indexed_identity = (row.get("size_bytes"), row.get("modified_at"))
+            matches_index = (before.st_size, before.st_mtime) == indexed_identity
+            duration = row.get("playback_duration_seconds")
+            fingerprint = str(row.get("stream_fingerprint") or "")
+            reusable = (
+                matches_index and int(row.get("fingerprint_checked") or 0) and isinstance(duration, (int, float))
+                and math.isfinite(duration) and duration > 0
+            )
+            if not reusable:
+                fingerprint, duration = mp4_playback_metadata(path)
+                try:
+                    after = path.stat()
+                except OSError:
                     continue
-                path = str(row.get("path") or "")
-                if path and path not in self._fingerprint_pending_set:
+                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                    continue
+                valid_duration = duration is not None and math.isfinite(duration) and duration > 0
+                if matches_index and self._recording_file_is_stable(path):
+                    saved_duration = duration if valid_duration else None
+                    updates.append((fingerprint, saved_duration, str(path), *indexed_identity))
+                    row["playback_duration_seconds"] = saved_duration
+                    row["fingerprint_checked"] = 1
+            row["stream_fingerprint"] = fingerprint
+            if duration is not None and math.isfinite(duration) and duration > 0:
+                row["duration_seconds"] = duration
+                row["end_epoch"] = float(row["start_epoch"]) + duration
+        if updates:
+            with self._index_connection() as connection:
+                connection.executemany(
+                    """UPDATE recordings SET stream_fingerprint = ?, fingerprint_checked = 1,
+                           playback_duration_seconds = ?
+                       WHERE path = ? AND size_bytes = ? AND modified_at = ?""",
+                    updates,
+                )
+
+    def queue_stream_fingerprints(self, rows: list[dict]) -> None:
+        candidates = [str(row.get("path") or "") for row in rows if not int(row.get("fingerprint_checked") or 0)]
+        candidates = [path for path in candidates if path]
+        if not candidates:
+            return
+        # Discovery rows have no flags. Check the index so every discovery pass
+        # does not enqueue files whose headers were already processed.
+        eligible = set()
+        with self._index_connection() as connection:
+            for offset in range(0, len(candidates), 500):
+                batch = candidates[offset:offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                eligible.update(str(row[0]) for row in connection.execute(
+                    f"SELECT path FROM recordings WHERE playable = 1 AND fingerprint_checked = 0 AND path IN ({placeholders})",
+                    batch,
+                ))
+        with self._fingerprint_lock:
+            for path in candidates:
+                if path in eligible and path not in self._fingerprint_pending_set:
                     self._fingerprint_pending.append(path)
                     self._fingerprint_pending_set.add(path)
 
@@ -1352,17 +1429,11 @@ class RecordingIndexMixin:
             if not path.is_file():
                 self._delete_index_paths([path_value])
                 continue
-            fingerprint = mp4_stream_fingerprint(path)
             with self._index_connection() as connection:
-                connection.execute(
-                    """
-                    UPDATE recordings
-                    SET stream_fingerprint = ?, fingerprint_checked = 1
-                    WHERE path = ?
-                    """,
-                    (fingerprint, path_value),
-                )
-            updated += 1
+                indexed = connection.execute("SELECT * FROM recordings WHERE path = ?", (path_value,)).fetchone()
+            if indexed is not None:
+                self.resolve_recording_playback_metadata([dict(indexed)])
+                updated += 1
         return updated
 
     def _prune_recording_index(self, camera_id: str, source: str, files: list[Path]) -> None:
@@ -1471,6 +1542,10 @@ class RecordingIndexMixin:
                         "UPDATE recordings SET playable = 0, health_error = ?, validated = 1 WHERE path = ?",
                         (error or "recording validation failed", str(path)),
                     )
+            with self._index_connection() as connection:
+                indexed = connection.execute("SELECT * FROM recordings WHERE path = ?", (str(path),)).fetchone()
+            if indexed is not None and duration is not None and not error:
+                self.resolve_recording_playback_metadata([dict(indexed)])
             validated += 1
         return validated
 

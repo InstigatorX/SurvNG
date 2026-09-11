@@ -267,7 +267,23 @@ async function runInteractions(page, url, engine) {
   assert.equal((await read()).error, null);
 
   const beforeCamera = await read();
+  const beforeCameraRequests = requests.length;
+  let releaseCameraWindow;
+  let cameraWindowRequested;
+  const cameraWindowGate = new Promise(resolve => { releaseCameraWindow = resolve; });
+  const cameraWindowStarted = new Promise(resolve => { cameraWindowRequested = resolve; });
+  let cameraWindowFinished;
+  const cameraWindowDone = new Promise(resolve => { cameraWindowFinished = resolve; });
+  const delayCameraWindow = async route => { cameraWindowRequested(); await cameraWindowGate; await route.continue(); cameraWindowFinished(); };
+  await page.route("**/yard/recordings/window?**", delayCameraWindow);
   await page.getByRole("button", { name: "Show Yard recording at the current time", exact: true }).click();
+  await cameraWindowStarted;
+  await page.waitForTimeout(150);
+  const prematurePlaylists = requests.slice(beforeCameraRequests).filter(request => request.path.endsWith("/yard/recordings/day.m3u8"));
+  releaseCameraWindow();
+  await cameraWindowDone;
+  assert.equal(prematurePlaylists.length, 0, "camera switch must wait for its own metadata before requesting a playlist");
+  await page.unroute("**/yard/recordings/window?**", delayCameraWindow);
   await page.waitForFunction(() => {
     const s = window.timelineFixture.snapshot();
     return s.context?.camera_id === "yard" && s.readyState >= 2 && !s.paused && !s.seeking;

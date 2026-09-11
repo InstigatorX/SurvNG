@@ -1810,6 +1810,7 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "already-validated.mp4"
             clip.write_bytes(b"recording")
+            self._age_file(clip)
             row = self._row(clip)
             row["validated"] = True
             recorder._store_recording_rows("front-door", "main", [row])
@@ -1819,7 +1820,7 @@ class RecorderTest(unittest.TestCase):
                 row["end_epoch"] + 1,
             ))
 
-            with patch("survng.app.recording_process.index.mp4_stream_fingerprint", return_value="stream-v1"):
+            with patch("survng.app.recording_process.index.mp4_playback_metadata", return_value=("stream-v1", 9.75)):
                 updated = recorder._backfill_stream_fingerprints(limit=1)
             with recorder._index_connection() as connection:
                 indexed = dict(connection.execute(
@@ -1858,6 +1859,7 @@ class RecorderTest(unittest.TestCase):
             with (
                 patch.object(recorder, "_probe_recording", return_value=(9.0, "")),
                 patch("survng.app.recording_process.index.mp4_stream_fingerprint", return_value="stream-v2"),
+                patch("survng.app.recording_process.index.mp4_playback_metadata", return_value=("stream-v2", 8.9)),
             ):
                 self.assertEqual(
                     recorder._validate_index_batch(limit=1, discover_unqueued=True),
@@ -1893,11 +1895,12 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "fingerprint.mp4"
             clip.write_bytes(b"recording")
+            self._age_file(clip)
             row = self._row(clip)
             row["validated"] = True
             recorder._store_recording_rows("front-door", "main", [row])
 
-            with patch("survng.app.recording_process.index.mp4_stream_fingerprint", return_value="stream-v3"):
+            with patch("survng.app.recording_process.index.mp4_playback_metadata", return_value=("stream-v3", 9.75)):
                 self.assertEqual(
                     recorder._backfill_stream_fingerprints(
                         limit=1,

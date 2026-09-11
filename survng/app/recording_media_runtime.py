@@ -26,7 +26,7 @@ from .config import AppConfig, slugify_camera_id
 from .incident_utils import event_epoch
 from .manager import AppManager
 from .media_exports import MediaExportManager
-from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, mp4_playback_metadata, playback_segment_duration
+from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, playback_segment_duration
 from .recording_routes import recording_source
 from .security import redact_secret_text
 
@@ -569,27 +569,21 @@ class RecordingMediaRuntime:
         if not fresh:
             with self.recording_day_cache_lock:
                 cached = self.recording_day_cache.get(cache_key)
-                near_live = end_epoch >= time.time() - max(30.0, selected_manager.recorder.segment_seconds * 3)
-                cache_seconds = self.recording_near_live_cache_seconds if near_live else self.recording_day_cache_seconds
-                if cached is not None and now - cached[0] < cache_seconds:
-                    selected_manager.recorder.lease_recordings_for_playback(cached[1])
-                    return cached[1]
+            near_live = end_epoch >= time.time() - max(30.0, selected_manager.recorder.segment_seconds * 3)
+            cache_seconds = self.recording_near_live_cache_seconds if near_live else self.recording_day_cache_seconds
+            if cached is not None and now - cached[0] < cache_seconds:
+                rows = [dict(row) for row in cached[1]]
+                selected_manager.recorder.lease_recordings_for_playback(rows)
+                selected_manager.recorder.resolve_recording_playback_metadata(rows)
+                return rows
         rows = [row for row in selected_manager.recorder.recording_rows_between(camera_id, start_epoch, end_epoch, selected_source, discover_missing=False) if int(row.get('size_bytes') or 0) > 1024]
         if fresh:
             rows = selected_manager.recorder.discard_missing_recording_rows(rows)
         selected_manager.recorder.lease_recordings_for_playback(rows)
+        # The index retains exact video sample durations separately from its
+        # availability estimates. Unknown legacy files are resolved once here.
+        selected_manager.recorder.resolve_recording_playback_metadata(rows)
         selected_manager.recorder.queue_stream_fingerprints(rows)
-        # Filename-derived index durations are estimates, and background format
-        # discovery may not have reached this window yet. Resolve MP4 headers
-        # before publishing either its time mapping or its immutable playlist.
-        # This reads no media payload and launches no FFmpeg/ffprobe process.
-        for row in rows:
-            fingerprint, duration = mp4_playback_metadata(Path(row['path']))
-            if fingerprint:
-                row['stream_fingerprint'] = fingerprint
-            if duration is not None:
-                row['duration_seconds'] = duration
-                row['end_epoch'] = float(row['start_epoch']) + duration
         with self.recording_day_cache_lock:
             self.recording_day_cache[cache_key] = (now, rows)
             expired = [key for key, value in self.recording_day_cache.items() if now - value[0] >= self.recording_day_cache_seconds]
