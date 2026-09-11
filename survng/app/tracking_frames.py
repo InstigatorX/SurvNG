@@ -46,6 +46,7 @@ class TrackingRecorder(Protocol):
         end_epoch: float,
         *,
         source: str,
+        discover_missing: bool = True,
     ) -> list[dict[str, Any]]: ...
 
 
@@ -237,9 +238,14 @@ class CameraFrameTimeline:
         end_epoch: float,
         sample_fps: float,
         frame_width: int,
+        *,
+        after_epoch: float | None = None,
     ) -> TrackingFrameBatch:
-        if end_epoch <= start_epoch or frame_width <= 0:
-            return TrackingFrameBatch((), start_epoch)
+        # Sampling starts after the last analyzed frame, but continuity must
+        # include the interval between that cursor and the first new sample.
+        continuity_start = start_epoch if after_epoch is None else min(start_epoch, after_epoch)
+        if end_epoch <= continuity_start or frame_width <= 0:
+            return TrackingFrameBatch((), continuity_start)
         self._refresh_recorder_boundary()
         with self._lock:
             boundary = next(
@@ -250,7 +256,7 @@ class CameraFrameTimeline:
                         key=lambda candidate: candidate.captured_at,
                     )
                     if (
-                        start_epoch < item.captured_at <= end_epoch
+                        continuity_start < item.captured_at <= end_epoch
                         and (
                             item.source == "live"
                             or item.reason == "recorder_epoch_changed"
@@ -260,12 +266,19 @@ class CameraFrameTimeline:
                 None,
             )
         readable_end = boundary.captured_at if boundary is not None else end_epoch
+        if readable_end < start_epoch or (boundary is not None and readable_end == start_epoch):
+            return TrackingFrameBatch(
+                (), continuity_start, boundary.reason if boundary is not None else None,
+            )
         rows = sorted(
             self.recorder.recording_rows_between(
                 self.camera.id,
                 start_epoch,
                 readable_end,
                 source="main",
+                # The recorder maintains this index. Synchronous discovery
+                # scans whole days and can exhaust a tracking session budget.
+                discover_missing=False,
             ),
             key=lambda row: (
                 float(row.get("start_epoch") or 0.0),

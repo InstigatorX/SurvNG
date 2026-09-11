@@ -89,7 +89,7 @@ class DummyRecorder:
     def recording_at(self, camera_id: str, epoch: float):
         return None
 
-    def recording_rows_between(self, camera_id, start_epoch, end_epoch, source="main"):
+    def recording_rows_between(self, camera_id, start_epoch, end_epoch, source="main", *, discover_missing=True):
         return []
 
 

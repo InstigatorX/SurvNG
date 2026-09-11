@@ -27,10 +27,15 @@ class TrackingFrameBatch:
         return iter(self.frames)
 
 
-CatchupFrameProvider = Callable[
-    [float, float, float, int],
-    Iterable[tuple[float, np.ndarray] | DecodedVideoFrame],
-]
+class CatchupFrameProvider(Protocol):
+    def __call__(
+        self, start_epoch: float, end_epoch: float, sample_fps: float, frame_width: int,
+        *, after_epoch: float | None = None,
+    ) -> Iterable[tuple[float, np.ndarray] | DecodedVideoFrame]:
+        """Read samples while checking continuity from the exclusive cursor."""
+        ...
+
+
 TrackingUpdate = Callable[[int, dict[str, Any], list[dict[str, Any]] | None], object | None]
 TrackingPublisher = Callable[[str, dict[str, Any]], None]
 AppearanceIndexWriter = Callable[[int, str, Iterable[dict[str, Any]]], int]

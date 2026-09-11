@@ -189,3 +189,18 @@ export function hlsPlaybackOffset(windowStartEpoch, mediaStartEpoch, initialOffs
   if (windowStart === null || mediaStart === null) return Math.max(0, requestedOffset || 0);
   return Math.max(0, windowStart - mediaStart) + Math.max(0, requestedOffset || 0);
 }
+
+export function trackingCoverageLabel(tracking) {
+  if (!tracking) return "Tracking unavailable";
+  if (tracking.state === "active") return "Tracking processing";
+  if (tracking.state === "complete" && !tracking.coverage_incomplete) {
+    return "Tracking complete";
+  }
+  const reason = tracking.completion_reason;
+  if (["missing_media_while_object_active", "stale_handoff_without_recorded_coverage"].includes(reason)) {
+    return "Tracking incomplete — recording coverage unavailable";
+  }
+  if (reason === "processing_budget_exhausted") return "Tracking incomplete — processing time limit reached";
+  if (reason === "session_stopped") return "Tracking incomplete — session stopped";
+  return "Tracking incomplete";
+}

@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
 import { cameraReportsForIncident } from "../cameraSemantics.mjs";
-import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
+import { incidentTrackingSource, trackingCoverageLabel, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
 import {
@@ -1106,7 +1106,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
             <button type="button" className={depthLayer === "heatmap" ? "active" : ""} aria-pressed={depthLayer === "heatmap"} onClick={() => onDepthLayerChange?.("heatmap")} title="Show depth heatmap only">Heatmap</button>
           </div>
         ) : null}
-        {analysisMode === "tracks" ? <small>{objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
+        {analysisMode === "tracks" ? <small>{trackingCoverageLabel(incidentTracking)} · {objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
         {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
         {analysisMode === "depth" && analysisStats ? (
           <small className={analysisStats.error || analysisStats.depthError ? "analysis-error" : ""}>

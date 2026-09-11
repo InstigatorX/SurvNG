@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
+import { trackingCoverageLabel, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
 
 const tracks = storedObjectTracks({ object_tracking: { tracks: [{
   track_id: 7,
@@ -118,3 +118,9 @@ assert.deepEqual(containedFrameTransform({ width: 1600, height: 900 }, { width: 
 assert.equal(containedFrameTransform({ width: 0, height: 900 }, { width: 1920, height: 1080 }), null);
 
 console.log("object track replay tests passed");
+
+assert.equal(trackingCoverageLabel({ state: "active" }), "Tracking processing");
+assert.equal(trackingCoverageLabel({ state: "complete", coverage_incomplete: false }), "Tracking complete");
+assert.match(trackingCoverageLabel({ state: "interrupted", completion_reason: "missing_media_while_object_active" }), /recording coverage unavailable/);
+assert.match(trackingCoverageLabel({ state: "interrupted", completion_reason: "processing_budget_exhausted" }), /processing time limit/);
+assert.equal(trackingCoverageLabel({ state: "complete", coverage_incomplete: true }), "Tracking incomplete");

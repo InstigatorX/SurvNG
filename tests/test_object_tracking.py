@@ -1297,7 +1297,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         self.assertTrue(session.start(
             42,
-            datetime.now(timezone.utc),
+            datetime.fromtimestamp(captured_at - 0.01, timezone.utc),
             [detection("person", 0.9, (10, 10, 40, 80))],
         ))
         self.assertTrue(duplicate_seen.wait(2.0))
@@ -1408,7 +1408,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         session.stop()
 
         self.assertEqual(detector.threshold, 0.25)
-        self.assertEqual(updates[-1]["state"], "complete")
+        self.assertEqual(updates[-1]["state"], "interrupted")
         self.assertGreaterEqual(updates[-1]["frames_processed"], 1)
         self.assertEqual(updates[0]["tracks"][0]["box_history"][0][0], round(event_at.timestamp(), 3))
         self.assertEqual(updates[0]["frame_width"], 160)
@@ -1530,7 +1530,9 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         self.assertEqual(calls_after_cap, 2)
 
-    def test_stale_handoff_without_recorded_coverage_finishes_without_live_gap(self) -> None:
+    @patch("survng.app.object_track.session.TRACKING_CATCHUP_SETTLE_SECONDS", 0.05)
+    @patch("survng.app.object_track.session.TRACKING_CATCHUP_RETRY_SECONDS", 0.01)
+    def test_stale_handoff_without_recorded_coverage_reports_incomplete(self) -> None:
         """A delayed refinement must not pin tracking on unavailable history."""
         updates: list[dict] = []
 
@@ -1562,12 +1564,14 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         self.assertEqual(
             updates[-1]["completion_reason"],
-            "stale_handoff_without_recorded_coverage",
+            "missing_media_while_object_active",
         )
-        self.assertFalse(updates[-1]["coverage_incomplete"])
+        self.assertTrue(updates[-1]["coverage_incomplete"])
 
-    def test_partial_catchup_still_stale_when_remaining_gap_unrecoverable(self) -> None:
-        """One catch-up frame must not disable stale abort for a huge remaining gap."""
+    @patch("survng.app.object_track.session.TRACKING_CATCHUP_SETTLE_SECONDS", 0.05)
+    @patch("survng.app.object_track.session.TRACKING_CATCHUP_RETRY_SECONDS", 0.01)
+    def test_partial_catchup_reports_missing_remaining_media(self) -> None:
+        """A readable prefix cannot stand in for the missing rest of the window."""
         updates: list[dict] = []
         event_epoch = time.time() - 40.0
 
@@ -1581,7 +1585,8 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 return [detection("person", 0.9, (10, 10, 40, 80))]
 
         def catchup_provider(start_epoch, end_epoch, _sample_fps, _frame_width):
-            yield min(start_epoch + 0.5, end_epoch), np.zeros((100, 100, 3), dtype=np.uint8)
+            if start_epoch <= event_epoch + 0.5 + 1e-6:
+                yield start_epoch, np.zeros((100, 100, 3), dtype=np.uint8)
 
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
@@ -1605,9 +1610,9 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         self.assertEqual(
             updates[-1]["completion_reason"],
-            "stale_handoff_without_recorded_coverage",
+            "missing_media_while_object_active",
         )
-        self.assertFalse(updates[-1]["coverage_incomplete"])
+        self.assertTrue(updates[-1]["coverage_incomplete"])
         self.assertGreaterEqual(updates[-1]["catchup_frames_processed"], 1)
 
     def test_recorded_catchup_preserves_identity_across_processing_delay(self) -> None:
@@ -1626,12 +1631,14 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 return [detection("person", 0.9, (10 + offset, 10, 40 + offset, 80))]
 
         def catchup_provider(start_epoch, end_epoch, sample_fps, frame_width):
-            self.assertAlmostEqual(start_epoch, event_at.timestamp() + 1.25, places=2)
+            self.assertGreaterEqual(start_epoch, event_at.timestamp() + 1.25)
             self.assertGreater(end_epoch, start_epoch)
             self.assertEqual(sample_fps, 2.0)
             self.assertEqual(frame_width, 100)
             for index in range(1, 10):
-                captured_at = event_at.timestamp() + 1.5 + index * 0.5
+                captured_at = event_at.timestamp() + 0.75 + index * 0.5
+                if captured_at < start_epoch:
+                    continue
                 if captured_at > end_epoch:
                     break
                 yield captured_at, np.full((100, 100, 3), index, dtype=np.uint8)
@@ -1719,7 +1726,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=3.0),
+            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=6.0),
             detector=Detector(),
             frame_provider=lambda: (
                 np.zeros((100, 100, 3), dtype=np.uint8),
@@ -1744,7 +1751,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 np.zeros((100, 100, 3), dtype=np.uint8),
             ))
             self.assertTrue(backfill_ready.wait(2.0))
-            session.stop()
+            self.assertTrue(session.wait_stopped(2.0))
 
         self.assertGreaterEqual(provider_calls, 3)
         self.assertEqual(updates[-1]["state"], "complete")
@@ -1775,7 +1782,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=3.0),
+            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=15.0),
             detector=Detector(),
             frame_provider=lambda: (
                 np.zeros((100, 100, 3), dtype=np.uint8),
@@ -1808,9 +1815,10 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 [detection("car", 0.95, (10, 10, 60, 70))],
                 np.zeros((100, 100, 3), dtype=np.uint8),
             ))
-            self.assertTrue(frame_processed.wait(2.0))
+            self.assertTrue(session.wait_stopped(2.0))
             session.stop()
 
+        self.assertEqual(updates[-1]["frames_processed"], 0)
         self.assertEqual(updates[-1]["state"], "interrupted")
         self.assertTrue(updates[-1]["coverage_incomplete"])
         self.assertEqual(updates[-1]["coverage_gap_count"], 1)
@@ -1857,7 +1865,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=3.0),
+            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=15.0),
             detector=Detector(),
             frame_provider=lambda: (
                 np.zeros((100, 100, 3), dtype=np.uint8),
@@ -1888,9 +1896,10 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 [detection("car", 0.95, (10, 10, 60, 70))],
                 np.zeros((100, 100, 3), dtype=np.uint8),
             ))
-            self.assertTrue(frame_processed.wait(2.0))
+            self.assertTrue(session.wait_stopped(2.0))
             session.stop()
 
+        self.assertEqual(updates[-1]["frames_processed"], 0)
         self.assertEqual(updates[-1]["state"], "interrupted")
         self.assertTrue(updates[-1]["coverage_incomplete"])
         self.assertEqual(updates[-1]["coverage_gap_count"], 1)
@@ -1970,7 +1979,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             "object_exited_recorded_window",
         )
 
-    def test_deferred_catchup_does_not_expire_track_or_skip_live_recovery(self) -> None:
+    def test_deferred_catchup_does_not_expire_track_or_skip_to_live(self) -> None:
         live_processed = threading.Event()
         updates: list[dict] = []
         event_epoch = time.time() - 1.0
@@ -2000,7 +2009,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             return np.ones((100, 100, 3), dtype=np.uint8), time.time(), token
 
         def catchup_provider(_start, _end, _fps, _width):
-            yield event_epoch + 0.75, np.zeros((100, 100, 3), dtype=np.uint8)
+            yield event_epoch + 0.25, np.zeros((100, 100, 3), dtype=np.uint8)
 
         def update_event(_event_id, tracking, _tracked_objects):
             updates.append(tracking)
@@ -2040,10 +2049,12 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 [detection("car", 0.95, (10, 10, 60, 70))],
                 np.zeros((100, 100, 3), dtype=np.uint8),
             ))
-            self.assertTrue(live_processed.wait(2.0))
+            self.assertTrue(session.wait_stopped(4.0))
         session.stop()
 
-        self.assertGreater(detector.live_calls, 0)
+        self.assertEqual(detector.live_calls, 0)
+        self.assertEqual(updates[-1]["completion_reason"], "inference_unavailable")
+        self.assertEqual(updates[-1]["tracks"][0]["state"], "confirmed")
         self.assertNotEqual(
             updates[-1].get("completion_reason"),
             "object_exited_recorded_window",

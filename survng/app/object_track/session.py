@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import inspect
 import logging
 import threading
 import time
@@ -49,9 +50,6 @@ TRACKING_CATCHUP_RETRY_SECONDS = 0.25
 # Small open-segment handoff gaps are expected; escalate only when large
 # or repeated, or when catch-up itself fails (exception path below).
 COVERAGE_GAP_WARNING_SECONDS = 10.0
-# Keep aligned with tracking_frames.TRACKING_OPEN_SEGMENT_BRIDGE_SECONDS.
-# Anything older cannot be reconstructed from retained live history.
-TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS = 12.0
 
 
 def _adaptive_tracking_fps(
@@ -145,6 +143,16 @@ class ObjectTrackingSession:
         self.appearance_encoder = appearance_encoder
         self.appearance_indexer = appearance_indexer
         self.catchup_frame_provider = catchup_frame_provider
+        # Keep existing four-argument integrations working. Native providers
+        # accept the separate cursor so no capture boundary falls between reads.
+        self._catchup_accepts_cursor = False
+        if catchup_frame_provider is not None:
+            try:
+                inspect.signature(catchup_frame_provider).bind(0.0, 1.0, 1.0, 1, after_epoch=0.0)
+            except (TypeError, ValueError):
+                pass  # Legacy provider, or a callable without an inspectable signature.
+            else:
+                self._catchup_accepts_cursor = True
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
         self.cover_promoter = cover_promoter
@@ -166,6 +174,7 @@ class ObjectTrackingSession:
         self._reid_avoided_base_by_label: dict[str, int] = {}
         self._reid_attempt_base = 0
         self._reid_attempt_base_by_reason: dict[str, int] = {}
+        self._last_analyzed_epoch: float | None = None
         self._frame_width = 0
         self._frame_height = 0
         self._catchup_frames_processed = 0
@@ -824,6 +833,7 @@ class ObjectTrackingSession:
                     self._deadline,
                     time.monotonic() + self.config.max_session_seconds,
                 )
+            self._last_analyzed_epoch = None
             self._frame_width = 0
             self._frame_height = 0
             self._catchup_frames_processed = 0
@@ -868,6 +878,8 @@ class ObjectTrackingSession:
                 float(np.median(seed_offsets)) if seed_offsets else 0.0
             )
             captured_at = seed_epoch
+            media_end = seed_epoch + self.config.max_session_seconds
+            self._last_analyzed_epoch = captured_at
             for detected in initial_objects:
                 detected["_tracking_first_seen_at"] = seed_epoch
             initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
@@ -1009,6 +1021,7 @@ class ObjectTrackingSession:
                     primary_track_ids,
                     frame_reference,
                 )
+                self._last_analyzed_epoch = sample_epoch
                 frames_processed += 1
                 if catchup:
                     self._catchup_frames_processed += 1
@@ -1043,279 +1056,235 @@ class ObjectTrackingSession:
                     last_persisted_at = now_monotonic
                 return True
 
-            def process_catchup_until(target_epoch: float) -> bool:
-                """Consume newly finalized recording frames up to ``target_epoch``.
+            catchup_deferred = False
+            catchup_gap = 0.0
+            # VFR/live history can be irregular (including dropped samples).
+            # Refuse gaps that would expire the object without analyzed evidence.
+            continuity_interval = self.config.lost_timeout_seconds
 
-                The recorder index intentionally exposes only finalized segments. A
-                delayed tracking session can therefore catch up to the end of the
-                previous segment while the next segment is still being written. This
-                helper is safe to call repeatedly as segments become available.
-                """
+            def process_catchup_until(target_epoch: float) -> bool:
+                """Analyze one bounded batch, retaining the last successful cursor."""
                 nonlocal captured_at, last_persisted_at
+                nonlocal catchup_deferred, catchup_gap
+                catchup_deferred = False
+                catchup_gap = 0.0
                 if self.catchup_frame_provider is None or initial_frame is None:
                     return False
                 catchup_interval = 1.0 / self.config.sample_fps
-                catchup_start = captured_at + catchup_interval
-                if target_epoch <= catchup_start:
+                catchup_start = min(captured_at + catchup_interval, target_epoch)
+                if target_epoch <= captured_at:
                     return False
+                # Bound decoding, not just inference: CameraFrameTimeline
+                # materializes the requested window before returning it.
+                batch_end = min(
+                    target_epoch,
+                    catchup_start + self.config.max_catchup_frames_per_tick * catchup_interval,
+                )
+                cursor_kwargs = {"after_epoch": captured_at} if self._catchup_accepts_cursor else {}
+                batch = self.catchup_frame_provider(
+                    catchup_start, batch_end, self.config.sample_fps,
+                    min(1280, int(initial_frame.shape[1])),
+                    **cursor_kwargs,
+                )
+                boundary = batch.interruption if isinstance(batch, TrackingFrameBatch) else None
                 advanced = False
                 persisted_before_batch = last_persisted_at
-                catchup_batch = self.catchup_frame_provider(
-                    catchup_start,
-                    target_epoch,
-                    self.config.sample_fps,
-                    min(1280, int(initial_frame.shape[1])),
-                )
-                if isinstance(catchup_batch, TrackingFrameBatch):
-                    if catchup_batch.interruption is not None:
-                        self._record_coverage_interruption(
-                            catchup_batch.interruption
-                        )
-                catchup_frames = iter(catchup_batch)
+                samples = iter(batch)
                 try:
-                    processed_this_tick = 0
-                    for sample in catchup_frames:
-                        sample_epoch, frame = sample
-                        frame_reference = getattr(sample, "reference", None)
+                    for attempt, sample in enumerate(samples):
+                        if attempt >= self.config.max_catchup_frames_per_tick:
+                            break
                         if stop.is_set() or time.monotonic() >= self._deadline:
                             break
-                        if sample_epoch <= captured_at or sample_epoch > target_epoch:
+                        sample_epoch, frame = sample
+                        if sample_epoch <= captured_at or sample_epoch > batch_end:
                             continue
-                        processed = process_frame(
-                            frame,
-                            sample_epoch,
-                            catchup=True,
-                            frame_reference=frame_reference,
-                        )
-                        # Count deferred/failed attempts toward the tick budget
-                        # so shed inference cannot monopolize catch-up replay.
-                        processed_this_tick += 1
-                        if processed:
-                            # Track expiry is based only on successfully
-                            # analyzed media, never on a deferred/failed cursor.
-                            captured_at = sample_epoch
-                            advanced = True
-                        if (
-                            processed_this_tick
-                            >= self.config.max_catchup_frames_per_tick
+                        if sample_epoch - captured_at > continuity_interval + 1e-6:
+                            catchup_gap = sample_epoch - captured_at
+                            break
+                        if not process_frame(
+                            frame, sample_epoch, catchup=True,
+                            frame_reference=getattr(sample, "reference", None),
                         ):
+                            # Retry this sample, not a later frame. A deferred
+                            # inference is not negative object evidence.
+                            catchup_deferred = True
+                            break
+                        captured_at = sample_epoch
+                        advanced = True
+                        if not tracker.has_live_tracks(captured_at):
                             break
                 finally:
-                    close_catchup = getattr(catchup_frames, "close", None)
-                    if callable(close_catchup):
-                        close_catchup()
+                    close = getattr(samples, "close", None)
+                    if callable(close):
+                        close()
+                # A boundary reported after a readable prefix matters only
+                # once we have consumed that prefix, not on the first tick.
                 if (
-                    advanced
-                    and self.config.persist_interval_seconds > 0
-                    and last_persisted_at == persisted_before_batch
+                    boundary and not catchup_deferred and not catchup_gap
+                    and (not batch.frames or captured_at >= batch.covered_through - 1e-6)
                 ):
-                    # A replay batch can finish before the wall-clock cadence
-                    # elapses. Flush once at its boundary, never once per frame.
-                    self._persist(
-                        event_id,
-                        tracker,
-                        captured_at,
-                        latest_tracked_objects,
-                        frames_processed,
-                        "active",
-                    )
+                    self._record_coverage_interruption(boundary)
+                if advanced and last_persisted_at == persisted_before_batch:
+                    self._persist(event_id, tracker, captured_at, latest_tracked_objects,
+                                  frames_processed, "active")
                     last_persisted_at = time.monotonic()
                 return advanced
 
-            catchup_until = time.time()
-            if (
-                self.catchup_frame_provider is not None
-                and initial_frame is not None
-                and catchup_until - captured_at > interval() * 1.5
-            ):
-                # Start immediately after the actual selected sample. The
-                # provider and loop still reject non-increasing timestamps.
-                try:
-                    process_catchup_until(catchup_until)
-                except Exception:
-                    LOGGER.exception(
-                        "recorded tracking catch-up failed for %s event %d; continuing live",
-                        self.camera.id,
-                        event_id,
-                    )
-                catchup_until = time.time()
-            if (
-                self.catchup_frame_provider is not None
-                and initial_frame is not None
-                and catchup_until - captured_at
-                > TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS
-            ):
-                # Do not turn minutes of queue delay into a fabricated
-                # open-segment warning. Partial catch-up that still leaves the
-                # cursor beyond recoverable live/open-segment history is the
-                # same unrecoverable case as advancing nothing.
-                self._completion_reason = "stale_handoff_without_recorded_coverage"
-                final_epoch = time.time()
-                self._persist(
-                    event_id,
-                    tracker,
-                    final_epoch,
-                    None,
-                    frames_processed,
-                    "interrupted",
+            def coverage_failed(gap: float) -> None:
+                self._coverage_gap_count += 1
+                self._maximum_coverage_gap_seconds = max(
+                    self._maximum_coverage_gap_seconds, gap,
                 )
-                self._set_status(
-                    enabled=True,
-                    active=False,
-                    event_id=event_id,
-                    track_count=len(tracker.summaries(final_epoch)),
-                    confirmed_tracks=len(tracker.summaries(final_epoch)),
-                    frames_processed=frames_processed,
-                    catchup_frames_processed=self._catchup_frames_processed,
-                )
-                return
-
-            next_sample = time.monotonic()
-            frame_acquisition_deadline = min(
-                self._deadline,
-                time.monotonic() + 5.0,
-            )
-            last_frame_token: float | None = None
-            # If recorded evidence already followed every confirmed track until
-            # it naturally expired, the event has complete useful coverage.
-            # Bridging to a much newer live frame would manufacture a timestamp
-            # gap after the object left and incorrectly suppress cover promotion.
-            live_bridge_required = tracker.has_live_tracks(captured_at)
-            if not live_bridge_required:
-                self._completion_reason = "object_exited_recorded_window"
-            while live_bridge_required and not stop.is_set():
-                with self._lock:
-                    deadline = self._deadline
-                if time.monotonic() >= deadline:
-                    break
-                wait_seconds = max(0.0, next_sample - time.monotonic())
-                if stop.wait(wait_seconds):
-                    break
-                sample = self.frame_provider()
-                now_epoch = time.time()
-                if sample is None:
-                    if time.monotonic() >= frame_acquisition_deadline and not tracker.has_live_tracks(now_epoch):
-                        break
-                    next_sample = time.monotonic() + interval()
-                    continue
-                frame, sample_epoch, frame_token = sample
-                if self._catchup_frames_processed and sample_epoch <= captured_at:
-                    next_sample = time.monotonic() + interval()
-                    continue
-                coverage_gap = sample_epoch - captured_at
-                gap_backfilled = False
-                if (
-                    self.catchup_frame_provider is not None
-                    and initial_frame is not None
-                    and coverage_gap > self.config.lost_timeout_seconds
-                ):
-                    # A live frame far ahead of the last recorded sample would age
-                    # every track out immediately. Give the recorder's currently-open
-                    # segment a bounded opportunity to finalize, then replay the gap
-                    # in timestamp order before returning to live frames.
-                    settle_deadline = min(
-                        deadline,
-                        time.monotonic() + TRACKING_CATCHUP_SETTLE_SECONDS,
-                    )
-                    while (
-                        not stop.is_set()
-                        and sample_epoch - captured_at > interval() * 1.5
-                        and time.monotonic() < settle_deadline
-                    ):
-                        try:
-                            gap_backfilled = bool(
-                                process_catchup_until(sample_epoch)
-                                or gap_backfilled
-                            )
-                        except Exception:
-                            LOGGER.exception(
-                                "recorded tracking gap backfill failed for %s event %d",
-                                self.camera.id,
-                                event_id,
-                            )
-                            break
-                        if sample_epoch - captured_at <= interval() * 1.5:
-                            break
-                        wait_for = min(
-                            TRACKING_CATCHUP_RETRY_SECONDS,
-                            max(0.0, settle_deadline - time.monotonic()),
-                        )
-                        if wait_for <= 0.0 or stop.wait(wait_for):
-                            break
-                    coverage_gap = sample_epoch - captured_at
-                    if (
-                        coverage_gap > self.config.lost_timeout_seconds
-                        and tracker.has_live_tracks(captured_at)
-                    ):
-                        self._coverage_gap_count += 1
-                        self._maximum_coverage_gap_seconds = max(
-                            self._maximum_coverage_gap_seconds,
-                            coverage_gap,
-                        )
-                        # Persist incomplete coverage either way; only the log
-                        # severity distinguishes common open-segment handoff
-                        # delays from larger/repeated gaps worth paging on.
-                        log = (
-                            LOGGER.warning
-                            if (
-                                coverage_gap >= COVERAGE_GAP_WARNING_SECONDS
-                                or self._coverage_gap_count > 1
-                            )
-                            else LOGGER.info
-                        )
-                        if self._coverage_interruption is not None:
-                            gap_detail = self._coverage_interruption.replace("_", " ")
-                            reason = self._coverage_interruption
-                        elif coverage_gap <= TRACKING_MAX_RECOVERABLE_HANDOFF_AGE_SECONDS:
-                            gap_detail = "open recording segment not bridged"
-                            reason = "missing_media_while_object_active"
-                        else:
-                            gap_detail = "tracking fell behind live"
-                            reason = "tracking_fell_behind_live"
-                        log(
-                            "object tracking coverage gap for %s event %d: %.3fs "
-                            "(%s)",
-                            self.camera.id,
-                            event_id,
-                            coverage_gap,
-                            gap_detail,
-                        )
-                        self._completion_reason = reason
-                    elif not tracker.has_live_tracks(captured_at):
-                        self._completion_reason = "object_exited_during_catchup"
-                        break
-                if gap_backfilled and sample_epoch <= captured_at + interval() * 0.5:
-                    last_frame_token = frame_token
-                    next_sample = time.monotonic() + interval()
-                    continue
-                if last_frame_token is not None and frame_token <= last_frame_token:
-                    if not tracker.has_live_tracks(now_epoch):
-                        break
-                    next_sample = time.monotonic() + interval()
-                    continue
-                last_frame_token = frame_token
-                if not process_frame(frame, sample_epoch, catchup=False):
-                    next_sample = time.monotonic() + interval()
-                    continue
-                captured_at = sample_epoch
-                if not tracker.has_live_tracks(sample_epoch):
-                    self._completion_reason = "object_exited_live_window"
-                    break
-                next_sample = max(next_sample + interval(), time.monotonic())
-            final_epoch = time.time()
-            final_state = "interrupted" if self._coverage_gap_count else "complete"
-            if not self._completion_reason:
                 self._completion_reason = (
-                    "session_stopped" if stop.is_set() else "tracking_window_complete"
+                    self._coverage_interruption or "missing_media_while_object_active"
                 )
+                log = LOGGER.warning if gap >= COVERAGE_GAP_WARNING_SECONDS else LOGGER.info
+                log("object tracking coverage gap for %s event %d: %.3fs (%s)",
+                    self.camera.id, event_id, gap,
+                    self._completion_reason.replace("_", " "))
+
+            stalled_since: float | None = None
+            last_frame_token: float | None = None
+            pending_live: FrameSample | None = None
+            while not stop.is_set():
+                if not tracker.has_live_tracks(captured_at):
+                    self._completion_reason = (
+                        "object_exited_recorded_window" if self._catchup_frames_processed
+                        else "object_exited_live_window"
+                    )
+                    break
+                if captured_at >= media_end - 1e-6:
+                    self._completion_reason = "tracking_window_complete"
+                    break
+                if time.monotonic() >= self._deadline:
+                    self._completion_reason = (
+                        "inference_unavailable" if catchup_deferred else "processing_budget_exhausted"
+                    )
+                    break
+                target_epoch = min(time.time(), media_end)
+                advanced = False
+                has_recorded_provider = self.catchup_frame_provider is not None and initial_frame is not None
+                if has_recorded_provider and pending_live is None:
+                    advanced = process_catchup_until(target_epoch)
+                # Provider/decoder work may outlast the cooperative budget or
+                # receive cancellation. Skipped samples are not an empty tail.
+                if stop.is_set():
+                    break
+                if self._coverage_interruption is not None and tracker.has_live_tracks(captured_at):
+                    coverage_failed(max(0.0, target_epoch - captured_at))
+                    break
+                if time.monotonic() >= self._deadline:
+                    if advanced and (
+                        captured_at >= media_end - 1e-6 or not tracker.has_live_tracks(captured_at)
+                    ):
+                        continue
+                    self._completion_reason = (
+                        "inference_unavailable" if catchup_deferred else "processing_budget_exhausted"
+                    )
+                    break
+                if advanced:
+                    stalled_since = None
+                    # Resume the next batch with the same tracker and cursor.
+                    # Inference already runs in the lower-priority tracking lane.
+                    if stop.wait(0.01):
+                        break
+                    continue
+                if self._coverage_interruption is not None:
+                    coverage_failed(max(0.0, target_epoch - captured_at))
+                    break
+
+                if catchup_deferred and pending_live is None:
+                    # Optional inference may be shed during an incident burst.
+                    # That is not a recording stall; use the processing budget.
+                    stalled_since = None
+                    stop.wait(TRACKING_CATCHUP_RETRY_SECONDS)
+                    continue
+                sample = pending_live if pending_live is not None else self.frame_provider()
+                if stop.is_set():
+                    break
+                if time.monotonic() >= self._deadline:
+                    self._completion_reason = (
+                        "inference_unavailable" if catchup_deferred else "processing_budget_exhausted"
+                    )
+                    break
+                if sample is not None:
+                    frame, sample_epoch, frame_token = sample
+                    gap = sample_epoch - captured_at
+                    allowed_gap = continuity_interval if has_recorded_provider else max(
+                        self.config.lost_timeout_seconds, 1.5 * interval(),
+                    )
+                    if (
+                        captured_at < sample_epoch <= media_end
+                        and gap <= allowed_gap + 1e-6
+                        and (last_frame_token is None or frame_token > last_frame_token)
+                    ):
+                        if has_recorded_provider and self._catchup_accepts_cursor:
+                            # The live candidate can be ahead of the bounded
+                            # decoded batch. Check its whole continuity interval
+                            # with a point read, without decoding that backlog.
+                            continuity = self.catchup_frame_provider(
+                                sample_epoch, sample_epoch, self.config.sample_fps,
+                                min(1280, int(initial_frame.shape[1])),
+                                after_epoch=captured_at,
+                            )
+                            if isinstance(continuity, TrackingFrameBatch) and continuity.interruption:
+                                self._record_coverage_interruption(continuity.interruption)
+                                coverage_failed(gap)
+                                break
+                        if stop.is_set():
+                            break
+                        if time.monotonic() >= self._deadline:
+                            self._completion_reason = "processing_budget_exhausted"
+                            break
+                        if process_frame(frame, sample_epoch, catchup=False):
+                            captured_at = sample_epoch
+                            last_frame_token = frame_token
+                            pending_live = None
+                            catchup_deferred = False
+                            stalled_since = None
+                            stop.wait(interval())
+                            continue
+                        pending_live = sample
+                        catchup_deferred = True
+                        stalled_since = None
+                        stop.wait(TRACKING_CATCHUP_RETRY_SECONDS)
+                        continue
+                # Only tolerate a sub-sample tail after actually checking it.
+                # An available last frame or continuity boundary takes priority.
+                end_tolerance = min(1.5 / self.config.sample_fps, self.config.max_session_seconds / 2)
+                if (
+                    target_epoch >= media_end and has_recorded_provider
+                    and not catchup_gap and not catchup_deferred
+                    and captured_at >= media_end - end_tolerance
+                ):
+                    self._completion_reason = "tracking_window_complete"
+                    break
+                # Never pass a newer live frame across unprocessed media. Wait
+                # for finalization (or deferred inference) at this same cursor.
+                if stalled_since is None:
+                    stalled_since = time.monotonic()
+                if time.monotonic() - stalled_since >= TRACKING_CATCHUP_SETTLE_SECONDS:
+                    coverage_failed(catchup_gap or max(target_epoch - captured_at, 0.0))
+                    break
+                stop.wait(TRACKING_CATCHUP_RETRY_SECONDS)
+
+            final_epoch = captured_at
+            if not self._completion_reason:
+                self._completion_reason = "session_stopped"
+            final_state = (
+                "complete" if self._completion_reason in {
+                    "object_exited_recorded_window", "object_exited_live_window",
+                    "tracking_window_complete",
+                } else "interrupted"
+            )
             if final_state == "complete" and not stop.is_set():
                 try:
                     self._promote_cover_candidate(event_id)
                 except Exception:
                     LOGGER.exception(
                         "tracked cover promotion failed for %s event %d",
-                        self.camera.id,
-                        event_id,
+                        self.camera.id, event_id,
                     )
             self._persist(event_id, tracker, final_epoch, None, frames_processed, final_state)
             self._set_status(
@@ -1405,13 +1374,17 @@ class ObjectTrackingSession:
                 self._maximum_coverage_gap_seconds,
                 3,
             ),
-            "coverage_incomplete": self._coverage_gap_count > 0,
+            "coverage_incomplete": self._coverage_gap_count > 0 or state == "interrupted",
             "completion_reason": self._completion_reason,
             "coverage_interruption": self._coverage_interruption,
             "coverage_interruption_counts": dict(
                 self._status.get("coverage_interruption_counts") or {}
             ),
+            # updated_at has historically served as the incident media end.
+            # Keep queue/processing time from extending the replay clip.
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
+            "persisted_at": datetime.now(timezone.utc).isoformat(),
+            "analyzed_through": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "tracks": tracks,
             "reid_diagnostics": {
                 **tracker_diagnostics,
@@ -1458,7 +1431,7 @@ class ObjectTrackingSession:
                 self._maximum_coverage_gap_seconds,
                 3,
             ),
-            coverage_incomplete=self._coverage_gap_count > 0,
+            coverage_incomplete=self._coverage_gap_count > 0 or state == "interrupted",
             completion_reason=self._completion_reason,
             coverage_interruption=self._coverage_interruption,
             reid_recoveries=(
@@ -1542,7 +1515,7 @@ class ObjectTrackingSession:
         frames_processed: int,
         error: Exception,
     ) -> None:
-        captured_at = time.time()
+        captured_at = self._last_analyzed_epoch or time.time()
         payload = {
             "implementation": self.config.implementation,
             "state": "failed",

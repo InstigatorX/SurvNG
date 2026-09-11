@@ -436,3 +436,15 @@ def test_recorder_epoch_rollover_is_a_tracking_continuity_boundary() -> None:
 
     assert [sample[0] for sample in batch] == [100.0, 100.5]
     assert batch.interruption == "recorder_epoch_changed"
+
+
+def test_tracking_batch_uses_maintained_index_without_filesystem_discovery() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    recorder.recording_rows_between.return_value = []
+    service = _service(recorder=recorder)
+
+    assert list(service.read_recorded_frames(100.0, 102.0, 3.0, 1280)) == []
+    recorder.recording_rows_between.assert_called_once_with(
+        "gate", 100.0, 102.0, source="main", discover_missing=False,
+    )

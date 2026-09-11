@@ -744,12 +744,15 @@ class CameraWorker:
         end_epoch: float,
         sample_fps: float,
         frame_width: int,
+        *,
+        after_epoch: float | None = None,
     ) -> TrackingFrameBatch:
         return self.tracking_frames.read_recorded_frames(
             start_epoch,
             end_epoch,
             sample_fps,
             frame_width,
+            after_epoch=after_epoch,
         )
 
     def _recorded_motion_frame(
