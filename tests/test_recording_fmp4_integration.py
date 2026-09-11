@@ -255,3 +255,71 @@ def test_changed_real_stream_description_requires_discontinuity(recording_fragme
     assert original_fingerprint and changed_fingerprint != original_fingerprint
     lines, _ = hls_map_transition(original_fingerprint, changed_fingerprint, "changed/init.mp4")
     assert lines == ["#EXT-X-DISCONTINUITY", '#EXT-X-MAP:URI="changed/init.mp4"']
+
+
+def test_first_playback_window_resolves_estimates_before_publishing_playlist(recording_fragments, monkeypatch):
+    root, _ffmpeg, _ffprobe, runtime = recording_fragments
+    rows = [{
+        "path": str(root / f"segment-{index:02d}.mp4"),
+        "name": f"segment-{index:02d}.mp4", "size_bytes": 4096,
+        "start_epoch": 100 + index * 2, "end_epoch": 103 + index * 2,
+        "duration_seconds": 3, "stream_fingerprint": "", "fingerprint_checked": 0,
+    } for index in range(3)]
+    recorder = SimpleNamespace(
+        segment_seconds=2,
+        recording_rows_between=lambda *_args, **_kwargs: [dict(row) for row in rows],
+        discard_missing_recording_rows=lambda rows: rows,
+        lease_recordings_for_playback=lambda _rows: None,
+        queue_stream_fingerprints=lambda _rows: None,
+    )
+    manager = SimpleNamespace(recorder=recorder, camera=lambda _id: object())
+    monkeypatch.setattr(runtime.deps, "get_manager", lambda: manager)
+    monkeypatch.setattr(runtime, "recording_day_cache", {})
+    window_rows = runtime._recording_day_rows("gate", 100, 106, "main")
+    assert [row["duration_seconds"] for row in window_rows] == [2, 2, 2]
+    assert [row["end_epoch"] for row in window_rows] == [102, 104, 106]
+    fingerprints = {row["stream_fingerprint"] for row in window_rows}
+    assert len(fingerprints) == 1 and "" not in fingerprints
+    dependencies = SimpleNamespace(
+        manager_access=None, manager_lock=None, get_manager=lambda: manager,
+        recording_day_rows=lambda _manager, *args, **kwargs: runtime._recording_day_rows(*args, **kwargs),
+    )
+    playlist = create_recording_router(dependencies).handlers["recording_day_hls_playlist"](
+        "gate", 100, 106,
+    ).body.decode()
+    assert playlist.count("#EXT-X-MAP:") == 1
+    assert "#EXT-X-DISCONTINUITY" not in playlist
+    assert playlist.count("#EXTINF:2.000,") == 3
+    assert "media_offset=2.000" in playlist and "media_offset=4.000" in playlist
+
+
+def test_shared_init_preserves_each_recordings_audio_start_delay(recording_fragments):
+    root, ffmpeg, ffprobe, runtime = recording_fragments
+    first_init = None
+    # AAC at 8 kHz has 128 ms of encoder priming; these offsets leave positive
+    # packet start delays like the camera recordings, rather than preroll edits.
+    for index, delay in enumerate((0.192, 0.256, 0.160)):
+        source = root / f"delayed-audio-{index}.mp4"
+        subprocess.run([
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            "testsrc2=size=160x90:rate=25:duration=2", "-itsoffset", str(delay),
+            "-f", "lavfi", "-i", "sine=sample_rate=8000:duration=1.7",
+            "-c:v", "libx264", "-bf", "0", "-g", "50", "-c:a", "aac", str(source),
+        ], check=True, capture_output=True, timeout=20)
+        init, media = runtime._recording_fmp4_files(source, 2, index * 2)
+        if first_init is None:
+            first_init = init
+        own = fragment_packets(root, ffprobe, init, media, f"own-delay-{index}.mp4")
+        shared = fragment_packets(root, ffprobe, first_init, media, f"shared-delay-{index}.mp4")
+        original = packets(ffprobe, source)
+        for stream in (0, 1):
+            own_packets = [p for p in own["packets"] if p["stream_index"] == stream]
+            shared_packets = [p for p in shared["packets"] if p["stream_index"] == stream]
+            source_packets = {p["data_hash"]: p for p in original["packets"] if p["stream_index"] == stream}
+            assert len(own_packets) == len(shared_packets)
+            for own_packet, shared_packet in zip(own_packets, shared_packets):
+                assert own_packet["data_hash"] == shared_packet["data_hash"]
+                source_packet = source_packets[own_packet["data_hash"]]
+                for field in ("pts_time", "dts_time"):
+                    assert float(shared_packet[field]) == pytest.approx(float(own_packet[field]), abs=.000002)
+                    assert float(own_packet[field]) - float(source_packet[field]) == pytest.approx(index * 2, abs=.000002)
