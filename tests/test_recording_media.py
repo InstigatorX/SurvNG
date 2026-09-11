@@ -10,6 +10,7 @@ from survng.app.recording_media import (
     event_clip_window,
     hls_map_transition,
     mp4_video_dimensions,
+    mp4_playback_metadata,
     mp4_stream_fingerprint,
     playback_segment_duration,
     resolve_stream_fingerprints,
@@ -58,6 +59,30 @@ def recording_file(video_entry: bytes, audio_entry: bytes | None = None, noise: 
 
 
 class RecordingMediaTest(unittest.TestCase):
+    def test_playback_metadata_uses_fractional_video_duration(self) -> None:
+        for version in (0, 1):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmpdir:
+                header = bytes([version, 0, 0, 0]) + bytes(16 if version else 8)
+                mdhd = box(b"mdhd", header + struct.pack(">I", 90_000)
+                           + struct.pack(">Q" if version else ">I", 887_400) + bytes(4))
+                hdlr = box(b"hdlr", bytes(8) + b"vide" + bytes(12))
+                stsd = box(b"stsd", bytes(4) + struct.pack(">I", 1)
+                           + video_entry(b"avc1", b"config"))
+                stts = box(b"stts", bytes(4) + struct.pack(">III", 1, 50, 17748))
+                track = box(b"trak", box(b"mdia", mdhd + hdlr + box(b"minf", box(b"stbl", stsd + stts))))
+                path = Path(tmpdir) / "clip.mp4"
+                path.write_bytes(box(b"moov", stream_track(b"soun", audio_entry(b"aac")) + track))
+                fingerprint, duration = mp4_playback_metadata(path)
+                self.assertTrue(fingerprint)
+                self.assertEqual(duration, 9.86)
+
+    def test_playback_metadata_keeps_unreadable_files_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "clip.mp4"
+            self.assertEqual(mp4_playback_metadata(path), ("", None))
+            path.write_bytes(b"incomplete")
+            self.assertEqual(mp4_playback_metadata(path), ("", None))
+
     def test_concatenated_clip_timing_excludes_recording_gaps(self) -> None:
         rows = [
             {"start_epoch": 100.0, "end_epoch": 110.0, "duration_seconds": 10.0},

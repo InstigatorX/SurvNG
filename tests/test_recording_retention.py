@@ -6,7 +6,7 @@ import time
 import unittest
 from collections import namedtuple
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from survng.app.config import (
     CameraConfig,
@@ -329,7 +329,7 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         )
         status = MediaLocationStatus(
             id="one", name="One", path=self.storage,
-            roles=("recordings",), state="full", total_bytes=1000,
+            roles=("recordings",), state="low_space", total_bytes=1000,
             free_bytes=250, usable_bytes=0, reserve_percent=30,
         )
         with patch.object(registry, "statuses", return_value=[status]):
@@ -543,6 +543,188 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         )
 
         self.assertEqual([str(row["path"]) for row in candidates], [str(yard), str(gate)])
+
+    def pressure_service(self, *, automatic_cleanup: bool = True) -> tuple[RecordingRetentionService, MediaStorageRegistry]:
+        registry = MediaStorageRegistry(self.storage, MediaStorageConfig(locations=[
+            MediaStorageLocationConfig(
+                id="one", path=str(self.storage), roles=["recordings", "snapshots"],
+                reserve_percent=15,
+            ),
+        ]))
+        service = RecordingRetentionService(
+            self.storage, self.recordings, self.connection,
+            RecordingRetentionConfig(automatic_cleanup=automatic_cleanup),
+            media_storage=registry,
+        )
+        return service, registry
+
+    def wait_until(self, predicate) -> None:
+        deadline = time.monotonic() + 2
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(predicate())
+
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 500, 500))
+    def test_registry_pressure_wakes_worker_and_preserves_protected_recording(self, usage) -> None:
+        eligible = self.insert_recording(age_days=2, size=100, location_id="one")
+        protected = self.insert_recording(age_days=3, size=100, location_id="one")
+        service, registry = self.pressure_service()
+        service.protected_paths_provider = lambda: {str(protected)}
+        service.start([])
+        self.addCleanup(service.stop)
+        service.request_run()
+        self.wait_until(lambda: service.status()["state"] == "idle")
+        self.assertTrue(eligible.exists())
+
+        usage.return_value = DiskUsage(1000, 870, 130)
+        selected = registry.choose("snapshots", "gate")
+        self.assertTrue(selected.writable)
+        self.wait_until(lambda: not eligible.exists() and service.status()["state"] == "idle")
+        self.assertTrue(protected.exists())
+        self.assertFalse(service._requested_apply)
+
+    @patch("survng.app.recording_retention.RETENTION_RETRY_SECONDS", 0.05)
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 500, 500))
+    def test_idle_capacity_probe_catches_pressure_without_new_storage_selection(self, usage) -> None:
+        eligible = self.insert_recording(age_days=2, size=100, location_id="one")
+        service, _registry = self.pressure_service()
+        service.start([])
+        self.addCleanup(service.stop)
+        service.request_run()
+        self.wait_until(lambda: service.status()["state"] == "idle")
+        usage.return_value = DiskUsage(1000, 870, 130)
+
+        self.wait_until(lambda: not eligible.exists())
+
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 870, 130))
+    def test_pressure_never_enables_automatic_cleanup(self, _usage) -> None:
+        eligible = self.insert_recording(age_days=2, size=100, location_id="one")
+        service, registry = self.pressure_service(automatic_cleanup=False)
+        service._force_plan = False
+        registry.choose("snapshots", "gate")
+        self.assertFalse(service._wake.is_set())
+        self.assertFalse(service._force_plan)
+        self.assertFalse(service._requested_apply)
+        service.start([])
+        self.addCleanup(service.stop)
+        service.request_run()
+        self.wait_until(lambda: service.status()["state"] == "idle")
+        self.assertTrue(eligible.exists())
+        self.assertIsNone(service.status()["last_run"])
+
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 500, 500))
+    def test_disabling_automatic_cleanup_stops_followup_automatic_batch(self, _usage) -> None:
+        eligible = self.insert_recording(age_days=30, size=100)
+        service = self.service(automatic_cleanup=True)
+        service._cleanup_active = True
+        service.reconfigure(service.config.model_copy(update={"automatic_cleanup": False}), [])
+        service.start([])
+        self.addCleanup(service.stop)
+
+        self.wait_until(lambda: service.status()["state"] == "idle")
+
+        self.assertTrue(eligible.exists())
+        self.assertIsNone(service.status()["last_run"])
+
+    @patch("survng.app.recording_retention.RETENTION_CLEANUP_INTERVAL_SECONDS", 0.05)
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 500, 500))
+    def test_scheduled_dry_run_refreshes_pressure_without_deleting(self, usage) -> None:
+        eligible = self.insert_recording(age_days=2, size=100, location_id="one")
+        service, _registry = self.pressure_service(automatic_cleanup=False)
+        service.start([])
+        self.addCleanup(service.stop)
+        service.request_run()
+        self.wait_until(lambda: service.status()["state"] == "idle")
+        self.assertEqual(service.status()["plan"]["reclaim"]["free_space_bytes"], 0)
+
+        usage.return_value = DiskUsage(1000, 870, 130)
+        self.wait_until(lambda: service.status()["plan"]["reclaim"]["free_space_bytes"] > 0)
+
+        self.assertTrue(eligible.exists())
+        self.assertIsNone(service.status()["last_run"])
+        self.assertEqual(service.status()["plan"]["storage"]["free_percent"], 13.0)
+
+    @patch("survng.app.recording_retention.RETENTION_RETRY_SECONDS", 0.02)
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 500, 500))
+    def test_manual_cleanup_continues_across_batches_with_automatic_cleanup_disabled(self, _usage) -> None:
+        recordings = [self.insert_recording(
+            age_days=30, size=1,
+            path=self.recordings / "gate" / "main" / f"old-{index}.mp4",
+        ) for index in range(101)]
+        service = self.service(automatic_cleanup=False, cleanup_batch_files=100)
+        service.plan = Mock(wraps=service.plan)
+        service.start([])
+        self.addCleanup(service.stop)
+        service.request_run(apply=True)
+
+        self.wait_until(lambda: service.status()["state"] == "idle")
+
+        self.assertTrue(all(not recording.exists() for recording in recordings))
+        self.assertEqual(service._cleanup_batches_completed, 2)
+        self.assertEqual(service.plan.call_count, 2)  # Initial and final, not between batches.
+        self.assertFalse(service._manual_cleanup_active)
+
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 870, 130))
+    def test_restart_after_error_accepts_pressure_and_clears_stale_backoff(self, _usage) -> None:
+        eligible = self.insert_recording(age_days=2, size=100, location_id="one")
+        service, registry = self.pressure_service()
+        original_plan = service.plan
+        service.plan = Mock(side_effect=OSError("temporary index failure"))
+        service.start([])
+        self.addCleanup(service.stop)
+        service.request_run()
+        self.wait_until(lambda: service.status()["state"] == "error")
+        service.stop()
+        service._next_pressure_plan_monotonic = time.monotonic() + 900
+        service.plan = original_plan
+        service.start([])
+        registry.choose("snapshots", "gate")
+
+        self.wait_until(lambda: not eligible.exists() and service.status()["state"] == "idle")
+
+        self.assertEqual(service.status()["error"], "")
+
+    def test_pressure_notifications_coalesce_and_keep_batch_retry_delay(self) -> None:
+        service = self.service(automatic_cleanup=True)
+        service._force_plan = False
+        with patch("survng.app.recording_retention.time.monotonic", return_value=100):
+            service.notify_storage_pressure()
+            for _ in range(20):
+                service.notify_storage_pressure()
+        self.assertTrue(service._force_plan)
+        self.assertEqual(service._next_pressure_plan_monotonic, 110)
+        service._wake.clear()
+        service._pressure_pending = False
+        service._force_plan = False
+        service._status["state"] = "idle"
+        with patch("survng.app.recording_retention.time.monotonic", return_value=109):
+            service.notify_storage_pressure()
+        self.assertFalse(service._wake.is_set())
+        service._cleanup_active = True
+        service._status["state"] = "waiting"
+        with patch("survng.app.recording_retention.time.monotonic", return_value=120):
+            service.notify_storage_pressure()
+        self.assertFalse(service._wake.is_set())
+        self.assertFalse(service._force_plan)
+
+    @patch("survng.app.recording_retention.RETENTION_RETRY_SECONDS", 0.02)
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 870, 130))
+    def test_unreclaimable_pressure_backs_off_planning_despite_repeated_writes(self, _usage) -> None:
+        protected = self.insert_recording(age_days=2, size=100, location_id="one")
+        service, registry = self.pressure_service()
+        service.protected_paths_provider = lambda: {str(protected)}
+        service.plan = Mock(wraps=service.plan)
+        registry.choose("snapshots", "gate")
+        service.start([])
+        self.addCleanup(service.stop)
+        self.wait_until(lambda: service.status()["state"] == "idle")
+        self.assertGreater(service._next_pressure_plan_monotonic - time.monotonic(), 50)
+        plans = service.plan.call_count
+        for _ in range(10):
+            registry.choose("snapshots", "gate")
+            time.sleep(0.01)
+        self.assertEqual(service.plan.call_count, plans)
+        self.assertTrue(protected.exists())
 
     def test_retention_uses_daily_plans_and_quarter_hour_cleanup(self) -> None:
         self.assertEqual(RETENTION_PLAN_INTERVAL_SECONDS, 24 * 60 * 60)

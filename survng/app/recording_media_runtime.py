@@ -26,7 +26,7 @@ from .config import AppConfig, slugify_camera_id
 from .incident_utils import event_epoch
 from .manager import AppManager
 from .media_exports import MediaExportManager
-from .recording_media import concatenated_clip_timing, event_clip_window, playback_segment_duration
+from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, mp4_playback_metadata, playback_segment_duration
 from .recording_routes import recording_source
 from .security import redact_secret_text
 
@@ -402,15 +402,89 @@ class RecordingMediaRuntime:
                     timescales[track_id] = timescale
         return timescales
 
+    def _fmp4_start_delays(self, init_data: bytearray, timescales: dict[int, int]) -> dict[int, int]:
+        """Move positive track delays out of per-clip init edit lists."""
+        delays = {}
+        for kind, _, payload, end in self._mp4_boxes(init_data):
+            if kind != b'moov':
+                continue
+            children = list(self._mp4_boxes(init_data, payload, end))
+            movie_scale = 0
+            for child, _, start, stop in children:
+                if child == b'mvhd':
+                    offset = start + (20 if init_data[start] == 1 else 12)
+                    if offset + 4 <= stop:
+                        movie_scale = struct.unpack_from('>I', init_data, offset)[0]
+            if not movie_scale:
+                continue
+            for child, _, start, stop in children:
+                if child != b'trak':
+                    continue
+                track = None
+                edits = None
+                for entry, box_start, a, b in self._mp4_boxes(init_data, start, stop):
+                    if entry == b'tkhd':
+                        offset = a + (20 if init_data[a] == 1 else 12)
+                        if offset + 4 <= b:
+                            track = struct.unpack_from('>I', init_data, offset)[0]
+                    elif entry == b'edts':
+                        edits = (box_start, a, b)
+                if track not in timescales or edits is None:
+                    continue
+                box_start, a, b = edits
+                for entry, _, edit_start, edit_end in self._mp4_boxes(init_data, a, b):
+                    if entry != b'elst' or edit_start + 8 > edit_end:
+                        continue
+                    version = init_data[edit_start]
+                    count = struct.unpack_from('>I', init_data, edit_start + 4)[0]
+                    fmt = '>Qqhh' if version == 1 else '>Iihh'
+                    size = struct.calcsize(fmt)
+                    if version not in (0, 1) or count not in (1, 2) or edit_start + 8 + count * size > edit_end:
+                        continue
+                    entries = [struct.unpack_from(fmt, init_data, edit_start + 8 + i * size) for i in range(count)]
+                    # Keep decoder preroll and nontrivial edits intact. The HLS
+                    # muxer's positive-delay form is an empty edit followed by
+                    # an unbounded, unshifted media edit at normal speed.
+                    if entries[-1] != (0, 0, 1, 0):
+                        continue
+                    if count == 2 and entries[0][1:] != (-1, 1, 0):
+                        continue
+                    delay = entries[0][0] if count == 2 else 0
+                    delays[track] = round(delay * timescales[track] / movie_scale)
+                    # Retain byte positions; the media now carries this delay.
+                    init_data[box_start + 4:box_start + 8] = b'free'
+        return delays
+
     def _offset_fmp4_timestamps(self, init_path: Path, media_path: Path, seconds: float) -> None:
-        if seconds <= 0:
-            return
-        timescales = self._mp4_track_timescales(init_path.read_bytes())
+        original_init = init_path.read_bytes()
+        init_data = bytearray(original_init)
+        timescales = self._mp4_track_timescales(init_data)
         if not timescales:
             raise RuntimeError('fragment init has no track timescales')
+        start_delays = self._fmp4_start_delays(init_data, timescales)
         adjusted = 0
         with media_path.open('r+b') as media_file, mmap.mmap(media_file.fileno(), 0) as data:
             for box_type, _, payload, box_end in self._mp4_boxes(data):
+                if box_type == b'sidx':
+                    # The seek index and media must describe the same timeline.
+                    # Its timescale is independent of the track's mdhd timescale;
+                    # retain the original presentation/decode timing difference.
+                    if payload + 4 > box_end or data[payload] not in (0, 1):
+                        raise RuntimeError('fragment has an invalid sidx version')
+                    version = data[payload]
+                    if payload + (32 if version == 1 else 24) > box_end:
+                        raise RuntimeError('fragment has a truncated sidx box')
+                    timescale = struct.unpack_from('>I', data, payload + 8)[0]
+                    if not timescale:
+                        raise RuntimeError('fragment sidx has no timescale')
+                    value_format = '>Q' if version == 1 else '>I'
+                    value_offset = payload + 12
+                    current = struct.unpack_from(value_format, data, value_offset)[0]
+                    next_value = current + round(seconds * timescale)
+                    if next_value >= 1 << (64 if version == 1 else 32):
+                        raise RuntimeError(f'fragment timestamp exceeds version {version} sidx')
+                    struct.pack_into(value_format, data, value_offset, next_value)
+                    continue
                 if box_type != b'moof':
                     continue
                 for child_type, _, child_payload, child_end in self._mp4_boxes(data, payload, box_end):
@@ -428,7 +502,7 @@ class RecordingMediaRuntime:
                     tfdt_payload, tfdt_end = tfdt
                     version = data[tfdt_payload]
                     value_offset = tfdt_payload + 4
-                    increment = round(seconds * timescales[track_id])
+                    increment = round(seconds * timescales[track_id]) + start_delays.get(track_id, 0)
                     if version == 1 and value_offset + 8 <= tfdt_end:
                         current = struct.unpack_from('>Q', data, value_offset)[0]
                         struct.pack_into('>Q', data, value_offset, current + increment)
@@ -443,6 +517,8 @@ class RecordingMediaRuntime:
             data.flush()
         if not adjusted:
             raise RuntimeError('fragment has no adjustable tfdt boxes')
+        if init_data != original_init:
+            init_path.write_bytes(init_data)
 
     def _event_clip_vaapi_enabled(self, source_codec: str) -> bool:
         mode = self._hardware_acceleration_mode()
@@ -503,6 +579,17 @@ class RecordingMediaRuntime:
             rows = selected_manager.recorder.discard_missing_recording_rows(rows)
         selected_manager.recorder.lease_recordings_for_playback(rows)
         selected_manager.recorder.queue_stream_fingerprints(rows)
+        # Filename-derived index durations are estimates, and background format
+        # discovery may not have reached this window yet. Resolve MP4 headers
+        # before publishing either its time mapping or its immutable playlist.
+        # This reads no media payload and launches no FFmpeg/ffprobe process.
+        for row in rows:
+            fingerprint, duration = mp4_playback_metadata(Path(row['path']))
+            if fingerprint:
+                row['stream_fingerprint'] = fingerprint
+            if duration is not None:
+                row['duration_seconds'] = duration
+                row['end_epoch'] = float(row['start_epoch']) + duration
         with self.recording_day_cache_lock:
             self.recording_day_cache[cache_key] = (now, rows)
             expired = [key for key, value in self.recording_day_cache.items() if now - value[0] >= self.recording_day_cache_seconds]
@@ -561,7 +648,7 @@ class RecordingMediaRuntime:
 
     def _recording_fmp4_files(self, path: Path, duration: float, media_offset: float, origin: str='playback') -> tuple[Path, Path]:
         stat = path.stat()
-        fingerprint = f'v3:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}'
+        fingerprint = f'v{RECORDING_FMP4_VERSION}:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}'
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:24]
         cache_dir = self.manager.storage_dir / 'playback-cache' / 'fmp4' / cache_key
         init_path = cache_dir / 'init.mp4'
@@ -580,7 +667,13 @@ class RecordingMediaRuntime:
             cache_dir.mkdir(parents=True, exist_ok=True)
             temp_dir = Path(tempfile.mkdtemp(prefix='fmp4-', dir=cache_dir))
             codec = self._probe_video_codec(path)
-            command = [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-output_ts_offset', f'{media_offset:.3f}']
+            # Remux each source locally, then shift tfdt and sidx once below.
+            # FFmpeg also carries output_ts_offset in the init edit lists. With
+            # tfdt repair it shifts playback twice when a later segment uses its
+            # own init (for example, after a codec change).
+            # Preserve decoder preroll too: automatic negative-timestamp shifting
+            # adds per-source A/V edit offsets that native HLS can turn into gaps.
+            command = [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
             if codec in {'hevc', 'h265'}:
                 command.extend(['-tag:v', 'hvc1'])
             command.extend(['-f', 'hls', '-hls_time', '300', '-hls_list_size', '0', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'), str(temp_dir / 'index.m3u8')])

@@ -137,13 +137,19 @@ try {
   assert.ok(warm.paused && warm.muted && !warm.visible && !warm.activeRef, "preloading must neither play nor expose standby audio");
   await assertColor(0, "first decoded frame");
 
-  await configure({ advance: true, playing: true });
-  await page.evaluate(async () => { const video = window.harness.video(); video.currentTime = video.duration - 0.2; await video.play(); });
+  await page.getByRole("button", { name: "Play both clips at 4×", exact: true }).click();
   await waitVisible("/clips/green.mp4");
   assert.equal((await snapshot()).find((v) => v.activeRef).id, warm.id, "handoff must promote the same preloaded DOM element");
-  await assertColor(1, "automatic clip boundary");
+  assert.equal((await snapshot()).find((v) => v.activeRef).rate, 4, "promoted warm element must inherit 4× playback");
+  await assertColor(1, "automatic clip boundary at 4×");
   assert.equal(await page.evaluate(() => window.harness.events.filter((e) => e.name === "ended" && e.src === "/clips/red.mp4").length), 1);
-  await page.evaluate(() => window.harness.video().pause());
+  await page.waitForFunction(() => window.harness.events.some((event) => event.name === "ended" && event.src === "/clips/green.mp4"));
+  const completed = await page.evaluate(() => window.harness.events.filter((event) => event.name === "ended"));
+  assert.deepEqual(completed.map((event) => [event.src, event.rate]), [["/clips/red.mp4", 4], ["/clips/green.mp4", 4]], "both original MP4 clips must play to their ends at 4×");
+  assert.equal(completed[1].id, warm.id, "second clip finishes on the preloaded node");
+  assert.ok((await snapshot()).filter((slot) => slot.src).every((slot) => slot.rate === 4), "loaded playback slots retain the requested 4× rate after handoff");
+  const finished = (await snapshot()).find((v) => v.activeRef);
+  assert.ok(finished.ended && finished.paused && finished.time >= finished.duration - 0.05);
   await configure({ advance: false, playing: false, playbackRate: 1.5 });
 
   const releaseBlue = hold("blue-delayed.mp4");
@@ -184,7 +190,7 @@ try {
   assert.deepEqual(await page.evaluate(() => window.standbyPlayback), [], "standby must never play, even transiently");
   assert.ok(await page.evaluate(() => window.harness.events.every((event) => event.ownsRef)), "every callback exposes the current active DOM video");
   assert.deepEqual(errors, [], "browser must have no uncaught errors");
-  console.log("native recording video browser tests passed (preload, real-node handoff, retained pixels, paused seek, superseded sources, stale events, error retention, standby audio)");
+  console.log("native recording video browser tests passed (4× original-MP4 playback through preloaded handoff, retained pixels, paused seek, superseded sources, stale events, error retention, standby audio)");
 } finally {
   await browser?.close();
   await server?.close();

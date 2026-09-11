@@ -26,6 +26,7 @@ from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_epoch
 from .media_exports import MediaExportManager
 from .manager_access import ManagerAccessCoordinator, guard_manager_generation
 from .recording_media import (
+    RECORDING_FMP4_VERSION,
     hls_map_transition,
     playback_segment_duration,
     resolve_stream_fingerprints,
@@ -889,7 +890,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         for row, stream_fingerprint in zip(rows, fingerprints):
             row_start = float(row["start_epoch"])
             segment_name = quote(str(row["name"]), safe="")
-            segment_query = f"{query}&media_offset={media_offset:.3f}"
+            segment_query = f"{query}&media_offset={media_offset:.3f}&v={RECORDING_FMP4_VERSION}"
             map_lines, previous_fingerprint = hls_map_transition(
                 previous_fingerprint,
                 stream_fingerprint,
@@ -1069,6 +1070,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             segment_name = quote(str(row["name"]), safe="")
             segment_query = (
                 f"{query}&media_offset={media_offset:.3f}&trim_end=true"
+                f"&v={RECORDING_FMP4_VERSION}"
             )
             encoded_camera = quote(camera_id, safe="")
             map_uri = deps.public_url(

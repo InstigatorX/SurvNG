@@ -1,5 +1,7 @@
 /* SurvNG mobile final: unified selectors + single-camera Timeline */
-.mobile-camera-select {
+.mobile-camera-select,
+.recordings-mobile-date,
+.recordings-mobile-time-navigation {
   display: none;
 }
 
@@ -269,6 +271,7 @@
     grid-row: 1 !important;
     display: grid !important;
     grid-template-columns: minmax(112px, 1fr) 108px auto !important;
+    grid-template-rows: 38px !important;
     align-items: center !important;
     gap: 4px !important;
     min-height: 46px !important;
@@ -280,6 +283,7 @@
     padding: 4px 5px !important;
   }
 
+  .recordings-tabs.recordings-commandbar .recordings-commandbar-live,
   .recordings-commandbar-day-controls .recordings-playback-rate,
   .recordings-commandbar-export {
     display: none !important;
@@ -340,7 +344,7 @@
     grid-column: 1 !important;
     grid-row: 2 !important;
     display: grid !important;
-    grid-template-rows: minmax(0, 1fr) 104px !important;
+    grid-template-rows: minmax(0, 1fr) 136px !important;
     width: 100% !important;
     height: 100% !important;
     min-height: 0 !important;
@@ -448,9 +452,46 @@
     display: none !important;
   }
 
+  .recordings-v2-date-toggle,
+  .recordings-v2-date-calendar {
+    display: none !important;
+  }
+
+  .recordings-mobile-date {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    height: 36px !important;
+    min-height: 36px !important;
+    padding: 0 4px;
+    font-size: 12px;
+    color: var(--ink);
+    background: var(--control);
+  }
+
+  .recordings-mobile-time-navigation {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 44px;
+    padding: 0 6px;
+  }
+
+  .recordings-mobile-time-navigation button,
+  .recordings-mobile-time-navigation select {
+    height: 44px;
+    min-height: 44px;
+    font-size: 12px;
+  }
+
+  .recordings-mobile-time-navigation select {
+    flex: 1;
+    min-width: 0;
+  }
+
   .recordings-v2-controls {
-    height: 104px !important;
-    min-height: 104px !important;
+    height: 136px !important;
+    min-height: 136px !important;
     overflow: hidden !important;
     border-top: 1px solid var(--line) !important;
     border-bottom: 0 !important;
@@ -515,17 +556,8 @@
 
   /*
    * Reclaim the space that evidence thumbnails previously occupied.
-   * The authoritative 24-hour track remains visible and touch-scrubbable.
+   * Keep the track below the mobile navigation row.
    */
-  .recordings-v2-controls {
-    height: 92px !important;
-    min-height: 92px !important;
-  }
-
-  .recordings-v2-workspace {
-    grid-template-rows: minmax(0, 1fr) 92px !important;
-  }
-
   .recordings-v2-timeline {
     height: 92px !important;
     min-height: 92px !important;

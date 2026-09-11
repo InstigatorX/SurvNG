@@ -7,6 +7,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+# Bump when fragment bytes change so disk and browser caches expire together.
+RECORDING_FMP4_VERSION = 7
+
 
 def event_clip_window(
     configured_before: float,
@@ -265,13 +268,45 @@ def _track_video_dimensions(data: bytes, payload: int, box_end: int) -> tuple[in
     return None
 
 
+def _track_video_duration(data: bytes, payload: int, box_end: int) -> float | None:
+    handler = b""
+    scale = 0
+    ticks = 0
+    for kind, _, start, end in _boxes(data, payload, box_end):
+        if kind == b"hdlr" and start + 12 <= end:
+            handler = data[start + 8:start + 12]
+        elif kind == b"mdhd" and start + 4 <= end:
+            version = data[start]
+            offset = start + (20 if version == 1 else 12)
+            if version not in (0, 1) or offset + 4 > end:
+                continue
+            scale = struct.unpack_from(">I", data, offset)[0]
+        elif kind == b"minf":
+            for child, _, child_start, child_end in _boxes(data, start, end):
+                if child != b"stbl":
+                    continue
+                for table, _, table_start, table_end in _boxes(data, child_start, child_end):
+                    if table != b"stts" or table_start + 8 > table_end:
+                        continue
+                    count = struct.unpack_from(">I", data, table_start + 4)[0]
+                    if table_start + 8 + count * 8 > table_end:
+                        continue
+                    # mdhd can include composition preroll; the sample durations
+                    # describe the footage carried across the clip boundary.
+                    ticks = sum(samples * delta for samples, delta in struct.iter_unpack(
+                        ">II", data[table_start + 8:table_start + 8 + count * 8]
+                    ))
+    return ticks / scale if handler == b"vide" and scale and ticks else None
+
+
 @lru_cache(maxsize=4096)
-def _cached_stream_fingerprint(path_value: str, modified_ns: int, size: int) -> str:
+def _cached_playback_metadata(path_value: str, modified_ns: int, size: int) -> tuple[str, float | None]:
     del modified_ns, size
     moov = _read_mp4_box(Path(path_value), b"moov")
     if not moov:
-        return ""
+        return "", None
     descriptors: list[bytes] = []
+    video_duration = None
     for box_type, _, payload, box_end in _boxes(moov):
         if box_type != b"moov":
             continue
@@ -281,24 +316,31 @@ def _cached_stream_fingerprint(path_value: str, modified_ns: int, size: int) -> 
             for trak_type, _, trak_payload, trak_end in _boxes(moov, child_payload, child_end):
                 if trak_type != b"mdia":
                     continue
+                if video_duration is None:
+                    video_duration = _track_video_duration(moov, trak_payload, trak_end)
                 descriptor = _track_stream_descriptor(moov, trak_payload, trak_end)
                 if descriptor:
                     descriptors.append(descriptor)
     if not descriptors:
-        return ""
+        return "", video_duration
     digest = hashlib.sha256()
     for descriptor in descriptors:
         digest.update(struct.pack(">I", len(descriptor)))
         digest.update(descriptor)
-    return digest.hexdigest()
+    return digest.hexdigest(), video_duration
 
 
 def mp4_stream_fingerprint(path: Path) -> str:
+    return mp4_playback_metadata(path)[0]
+
+
+def mp4_playback_metadata(path: Path) -> tuple[str, float | None]:
+    """Read cached stream identity and video duration from MP4 headers only."""
     try:
         stat = path.stat()
     except OSError:
-        return ""
-    return _cached_stream_fingerprint(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+        return "", None
+    return _cached_playback_metadata(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
 
 
 @lru_cache(maxsize=4096)

@@ -7351,6 +7351,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 .retention-state.cleaning,
 .retention-state.planning,
+.retention-state.low_space,
 .retention-state.waiting,
 .retention-state.queued {
   background: color-mix(in srgb, var(--accent) 15%, var(--control-muted));

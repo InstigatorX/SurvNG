@@ -3,13 +3,16 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from queue import Full, Queue
 from typing import Any, Callable
 
 from ..face_recognition import OpenVinoFaceRecognizer
 from ..inference import INFERENCE_REQUEST_TIMEOUT_SECONDS
-from ..incident_utils import event_snapshot_path, portable_media_path
+from ..incident_utils import (
+    event_snapshot_path, media_path_aliases, portable_media_path,
+)
 from ..media_storage import MediaStorageRegistry
 from ..main_database import connect_main_database
 from .benchmarks import FaceStoreBenchmarkMixin
@@ -441,30 +444,45 @@ class FaceStore(
                     self._recognition_thread = None
 
     def _delete_face_snapshots(self, paths: list[Path], reason: str) -> None:
-        if not paths:
-            return
-        # Discarded payloads can reuse a retained path. Serialize the final
-        # ownership check with database writers, including event ingestion.
-        with self._connect() as connection:
-            connection.execute("begin immediate")
-            tables = {str(row[0]) for row in connection.execute(
-                "select name from sqlite_master where type = 'table'"
-            )}
-            for path in set(paths):
-                raw_paths = (portable_media_path(self.storage_dir, path), str(path))
+        for path in set(paths):
+            # Resolution can touch network storage. Do it before acquiring the
+            # database writer, then claim the unowned file in a short transaction.
+            portable = portable_media_path(self.storage_dir, path)
+            aliases = tuple(sorted({str(path), *media_path_aliases(self.storage_dir, portable)}))
+            claimed_at = datetime.now(timezone.utc).isoformat()
+            with self._connect() as connection:
+                connection.execute("begin immediate")
+                tables = {str(row[0]) for row in connection.execute(
+                    "select name from sqlite_master where type = 'table'"
+                )}
                 if any(
                     connection.execute(
-                        f"select 1 from {table} where snapshot_path in (?, ?) limit 1",
-                        raw_paths,
+                        f"select 1 from {table} where snapshot_path in ({','.join('?' for _ in aliases)}) limit 1",
+                        aliases,
                     ).fetchone() is not None
                     for table in ("face_observations", "events", "motion_audits")
                     if table in tables
                 ):
                     continue
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    LOGGER.debug("could not remove %s face candidate %s", reason, path)
+                if connection.execute(
+                    f"select 1 from media_deletion_claims where path in ({','.join('?' for _ in aliases)})",
+                    aliases,
+                ).fetchone() is not None:
+                    continue
+                connection.execute(
+                    "insert into media_deletion_claims (path, role, claimed_at) values (?, 'snapshot', ?)",
+                    (portable, claimed_at),
+                )
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.debug("could not remove %s face candidate %s", reason, path)
+            finally:
+                with self._connect() as connection:
+                    connection.execute(
+                        "delete from media_deletion_claims where path = ? and role = 'snapshot' and claimed_at = ?",
+                        (portable, claimed_at),
+                    )
 
     def _prunable_face_group_locked(
         self, connection: sqlite3.Connection, observation_id: int,

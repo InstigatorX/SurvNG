@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 import {
   CLIP_MINIMUM_DURATION_SECONDS,
   canSetClipBoundaryAtPlayhead,
@@ -45,5 +47,28 @@ assert.equal(clipPreviewReachedEnd(179.91, 180), false);
 assert.equal(clipPreviewReachedEnd(179.92, 180), true);
 assert.equal(clipPreviewReachedEnd(180.5, 180), true);
 assert.equal(clipPreviewReachedEnd(null, 180), false);
+
+const source = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
+const endedHandler = source.slice(source.indexOf("  function handleRecordingEnded("), source.indexOf("  function handleRecordingSeeked("));
+for (const useSegmentPlayback of [false, true]) {
+  for (const previewComplete of [false, true]) {
+    const expectedEpoch = useSegmentPlayback ? 100 : 200;
+    const video = { currentTime: 10 };
+    let continued = false;
+    const context = vm.createContext({
+      useSegmentPlayback, nativeSegment: { start_epoch: 90 },
+      mediaTimeToEpoch: (time) => 190 + time,
+      finishClipPreviewAtEnd(element, epoch) {
+        assert.equal(element, video);
+        assert.equal(epoch, expectedEpoch);
+        return clipPreviewReachedEnd(epoch, expectedEpoch + (previewComplete ? 0 : 10));
+      },
+      continueRecordingPlayback() { continued = true; },
+    });
+    vm.runInContext(endedHandler, context);
+    context.handleRecordingEnded({ currentTarget: video });
+    assert.equal(continued, !previewComplete, "continue across segments only while the selected preview is unfinished");
+  }
+}
 
 console.log("recording clip selection tests passed");

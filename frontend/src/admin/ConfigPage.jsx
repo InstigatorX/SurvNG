@@ -4276,12 +4276,12 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                   ? candidateStatus
                   : null;
                 return <article className="media-location-card" key={index}>
-                  <header><strong>{location.name || location.id || `Location ${index + 1}`}</strong><span className={`retention-state ${status?.state === "online" ? "running" : status?.state || "idle"}`}>{status?.state || "save to inspect"}</span><button type="button" className="danger compact" aria-label={`Remove ${location.name || location.id}`} disabled={mediaLocations.length <= 1} onClick={() => updateConfig(["media_storage", "locations"], mediaLocations.filter((_item, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button></header>
+                  <header><strong>{location.name || location.id || `Location ${index + 1}`}</strong><span className={`retention-state ${status?.state === "online" ? "running" : status?.state || "idle"}`}>{status?.state === "low_space" ? "Low space · writes continue" : status?.state || "save to inspect"}</span><button type="button" className="danger compact" aria-label={`Remove ${location.name || location.id}`} disabled={mediaLocations.length <= 1} onClick={() => updateConfig(["media_storage", "locations"], mediaLocations.filter((_item, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button></header>
                   <div className="admin-field-grid">
                     <label>ID<input value={location.id || ""} onChange={(event) => updateMediaLocation(index, "id", event.target.value)} /></label>
                     <label>Name<input value={location.name || ""} onChange={(event) => updateMediaLocation(index, "name", event.target.value)} /></label>
                     <label className="wide-field">Filesystem path<input value={location.path || ""} onChange={(event) => updateMediaLocation(index, "path", event.target.value)} placeholder="/mnt/survng-media-2" /></label>
-                    <label>Reserve free space<input type="number" min="0" max="95" step="1" value={location.reserve_percent ?? 15} onChange={(event) => updateMediaLocation(index, "reserve_percent", Number(event.target.value))} /></label>
+                    <label>Cleanup trigger (% free)<input type="number" min="0" max="95" step="1" value={location.reserve_percent ?? 15} onChange={(event) => updateMediaLocation(index, "reserve_percent", Number(event.target.value))} /></label>
                     <label>Priority<input type="number" min="1" max="1000" step="1" value={location.priority ?? 100} onChange={(event) => updateMediaLocation(index, "priority", Number(event.target.value))} /></label>
                   </div>
                   <fieldset className="media-location-roles"><legend>Media roles</legend>{MEDIA_STORAGE_ROLES.map(([role, label]) => <label key={role}><input type="checkbox" checked={(location.roles || []).includes(role)} onChange={(event) => toggleMediaRole(index, role, event.target.checked)} />{label}</label>)}</fieldset>
@@ -4290,6 +4290,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 </article>;
               })}
             </div>
+            <p>Below the cleanup trigger, writes continue and automatic retention reclaims eligible recordings when enabled. A location is full only when its filesystem reports no available space.</p>
             <p className="retention-protection"><ShieldCheck size={15} /> Databases, indexes, models, and playback cache remain on local SurvNG storage. A required mount is never replaced by its empty mountpoint.</p>
           </section>
           <div className="prewarm-setting" hidden={storageSection !== "media"}>
