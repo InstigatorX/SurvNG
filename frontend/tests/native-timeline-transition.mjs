@@ -15,7 +15,7 @@ for (const autoplay of [true, false]) {
   const warmWindow = { start: 110, end: 1010, rows: [{ start_epoch: 110, end_epoch: 120 }] };
   const context = vm.createContext({
     Number, performance, recordingSegmentAt, snapToRecording: (value) => value,
-    activeCameraId: "gate", isAllCameras: false, useNativeMobilePlayback: true,
+    activeCameraId: "gate", isAllCameras: false, useSegmentPlayback: true,
     timelineView: { startEpoch: 0, endEpoch: 1010 },
     loadedPlaybackWindow: { start: 0, end: 110 }, playbackTimeline: [{ start_epoch: 100, end_epoch: 110 }],
     prefetchedNativeWindow: warmWindow, nativeSegment: { start_epoch: 100, end_epoch: 110 },
@@ -43,7 +43,7 @@ for (const autoplay of [true, false]) {
 const paused = [];
 const toggle = vm.createContext({
   videoRef: { current: { paused: true, pause: () => paused.push("pause") } },
-  useNativeMobilePlayback: true, heroSeeking: true, autoplayRef: { current: true },
+  useSegmentPlayback: true, heroSeeking: true, autoplayRef: { current: true },
   setHeroPlaying: (value) => paused.push(value), requestRecordingPlay: () => paused.push("play"),
 });
 vm.runInContext(functionSource("toggleHeroPlayback", "beginFrameSearch"), toggle);

@@ -446,4 +446,15 @@ CHECK_GROWTH=1 CAMERA=front-door SOURCE=main SOAK_SECONDS=30 SCRUBS=8 \
   npm --prefix frontend run test:recordings-soak
 ```
 
+Timeline uses HLS by default on desktop and mobile: browsers with native HLS support play the playlist directly, and other browsers use Shaka. Recording video and audio are remuxed without re-encoding. At 4×, native-HLS browsers use buffered original MP4 clips to avoid Safari’s I-frame-only HLS fast-forward mode; returning to 2× or below restores HLS. An HLS format or decode failure switches that camera/source/day to buffered original MP4 playback. Transcoding is used only if the original file also fails to decode; network failures retry the current transport.
+
 Real Safari validation must run on a Mac because Linux Chromium does not provide Safari's HEVC pipeline. Open the same camera/day in Safari, play through several segment boundaries, scrub to widely separated times, and confirm playback resumes without a black frame. Use an H.265 camera such as Upper Garage to exercise `hvc1` playback.
+
+For a self-contained HLS boundary/seek check using production remux output:
+
+```bash
+python frontend/tests/fixtures/generate-recording-hls.py --output /tmp/survng-hls
+HLS_RECORDING_FIXTURES=/tmp/survng-hls node frontend/tests/hls-recording-video.mjs
+```
+
+Set `HLS_RECORDING_SERVE=1` to open the fixture manually in Safari or on a connected test browser. `HLS_RECORDING_BROWSER=webkit` selects an installed Playwright WebKit runtime; `HLS_RECORDING_HEVC=1` also tests HEVC and codec changes on a capable browser. The browser fixture checks colored clip boundaries, paused/playing seeks, and playlist failure/retry. The Python media tests verify that compressed video/audio packets and their relative timestamps are preserved. Also run the camera/day checks above on a physical iPhone/iPad.

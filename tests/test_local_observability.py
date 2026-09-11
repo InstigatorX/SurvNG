@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 from survng import ctl
 from survng.app.config import AppConfig
+from survng.app.ffmpeg_process import named_ffmpeg_executable
 from survng.app.local_observability import (
     LocalObservabilityServer,
     MAX_RECENT_LOG_BYTES,
@@ -294,5 +295,31 @@ def test_server_refuses_insecure_parent_directory(tmp_path: Path) -> None:
             assert "mode 0700" in str(error)
         else:
             raise AssertionError("insecure socket parent should be rejected")
+
+    asyncio.run(exercise())
+
+
+def test_ffmpeg_and_observer_share_private_runtime_across_restarts(tmp_path: Path, monkeypatch) -> None:
+    parent = tmp_path / "survng"
+    monkeypatch.setattr("survng.app.local_observability.SERVICE_RUNTIME_DIRECTORY", parent)
+
+    async def exercise() -> None:
+        # Reproduce both startup orders, including an existing legacy 0755 root.
+        for ffmpeg_first in (True, False, True):
+            parent.mkdir(exist_ok=True)
+            parent.chmod(0o755)
+            if ffmpeg_first:
+                assert named_ffmpeg_executable("sh", "survng-test", runtime_dir=parent) == str(parent / "survng-test")
+            server = LocalObservabilityServer(lambda: {"ready": True}, parent / "observability.sock")
+            await server.start()
+            try:
+                if not ffmpeg_first:
+                    named_ffmpeg_executable("sh", "survng-test", runtime_dir=parent)
+                assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+                assert stat.S_IMODE(server.socket_path.stat().st_mode) == 0o600
+                assert await asyncio.to_thread(request_runtime_status, server.socket_path) == {"ready": True}
+            finally:
+                await server.stop()
+            assert not server.socket_path.exists()
 
     asyncio.run(exercise())

@@ -1,5 +1,17 @@
 import { PREFER_NATIVE_HLS } from "./shared/constants.js";
 
+export function supportsNativeRecordingHls() {
+  return typeof document !== "undefined"
+    && Boolean(document.createElement("video").canPlayType("application/vnd.apple.mpegurl"));
+}
+
+export function recordingPlaybackTransport({ nativeHls, rate, incompatible = false, preferOriginal = false }) {
+  if (incompatible) return "transcode";
+  // Native HLS above 2× uses I-frame trick play. These archive playlists have
+  // no I-frame rendition; buffered original MP4 clips retain smooth fast play.
+  return preferOriginal || (nativeHls && rate > 2) ? "original" : "hls";
+}
+
 export function prefersJpegScrubPreview(options = {}) {
   const preferNativeHls = typeof options.preferNativeHls === "boolean"
     ? options.preferNativeHls
@@ -176,6 +188,18 @@ export function isUnsupportedPlaybackError(error) {
     || dataCodes.includes(4)
     || /(?:codec|decode|format|media source).*(?:unsupported|not supported)/.test(description)
     || /(?:unsupported|not supported).*(?:codec|decode|format|media source)/.test(description);
+}
+
+/** Only media compatibility failures justify switching playback transports. */
+export function isRecordingCompatibilityError(error) {
+  const code = Number(error?.code);
+  if (Number(error?.category) === 1 || (code >= 1000 && code < 2000)) return false;
+  return code === 3 || code === 4
+    || code === 4032 // Shaka CONTENT_UNSUPPORTED_BY_BROWSER
+    || ([3014, 3016].includes(code) && [3, 4].includes(Number(error?.data?.[0]))) // MediaError
+    || (code === 3015 && error?.data?.[0]?.name === "NotSupportedError") // addSourceBuffer
+    || /does not support Shaka Player/.test(error?.message || "")
+    || (!Number.isFinite(code) && isUnsupportedPlaybackError(error));
 }
 
 export function recordingSegmentAt(rows, epoch) {

@@ -6,12 +6,14 @@ import os
 import shutil
 from pathlib import Path
 
+from .runtime_directory import SERVICE_RUNTIME_DIRECTORY, prepare_private_directory
+
 
 def named_ffmpeg_executable(
     path: str,
     name: str,
     *,
-    runtime_dir: Path = Path("/run/survng"),
+    runtime_dir: Path = SERVICE_RUNTIME_DIRECTORY,
 ) -> str:
     """Return a stable process-name alias without breaking PATH resolution."""
     resolved = shutil.which(path)
@@ -19,7 +21,7 @@ def named_ffmpeg_executable(
         return path
     target = os.path.realpath(resolved)
     try:
-        runtime_dir.mkdir(parents=True, exist_ok=True)
+        prepare_private_directory(runtime_dir, repair_mode=True)
         link = runtime_dir / name
         if not link.is_symlink() or os.path.realpath(link) != target:
             link.unlink(missing_ok=True)

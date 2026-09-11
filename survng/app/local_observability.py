@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from .security import redact_secret_text
+from .runtime_directory import SERVICE_RUNTIME_DIRECTORY, prepare_private_directory
 
 if TYPE_CHECKING:
     from .config import AppConfig
@@ -499,20 +500,12 @@ class LocalObservabilityServer:
     @staticmethod
     def _prepare_parent(path: Path) -> None:
         parent = path.parent
-        if parent.exists():
-            info = parent.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise RuntimeError(f"observability socket parent is not a directory: {parent}")
-            if info.st_uid != os.geteuid():
-                raise PermissionError(
-                    "observability socket parent is not owned by this service: "
-                    f"{parent}"
-                )
-            if stat.S_IMODE(info.st_mode) & 0o077:
-                raise PermissionError(f"observability socket parent must be mode 0700: {parent}")
-            return
-        parent.mkdir(mode=0o700, parents=True)
-        parent.chmod(0o700)
+        prepare_private_directory(
+            parent,
+            # Earlier FFmpeg helpers created this shared directory as 0755.
+            # Custom socket parents remain strictly validated, never chmodded.
+            repair_mode=parent == SERVICE_RUNTIME_DIRECTORY,
+        )
 
     async def _remove_stale_socket(self) -> None:
         try:
