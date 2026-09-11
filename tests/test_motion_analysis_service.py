@@ -938,7 +938,11 @@ def test_adaptive_enqueue_failure_releases_reservation() -> None:
     assert service.events.episode_controller.snapshot()["request_status"] == "aborted"
 
 
-def test_aborted_ema_reservation_admits_retained_camera_notice() -> None:
+@pytest.mark.parametrize("reason", [
+    EpisodeDecisionReason.REQUEST_RESERVED,
+    EpisodeDecisionReason.FOLLOWUP_RESERVED,
+])
+def test_aborted_ema_reservation_admits_retained_camera_notice(reason) -> None:
     service = _service(_hooks())
     controller = Mock()
     service.events.episode_controller = controller
@@ -964,7 +968,7 @@ def test_aborted_ema_reservation_admits_retained_camera_notice() -> None:
     )
 
     admitted = service._enqueue_replacement_camera_notice(EpisodeDecision(
-        EpisodeDecisionReason.REQUEST_RESERVED,
+        reason,
         "episode-1",
         intent,
     ))

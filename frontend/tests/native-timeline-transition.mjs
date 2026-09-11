@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { recordingSegmentAt } from "../src/recordingPlayback.mjs";
+import { recordingSegmentAt, recordingSegmentLocalTime, recordingSeekToleranceSeconds, videoReachedSeekTarget } from "../src/recordingPlayback.mjs";
 
 const source = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
 function functionSource(name, nextName) {
@@ -71,6 +71,32 @@ for (const recycle of [false, true]) {
   callbacks[0]();
   assert.equal(video.currentTime, 0);
   assert.equal(callbacks.length, 1);
+}
+
+// A delayed seeked event on the active element must not settle a newer scrub.
+{
+  const video = { currentTime: 2, duration: 10, seeking: false, paused: true };
+  const calls = [];
+  const context = vm.createContext({
+    Number, performance, recordingSegmentLocalTime, recordingSeekToleranceSeconds, videoReachedSeekTarget,
+    videoRef: { current: video }, nativeSegment: { start_epoch: 100, end_epoch: 110 },
+    pendingSeekEpochRef: { current: 108 }, pendingSeekModeRef: { current: "native-local" },
+    desiredEpochRef: {}, ignorePauseUntilRef: {}, autoplayRef: { current: false },
+    clearSeekWatchdog: () => calls.push("clear"), setPlayhead: (value) => calls.push(value),
+    setHeroSeeking() {}, setPlaybackNotice() {}, ignorePauseAfterSeekMs: () => 0,
+  });
+  vm.runInContext(functionSource("completePendingNativeSeek", "scheduleNativeSeekWatchdog"), context);
+  context.completePendingNativeSeek(video);
+  assert.equal(context.pendingSeekEpochRef.current, 108);
+  assert.deepEqual(calls, []);
+  video.currentTime = 8;
+  video.seeking = true;
+  context.completePendingNativeSeek(video);
+  assert.equal(context.pendingSeekEpochRef.current, 108);
+  video.seeking = false;
+  context.completePendingNativeSeek(video);
+  assert.equal(context.pendingSeekEpochRef.current, null);
+  assert.deepEqual(calls, ["clear", 108]);
 }
 
 console.log("native Timeline handoff, pause intent, and stale seek tests passed");

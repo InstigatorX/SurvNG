@@ -562,7 +562,6 @@ class RecordingRetentionService:
             "remaining_planned_bytes": max(0, int(planned_reclaim_bytes)),
         }
         if apply:
-            batch_deadline = time.monotonic() + RETENTION_BATCH_TIME_BUDGET_SECONDS
             candidates = self._candidates(
                 plan,
                 now_epoch=now_epoch,
@@ -570,6 +569,10 @@ class RecordingRetentionService:
                 quota_reclaim_bytes=quota_reclaim_bytes,
                 free_reclaim_by_location=free_reclaim_by_location,
             )
+            # Selection on a large index (including legacy storage-path checks)
+            # can exceed the deletion budget. Start that budget only once work
+            # is ready, or every pass can expire before removing its first file.
+            batch_deadline = time.monotonic() + RETENTION_BATCH_TIME_BUDGET_SECONDS
             result["selected_files"] = len(candidates)
             removed_paths: list[str] = []
             empty_directory_candidates: set[Path] = set()

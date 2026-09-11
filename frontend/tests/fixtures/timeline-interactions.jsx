@@ -35,7 +35,10 @@ function snapshot() {
     readyState: element?.readyState, error: element?.error?.code || null,
     context, playhead: context?.recording_epoch,
     rangeOffset: Number(slider?.value), rangeSeconds: Number(slider?.max),
-    ticks: [...document.querySelectorAll(".recordings-v2-ticks small")].map(node => node.textContent),
+    // A half-hour pan can retain the same hourly label at a new position.
+    ticks: [...document.querySelectorAll(".recordings-v2-ticks > span")].map(node => ({
+      label: node.textContent, left: node.style.left,
+    })),
     notices: [...document.querySelectorAll(".recordings-v2-notice,.recordings-v2-message")].map(node => node.textContent),
     events: events.slice(-15),
   };

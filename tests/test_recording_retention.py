@@ -544,6 +544,45 @@ class RecordingRetentionServiceTest(unittest.TestCase):
 
         self.assertEqual([str(row["path"]) for row in candidates], [str(yard), str(gate)])
 
+    @patch("survng.app.recording_retention.shutil.disk_usage", return_value=DiskUsage(1000, 500, 500))
+    def test_slow_candidate_selection_does_not_starve_bounded_deletion(self, _usage) -> None:
+        oldest = self.insert_recording(age_days=10)
+        newer = self.insert_recording(age_days=9)
+        service = self.service()
+        plan = service.plan()
+        clock = [100.0]
+        select = service._candidates
+
+        def slow_select(*args, **kwargs):
+            rows = select(*args, **kwargs)
+            clock[0] += 20.0
+            return rows
+
+        def slow_delete(path):
+            path.unlink()
+            clock[0] += 11.0
+            return True
+
+        service.delete_recording_provider = slow_delete
+        with patch.object(service, "_candidates", side_effect=slow_select), patch(
+            "survng.app.recording_retention.time.monotonic", side_effect=lambda: clock[0]
+        ):
+            result = service._apply_plan(
+                plan, apply=True, now_epoch=time.time(),
+                capacity_reclaim_bytes=0,
+                planned_reclaim_bytes=plan["reclaim"]["planned_bytes"],
+            )
+
+        self.assertEqual(result["deleted_files"], 1)
+        self.assertTrue(result["batch_saturated"])
+        self.assertFalse(oldest.exists())
+        self.assertTrue(newer.exists())
+        with self.connection() as connection:
+            self.assertEqual(
+                [row["path"] for row in connection.execute("SELECT path FROM recordings")],
+                [str(newer)],
+            )
+
     def pressure_service(self, *, automatic_cleanup: bool = True) -> tuple[RecordingRetentionService, MediaStorageRegistry]:
         registry = MediaStorageRegistry(self.storage, MediaStorageConfig(locations=[
             MediaStorageLocationConfig(

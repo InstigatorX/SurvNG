@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
@@ -108,19 +109,20 @@ def test_camera_enqueue_exception_aborts_episode_reservation() -> None:
     owned.state.end_ingress.assert_called_once_with(1)
 
 
-def test_camera_admission_failure_enqueues_merged_ema_fallback() -> None:
+@pytest.mark.parametrize("followup", [False, True])
+def test_camera_admission_failure_enqueues_merged_ema_fallback(followup) -> None:
     service, owned = _service(mode="camera_rescue")
     ema = EmaQualified(
         camera_id="gate",
         captured_at=1_700_000_000.0,
-        observed_monotonic=100.0,
+        observed_monotonic=time.monotonic() + 2.0,
         result=MotionQualificationResult(
             accepted=True,
             score=0.8,
             threshold=0.48,
             reason="credible_motion",
             frame_count=3,
-            features={"motion_region_track_id": 7},
+            features={"motion_region_track_id": 7, "motion_regions": [[0.1, 0.1, 0.4, 0.4]]},
             telemetry={},
         ),
         required_score=0.65,
@@ -131,6 +133,19 @@ def test_camera_admission_failure_enqueues_merged_ema_fallback() -> None:
         evidence_frame_sequence=27,
         evidence_capture_generation=9,
     )
+    if followup:
+        # A failed EMA follow-up refunds its reservation. A fresh camera notice
+        # can then reserve a replacement in that same, already-active episode.
+        service.handle("onvif/motion", "first motion")
+        controller = owned.events.episode_controller
+        first = owned.events.enqueue.call_args.args[0]
+        controller.complete(first.detection_intent_id, occurred_monotonic=time.monotonic())
+        reserved = controller.observe_ema(ema, generation=1)
+        assert reserved.reason.value == "followup_reserved"
+        controller.acknowledge_admission(
+            reserved.intent.intent_id, admitted=False, occurred_monotonic=time.monotonic(),
+        )
+        owned.events.enqueue.reset_mock()
     enqueue_calls = 0
 
     def enqueue(_trigger: object, **_kwargs: object) -> bool:
@@ -158,7 +173,7 @@ def test_camera_admission_failure_enqueues_merged_ema_fallback() -> None:
     assert fallback.evidence_capture_generation == 9
     episode = owned.events.episode_controller.snapshot()
     assert episode["request_status"] == "admitted"
-    assert episode["admitted_sources"] == ("ema",)
+    assert episode["admitted_sources"] == (("camera", "ema") if followup else ("ema",))
 
 
 def test_event_clock_separates_stable_offset_from_delivery_delay() -> None:

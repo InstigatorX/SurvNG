@@ -1731,7 +1731,10 @@ class MotionAnalysisService:
 
     def _enqueue_replacement_camera_notice(self, decision: EpisodeDecision) -> bool:
         """Admit a retained camera notice after a merged EMA request aborts."""
-        if decision.reason is not EpisodeDecisionReason.REQUEST_RESERVED:
+        if decision.reason not in {
+            EpisodeDecisionReason.REQUEST_RESERVED,
+            EpisodeDecisionReason.FOLLOWUP_RESERVED,
+        }:
             return False
         intent = decision.intent
         if intent is None or intent.camera_notice is None:

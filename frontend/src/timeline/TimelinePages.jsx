@@ -1339,9 +1339,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function completePendingNativeSeek(video) {
-    if (video !== videoRef.current) return;
+    if (video !== videoRef.current || video.seeking) return;
     const pendingMode = pendingSeekModeRef.current;
     if (pendingMode !== "native-local" && pendingMode !== "native-ready") return;
+    const target = recordingSegmentLocalTime(nativeSegment, pendingSeekEpochRef.current, video);
+    if (!videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds({ preferNativeHls: true }))) return;
     clearSeekWatchdog();
     const segment = nativeSegment;
     if (segment) {

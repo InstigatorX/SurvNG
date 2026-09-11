@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
-import test_face_identity_reconciliation as identity_tests
-from test_face_reference_retention import CUTOFF, OLD, gallery, stores
+from tests import test_face_identity_reconciliation as identity_tests
+from tests.test_face_reference_retention import CUTOFF, OLD, gallery, stores
 
 
 @pytest.mark.parametrize("bulk", [False, True], ids=["single", "bulk"])

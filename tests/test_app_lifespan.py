@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from survng.app import main
+
+
+@pytest.fixture(autouse=True)
+def isolated_observability_socket(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        main, "LocalObservabilityServer",
+        partial(main.LocalObservabilityServer, socket_path=tmp_path / "runtime" / "observability.sock"),
+    )
 
 
 def test_server_restart_is_scheduled_after_response_without_blocking() -> None:

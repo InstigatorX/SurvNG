@@ -196,7 +196,10 @@ class MotionEventIngressService:
                 ),
                 generation=generation,
             )
-            if episode.reason is not EpisodeDecisionReason.REQUEST_RESERVED:
+            if episode.reason not in {
+                EpisodeDecisionReason.REQUEST_RESERVED,
+                EpisodeDecisionReason.FOLLOWUP_RESERVED,
+            }:
                 return
             intent = episode.intent
             if intent is None:
@@ -255,7 +258,10 @@ class MotionEventIngressService:
 
     def _enqueue_ema_fallback(self, admission: EpisodeDecision) -> None:
         """Deliver EMA evidence retained behind a failed camera reservation."""
-        if admission.reason is not EpisodeDecisionReason.REQUEST_RESERVED:
+        if admission.reason not in {
+            EpisodeDecisionReason.REQUEST_RESERVED,
+            EpisodeDecisionReason.FOLLOWUP_RESERVED,
+        }:
             return
         intent = admission.intent
         if intent is None or intent.ema is None:

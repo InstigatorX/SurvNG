@@ -98,7 +98,21 @@ try {
       return;
     }
     const color = name.split("-")[0].replace(".mp4", "");
-    await route.fulfill({ status: 200, contentType: "video/mp4", body: readFileSync(join(temporary, `${color}.mp4`)) }).catch(() => {});
+    const bytes = readFileSync(join(temporary, `${color}.mp4`));
+    const range = /^bytes=(\d+)-(\d*)$/.exec(route.request().headers().range || "");
+    const headers = { "Accept-Ranges": "bytes" };
+    if (range) {
+      const start = Number(range[1]);
+      const end = Math.min(bytes.length - 1, range[2] ? Number(range[2]) : bytes.length - 1);
+      if (start > end) {
+        await route.fulfill({ status: 416, headers: { ...headers, "Content-Range": `bytes */${bytes.length}` } });
+        return;
+      }
+      headers["Content-Range"] = `bytes ${start}-${end}/${bytes.length}`;
+      await route.fulfill({ status: 206, contentType: "video/mp4", headers, body: bytes.subarray(start, end + 1) }).catch(() => {});
+    } else {
+      await route.fulfill({ status: 200, contentType: "video/mp4", headers, body: bytes }).catch(() => {});
+    }
   });
   await page.goto(server.resolvedUrls.local[0]);
   await page.waitForFunction(() => Boolean(window.harness));
@@ -161,7 +175,7 @@ try {
   releaseBlue();
   await waitVisible("/clips/blue-delayed.mp4");
   const sought = (await snapshot()).find((v) => v.activeRef);
-  assert.ok(sought.paused && Math.abs(sought.time - 0.75) < 0.05, "paused source change preserves the requested seek");
+  assert.ok(sought.paused && Math.abs(sought.time - 0.75) < 0.05, `paused source change preserves the requested seek: ${JSON.stringify(await snapshot())}`);
   assert.equal(await page.evaluate(() => window.harness.video().playbackRate), 1.5);
   await assertColor(2, "new clip appears after paused seek completes");
 
