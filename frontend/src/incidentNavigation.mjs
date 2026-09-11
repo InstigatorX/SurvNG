@@ -469,3 +469,8 @@ export function incidentThumbnailPageSize({ width, height, density, columns: req
   const rowHeight = Math.max(44, Number.isFinite(Number(requestedRowHeight)) ? Number(requestedRowHeight) : compact ? 78 : 98);
   return Math.max(1, Math.floor((safeHeight + gap) / (rowHeight + gap)));
 }
+
+export function incidentGalleryPageSize(value) {
+  const size = Number(value);
+  return [25, 50, 100].includes(size) ? size : 25;
+}

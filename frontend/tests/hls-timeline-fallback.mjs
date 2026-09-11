@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { clipPreviewReachedEnd } from "../src/recordingClipSelection.mjs";
 import { recordingPlaybackTransport, seekVideoToTime, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt, playbackRowsCoverEpoch, videoReachedSeekTarget, recordingSeekToleranceSeconds } from "../src/recordingPlayback.mjs";
 
 for (const error of [{ code: 3 }, { code: 4 }, { code: 4032, category: 4 }, { code: 3014, data: [3] }, { code: 3015, data: [{ name: "NotSupportedError" }] }, { code: 3016, data: [3] }, { code: 3016, data: [4] }, new Error("This browser does not support Shaka Player")]) {
@@ -177,6 +178,7 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
   const plays = [];
   const context = vm.createContext({
     Number, Math, performance, videoReachedSeekTarget, recordingSeekToleranceSeconds, nativeHls: true, videoRef: { current: video }, useSegmentPlayback: false,
+    clipPreviewReachedEnd, clipPreviewEndRef: { current: null },
     transport: "hls", requestedTransport: "hls", originalFallbackRef: {}, transcodeFallbackRef: {}, nativeScope: "gate",
     playbackRate: 1, normalizedTimelinePlaybackRate: (rate) => rate,
     playbackRetryRef: { current: { attempts: 0 } }, pendingSeekEpochRef: { current: 1005.1 },

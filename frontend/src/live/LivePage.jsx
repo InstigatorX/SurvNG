@@ -28,9 +28,10 @@ import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, m
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "../liveWorkspace.mjs";
 import { cameraCaptureConnectivity, cameraTileLiveState } from "../cameraConnectivity.mjs";
 import { liveFramingStyle } from "../liveFraming.mjs";
+import { focusLiveMosaicLayout, focusedLiveCameraId as validFocusCameraId } from "../liveFocusLayout.mjs";
 import { detectionStatus, recordingStatus } from "../liveCameraStatus.mjs";
 import { createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident } from "../incidentNavigation.mjs";
-import { appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
+import { appUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS, STREAM_MODES, STREAM_LABELS, MOTION_WEBRTC_HOLD_MS } from "../shared/constants.js";
 import { formatTimeOnly } from "../shared/format.js";
 import { useStoredState, useViewportQuery, useModalFocus } from "../shared/hooks.js";
@@ -79,7 +80,7 @@ function CameraTileStatus({ status }) {
   );
 }
 
-export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, onPreviewClose, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobileView = false, mobilePrimary = false }) {
+export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, onPreviewClose, onAspectChange, onMakePrimary, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobileView = false, mobilePrimary = false, focusPrimary = false }) {
   const tileRef = useRef(null);
   const controlMenuButtonRef = useRef(null);
   const hoverTimerRef = useRef(null);
@@ -482,7 +483,7 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   return (
     <article
       ref={tileRef}
-      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""} ${mobilePrimary ? "mobile-primary" : ""}`}
+      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""} ${mobilePrimary ? "mobile-primary" : ""} ${focusPrimary ? "focus-primary" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
       data-camera-id={camera.id}
       data-hover-preview={hoverPreview ? "true" : "false"}
@@ -566,6 +567,36 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
           onContextMenu={blockBrowserHoldMenu}
           aria-label={mobileView ? `Open ${camera.name} live view. Press and hold to preview.` : `Open ${camera.name} live view`}
         />
+        <div className="camera-tile-quick-actions" role="group" aria-label={`${camera.name} quick actions`}>
+          {dragHandleProps.onPointerDown ? <button
+            type="button"
+            className="camera-tile-quick-action camera-tile-move-action"
+            {...dragHandleProps}
+            aria-label={`Move ${camera.name} from quick actions. Press Enter, use arrow keys, then Enter to save or Escape to cancel`}
+          >
+            <GripVertical size={14} aria-hidden="true" />
+            <span>Move</span>
+          </button> : null}
+          {onMakePrimary ? <button
+            type="button"
+            className="camera-tile-quick-action"
+            onClick={() => onMakePrimary?.(camera)}
+            aria-label={focusPrimary ? `${camera.name} is the primary camera` : `Make ${camera.name} the primary camera`}
+            aria-pressed={focusPrimary}
+            title={focusPrimary ? "Primary camera" : "Make primary"}
+          >
+            <Camera size={14} aria-hidden="true" />
+            <span>{focusPrimary ? "Primary" : "Make primary"}</span>
+          </button> : null}
+          <button type="button" className="camera-tile-quick-action" onClick={() => onOpen(camera)} title="Open live view" aria-label={`Open ${camera.name} live view`}>
+            <Maximize2 size={14} aria-hidden="true" />
+            <span>Live view</span>
+          </button>
+          <a className="camera-tile-quick-action" href={recordingsHref({ cameraId: camera.id, epoch: Date.now() / 1000 })} title="Review footage" aria-label={`Review footage from ${camera.name}`}>
+            <Video size={14} aria-hidden="true" />
+            <span>Review footage</span>
+          </a>
+        </div>
         <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
         {controlMenuOpen ? <div className="camera-tile-control-menu" role="group" aria-label={`${camera.name} controls`}>
           <div className="tile-controls">
@@ -790,6 +821,7 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
       </div>
       <div className="live-layout-control" role="group" aria-label="Live camera layout">
         <button type="button" className={layoutMode === "auto" ? "active" : ""} aria-pressed={layoutMode === "auto"} onClick={() => onLayoutModeChange("auto")}><Grid2X2 size={15} /> Automatic</button>
+        <button type="button" className={layoutMode === "focus" ? "active" : ""} aria-pressed={layoutMode === "focus"} onClick={() => onLayoutModeChange("focus")} disabled={!customAvailable} title={customAvailable ? "Prioritize one camera in a desktop mosaic" : "Focus layout is available on desktop"}><Camera size={15} /> Focus</button>
         <button type="button" className={layoutMode === "custom" ? "active" : ""} aria-pressed={layoutMode === "custom"} onClick={() => onLayoutModeChange("custom")} disabled={!customAvailable} title={customAvailable ? "Arrange and resize cameras" : "Custom layout is available on desktop"}><GripVertical size={15} /> Custom</button>
         {layoutMode === "custom" && customAvailable ? <button type="button" className="secondary live-layout-reset" onClick={onResetLayout}><RotateCcw size={14} /> Reset</button> : null}
         <button type="button" className="live-fullscreen" onClick={onFullscreen} aria-label="View Live fullscreen" title="Fullscreen"><Maximize2 size={16} /></button>
@@ -812,6 +844,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
   const [liveDensityValue, setLiveDensityValue] = useStoredState("survng.liveDensity.v1", "fit");
   const [liveDensityPageValue, setLiveDensityPageValue] = useState(0);
   const [customLayoutValue, setCustomLayoutValue] = useStoredState("survng.liveCustomLayout.v1", "{}");
+  const [storedFocusCamera, setStoredFocusCamera] = useStoredState("survng.liveFocusCamera.v1", "");
   const [storedMobileFocus, setStoredMobileFocus] = useStoredState("survng.liveFocusedCamera.v1", "");
   const customLayoutAvailable = useViewportQuery("(min-width: 1051px)");
   const mobileLiveView = useViewportQuery("(max-width: 760px)");
@@ -881,16 +914,17 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     const seen = new Set(sorted.map((camera) => camera.id));
     return [...sorted, ...cameras.filter((camera) => !seen.has(camera.id))];
   }, [cameras, cameraOrder]);
-  const normalizedLayoutMode = liveLayoutMode === "custom" ? "custom" : "auto";
+  const normalizedLayoutMode = ["auto", "focus", "custom"].includes(liveLayoutMode) ? liveLayoutMode : "auto";
   const effectiveLayoutMode = customLayoutAvailable ? normalizedLayoutMode : "auto";
   const liveDensity = normalizedLiveDensity(liveDensityValue);
-  const effectiveLiveDensity = effectiveLayoutMode === "custom" || mobileLiveView ? "fit" : liveDensity;
+  const effectiveLiveDensity = effectiveLayoutMode === "custom" || effectiveLayoutMode === "focus" || mobileLiveView ? "fit" : liveDensity;
   const densitySelection = useMemo(
     () => liveDensityPage(orderedCameras, effectiveLiveDensity, liveDensityPageValue),
     [effectiveLiveDensity, liveDensityPageValue, orderedCameras],
   );
   const visibleLiveCameras = densitySelection.cameras;
   const mobileFocusedCameraId = focusedLiveCameraId(orderedCameras, storedMobileFocus);
+  const focusCameraId = validFocusCameraId(orderedCameras, storedFocusCamera);
   const renderedCameras = useMemo(
     () => orderedLiveCamerasForFocus(visibleLiveCameras, mobileFocusedCameraId, mobileLiveView),
     [mobileFocusedCameraId, mobileLiveView, visibleLiveCameras],
@@ -910,9 +944,17 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     ),
     [liveCameraGridSize.height, liveCameraGridSize.width, visibleLiveCameras],
   );
+  const liveFocusLayout = useMemo(
+    () => focusLiveMosaicLayout(visibleLiveCameras, liveCameraGridSize.width, liveCameraGridSize.height, focusCameraId, 4, liveCameraAspects[focusCameraId]),
+    [focusCameraId, liveCameraAspects, liveCameraGridSize.height, liveCameraGridSize.width, visibleLiveCameras],
+  );
   const liveCameraLayoutById = useMemo(
     () => new Map(liveCameraLayout.map((item) => [item.camera.id, item])),
     [liveCameraLayout],
+  );
+  const liveFocusLayoutById = useMemo(
+    () => new Map(liveFocusLayout.map((item) => [item.camera.id, item])),
+    [liveFocusLayout],
   );
   const liveCameraLayoutReady = liveCameraLayout.length === visibleLiveCameras.length && visibleLiveCameras.length > 0;
   const customGridMetrics = useMemo(
@@ -1098,6 +1140,16 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
   function changeLiveDensity(nextDensity) {
     setLiveDensityValue(normalizedLiveDensity(nextDensity));
     setLiveDensityPageValue(0);
+  }
+
+  function makePrimaryCamera(camera) {
+    if (!camera?.id) return;
+    setStoredFocusCamera(String(camera.id));
+    if (mobileLiveView) {
+      setStoredMobileFocus(String(camera.id));
+      return;
+    }
+    if (customLayoutAvailable) setLiveLayoutMode("focus");
   }
 
   async function openLiveFullscreen() {
@@ -1519,7 +1571,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
         </div>
         <div
           ref={liveCameraGridRef}
-          className={`camera-grid live-camera-grid${effectiveLayoutMode === "custom" ? " custom-layout" : liveCameraLayoutReady ? " viewport-layout" : ""}`}
+          className={`camera-grid live-camera-grid${effectiveLayoutMode === "custom" ? " custom-layout" : effectiveLayoutMode === "focus" ? " viewport-layout focus-layout" : liveCameraLayoutReady ? " viewport-layout" : ""}`}
           style={effectiveLayoutMode === "custom" ? { "--custom-pack-row-height": `${customGridMetrics.packRowHeight}px` } : undefined}
         >
           {liveDefaultsReady ? renderedCameras.map((camera) => (
@@ -1532,7 +1584,8 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
               onPreviewOpen={(camera) => openExpandedCamera(camera, "preview")}
               onPreviewClose={closeExpandedCamera}
               onAspectChange={updateLiveCameraAspect}
-              layout={effectiveLayoutMode === "auto" ? liveCameraLayoutById.get(camera.id) : null}
+              onMakePrimary={customLayoutAvailable || mobileLiveView ? makePrimaryCamera : undefined}
+              layout={effectiveLayoutMode === "focus" ? liveFocusLayoutById.get(camera.id) : effectiveLayoutMode === "auto" ? liveCameraLayoutById.get(camera.id) : null}
               customLayout={effectiveLayoutMode === "custom"}
               customStyle={effectiveLayoutMode === "custom" ? (() => {
                 const size = customSizePreview[camera.id] || displayedCustomLayout.sizes[camera.id];
@@ -1563,6 +1616,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
                 "aria-label": `Resize ${camera.name}. Press Enter, use arrow keys, S to fit the video, then Enter to save or Escape to cancel`,
               } : {}}
               mobilePrimary={camera.id === mobileFocusedCameraId}
+              focusPrimary={mobileLiveView ? camera.id === mobileFocusedCameraId : effectiveLayoutMode === "focus" && camera.id === focusCameraId}
               mobileView={mobileLiveView}
             />
           )) : null}
