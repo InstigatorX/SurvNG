@@ -1082,6 +1082,26 @@ class RecordingRetentionService:
             placeholders = ",".join("?" for _ in location_ids)
             location_clause = f" AND location_id IN ({placeholders})"
             location_parameters = tuple(location_ids)
+            if self.media_storage is not None:
+                # Legacy rows use 'default' for any volume. Filter their path
+                # before LIMIT, otherwise older rows from a healthy volume can
+                # crowd out every candidate on the pressured volume. This is a
+                # lexical selection hint; resolved-path checks still authorize
+                # each deletion below, without NFS probes for every index row.
+                legacy_clauses: list[str] = []
+                legacy_parameters: list[object] = []
+                for root in self.media_storage.configured_roots_for("recordings"):
+                    if self.media_storage.location_id_for(root, "recordings") not in location_ids:
+                        continue
+                    prefix = str(root) + os.sep
+                    legacy_clauses.append("substr(path, 1, ?) = ?")
+                    legacy_parameters.extend((len(prefix), prefix))
+                legacy_predicate = " OR ".join(legacy_clauses) or "0"
+                location_clause = (
+                    f" AND ((location_id != 'default' AND location_id IN ({placeholders}))"
+                    f" OR (location_id = 'default' AND ({legacy_predicate})))"
+                )
+                location_parameters += tuple(legacy_parameters)
         # The existing range index keeps upgrades non-blocking. A location-first
         # index on millions of legacy rows would otherwise be built at startup.
         index_name = "recordings_range"
@@ -1246,7 +1266,7 @@ class RecordingRetentionService:
                     limit_per_group=limit * 2,
                     age_limited=False,
                     now_epoch=now_epoch,
-                    location_ids=tuple(dict.fromkeys([*member_ids, "default"])),
+                    location_ids=tuple(dict.fromkeys(member_ids)),
                 )
                 for row in self._merge_oldest_rows(row_groups):
                     path_key = str(row["path"])

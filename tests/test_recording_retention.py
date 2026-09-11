@@ -289,6 +289,55 @@ class RecordingRetentionServiceTest(unittest.TestCase):
             {"one": 200, "two": 200},
         )
 
+    def test_pressure_selection_filters_legacy_locations_before_limit(self) -> None:
+        second = self.storage / "second"
+        second.mkdir()
+        registry = MediaStorageRegistry(self.storage, MediaStorageConfig(locations=[
+            MediaStorageLocationConfig(id="default", path=str(self.storage), roles=["recordings"]),
+            MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+        ]))
+        # More older primary-volume rows than the per-stream candidate limit.
+        healthy = [self.insert_recording(
+            age_days=3, size=1,
+            path=self.recordings / f"healthy-{index}.mp4",
+        ) for index in range(201)]
+        legacy = self.insert_recording(
+            age_days=2, size=100,
+            path=second / "recordings" / "legacy.mp4",
+        )
+        indexed = self.insert_recording(
+            age_days=1, size=100, location_id="two",
+            path=second / "recordings" / "indexed.mp4",
+        )
+        protected = self.insert_recording(
+            age_days=4, size=100, location_id="two",
+            path=second / "recordings" / "protected.mp4",
+        )
+        service = RecordingRetentionService(
+            self.storage, self.recordings, self.connection,
+            RecordingRetentionConfig(main_days=7, cleanup_batch_files=100),
+            media_storage=registry, protected_paths_provider=lambda: {str(protected)},
+        )
+        plan = {
+            "policy": {"cleanup_batch_files": 100},
+            "per_camera": [{"camera_id": "gate", "source": "main", "retention_days": 7}],
+            "reclaim": {"quota_bytes": 0, "free_space_bytes": 150,
+                        "free_space_by_location": {"two": 150}},
+        }
+        result = service._apply_plan(
+            plan, apply=True, now_epoch=time.time(), capacity_reclaim_bytes=0,
+            planned_reclaim_bytes=150, quota_reclaim_bytes=0,
+            free_reclaim_by_location={"two": 150},
+        )
+        self.assertEqual(result["deleted_files"], 2)
+        self.assertEqual(result["recording_deleted_bytes_by_location"], {"two": 200})
+        self.assertFalse(legacy.exists())
+        self.assertFalse(indexed.exists())
+        self.assertTrue(protected.exists())
+        self.assertTrue(all(path.exists() for path in healthy))
+        with self.connection() as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM recordings").fetchone()[0], 202)
+
     def test_snapshot_deletion_never_satisfies_recording_disk_pressure(self) -> None:
         service = self.service()
         service.snapshot_cleanup_provider = lambda _cutoff, _limit: {
