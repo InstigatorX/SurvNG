@@ -20,7 +20,7 @@ for (const autoplay of [true, false]) {
     loadedPlaybackWindow: { start: 0, end: 110 }, playbackTimeline: [{ start_epoch: 100, end_epoch: 110 }],
     prefetchedNativeWindow: warmWindow, nativeSegment: { start_epoch: 100, end_epoch: 110 },
     windowAround: (start) => ({ start, end: start + 900 }), playbackRowsCoverEpoch: () => false,
-    videoRef: { current: { paused: true, readyState: 4 } }, autoplayRef: { current: true },
+    videoRef: { current: { paused: true, readyState: 4, pause() {} } }, autoplayRef: { current: true },
     desiredEpochRef: {}, pendingSeekEpochRef: {}, pendingSeekModeRef: {}, playbackRequestRef: { current: 1 },
     setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {},
     setPlayhead() {}, setPlaybackWindow() {}, setPlaybackNotice() {}, clearSeekWatchdog() {},

@@ -208,6 +208,20 @@ export function recordingSegmentAt(rows, epoch) {
   return row ? { start_epoch: Number(row.start_epoch), end_epoch: Number(row.end_epoch) } : null;
 }
 
+export function recordingPlayableEpoch(rows, epoch) {
+  const valid = (rows || []).filter(row => Number.isFinite(Number(row.start_epoch))
+    && Number.isFinite(Number(row.end_epoch)) && Number(row.end_epoch) > Number(row.start_epoch));
+  if (!valid.length || !Number.isFinite(epoch)) return null;
+  const last = valid.reduce((a, b) => Number(a.end_epoch) > Number(b.end_epoch) ? a : b);
+  if (epoch >= Number(last.end_epoch) - 1) return Math.max(Number(last.start_epoch), Number(last.end_epoch) - 1);
+  if (valid.some(row => Number(row.start_epoch) <= epoch && epoch < Number(row.end_epoch))) return epoch;
+  return valid.reduce((best, row) => {
+    const candidate = epoch < Number(row.start_epoch) ? Number(row.start_epoch)
+      : Math.max(Number(row.start_epoch), Number(row.end_epoch) - 1);
+    return best === null || Math.abs(candidate - epoch) < Math.abs(best - epoch) ? candidate : best;
+  }, null);
+}
+
 export function recordingSegmentLocalTime(segment, epoch, video = null) {
   if (!segment || !Number.isFinite(epoch)) return null;
   const indexedDuration = Math.max(0, segment.end_epoch - segment.start_epoch);

@@ -32,3 +32,14 @@ Concurrent edits to `survng/app/recording_retention.py` and `tests/test_recordin
 The general browser suite stopped at `assistant-apply-modal.mjs` because the expected camera tile was not visible on its configured application. Remaining tests in that general runner were not executed. Physical iOS authorization, hardware-specific inference, HEVC/mixed-codec browser playback, and deployment execution were not established by these checks.
 
 The validation results above were captured before the user-requested commit and service restart.
+
+## Timeline usability follow-up (iPhone/Safari target)
+
+- Start at least one second inside the latest available recording, and reconcile the overview target with the finalized window's actual media bounds.
+- Pause outgoing footage as soon as a seek starts. Keep camera/day transitions pending through index loading so outgoing time updates and end events cannot overwrite the selected time or complete the replacement seek.
+- Preserve the HLS video element across camera changes and carry playback intent into the selected child camera. Empty native HLS sources release the old media without requesting the page as a video.
+- Reuse up to eight recent recording windows (30-second archive lifetime, two seconds near live); Retry clears the cache. This avoids repeated metadata requests when revisiting footage; no production page-load timing improvement is claimed.
+- Add a visible mobile playhead handle: dragging near it seeks at one second per pixel; swiping elsewhere pans the range. Center the mobile native date field and remove its extra internal spacing.
+- Clear the seeking indicator when window loading fails.
+
+Validation: 66 frontend unit test files passed. Chromium and WebKit full Timeline fixtures passed, including delayed window loading, outgoing end events, cached revisits, and linked-camera autoplay at the retained time. Chromium additionally exercised real touch dragging of the fine scrubber; WebKit mobile layout was visually checked. Native MP4 and HLS lifecycle coverage was rerun. These automated engines do not establish physical iPhone autoplay policy or camera-specific codec behavior.

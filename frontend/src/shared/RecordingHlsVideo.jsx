@@ -22,7 +22,7 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
     let checking = false;
     let disposed = false;
     let timer;
-    const isCurrent = () => !disposed && callbacks.current.src === src
+    const isCurrent = () => Boolean(src) && !disposed && callbacks.current.src === src
       && videoRef.current === video && video.getAttribute("src") === src;
     const ready = () => {
       if (isCurrent() && video.readyState >= 1) callbacks.current.onReady?.(null, video);
@@ -57,7 +57,8 @@ export const RecordingHlsVideo = forwardRef(function RecordingHlsVideo({
     video.addEventListener("error", failed);
     // Own source changes here so cleanup releases the previous playlist before
     // loading the next one. Keep the element that received the user's play gesture.
-    video.setAttribute("src", src);
+    if (src) video.setAttribute("src", src);
+    else video.removeAttribute("src");
     video.load();
     return () => {
       disposed = true;

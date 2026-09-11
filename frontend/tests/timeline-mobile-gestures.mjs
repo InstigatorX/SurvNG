@@ -72,9 +72,20 @@ for (const mode of ["touch", "mouse"]) {
   assert.equal(captures.size, 0);
 }
 
-// Mouse drags still scrub the selected hour, including preview updates.
+// Touch drags on the playhead fine scrub without moving the viewport.
 {
   const { context, seeks, pans, previews, event } = gestureHarness();
+  context.startDrag(event(130)); // current playhead at 1200 seconds / 3600
+  context.moveDrag(event(175));
+  context.finishDrag(event(175));
+  assert.deepEqual(pans, [], "grabbing the playhead must scrub, not pan");
+  assert.deepEqual(seeks, [21600 + 1245], "fine scrubbing moves one second per pixel");
+  assert.ok(previews.length > 0);
+}
+
+{
+  const { context, seeks, pans, previews, event } = gestureHarness();
+  // Mouse drags still scrub the selected hour, including preview updates.
   context.startDrag(event(100, "mouse"));
   context.moveDrag(event(200, "mouse"));
   context.finishDrag(event(240, "mouse"));

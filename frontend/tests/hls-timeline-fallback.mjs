@@ -225,7 +225,7 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
 // Subsequent scrubs within the current native HLS playlist must also bypass
 // Safari fastSeek, not just the initial metadata/ready seek.
 {
-  const video = { currentTime: 0, paused: false, fastSeek() { throw new Error("Repeated native HLS scrub used fastSeek"); } };
+  const video = { currentTime: 0, paused: false, pause() {}, fastSeek() { throw new Error("Repeated native HLS scrub used fastSeek"); } };
   const context = vm.createContext({
     Number, nativeHls: true, useSegmentPlayback: false, isAllCameras: false, activeCameraId: "gate",
     timelineView: { startEpoch: 1000, endEpoch: 1900 }, loadedPlaybackWindow: { start: 1000, end: 1900 },
@@ -234,7 +234,7 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
     videoRef: { current: video }, autoplayRef: {}, pendingSeekEpochRef: {}, pendingSeekModeRef: {}, desiredEpochRef: {},
     playbackRequestRef: { current: 0 }, epochToPlaybackMediaTime: (epoch) => epoch - 1000, seekVideoToTime,
     setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
-    setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {},
+    setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {}, clearSeekWatchdog() {},
   });
   const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport("));
   vm.runInContext(playAt, context);

@@ -60,7 +60,7 @@ try {
       if (path.startsWith("/api/") || path.startsWith("/timeline-interactions-media/")) requests.push({ id: requests.length + 1, path, query: url.search, method: req.method, range: req.headers.range || "", at: Date.now() });
       if (path === "/api/events/stream") { res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" }); res.write(': fixture connected\n\n'); streams.add(res); req.on("close", () => streams.delete(res)); return; }
       if (path === "/api/cameras") { json(res, cameras); return; }
-      if (path === "/api/config") { json(res, { cameras, detector: { tracking: { camera_transition_routes: [] } } }); return; }
+      if (path === "/api/config") { json(res, { cameras, detector: { tracking: { camera_transition_routes: [{ from_camera: "gate", to_camera: "yard", bidirectional: true }] } } }); return; }
       if (path === "/api/semantic-search/status") { json(res, { enabled: false, ready: false }); return; }
       if (path === "/api/exports") { json(res, { exports: [] }); return; }
       if (path === "/api/system/status") { json(res, {}); return; }
@@ -99,6 +99,7 @@ try {
     page.on("pageerror", error => errors.push(error.message));
     await page.goto(url);
     await page.waitForFunction(() => window.timelineFixture?.snapshot().readyState >= 2);
+    if (process.env.TIMELINE_INTERACTIONS_SCREENSHOT) await page.screenshot({ path: process.env.TIMELINE_INTERACTIONS_SCREENSHOT });
     await runInteractions(page, url, engine);
     assert.deepEqual(errors, [], "full mobile page must not raise JavaScript errors");
     const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -187,7 +188,11 @@ async function runInteractions(page, url, engine) {
   }
   const beforeWheel = JSON.stringify((await read()).ticks);
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.wheel(180, 0);
+  if (engine === "webkit") {
+    await slider.dispatchEvent("wheel", { deltaX: 180, deltaY: 0 });
+  } else {
+    await page.mouse.wheel(180, 0);
+  }
   await page.waitForFunction(ticks => JSON.stringify(window.timelineFixture.snapshot().ticks) !== ticks, beforeWheel);
   assert.equal(playlistCount(), beforePanManifests, "viewport panning must not request a new hero playlist");
   assert.equal((await read()).videoId, beforePan.videoId);
@@ -220,7 +225,22 @@ async function runInteractions(page, url, engine) {
     assert.equal(after.src, initial.src, "same-window seeks must retain their source");
   }
   assert.equal(playlistCount(), initialManifests, "same-window seeks must reuse the loaded playlist");
-  const cross = await tapAtFraction(0.86);
+  if ((await read()).paused) await page.locator(".recording-hero-controls").getByRole("button", { name: "Play", exact: true }).click();
+  let releaseWindow;
+  let windowRequested;
+  const blockedWindow = new Promise(resolve => { releaseWindow = resolve; });
+  const windowStarted = new Promise(resolve => { windowRequested = resolve; });
+  const delayWindow = async route => { windowRequested(); await blockedWindow; await route.continue(); };
+  await page.route("**/recordings/window?**", delayWindow);
+  const crossSeek = tapAtFraction(0.86);
+  await windowStarted;
+  assert.equal((await read()).paused, true, "a pending seek stops outgoing footage immediately");
+  const requestedPlayhead = (await read()).playhead;
+  await page.evaluate(() => window.timelineFixture.video().dispatchEvent(new Event("ended")));
+  assert.equal((await read()).playhead, requestedPlayhead, "an outgoing ended event cannot redirect the new seek");
+  releaseWindow();
+  const cross = await crossSeek;
+  await page.unroute("**/recordings/window?**", delayWindow);
   assert.ok(playlistCount() > initialManifests, "cross-window seek must request another playlist");
   const selectedPlaylists = requests.filter(request => request.path.endsWith("/day.m3u8"));
   assert.ok(new Set(selectedPlaylists.map(request => new URLSearchParams(request.query).get("start_epoch"))).size > 1);
@@ -232,6 +252,11 @@ async function runInteractions(page, url, engine) {
   assert.equal(repeated.src, cross.src);
   assert.equal(repeated.videoId, cross.videoId);
   assert.equal(playlistCount(), crossCount, "later seek in new window must not reload it");
+  const windowCount = requests.filter(request => request.path.endsWith("/window")).length;
+  const revisit = await read();
+  await tapAtFraction((initial.playhead + 120 - (revisit.playhead - revisit.rangeOffset)) / revisit.rangeSeconds);
+  assert.equal(requests.filter(request => request.path.endsWith("/window")).length, windowCount,
+    "revisiting a recent archive window reuses its metadata");
   if ((await read()).paused) await page.locator(".recording-hero-controls").getByRole("button", { name: "Play", exact: true }).click();
   const playing = await read();
   await page.waitForFunction(previous => {
@@ -240,4 +265,32 @@ async function runInteractions(page, url, engine) {
   }, playing.playhead);
   await page.locator(".recording-hero-controls").getByRole("button", { name: "Pause", exact: true }).click();
   assert.equal((await read()).error, null);
+
+  const beforeCamera = await read();
+  await page.getByRole("button", { name: "Show Yard recording at the current time", exact: true }).click();
+  await page.waitForFunction(() => {
+    const s = window.timelineFixture.snapshot();
+    return s.context?.camera_id === "yard" && s.readyState >= 2 && !s.paused && !s.seeking;
+  }).catch(async error => { console.error("Camera switch state:", await read()); throw error; });
+  assert.equal((await read()).videoId, beforeCamera.videoId, "camera changes retain Safari's authorized video element");
+  assert.ok(Math.abs((await read()).playhead - beforeCamera.playhead) < 5, "camera switch retains the selected time");
+
+  // Drag the visible playhead instead of panning the surrounding time range.
+  if (engine === "chromium") {
+    await page.locator(".recording-hero-controls").getByRole("button", { name: "Pause", exact: true }).click();
+    const fineBefore = await read();
+    const fineBox = await slider.boundingBox();
+    const fineX = fineBox.x + fineBox.width * fineBefore.rangeOffset / fineBefore.rangeSeconds;
+    const fineY = fineBox.y + fineBox.height / 2;
+    const fineInput = await page.context().newCDPSession(page);
+    await fineInput.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: fineX, y: fineY }] });
+    await fineInput.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: fineX + 40, y: fineY }] });
+    await fineInput.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await fineInput.detach();
+    await page.waitForFunction(target => {
+      const s = window.timelineFixture.snapshot();
+      return !s.seeking && !s.paused && Math.abs(s.playhead - target) < 3;
+    }, fineBefore.playhead + 40);
+    assert.deepEqual((await read()).ticks, fineBefore.ticks, "fine scrub must retain the browsed time range");
+  }
 }

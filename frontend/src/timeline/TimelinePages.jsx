@@ -39,7 +39,7 @@ import { browserStorage } from "../storage.mjs";
 import { canSetClipBoundaryAtPlayhead, clipPreviewReachedEnd, clipRangeIsValid, setClipBoundaryAtPlayhead } from "../recordingClipSelection.mjs";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { ACTIVE_EXPORT_STATUSES, cacheExportJobs, exportIsActive, fetchExportJob, removeCachedExportJobs } from "../exportPolling.mjs";
-import { recordingPlaybackTransport, supportsNativeRecordingHls, recordingSegmentAt, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
+import { recordingPlaybackTransport, supportsNativeRecordingHls, recordingSegmentAt, recordingPlayableEpoch, recordingSegmentLocalTime, recordingEpochAfterSegment, adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSeek, ignorePauseAfterSeekMs, isRecordingCompatibilityError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch, prefersJpegScrubPreview, recordingSeekToleranceSeconds, scrubPreviewBucketSeconds, scrubPreviewDelayMs, seekVideoToTime, seekWatchdogDelayMs, shouldResumePlaybackAfterSeek, videoReachedSeekTarget } from "../recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch } from "../recordingGrid.mjs";
 import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../timelineWorkspace.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "../semanticSearchState.mjs";
@@ -744,6 +744,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const [playbackTransport, setPlaybackTransport] = useState(null);
   const playbackTransportRef = useRef(null);
   const playbackRequestRef = useRef(0);
+  const playbackWindowCacheRef = useRef(new Map());
   const latestAvailabilityRef = useRef(null);
   const pendingSeekEpochRef = useRef(null);
   const pendingSeekModeRef = useRef(null);
@@ -1232,7 +1233,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!timeline.length) return null;
     const bounded = Math.max(dayStart, Math.min(dayEnd - 0.01, epoch));
     const latest = timeline[timeline.length - 1];
-    if (bounded >= latest.end_epoch) return latest.end_epoch - 0.01;
+    if (bounded >= latest.end_epoch - 1) return Math.max(latest.start_epoch, latest.end_epoch - 1);
     const containing = timeline.find((item) => item.start_epoch <= bounded && bounded < item.end_epoch);
     if (containing) return bounded;
     let nearest = timeline[0].start_epoch;
@@ -1466,6 +1467,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       desiredEpochRef.current = target;
       return;
     }
+    clearSeekWatchdog();
     setHeroSeeking(true);
     autoplayRef.current = autoplay;
     setFollowTarget(null);
@@ -1479,6 +1481,10 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       && target < loadedPlaybackWindow.end;
     const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
+    // Stop outgoing footage immediately; its ended event must not override this seek.
+    pendingSeekEpochRef.current = target;
+    pendingSeekModeRef.current = "window";
+    video?.pause();
     if (useSegmentPlayback) {
       clearSeekWatchdog();
       if (!autoplay) setHeroPlaying(false);
@@ -1539,6 +1545,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       setPlaybackNotice("Loading recording...");
       requestPlaybackWindow(nextWindow);
     }
+  }
+
+  function selectPlaybackCamera(camera) {
+    checkpointTimelineView();
+    autoplayRef.current = true;
+    ignorePauseUntilRef.current = performance.now() + 2000;
+    if (videoRef.current) requestRecordingPlay(videoRef.current, false);
+    setCameraId(camera);
   }
 
   function panTimelineViewport(deltaSeconds) {
@@ -1606,6 +1620,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setPlaybackError("");
     setPlaybackErrorStage("");
     setPlaybackBlocked(false);
+    ignorePauseUntilRef.current = performance.now() + 2000;
     setHeroPlaying(false);
     setHeroSeeking(false);
     setRecordings([]);
@@ -1621,10 +1636,11 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     setNativePrefetchDetail(null);
     setNativeSegmentRetryToken(0);
     setFollowTarget(null);
-    pendingSeekEpochRef.current = null;
-    pendingSeekModeRef.current = null;
     clearSeekWatchdog();
     if (Number.isFinite(playhead)) desiredEpochRef.current = playhead;
+    // Ignore outgoing media events while the new camera/day index is loading.
+    pendingSeekEpochRef.current = Number.isFinite(desiredEpochRef.current) ? desiredEpochRef.current : dayStart;
+    pendingSeekModeRef.current = "window";
     setPlayhead(null);
     const video = videoRef.current;
     if (video) {
@@ -1732,18 +1748,39 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     const controller = new AbortController();
     const requestId = ++playbackRequestRef.current;
     const requestedWindow = { ...playbackWindow };
-    fetch(
-      recordingWindowUrl(activeCameraId, requestedWindow.start, requestedWindow.end, source),
-      { signal: controller.signal },
-    )
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`Recording window failed (${response.status})`);
-        return response.json();
-      })
+    const cacheKey = `${nativeScope}:${requestedWindow.start}:${requestedWindow.end}`;
+    async function loadWindow() {
+      const cache = playbackWindowCacheRef.current;
+      const cached = cache.get(cacheKey);
+      const nearLive = requestedWindow.end >= Date.now() / 1000 - 60;
+      if (cached && performance.now() - cached.at < (nearLive ? 2000 : 30000)) return cached.payload;
+      const response = await fetch(
+        recordingWindowUrl(activeCameraId, requestedWindow.start, requestedWindow.end, source),
+        { signal: controller.signal },
+      );
+      if (!response.ok) throw new Error(`Recording window failed (${response.status})`);
+      const payload = await response.json();
+      if (!controller.signal.aborted) {
+        cache.delete(cacheKey);
+        cache.set(cacheKey, { at: performance.now(), payload });
+        if (cache.size > 8) cache.delete(cache.keys().next().value);
+      }
+      return payload;
+    }
+    loadWindow()
       .then((payload) => {
         if (controller.signal.aborted || requestId !== playbackRequestRef.current) return;
         const rows = payload.recordings || [];
         if (!rows.length) throw new Error("No recording segments exist in this window");
+        const requestedEpoch = Number.isFinite(pendingSeekEpochRef.current)
+          ? pendingSeekEpochRef.current : desiredEpochRef.current;
+        const playableEpoch = recordingPlayableEpoch(rows, requestedEpoch);
+        if (Number.isFinite(playableEpoch)) {
+          pendingSeekEpochRef.current = playableEpoch;
+          pendingSeekModeRef.current = "window";
+          desiredEpochRef.current = playableEpoch;
+          setPlayhead(playableEpoch);
+        }
         setPlaybackDetail({
           start: Number(payload.start_epoch),
           end: Number(payload.end_epoch),
@@ -1765,6 +1802,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
           pendingSeekEpochRef.current = null;
           pendingSeekModeRef.current = null;
           setPlaybackNotice("");
+          setHeroSeeking(false);
           setPlaybackErrorStage("window");
           setPlaybackError(error.message || "Unable to load recording window");
         }
@@ -1781,7 +1819,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (isAllCameras && !Number.isFinite(retainedEpoch) && date === today) {
       initialEpoch = recordingGridBestEpoch(timeline, initialEpoch) ?? initialEpoch;
     }
-    playAt(initialEpoch, false);
+    playAt(initialEpoch, autoplayRef.current);
   }, [date, dayEnd, dayStart, isAllCameras, playhead, timeline, today]);
 
   useEffect(() => {
@@ -2033,6 +2071,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   function handleRecordingEnded(event) {
     const video = event?.currentTarget;
+    if (video !== videoRef.current || Number.isFinite(pendingSeekEpochRef.current)) return;
     const epoch = useSegmentPlayback && nativeSegment
       ? nativeSegment.start_epoch + Math.max(0, Number(video?.currentTime) || 0)
       : mediaTimeToEpoch(Number(video?.currentTime));
@@ -2320,6 +2359,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function retryRecordingPlayback() {
+    playbackWindowCacheRef.current.clear();
     if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
     playbackRetryRef.current = { attempts: 0, timer: null };
     setPlaybackError("");
@@ -2493,13 +2533,13 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
         <TimelineCameraPicker
           cameras={cameras}
           value={activeCameraId}
-          onChange={(nextCameraId) => { checkpointTimelineView(); setCameraId(nextCameraId); }}
+          onChange={(nextCameraId) => { selectPlaybackCamera(nextCameraId); }}
         />
         <MobileCameraSelect
           className="timeline-mobile-camera-select"
           cameras={cameras}
           value={activeCameraId}
-          onChange={(nextCameraId) => { checkpointTimelineView(); setCameraId(nextCameraId); }}
+          onChange={(nextCameraId) => { selectPlaybackCamera(nextCameraId); }}
           ariaLabel="Timeline camera"
         />
         <span className="recordings-commandbar-live"><i />{date === today ? "Live archive" : "Archive"}</span>
@@ -2512,7 +2552,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             source={source}
             epoch={playhead}
             playing={gridPlaying}
-            onSelect={(selectedCameraId) => { checkpointTimelineView(); setCameraId(selectedCameraId); }}
+            onSelect={(selectedCameraId) => { selectPlaybackCamera(selectedCameraId); }}
           /> : null}
           {!isAllCameras ? <div className="recording-hero-media">
           {nativeSegmentUrl ? (
@@ -2544,7 +2584,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
             />
           ) : null}
-          {!nativeSegmentUrl && manifestUrl ? (
+          {!useSegmentPlayback && !isAllCameras && activeCameraId ? (
             <RecordingHlsVideo
               ref={videoRef}
               src={manifestUrl}
@@ -2631,7 +2671,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
             </div>
           ) : null}
           </div> : null}
-          {!isAllCameras && Number.isFinite(playhead) ? <RecordingCompanionStrip cameras={cameras} routes={cameraTransitionRoutes} activeCameraId={activeCameraId} source={source} epoch={playhead} onSelect={(camera) => { checkpointTimelineView(); setCameraId(camera); }} /> : null}
+          {!isAllCameras && Number.isFinite(playhead) ? <RecordingCompanionStrip cameras={cameras} routes={cameraTransitionRoutes} activeCameraId={activeCameraId} source={source} epoch={playhead} onSelect={(camera) => { selectPlaybackCamera(camera); }} /> : null}
           {loading ? <div className="recordings-v2-message"><Film size={28} />Loading recordings</div> : null}
           {!loading && !timeline.length ? <div className="recordings-v2-message"><Film size={28} />No recordings on this day</div> : null}
           {playbackError ? <div className="recordings-v2-error"><span>{playbackError}</span><button type="button" onClick={retryRecordingPlayback}><RefreshCcw size={14} />Retry</button></div> : null}
@@ -3517,7 +3557,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     const localMediaTime = useLocalPreview
       ? playbackMediaTimeForEpoch(previewTimeline, requestedEpoch)
       : null;
-    const bucketSeconds = scrubPreviewBucketSeconds();
+    const bucketSeconds = dragRef.current?.fine ? 1 : scrubPreviewBucketSeconds();
     const previewBucket = Number.isFinite(localMediaTime)
       ? `local:${Math.floor(requestedEpoch * 2)}`
       : `jpeg:${Math.floor((requestedEpoch - startEpoch) / bucketSeconds)}`;
@@ -3549,6 +3589,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
   }
 
   function pointerValue(event, drag) {
+    if (drag.fine) return Math.max(0, Math.min(duration, drag.initialOffset + event.clientX - drag.originX));
     const pointerX = Math.max(0, Math.min(drag.width, event.clientX - drag.left));
     return (pointerX / drag.width) * duration;
   }
@@ -3558,7 +3599,10 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     if (!rect.width) return;
     const pointerX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
     const value = (pointerX / rect.width) * duration;
+    const grabPlayhead = event.pointerType === "touch" && Math.abs(pointerX - (offset / duration) * rect.width) <= 24;
     const drag = {
+      fine: grabPlayhead,
+      initialOffset: offset,
       pointerId: event.pointerId,
       left: rect.left,
       width: rect.width,
@@ -3566,7 +3610,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
       startValue: value,
       lastX: event.clientX,
       originX: event.clientX,
-      mode: event.pointerType === "touch" && onPanViewport ? "pending-pan" : "seek",
+      mode: event.pointerType === "touch" && onPanViewport && !grabPlayhead ? "pending-pan" : "seek",
     };
     dragRef.current = drag;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -3576,8 +3620,9 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
     if (previewManifestUrl && !prefersJpegScrubPreview()) setLocalPreviewEnabled(true);
     setScrubbing(true);
-    updateDraft(value, true);
-    schedulePreview(value, true);
+    const seekValue = grabPlayhead ? offset : value;
+    updateDraft(seekValue, true);
+    schedulePreview(seekValue, true);
   }
 
   function moveDrag(event) {
@@ -3612,7 +3657,9 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
     }
     setScrubbing(false);
     hidePreviewAfterDelay();
-    commit(pointerValue(event, drag));
+    commit(drag.fine && Math.abs(event.clientX - drag.originX) < 8
+      ? ((Math.max(0, Math.min(drag.width, event.clientX - drag.left))) / drag.width) * duration
+      : pointerValue(event, drag));
   }
 
   function exportEpochAtPointer(event, drag) {
@@ -3757,7 +3804,7 @@ export function RecordingTimeline({ cameraId, source, previewManifestUrl, previe
           </div>
           <time>{formatTimeOnly(Number.isFinite(preview.epoch) ? preview.epoch : startEpoch + draft, timeZone)}</time>
         </div>
-        <i style={{ left: `${percent}%` }} />
+        <i className="recordings-playhead" style={{ left: `${percent}%` }} />
         <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatTimeOnly(startEpoch + (scrubbing ? draft : offset), timeZone)}</output>
         <input
           type="range"

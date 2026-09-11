@@ -56,6 +56,7 @@ for (const useSegmentPlayback of [false, true]) {
     const video = { currentTime: 10 };
     let continued = false;
     const context = vm.createContext({
+      Number, videoRef: { current: video }, pendingSeekEpochRef: { current: null },
       useSegmentPlayback, nativeSegment: { start_epoch: 90 },
       mediaTimeToEpoch: (time) => 190 + time,
       finishClipPreviewAtEnd(element, epoch) {
@@ -68,6 +69,10 @@ for (const useSegmentPlayback of [false, true]) {
     vm.runInContext(endedHandler, context);
     context.handleRecordingEnded({ currentTarget: video });
     assert.equal(continued, !previewComplete, "continue across segments only while the selected preview is unfinished");
+    continued = false;
+    context.pendingSeekEpochRef.current = 500;
+    context.handleRecordingEnded({ currentTarget: video });
+    assert.equal(continued, false, "outgoing clip ending must not replace a pending seek");
   }
 }
 
