@@ -253,7 +253,7 @@ class SemanticIndexTest(unittest.TestCase):
         })
 
         self.assertEqual(written, 2)
-        self.assertEqual(encoder.calls, [[(100, 200, 3), (60, 100, 3)]])
+        self.assertEqual(encoder.calls, [[(100, 200, 3)], [(60, 100, 3)]])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 2, "event_count": 1})
 
         # A second pass for the same model generation performs no inference.
@@ -263,7 +263,7 @@ class SemanticIndexTest(unittest.TestCase):
             "objects_json": '[{"label":"car","box":{"x1":10,"y1":20,"x2":110,"y2":80}}]',
         })
         self.assertEqual(written, 0)
-        self.assertEqual(len(encoder.calls), 1)
+        self.assertEqual(len(encoder.calls), 2)
 
         # If only crops are missing, repair them without re-encoding the frame.
         self.index.upsert(
@@ -276,7 +276,7 @@ class SemanticIndexTest(unittest.TestCase):
             "snapshot_path": "snapshot.jpg",
             "objects_json": '[{"label":"car","box":{"x1":10,"y1":20,"x2":110,"y2":80}}]',
         })
-        self.assertEqual(encoder.calls[1], [(60, 100, 3)])
+        self.assertEqual(encoder.calls[2], [(60, 100, 3)])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 4, "event_count": 2})
 
     def test_search_event_object_encodes_scaled_snapshot_crop(self) -> None:

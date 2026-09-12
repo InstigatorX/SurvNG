@@ -839,6 +839,33 @@ def test_failed_refinement_preserves_initial_handoff_and_reports_cause() -> None
     assert service.wait_stopped(1.0)
 
 
+def test_unavailable_refinement_preserves_initial_tracking_handoff() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=42, snapshot_path="initial.webp", object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+        refinement_pending=True,
+    )
+    service, decision, tracking, _prewarm, image_reader = _service(initial)
+    decision.refine.return_value = MotionDecisionOutcome(
+        event_id=42, snapshot_path="", object_detected=None,
+        rejection_reason="refinement_unavailable_preserved",
+    )
+    image_reader.return_value = np.ones((20, 20, 3), dtype=np.uint8)
+    handed_off = threading.Event()
+    tracking.start.side_effect = lambda *_: handed_off.set() or True
+    stop = threading.Event()
+    service.start(stop)
+    try:
+        service.process("motion", "person", datetime.now(timezone.utc), {})
+        assert handed_off.wait(1), "unavailable recording stranded an admitted incident"
+        tracking.start.assert_called_once()
+        assert tracking.start.call_args.args[0] == 42
+    finally:
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(1)
+
+
 def test_live_refine_timing_and_oldest_refinement_age_are_reported() -> None:
     initial = MotionDecisionOutcome(
         event_id=None,

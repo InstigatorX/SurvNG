@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..durable_payload import durable_json_dumps
+from ..motion_trigger_authority import merge_trigger_authority
 
 DETECTION_JOB_MAXIMUM_AGE_SECONDS = 20.0
 # A probe that has not admitted an incident becomes irrelevant quickly. Once a
@@ -997,6 +998,56 @@ class EventStoreJobsMixin:
                 )
             return False
 
+    def merge_motion_trigger_authority(
+        self,
+        *,
+        camera_id: str,
+        job_id: str,
+        lifecycle_generation: int,
+        authority: dict[str, Any],
+    ) -> None:
+        """Enrich admitted work without resurrecting a completed delivery.
+
+        Missing rows are expected before initial enqueue. Its coordinator
+        serializes enqueue with ingress and copies the latest intent there.
+        """
+        with self._jobs_lock, self._connect_jobs() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute(
+                "select payload_json from motion_trigger_jobs "
+                "where id = ? and camera_id = ? and state in ('queued', 'running')",
+                (job_id, camera_id),
+            ).fetchone()
+            if row is None:
+                return
+            payload = json.loads(str(row["payload_json"]))
+            if int(payload.get("lifecycle_generation") or 0) != lifecycle_generation:
+                return
+            merged = merge_trigger_authority(payload, authority)
+            if merged == payload:
+                return
+            conn.execute(
+                "update motion_trigger_jobs set payload_json = ?, updated_at = ? where id = ?",
+                (durable_json_dumps(merged, sort_keys=True),
+                 datetime.now(timezone.utc).isoformat(), job_id),
+            )
+
+    def motion_trigger_authority(
+        self, *, camera_id: str, job_id: str
+    ) -> dict[str, Any] | None:
+        with self._connect_jobs() as conn:
+            row = conn.execute(
+                "select payload_json from motion_trigger_jobs where id = ? and camera_id = ?",
+                (job_id, camera_id),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row["payload_json"]))
+        return {
+            "admitted_sources": payload.get("admitted_sources", []),
+            "camera_semantics": payload.get("camera_semantics"),
+        }
+
     def claim_motion_trigger(
         self,
         camera_id: str,
@@ -1095,13 +1146,23 @@ class EventStoreJobsMixin:
         with self._jobs_lock, self._connect_jobs() as conn:
             conn.execute("begin immediate")
             row = conn.execute(
-                "select attempts from motion_trigger_jobs where id = ? "
+                "select attempts, payload_json from motion_trigger_jobs where id = ? "
                 "and state = 'running' "
                 "and (lease_owner = ? or ? = '')",
                 (job_id, lease_owner, lease_owner),
             ).fetchone()
             if row is None:
                 return None
+            if payload is not None:
+                # Ingress can merge a camera notice after this consumer claimed
+                # the job. Checkpoint only processing fields destructively;
+                # authority is additive under this same write transaction.
+                payload_json = durable_json_dumps(
+                    merge_trigger_authority(
+                        payload, json.loads(str(row["payload_json"]))
+                    ),
+                    sort_keys=True,
+                )
             retry = int(row["attempts"]) < maximum_attempts
             cursor = conn.execute(
                 "update motion_trigger_jobs set state = ?, available_at = ?, "

@@ -13,6 +13,7 @@ import numpy as np
 from ..config import CameraConfig, ObjectTrackingConfig
 from ..detector import detection_failure
 from ..domain_events import TrackingCompleted
+from ..evidence_pixels import snapshot_has_luma_only_pixels
 from ..security import redact_secret_text
 from ..video_frames import DecodedVideoFrame, VideoFrameReference
 from ..visual_quality import image_quality
@@ -876,7 +877,7 @@ class ObjectTrackingSession:
                 self.config,
                 float(self.detector.config.confidence_threshold),
             )
-            live_seed = any(item.get("frame_source") == "live_fast_path" for item in initial_objects)
+            live_seed = any(snapshot_has_luma_only_pixels(item) for item in initial_objects)
             color_seed = initial_frame is not None and initial_frame.ndim == 3 and not live_seed
             seed_sidecars = {
                 (item["live_detection_session"], item["live_inference_sequence"])

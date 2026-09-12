@@ -185,7 +185,10 @@ class MotionEventIngressService:
                     source="manual" if manual else "onvif",
                 ).to_payload() | {"event_timing": event_timing.to_payload()},
             )
-            episode = self.events.episode_controller.observe_camera(
+            semantic_reports = camera_semantic_reports(
+                topic, message, self.model_labels()
+            )
+            episode = self.events.observe_camera(
                 CameraNotice(
                     camera_id=self.camera_id,
                     event_at=normalized_event_at.timestamp(),
@@ -193,6 +196,9 @@ class MotionEventIngressService:
                     topic=topic,
                     message=message,
                     manual=manual,
+                    # An empty snapshot is still authoritative; only legacy
+                    # notices without a snapshot are reparsed at decision time.
+                    camera_semantics={"reports": semantic_reports},
                 ),
                 generation=generation,
             )
@@ -206,9 +212,6 @@ class MotionEventIngressService:
                 return
             queued = False
             try:
-                semantic_reports = camera_semantic_reports(
-                    topic, message, self.model_labels()
-                )
                 queued = self.enqueue(MotionTrigger(
                     topic=topic,
                     message=message,

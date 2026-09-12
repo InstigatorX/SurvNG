@@ -7,10 +7,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
+import pytest
 
 from survng.app.appearance_backfill import DeferredAppearanceBackfill
 from survng.app.appearance_index import AppearanceIndex
@@ -237,6 +238,60 @@ class DeferredAppearanceBackfillTest(unittest.TestCase):
             self.assertEqual((state, count), ("completed", 1), reason)
             self.assertTrue(index.has_event(7))
             self.assertEqual(service.process_event(7)[0], "skipped")
+
+
+@pytest.mark.parametrize("source", ["live_fast_path", "live_fallback"])
+@pytest.mark.parametrize("pixel_format", ["", "GRAY8", "BGR"])
+@pytest.mark.parametrize("provisional", [True, False])
+@pytest.mark.parametrize("promoted_source", ["recorded_main", "recorded_refinement", "object_tracking"])
+def test_luma_backfill_defers_until_cover_is_promoted(source, pixel_format, provisional, promoted_source):
+    service = DeferredAppearanceBackfill.__new__(DeferredAppearanceBackfill)
+    service.storage_dir = Path("/unused")
+    service.media_storage = None
+    service.config = ObjectTrackingConfig(
+        vehicle_reid_enabled=True, vehicle_reid_model_path="vehicle.xml",
+        deferred_reid_min_crop_pixels=256,
+    )
+    service.index = Mock()
+    service.index.has_event.return_value = False
+    service.index.append_event.return_value = 1
+    service.encoder = Mock(wraps=_Encoder())
+    obj = {
+        "label": "car", "incident_eligible": True, "frame_source": source,
+        "provisional_detection": provisional,
+        "frame_pixel_format": pixel_format,
+        "box": {"x1": 20, "y1": 10, "x2": 180, "y2": 90},
+        "detection_frame_width": 200, "detection_frame_height": 100,
+    }
+    event = {"id": 7, "camera_id": "gate", "objects_json": json.dumps([obj])}
+    service.event_store = _Events(event)
+    attempted = Mock()
+    # Identical channels could also be a legitimate nighttime main image.
+    # The provenance, not a channel-equality heuristic, controls admission.
+    frame = np.full((100, 200, 3), 127, dtype=np.uint8)
+    with patch("survng.app.appearance_backfill.event_snapshot_path", return_value=Path("/unused")), \
+         patch("survng.app.appearance_backfill.cv2.imread", return_value=frame):
+        state, count, _ = service.process_event(7, on_inference_attempt=attempted)
+        if pixel_format == "BGR":
+            assert (state, count) == ("completed", 1)
+            service.encoder.embed_for_label.assert_called_once()
+            service.index.append_event.assert_called_once()
+            attempted.assert_called_once()
+            return
+        assert (state, count) == ("deferred", 0)
+        service.encoder.embed_for_label.assert_not_called()
+        service.index.append_event.assert_not_called()
+        attempted.assert_not_called()
+
+        # A real promotion preserves the original admission facts but marks
+        # the replacement pixels. The next durable attempt must be eligible.
+        obj.update(snapshot_source=promoted_source, snapshot_visible=True)
+        event["objects_json"] = json.dumps([obj])
+        state, count, reason = service.process_event(7, on_inference_attempt=attempted)
+        assert (state, count) == ("completed", 1), reason
+        service.encoder.embed_for_label.assert_called_once()
+        service.index.append_event.assert_called_once()
+        attempted.assert_called_once()
 
 
 if __name__ == "__main__":

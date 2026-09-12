@@ -48,6 +48,7 @@ class InferenceSupervisor:
         self._initial_active = 0
         self._refinement_active = 0
         self._optional_active = 0
+        self._cpu_optional_active = 0
         self._interactive_active = 0
         self._offline_active = 0
         self._device_workload_stats: dict[InferenceWorkload, dict[str, float | int]] = {
@@ -135,19 +136,42 @@ class InferenceSupervisor:
         with self._config_lock:
             return int(self.config.max_concurrent_refinements)
 
+    def _object_pool_is_gpu(self) -> bool:
+        # Called under the admission condition. Never wait for reconfiguration
+        # (which can itself wait for workers); uncertainty preserves exclusion.
+        if not self._config_lock.acquire(blocking=False):
+            return False
+        try:
+            return bool(self._object_workers) and all(
+                worker.admission_device().split(".", 1)[0] == "GPU"
+                for worker in self._object_workers
+            )
+        finally:
+            self._config_lock.release()
+
+    @staticmethod
+    def _cpu_auxiliary(worker: _InferenceWorker) -> bool:
+        # Explicit/resolved CPU also constrains any restart during this call.
+        # A loaded GPU with a newly changed config, or unknown runtime, cannot
+        # be treated as CPU merely because the next startup is configured so.
+        return worker.cpu_only_configured() and worker.admission_device() == "CPU"
+
     def _enter_device_workload(
         self,
         workload: InferenceWorkload,
         *,
         shed_optional: bool = True,
         timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
+        cpu_only: bool = False,
+        cancel_event: threading.Event | None = None,
+        security_device: str | None = None,
     ) -> bool:
         """Cooperatively keep optional GPU work behind security inference."""
         started = time.monotonic()
         deadline = started + max(0.0, timeout)
         security = self._security_workload(workload)
         with self._device_condition:
-            if not self._device_accepting:
+            if not self._device_accepting or (cancel_event is not None and cancel_event.is_set()):
                 self._device_workload_stats[workload]["shed"] += 1
                 return False
             if security:
@@ -164,7 +188,13 @@ class InferenceSupervisor:
                         if not self._device_accepting:
                             self._device_workload_stats[workload]["shed"] += 1
                             return False
-                        blocked_by_optional = self._optional_active > 0
+                        blocked_by_optional = self._optional_active > 0 and not (
+                            self._optional_active == self._cpu_optional_active
+                            and (
+                                self._object_pool_is_gpu() if security_device is None
+                                else security_device.split(".", 1)[0] == "GPU"
+                            )
+                        )
                         blocked_by_initial = (not initial) and (
                             self._initial_waiting > 0 or self._initial_active > 0
                         )
@@ -200,6 +230,7 @@ class InferenceSupervisor:
                     or self._security_active
                     or self._offline_active
                     or (interactive and self._interactive_active)
+                    or self._cpu_optional_active
                 ):
                     self._device_workload_stats[workload]["shed"] += 1
                     return False
@@ -208,16 +239,19 @@ class InferenceSupervisor:
                     or self._security_active
                     or (offline and self._optional_active)
                     or (not offline and self._offline_active)
+                    or self._cpu_optional_active
                 ):
-                    if not self._device_accepting:
+                    if not self._device_accepting or (cancel_event is not None and cancel_event.is_set()):
                         self._device_workload_stats[workload]["shed"] += 1
                         return False
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         self._device_workload_stats[workload]["timed_out"] += 1
                         return False
-                    self._device_condition.wait(remaining)
+                    self._device_condition.wait(min(remaining, 0.25) if cancel_event is not None else remaining)
                 self._optional_active += 1
+                if cpu_only:
+                    self._cpu_optional_active += 1
                 if interactive:
                     self._interactive_active += 1
                 if offline:
@@ -230,7 +264,7 @@ class InferenceSupervisor:
             self._device_wait_samples[workload].add(wait_ms)
             return True
 
-    def _leave_device_workload(self, workload: InferenceWorkload) -> None:
+    def _leave_device_workload(self, workload: InferenceWorkload, *, cpu_only: bool = False) -> None:
         with self._device_condition:
             if self._security_workload(workload):
                 self._security_active = max(0, self._security_active - 1)
@@ -240,6 +274,8 @@ class InferenceSupervisor:
                     self._refinement_active = max(0, self._refinement_active - 1)
             else:
                 self._optional_active = max(0, self._optional_active - 1)
+                if cpu_only:
+                    self._cpu_optional_active = max(0, self._cpu_optional_active - 1)
                 if workload is InferenceWorkload.INTERACTIVE:
                     self._interactive_active = max(0, self._interactive_active - 1)
                 if workload is InferenceWorkload.OFFLINE:
@@ -248,10 +284,10 @@ class InferenceSupervisor:
             self._device_condition.notify_all()
 
     @contextmanager
-    def offline_device_lease(self):
+    def offline_device_lease(self, *, cancel_event: threading.Event | None = None):
         """Serialize unmanaged offline inference behind security workloads."""
         workload = InferenceWorkload.OFFLINE
-        if not self._enter_device_workload(workload, shed_optional=False, timeout=60.0):
+        if not self._enter_device_workload(workload, shed_optional=False, timeout=60.0, cancel_event=cancel_event):
             raise InferenceUnavailable("offline inference timed out waiting for production")
         try:
             yield
@@ -268,6 +304,7 @@ class InferenceSupervisor:
                 "refinement_active": self._refinement_active,
                 "max_concurrent_refinements": self._max_concurrent_refinements(),
                 "optional_active": self._optional_active,
+                "cpu_optional_active": self._cpu_optional_active,
                 "interactive_active": self._interactive_active,
                 "offline_active": self._offline_active,
                 "accepting": self._device_accepting,
@@ -894,13 +931,14 @@ class InferenceSupervisor:
 
     def embed(self, face: np.ndarray) -> np.ndarray:
         workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload):
+        cpu_only = self._cpu_auxiliary(self._face)
+        if not self._enter_device_workload(workload, cpu_only=cpu_only):
             raise InferenceUnavailable("face embedding shed for incident inference")
         try:
-            result = self._face.request("embed", frame=face, workload=workload)
+            result = self._face.request("embed", frame=face, workload=workload, require_cpu=cpu_only)
             return np.asarray(result, dtype=np.float32)
         finally:
-            self._leave_device_workload(workload)
+            self._leave_device_workload(workload, cpu_only=cpu_only)
 
     def detect_faces(self, frame: np.ndarray) -> list[dict[str, Any]]:
         if (
@@ -909,7 +947,8 @@ class InferenceSupervisor:
         ):
             return []
         workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload):
+        cpu_only = self._cpu_auxiliary(self._face)
+        if not self._enter_device_workload(workload, cpu_only=cpu_only):
             return []
         try:
             return list(
@@ -918,6 +957,7 @@ class InferenceSupervisor:
                     frame=frame,
                     confidence_threshold=self.config.face_detection_threshold,
                     workload=workload,
+                    require_cpu=cpu_only,
                 )
                 or []
             )
@@ -925,11 +965,12 @@ class InferenceSupervisor:
             LOGGER.warning("Dedicated face detection unavailable: %s", exc)
             return []
         finally:
-            self._leave_device_workload(workload)
+            self._leave_device_workload(workload, cpu_only=cpu_only)
 
     def embed_person(self, person: np.ndarray) -> np.ndarray:
         workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload):
+        cpu_only = self._cpu_auxiliary(self._reid)
+        if not self._enter_device_workload(workload, cpu_only=cpu_only):
             raise InferenceUnavailable("person ReID shed for incident inference")
         try:
             result = self._reid.request(
@@ -937,14 +978,16 @@ class InferenceSupervisor:
                 frame=person,
                 timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
                 workload=workload,
+                require_cpu=cpu_only,
             )
             return np.asarray(result, dtype=np.float32)
         finally:
-            self._leave_device_workload(workload)
+            self._leave_device_workload(workload, cpu_only=cpu_only)
 
     def embed_reid(self, label: str, crop: np.ndarray) -> np.ndarray:
         workload = InferenceWorkload.ENRICHMENT
-        if not self._enter_device_workload(workload):
+        cpu_only = self._cpu_auxiliary(self._reid)
+        if not self._enter_device_workload(workload, cpu_only=cpu_only):
             raise InferenceUnavailable("object ReID shed for incident inference")
         try:
             result = self._reid.request(
@@ -953,10 +996,11 @@ class InferenceSupervisor:
                 label=str(label or "").strip().lower(),
                 timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
                 workload=workload,
+                require_cpu=cpu_only,
             )
             return np.asarray(result, dtype=np.float32)
         finally:
-            self._leave_device_workload(workload)
+            self._leave_device_workload(workload, cpu_only=cpu_only)
 
     def estimate_depth_for_objects(
         self,
@@ -974,7 +1018,13 @@ class InferenceSupervisor:
         optional_slot = workload >= InferenceWorkload.INTERACTIVE
         if optional_slot and not self._depth_optional_slot.acquire(blocking=False):
             return list(objects), {"status": "depth_deferred"}
-        if not self._enter_device_workload(workload, shed_optional=True):
+        cpu_only = optional_slot and self._cpu_auxiliary(self._depth)
+        if not self._enter_device_workload(
+            workload,
+            shed_optional=True,
+            cpu_only=cpu_only,
+            security_device=self._depth.admission_device(),
+        ):
             if optional_slot:
                 self._depth_optional_slot.release()
             return list(objects), {"status": "depth_deferred"}
@@ -987,6 +1037,7 @@ class InferenceSupervisor:
                     frame_offset_s=frame_offset_s,
                     include_heatmap=include_heatmap,
                     workload=workload,
+                    require_cpu=cpu_only,
                 )
                 or {}
             )
@@ -1003,7 +1054,7 @@ class InferenceSupervisor:
                 "error": "Depth estimation failed in the isolated worker.",
             }
         finally:
-            self._leave_device_workload(workload)
+            self._leave_device_workload(workload, cpu_only=cpu_only)
             if optional_slot:
                 self._depth_optional_slot.release()
 

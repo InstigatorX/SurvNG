@@ -23,6 +23,7 @@ def _service(
     owned.events.enqueue.return_value = True
     owned.events.episode_controller = MotionEpisodeController("gate")
     owned.events.episode_controller.start_generation(1)
+    owned.events.observe_camera.side_effect = owned.events.episode_controller.observe_camera
     owned.state.accepting_events.return_value = accepting
     owned.state.detection_enabled.return_value = detection_enabled
     owned.state.begin_ingress.return_value = (

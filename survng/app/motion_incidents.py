@@ -1071,6 +1071,9 @@ class MotionIncidentService:
                         outcome.rejection_reason or "refinement returned no terminal evidence",
                         lease_owner=self._lease_owner,
                     )
+                    # Preserve the initial handoff on unavailable evidence,
+                    # matching the exception path while refinement retries.
+                    self._handoff(job.initial_outcome, job.event_at)
                     if retrying:
                         try:
                             self._refinement_queue.put_nowait(True)

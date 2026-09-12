@@ -106,6 +106,15 @@ class _InferenceWorker:
             return next(iter(devices)) if len(devices) == 1 else "CPU"
         return self.config.device
 
+    def cpu_only_configured(self) -> bool:
+        if self.role == "reid":
+            tracking = self.config.tracking
+            return (
+                (not tracking.reid_enabled or tracking.resolved_reid_device() == "CPU")
+                and (not tracking.vehicle_reid_enabled or tracking.resolved_vehicle_reid_device() == "CPU")
+            )
+        return self.configured_device == "CPU"
+
     def update_config_reference(self, config: DetectorConfig) -> None:
         """Update configuration used by status and any future worker respawn."""
         with self._lock:
@@ -519,6 +528,7 @@ class _InferenceWorker:
         timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
         admission_timeout: float | None = None,
         workload: InferenceWorkload = InferenceWorkload.INTERACTIVE,
+        require_cpu: bool = False,
         **payload: Any,
     ) -> Any:
         if timeout <= 0:
@@ -580,11 +590,18 @@ class _InferenceWorker:
                     f"{self.role} {operation} timed out waiting for the inference worker"
                 )
             try:
+                # Reconfiguration may complete between device admission and
+                # acquiring this lock. Never start/compile a GPU process using
+                # an exemption granted to an earlier CPU generation.
+                if require_cpu and not self.cpu_only_configured():
+                    raise InferenceUnavailable("CPU-only admission invalidated by device reconfiguration")
                 remaining = deadline - time.monotonic()
                 if not self._ensure_worker_locked(startup_timeout=max(0.0, remaining)):
                     raise InferenceUnavailable(
                         self._last_error or f"{self.role} inference worker is unavailable"
                     )
+                if require_cpu and self.admission_device() != "CPU":
+                    raise InferenceUnavailable("CPU-only admission requires a loaded CPU worker")
                 connection = self._connection
                 if connection is None:
                     raise InferenceUnavailable(
@@ -688,6 +705,32 @@ class _InferenceWorker:
                 status[key] = {**child, "ready": False}
         return status
 
+    def admission_device(self) -> str:
+        """Return a proven current device without waiting behind inference IPC.
+
+        Admission must not assume the configured GPU survived CPU fallback or
+        that a stale status still describes a live worker. Unknown is safe.
+        """
+        if not self._lock.acquire(blocking=False):
+            return ""
+        try:
+            if self._process is None or not self._process.is_alive():
+                return ""
+            if self.role == "reid":
+                devices = {
+                    str(child.get("loaded_device") or child.get("device") or "").upper()
+                    if child.get("ready") else ""
+                    for key in ("person", "vehicle")
+                    if isinstance(child := self._status.get(key), dict)
+                    and child.get("enabled")
+                }
+                return next(iter(devices)) if len(devices) == 1 else ""
+            if self.role != "object" and not self._status.get("ready"):
+                return ""
+            return str(self._status.get("loaded_device") or self._status.get("device") or "").upper()
+        finally:
+            self._lock.release()
+
     def pending_requests(self) -> int:
         """Return pool-routing pressure without waiting for worker IPC."""
         with self._pending_lock:
@@ -749,6 +792,12 @@ class _InferenceWorker:
                 "enabled": self.start_enabled,
                 "role": self.role,
                 "configured_device": self.configured_device,
+                "loaded_device": str(self._status.get("loaded_device") or self._status.get("device") or "") if worker_alive else "",
+                "loaded_devices": {
+                    key: str(child.get("loaded_device") or child.get("device") or "") if worker_alive and child.get("ready") else ""
+                    for key in ("person", "vehicle")
+                    if isinstance(child := self._status.get(key), dict)
+                },
                 "worker_pid": process.pid if worker_alive else None,
                 "worker_alive": worker_alive,
                 "generation": self._generation,

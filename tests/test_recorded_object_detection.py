@@ -833,6 +833,41 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertIn("select=", " ".join(command))
         self.assertIn("showinfo@event_sample", " ".join(command))
 
+    def test_recorded_batch_selects_before_hardware_download(self) -> None:
+        frame = np.full((12, 16, 3), 17, dtype=np.uint8)
+        _, encoded = cv2.imencode(".bmp", frame)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recording = Path(tmpdir) / "sample.mp4"
+            recording.touch()
+            for mode in ("vaapi", "qsv", "off"):
+                with self.subTest(mode=mode):
+                    backend = RecordedMotionObjectDetector(
+                        CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+                        SimpleNamespace(config=SimpleNamespace()),
+                        SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration=mode),
+                        lambda: None,
+                    )
+                    process = Mock()
+                    process.returncode = 0
+                    process.wait.return_value = 0
+                    process.stdout = BytesIO(encoded.tobytes())
+                    process.stderr = BytesIO(
+                        b"[showinfo@event_sample] n: 0 pts: 94500 pts_time:1.05\n"
+                    )
+                    with patch(
+                        "survng.app.motion_pipeline.object_detection.subprocess.Popen",
+                        return_value=process,
+                    ) as popen:
+                        frames, count = backend._read_recorded_frames(recording, [1.0])
+                    self.assertEqual(count, 1)
+                    self.assertEqual(frames[1.0].actual_offset, 1.05)
+                    self.assertTrue(np.array_equal(frames[1.0].frame, frame))
+                    command = popen.call_args.args[0]
+                    filters = command[command.index("-vf") + 1]
+                    self.assertTrue(filters.startswith("select="))
+                    self.assertTrue(filters.endswith("showinfo@event_sample"))
+                    self.assertEqual("hwdownload,format=nv12" in filters, mode != "off")
+
     def test_nonselected_recorded_frames_are_released(self) -> None:
         samples = [
             sample(-0.5, [detected("car", 0.8, (2, 2, 12, 12))]),

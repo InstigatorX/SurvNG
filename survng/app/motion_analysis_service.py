@@ -110,6 +110,8 @@ class MotionEvidenceFrame:
     lifecycle_generation: int
     source_pts: float = float("nan")
     source_session: str = ""
+    # Original capture format, before EMA expands luma to three channels.
+    pixel_format: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,6 +573,7 @@ class MotionAnalysisService:
                 lifecycle_generation=lifecycle_generation,
                 source_pts=source_pts,
                 source_session=source_session,
+                pixel_format="GRAY8" if is_gray else "BGR",
             ))
             if processed is not None:
                 self.processed_frames.append((frame_epoch, processed))

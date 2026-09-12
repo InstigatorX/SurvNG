@@ -16,6 +16,7 @@ from survng.app.local_observability import (
     MAX_RECENT_LOG_ROWS,
     MAX_MOTION_STAGES,
     build_runtime_status,
+    _detector_snapshot,
     request_runtime_status,
 )
 
@@ -156,6 +157,53 @@ def test_runtime_status_is_effective_and_strictly_allowlisted() -> None:
     assert "rtsp://" not in encoded
     assert "stream_url" not in encoded
     assert "private_key" not in encoded
+
+
+def test_detector_snapshot_distinguishes_configured_device_and_cpu_fallback() -> None:
+    payload = _detector_snapshot(AppConfig(detector={"device": "GPU"}), {
+        "loaded_backend": "openvino", "loaded_device": "CPU",
+        "isolation": {"enabled": True, "worker_alive": True, "fallback_active": True},
+    })
+    assert payload["device"] == "GPU"  # Existing configured-device contract.
+    assert payload["loaded_devices"] == ["CPU"]
+    assert payload["fallback_active"] is True
+    assert payload["ready"] is True
+
+
+def test_detector_snapshot_reports_mixed_workers_and_excludes_stopped_devices() -> None:
+    secret = "private-model-error"
+    worker = {
+        "configured_device": "GPU", "worker_alive": True,
+        "loaded_device": "GPU", "last_error": secret, "model_path": secret,
+    }
+    payload = _detector_snapshot(AppConfig(), {
+        "loaded_device": "GPU",  # Aggregate used to report only worker zero.
+        "isolation": {
+            "enabled": True, "worker_alive": True, "fallback_active": True,
+            "restart_count": 3, "crash_count": 2,
+            "instances": [
+                {"index": 1, **worker},
+                {"index": 2, **worker, "loaded_device": "CPU", "fallback_active": True},
+                {"index": 3, **worker, "loaded_device": "NPU", "worker_alive": False},
+            ],
+        },
+        "workers": {"face": {**worker, "configured_device": "CPU", "loaded_device": "CPU"}},
+    })
+    assert payload["loaded_devices"] == ["CPU", "GPU"]
+    assert payload["workers"]["restart_count"] == 3
+    assert payload["workers"]["crash_count"] == 2
+    assert payload["workers"]["instances"][1]["fallback_active"] is True
+    assert payload["workers"]["instances"][2]["loaded_device"] == ""
+    assert payload["auxiliary_workers"]["face"]["loaded_device"] == "CPU"
+    assert secret not in json.dumps(payload)
+
+
+def test_detector_snapshot_does_not_infer_actual_device_from_configuration() -> None:
+    assert _detector_snapshot(AppConfig(detector={"device": "GPU"}), {})["loaded_devices"] == []
+    payload = _detector_snapshot(AppConfig(), {
+        "loaded_device": "GPU", "isolation": {"enabled": True, "worker_alive": False},
+    })
+    assert payload["loaded_devices"] == []
 
 
 def test_runtime_status_log_tail_is_bounded_allowlisted_and_redacted() -> None:

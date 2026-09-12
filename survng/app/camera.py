@@ -710,6 +710,7 @@ class CameraWorker:
             source_pts=frame.source_pts,
             source_session=frame.source_session,
             spatial_alignment=dict(alignment),
+            pixel_format="GRAY8" if frame.image.ndim == 2 else "BGR",
         )
 
     def _get_evidence_detection_frame(
@@ -754,6 +755,7 @@ class CameraWorker:
             source_pts=selected.source_pts,
             source_session=selected.source_session,
             spatial_alignment=dict(alignment),
+            pixel_format=selected.pixel_format,
         )
 
     def _get_latest_tracking_frame(

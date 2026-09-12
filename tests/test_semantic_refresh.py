@@ -59,10 +59,12 @@ def test_cover_refresh_supersedes_inflight_and_queued_evidence(tmp_path):
     assert service.index_event(stale) == 0
     _, _, queued = service._queue.get_nowait()
     assert service.index_event(queued) == 2
-    assert service.encoder.calls == 2
+    # The stale cover stops before its crop; the replacement encodes cover
+    # and crop separately so production can be admitted between them.
+    assert service.encoder.calls == 3
     _, _, delayed = service._queue.get_nowait()
     assert service.index_event(delayed) == 0
-    assert service.encoder.calls == 2
+    assert service.encoder.calls == 3
     with index._connect() as connection:
         rows = connection.execute('select image_path from semantic_embeddings where event_id=1').fetchall()
     assert len(rows) == 2
