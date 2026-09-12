@@ -95,3 +95,46 @@ Use a read-only recording/model mount and GPU device access. Choose the negative
 window for the actual clip, not an arbitrary timestamp. The command fails for
 empty-only output, incomplete playback, or detections in the specified empty
 window. It does not replace full-app replay or multi-camera/recovery testing.
+
+## Published-image and deployment validation
+
+Implementation commit: `8731deb98a175ae9a6c707340e585a37d55c5920`.
+Test-server image: `ghcr.io/instigatorx/survng:sha-8731deb-intel`, manifest digest
+`sha256:7710b9b32b82a33b66954ca72db8d2dc19562750a11b6f2985da5c5b4933e0b7`.
+The installed native packages were verified as DL Streamer 2026.2.0 and
+OpenVINO 2026.2.0.21903. No diagnostic code or source-file overrides are deployed.
+
+- [CI](https://github.com/InstigatorX/SurvNG/actions/runs/34670188521) passed:
+  2,134 Python tests, 216 subtests, 14 skips; all 52 frontend test files; native
+  Intel metadata and multistream smoke checks. The optional legacy Ultralytics
+  dependency responsible for the baseline local failure is absent in CI.
+- [Docker publication](https://github.com/InstigatorX/SurvNG/actions/runs/34670188507)
+  passed and reused unaffected dependency layers.
+- An isolated three-camera hardware harness discarded only detection messages
+  for an eight-second window while video continued. The five-second watchdog
+  fired, terminated the old supervisor, and all three cameras recovered with
+  new evidence sessions and advancing inference. The harness asserted recovery
+  at the end of its 95-second run; fault injection is not application code.
+- The unmodified published image ran a five-minute full-application test with
+  real Gate/Foyer streams and the aligned Downstairs recording replay. Observed
+  consecutive live person admissions were 0.590 and 0.693 seconds after the EMA
+  trigger; recorded-main confirmation followed at 7.615 and 12.843 seconds.
+  All three cameras maintained inference progress without session resets or
+  inference failures. Recording references and thumbnails existed.
+- The normal three-camera test service was restored on the same image and
+  passed a separate five-minute observation, including a normal event
+  refinement. It remained container-healthy with zero restarts and zero failed
+  inferences. Finalized main/live recordings for all cameras contained readable
+  H.264 video and AAC audio. Memory was approximately 2.4 GiB at a sampled check.
+- Six prewarm errors on deployment corresponded to old, incomplete recording
+  tails from before deployment, with missing MP4 `moov` atoms. Existing index
+  revalidation marked them unplayable; no recordings were deleted. Separately,
+  all six final recording tails from the clean-image replay shutdown validated.
+- Only live inference cadence changed in the test configuration: 2.5 FPS,
+  while EMA remains 5 FPS and configured tracking remains 2 FPS. Previous
+  configuration and Compose files have `.before-8731deb` backups on the test
+  host. Replay containers are stopped; original footage/models are preserved.
+
+These are bounded regression and hardware checks, not an exhaustive accuracy
+benchmark or an overnight stability guarantee. Recorded-main confirmation still
+depends on segment finalization; timestamp-mismatched live evidence is rejected.
