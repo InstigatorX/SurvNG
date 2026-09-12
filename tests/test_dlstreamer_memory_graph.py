@@ -1,6 +1,7 @@
 """Exercise graph construction without GI; real VA negotiation needs a GPU."""
 
 from fractions import Fraction
+import io
 from pathlib import Path
 import sys
 import threading
@@ -41,8 +42,14 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         def get_name(self):
             return self.name
 
+    contexts = []
+    shared_context = object() if decoder == "va" and not test_source else None
+
+    def add(element):
+        assert contexts == ([shared_context] if shared_context is not None else [])
+
     pipeline = SimpleNamespace(
-        add=lambda element: None, connect=lambda *args: None,
+        add=add, connect=lambda *args: None, set_context=contexts.append,
         get_bus=lambda: None, set_state=lambda state: 0,
         get_by_name=lambda name: elements.get(name),
     )
@@ -68,6 +75,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         stop_event=stop, encode_frame=None, encode_jpeg=None, encode_json=None,
         TYPE_DETECTIONS=2, TYPE_STATUS=3, install_signals=False,
         test_source=test_source, source_role=role,
+        va_context=shared_context,
     )
     va = decoder == "va" and detect and not test_source
     expected = "vapostproc" if va else "videoconvert"
@@ -110,3 +118,78 @@ def test_negotiated_memory_uses_actual_pad_caps():
     element = SimpleNamespace(get_static_pad=lambda name: SimpleNamespace(get_current_caps=lambda: caps))
     assert live._negotiated_memory(element) == "memory:VAMemory"
     assert live._negotiated_memory(None) is None
+
+
+@pytest.mark.parametrize("detect", [True, False])
+def test_supervisor_retains_one_context_across_live_main_and_reconnect(monkeypatch, detect):
+    shared_context = object()
+    created = []
+    received = []
+
+    def create(gst):
+        created.append(shared_context)
+        return shared_context
+
+    def pump(gst, args, **kwargs):
+        received.append((kwargs["stream_id"], kwargs["source_role"], kwargs["va_context"]))
+        assert kwargs["stop_event"].wait(2), "supervisor must join its workers"
+
+    monkeypatch.setattr(live, "_create_shared_va_context", create)
+    monkeypatch.setattr(live, "_pump_pipeline", pump)
+    commands = (
+        b'{"op":"add","stream_id":"live","url":"rtsp://fixture.invalid/live"}\n'
+        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main"}\n'
+        b'{"op":"remove","stream_id":"main"}\n'
+        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main"}\n'
+    )
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(commands)))
+    args = live._parser().parse_args(["--decoder", "va"])
+    live._run_supervisor(
+        object(), args, detect=detect, model_path=Path("fixture.xml"),
+        instance_id="shared", rate=Fraction(5), detect_rate=Fraction(5),
+        qualifier_width=320, jpeg_rate=None, open_timeout=3, stdout=io.BytesIO(),
+    )
+    assert created == ([shared_context] if detect else [])
+    expected_context = shared_context if detect else None
+    assert sorted(received) == [
+        ("live", "live", expected_context),
+        ("main", "main", expected_context),
+        ("main", "main", expected_context),
+    ]
+
+
+@pytest.mark.parametrize("display_available", [True, False])
+def test_shared_context_uses_decoder_device_and_releases_probe(monkeypatch, display_available):
+    states, paths = [], []
+    display = object() if display_available else None
+    context = SimpleNamespace(display=None)
+    decoder = SimpleNamespace(
+        set_state=lambda state: states.append(state),
+        get_property=lambda name: "/dev/dri/renderD129",
+    )
+    gst = SimpleNamespace(
+        ElementFactory=SimpleNamespace(make=lambda name: decoder),
+        State=SimpleNamespace(READY=1, NULL=0),
+        StateChangeReturn=SimpleNamespace(FAILURE=-1),
+        Context=SimpleNamespace(new=lambda name, persistent: context),
+    )
+
+    def open_display(path):
+        paths.append(path)
+        return display
+
+    va = SimpleNamespace(
+        VaDisplayDrm=SimpleNamespace(new_from_path=open_display),
+        VA_DISPLAY_HANDLE_CONTEXT_TYPE_STR="gst.va.display.handle",
+        context_set_va_display=lambda context, display: setattr(context, "display", display),
+    )
+    monkeypatch.setitem(sys.modules, "gi", SimpleNamespace(require_version=lambda *args: None))
+    monkeypatch.setitem(sys.modules, "gi.repository", SimpleNamespace(GstVa=va))
+    if display_available:
+        assert live._create_shared_va_context(gst) is context
+        assert context.display is display
+    else:
+        with pytest.raises(RuntimeError, match="could not open shared VA display"):
+            live._create_shared_va_context(gst)
+    assert paths == ["/dev/dri/renderD129"]
+    assert states == [gst.State.READY, gst.State.NULL]

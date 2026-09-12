@@ -160,7 +160,7 @@ def test_buffered_sidecars_keep_tracking_continuity_without_rgb_inference(monkey
 
 def run_supervisor():
     return native._run_supervisor(
-        None, SimpleNamespace(test_source=False, main_fps=2), detect=False,
+        None, SimpleNamespace(test_source=False, main_fps=2, decoder="auto"), detect=False,
         model_path=None, instance_id="", rate=Fraction(5), detect_rate=Fraction(5),
         qualifier_width=320, jpeg_rate=None, open_timeout=3, stdout=io.BytesIO(),
     )

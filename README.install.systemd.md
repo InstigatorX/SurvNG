@@ -99,6 +99,8 @@ These packages are required for live capture, including CPU inference;
 The check verifies runtime loading and capture elements without opening cameras.
 For Intel GPU operation, complete section 10's driver setup before starting
 SurvNG. The runtime check does not validate GPU access or model inference.
+On a new Intel GPU host, use `install-native-runtime.sh --intel-gpu` in the
+block above to install the coordinated, pinned Intel userspace stack too.
 
 ## 5. Private config and media path
 
@@ -325,20 +327,14 @@ ffmpeg -hide_banner -hwaccels
 
 Expect `CPU` and `GPU`. Then select `GPU` or `AUTO` in Admin.
 
-Coordinated PPA upgrade (stops SurvNG; reboot after):
+Coordinated PPA upgrade (stops SurvNG; reboot after). The installer's
+`--intel-gpu` option pins media, compute, IGC, GMM and Level Zero versions
+alongside DL Streamer to match the branch's Docker build:
 
 ```bash
 sudo systemctl stop survng.service
-sudo apt-get update
-sudo apt-get install -y software-properties-common
-sudo add-apt-repository -y ppa:kobuk-team/intel-graphics
-sudo apt-get update
-sudo apt-get --simulate install \
-  intel-opencl-icd libze-intel-gpu1 libze1 clinfo \
-  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 libvpl-tools vainfo
-sudo apt-get install -y \
-  intel-opencl-icd libze-intel-gpu1 libze1 clinfo \
-  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 libvpl-tools vainfo
+sudo bash "$SURVNG_ROOT/scripts/install-native-runtime.sh" --intel-gpu
+sudo apt-get install -y clinfo libvpl-tools vainfo
 sudo -u survng mv "$SURVNG_ROOT/.cache/openvino" \
   "$SURVNG_ROOT/.cache/openvino-before-intel-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
 sudo -u survng mkdir -p "$SURVNG_ROOT/.cache/openvino"

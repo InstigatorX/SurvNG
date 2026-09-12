@@ -378,7 +378,13 @@ class _SharedLiveProcess:
         except Exception as error:
             detail = redact_secret_text(str(error))[:400]
             failure = f"DL Streamer supervisor failed ({type(error).__name__}): {detail}"
-            LOGGER.warning("%s", failure)
+            # One bounded diagnostic per supervisor failure. Keep the native
+            # cause beyond the source-file prefix; camera retries stay concise.
+            LOGGER.warning(
+                "DL Streamer supervisor failed (%s): %s; native stderr: %s",
+                type(error).__name__, redact_secret_text(str(error))[-4000:],
+                redact_secret_text(self._stderr.decode("utf-8", errors="replace"))[-4000:],
+            )
         finally:
             self._failed = True
             with self._lock:
@@ -389,6 +395,7 @@ class _SharedLiveProcess:
     def _check_inference_progress(self, now: float) -> None:
         with self._lock:
             inboxes = list(self._inboxes.values())
+        active = False
         for inbox in inboxes:
             if not inbox.alive or inbox.inference_started_at is None:
                 continue
@@ -397,6 +404,7 @@ class _SharedLiveProcess:
             # while the same stream is still delivering video.
             if inbox.last_frame_at is None or now - inbox.last_frame_at > 1.0:
                 continue
+            active = True
             progress = inbox.last_inference_at
             if progress is None:
                 progress = inbox.inference_started_at
@@ -405,10 +413,14 @@ class _SharedLiveProcess:
                 # continuous video. Give its first resumed frame the normal
                 # bounded inference budget without inventing result progress.
                 progress = max(progress, inbox.video_resumed_at)
-            if now - progress > DLSTREAMER_INFERENCE_STALL_SECONDS:
-                # The native model and its request pool are shared. Reopening
-                # one pipeline cannot recover a wedged shared inference pool.
-                raise RuntimeError("shared live inference stalled: no new result for 5 seconds")
+            if now - progress <= DLSTREAMER_INFERENCE_STALL_SECONDS:
+                # One delayed camera is not proof that the shared pool is
+                # wedged: other cameras can still complete inference under
+                # load. Their progress must prevent a global capture reset.
+                # Per-camera snapshot freshness still rejects stale results.
+                return
+        if active:
+            raise RuntimeError("shared live inference stalled: no new result for 5 seconds")
 
     def _dispatch(self, message_type: int, payload: bytes) -> None:
         if message_type == TYPE_FATAL:

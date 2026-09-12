@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import runpy
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,15 @@ from survng import dlstreamer_live as native
 
 
 CHECK = Path(__file__).resolve().parents[1] / "scripts/check-native-runtime.py"
+
+
+def test_native_driver_pins_match_docker():
+    root = CHECK.parents[1]
+    docker = dict(re.findall(r"^ARG (\w+_VERSION)=(\S+)$", (root / "Dockerfile").read_text(), re.M))
+    native = dict(re.findall(r"^(\w+_version)=(\S+)$", (root / "scripts/install-native-runtime.sh").read_text(), re.M))
+    assert native
+    for name, version in native.items():
+        assert version == docker[name.upper()], name
 
 
 @pytest.mark.parametrize("failure", ["Namespace Gst not available", "required GStreamer element is unavailable: gvadetect"])

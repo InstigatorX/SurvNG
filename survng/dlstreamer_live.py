@@ -252,6 +252,39 @@ def _load_gstreamer():
     return Gst
 
 
+def _create_shared_va_context(Gst):
+    """Own one VA display for the lifetime of the shared inference pool.
+
+    Separate per-camera displays force DL Streamer to export/import surfaces
+    between driver contexts. Main-stream teardown must not change the display
+    used by the shared live model. Use the VA decoder's selected render device.
+    """
+    import gi
+
+    gi.require_version("GstVa", "1.0")
+    from gi.repository import GstVa
+
+    decoder = next((element for name in ("vah264dec", "vah265dec")
+                    if (element := Gst.ElementFactory.make(name)) is not None), None)
+    if decoder is None:
+        raise RuntimeError("shared VA capture requires a GStreamer VA decoder")
+    try:
+        if decoder.set_state(Gst.State.READY) == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError("could not initialize VA decoder to select render device")
+        device_path = decoder.get_property("device-path")
+        if not device_path:
+            raise RuntimeError("VA decoder did not select a render device")
+        display = GstVa.VaDisplayDrm.new_from_path(device_path)
+        if display is None:
+            raise RuntimeError(f"could not open shared VA display on {device_path}")
+        context = Gst.Context.new(GstVa.VA_DISPLAY_HANDLE_CONTEXT_TYPE_STR, True)
+        # The context owns a reference to the display, beyond the probe decoder.
+        GstVa.context_set_va_display(context, display)
+        return context
+    finally:
+        decoder.set_state(Gst.State.NULL)
+
+
 def _prefer_decoder(Gst, family: str) -> None:
     preferred = DECODERS[family]
     registry = Gst.Registry.get()
@@ -541,6 +574,12 @@ def _run_supervisor(
     stop_all = threading.Event()
     workers: dict[str, tuple[threading.Event, threading.Thread]] = {}
     workers_lock = threading.Lock()
+    # Keep the display alive until all live/main workers have stopped. Every
+    # pipeline must inherit it before creating decoders or inference elements.
+    va_context = (
+        _create_shared_va_context(Gst)
+        if detect and args.decoder == "va" and not args.test_source else None
+    )
     print(
         f"survng-dls supervisor model_instance_id={instance_id or 'none'}",
         file=sys.stderr,
@@ -601,6 +640,7 @@ def _run_supervisor(
                     install_signals=False,
                     test_source=args.test_source,
                     source_role=source_role,
+                    va_context=va_context,
                 )
             except Exception as exc:
                 _write(
@@ -701,11 +741,14 @@ def _pump_pipeline(
     install_signals: bool = True,
     test_source: bool | None = None,
     source_role: str = "live",
+    va_context=None,
 ) -> int:
     use_test_source = args.test_source if test_source is None else test_source
     pipeline = Gst.Pipeline.new(_pipeline_name(stream_id))
     if pipeline is None:
         raise RuntimeError("could not create GStreamer pipeline")
+    if va_context is not None:
+        pipeline.set_context(va_context)
 
     source, source_factory = _make_live_source(Gst, test_source=use_test_source)
     print(

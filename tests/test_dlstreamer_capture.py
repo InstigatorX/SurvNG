@@ -285,6 +285,7 @@ def test_shared_supervisor_serves_two_handles_from_one_process() -> None:
 
 
 def test_apply_dlstreamer_env_keeps_ubuntu_playback_plugins(monkeypatch) -> None:
+    monkeypatch.setattr(Path, "is_dir", lambda p: str(p) == _SYSTEM_GST_PLUGINS)
     monkeypatch.delenv("GST_PLUGIN_SYSTEM_PATH", raising=False)
     monkeypatch.delenv("GST_PLUGIN_SYSTEM_PATH_1_0", raising=False)
     _apply_dlstreamer_env()
@@ -321,8 +322,10 @@ def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog, 
     monkeypatch.setattr("survng.app.dlstreamer_capture.select.select", lambda *args: ([True], [], []))
     shared = _SharedLiveProcess([], read_timeout_ms=1000)
     shared._inboxes = {name: _StreamInbox() for name in ("gate", "downstairs")}
+    shared._stderr.extend(b"native detail rtsp://admin:stderr-secret@camera/live")
     shared._process = SimpleNamespace(stdout=io.BytesIO(encode_json(
-        TYPE_FATAL, {"ok": False, "error": "libopencv missing; rtsp://admin:secret@camera/live"},
+        TYPE_FATAL, {"ok": False, "error": "libopencv missing; rtsp://admin:secret@camera/live"
+                    + "x" * 500 + "; native root cause beyond source prefix"},
     )))
     shared._read_stdout()
     for inbox in shared._inboxes.values():
@@ -331,6 +334,8 @@ def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog, 
         assert "secret" not in inbox.error
         assert "ProtocolError" not in inbox.error
     assert "secret" not in caplog.text
+    assert "native root cause beyond source prefix" in caplog.text
+    assert "native detail" in caplog.text
 
 
 def test_inference_watchdog_distinguishes_empty_results_from_stalled_metadata(monkeypatch):
@@ -378,6 +383,31 @@ def test_stream_error_is_local_but_native_inference_error_fails_shared_reader(mo
     shared._read_stdout()
     assert shared._failed
     assert all(not inbox.alive for inbox in shared._inboxes.values())
+
+
+def test_shared_watchdog_does_not_reset_working_pool_for_one_delayed_camera():
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    delayed, working, main = _StreamInbox(), _StreamInbox(), _StreamInbox()
+    for inbox in (delayed, working):
+        inbox.inference_started_at = 10.0
+        inbox.last_frame_at = 19.9
+    delayed.last_inference_at = 12.0
+    working.last_inference_at = 19.5
+    main.last_frame_at = 19.9
+    shared._inboxes = {"delayed": delayed, "working": working, "main": main}
+    shared._check_inference_progress(20.0)
+    assert all(inbox.alive for inbox in shared._inboxes.values())
+
+    # A real pool-wide stall still fails, even while main/video frames arrive.
+    working.last_inference_at = 12.0
+    with pytest.raises(RuntimeError, match="shared live inference stalled"):
+        shared._check_inference_progress(20.0)
+
+    # Results from a retired stream cannot conceal a stalled active pool.
+    working.last_inference_at = 19.5
+    working.alive = False
+    with pytest.raises(RuntimeError, match="shared live inference stalled"):
+        shared._check_inference_progress(20.0)
 
 
 def test_stalled_shared_process_is_replaced_and_sessions_are_not_reused(monkeypatch):
