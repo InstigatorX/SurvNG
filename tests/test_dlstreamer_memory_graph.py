@@ -159,7 +159,8 @@ def test_supervisor_retains_one_context_across_live_main_and_reconnect(monkeypat
 
 
 @pytest.mark.parametrize("display_available", [True, False])
-def test_shared_context_uses_decoder_device_and_releases_probe(monkeypatch, display_available):
+@pytest.mark.parametrize("decoder_factory", ["vah264dec", "vah265dec"])
+def test_shared_context_uses_decoder_device_and_releases_probe(monkeypatch, display_available, decoder_factory):
     states, paths = [], []
     display = object() if display_available else None
     context = SimpleNamespace(display=None)
@@ -167,8 +168,12 @@ def test_shared_context_uses_decoder_device_and_releases_probe(monkeypatch, disp
         set_state=lambda state: states.append(state),
         get_property=lambda name: "/dev/dri/renderD129",
     )
+    def make(name):
+        assert name == decoder_factory, "GI can raise when an unavailable factory is constructed"
+        return decoder
+
     gst = SimpleNamespace(
-        ElementFactory=SimpleNamespace(make=lambda name: decoder),
+        ElementFactory=SimpleNamespace(make=make, find=lambda name: object() if name == decoder_factory else None),
         State=SimpleNamespace(READY=1, NULL=0),
         StateChangeReturn=SimpleNamespace(FAILURE=-1),
         Context=SimpleNamespace(new=lambda name, persistent: context),

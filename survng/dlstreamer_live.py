@@ -264,8 +264,14 @@ def _create_shared_va_context(Gst):
     gi.require_version("GstVa", "1.0")
     from gi.repository import GstVa
 
-    decoder = next((element for name in ("vah264dec", "vah265dec")
-                    if (element := Gst.ElementFactory.make(name)) is not None), None)
+    decoder = None
+    for name in ("vah264dec", "vah265dec"):
+        # Gst's Python overrides can raise for missing factories. Discover
+        # availability first so an absent H.264 decoder still permits H.265.
+        if Gst.ElementFactory.find(name) is not None:
+            decoder = Gst.ElementFactory.make(name)
+            if decoder is not None:
+                break
     if decoder is None:
         raise RuntimeError("shared VA capture requires a GStreamer VA decoder")
     try:

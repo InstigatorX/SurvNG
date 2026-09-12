@@ -109,6 +109,19 @@ def live_python_executable(preferred: str = "") -> str:
     return sys.executable
 
 
+def _safe_stderr_tail(buffer: bytearray, limit: int = 400) -> str:
+    """Redact complete lines before truncation; partial URLs cannot be scrubbed."""
+    raw = bytes(buffer)
+    if len(raw) >= 8192:
+        # The rolling buffer may begin halfway through a credential.
+        raw = raw.partition(b"\n")[2]
+    # A pipe read may also end halfway through a credential-bearing URL.
+    raw = raw.rpartition(b"\n")[0]
+    if not raw:
+        return "[partial native stderr omitted]" if buffer else ""
+    return redact_secret_text(raw.decode("utf-8", errors="replace")).strip()[-limit:]
+
+
 class _StreamInbox:
     """Per-camera messages demuxed from the shared live supervisor."""
 
@@ -253,7 +266,7 @@ class _SharedLiveProcess:
         )
 
     def stderr_text(self) -> str:
-        return self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+        return _safe_stderr_tail(self._stderr)
 
     def start(self) -> None:
         if self.is_running():
@@ -383,7 +396,7 @@ class _SharedLiveProcess:
             LOGGER.warning(
                 "DL Streamer supervisor failed (%s): %s; native stderr: %s",
                 type(error).__name__, redact_secret_text(str(error))[-4000:],
-                redact_secret_text(self._stderr.decode("utf-8", errors="replace"))[-4000:],
+                _safe_stderr_tail(self._stderr, 4000),
             )
         finally:
             self._failed = True
@@ -395,16 +408,25 @@ class _SharedLiveProcess:
     def _check_inference_progress(self, now: float) -> None:
         with self._lock:
             inboxes = list(self._inboxes.values())
-        active = False
+        stalled = False
         for inbox in inboxes:
-            if not inbox.alive or inbox.inference_started_at is None:
+            if not inbox.alive:
+                continue
+            # A real completion proves the pool is working even if that
+            # camera's video has paused or its first status has not arrived.
+            # Startup/resume grace alone is not evidence of pool progress.
+            if (
+                inbox.last_inference_at is not None
+                and now - inbox.last_inference_at <= DLSTREAMER_INFERENCE_STALL_SECONDS
+            ):
+                return
+            if inbox.inference_started_at is None:
                 continue
             # An RTSP outage belongs to this camera's read/reconnect lifecycle,
             # not to the shared model. Diagnose a silent inference stall only
             # while the same stream is still delivering video.
             if inbox.last_frame_at is None or now - inbox.last_frame_at > 1.0:
                 continue
-            active = True
             progress = inbox.last_inference_at
             if progress is None:
                 progress = inbox.inference_started_at
@@ -413,13 +435,11 @@ class _SharedLiveProcess:
                 # continuous video. Give its first resumed frame the normal
                 # bounded inference budget without inventing result progress.
                 progress = max(progress, inbox.video_resumed_at)
-            if now - progress <= DLSTREAMER_INFERENCE_STALL_SECONDS:
-                # One delayed camera is not proof that the shared pool is
-                # wedged: other cameras can still complete inference under
-                # load. Their progress must prevent a global capture reset.
-                # Per-camera snapshot freshness still rejects stale results.
-                return
-        if active:
+            if now - progress > DLSTREAMER_INFERENCE_STALL_SECONDS:
+                stalled = True
+        # Grace for a newly added/resumed stream must not keep an already
+        # stalled, continuously active pool alive indefinitely through churn.
+        if stalled:
             raise RuntimeError("shared live inference stalled: no new result for 5 seconds")
 
     def _dispatch(self, message_type: int, payload: bytes) -> None:
@@ -653,7 +673,7 @@ class DlStreamerCaptureHandle:
             process = self._process
             return_code = process.poll() if process is not None else None
             status_error = str(self._status.get("error") or "").strip()
-            detail = self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+            detail = _safe_stderr_tail(self._stderr)
         parts = [part for part in (status_error, detail) if part]
         combined = ": ".join(parts)
         if return_code is None:

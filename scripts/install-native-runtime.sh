@@ -30,11 +30,12 @@ if [[ "${ID:-}" != ubuntu || "${VERSION_ID:-}" != 24.04 || "$(dpkg --print-archi
 fi
 
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg
+apt-get install -y --no-install-recommends ca-certificates curl gnupg software-properties-common
+# DL Streamer itself requires libva2 >= 2.21, including CPU inference installs;
+# stock Noble provides 2.20. The GPU flag controls drivers, not this dependency.
+add-apt-repository -y ppa:kobuk-team/intel-graphics
+apt-get update
 if [[ "$install_gpu" == true ]]; then
-    apt-get install -y --no-install-recommends software-properties-common
-    add-apt-repository -y ppa:kobuk-team/intel-graphics
-    apt-get update
     gpu_packages=(
         "intel-media-va-driver-non-free=$intel_media_version"
         "intel-opencl-icd=$intel_compute_version"
@@ -43,7 +44,7 @@ if [[ "$install_gpu" == true ]]; then
         "libmfx-gen1.2=$intel_media_version" "libvpl2=$intel_vpl_version"
         "libze-intel-gpu1=$intel_compute_version" "libze1=$intel_level_zero_version"
     )
-    # Only explicitly selected packages may change despite an earlier version hold.
+    # Permit upgrading previously held members of the pinned driver stack.
     apt-get install -y --no-install-recommends --allow-change-held-packages \
         "${gpu_packages[@]}" ocl-icd-libopencl1
     for package in "${gpu_packages[@]}"; do
@@ -73,4 +74,8 @@ apt-get install -y --no-install-recommends --allow-change-held-packages \
     gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools \
     "intel-dlstreamer=$dlstreamer_version"
 apt-mark hold intel-dlstreamer
-/usr/bin/python3 "$repo_dir/scripts/check-native-runtime.py"
+check_args=()
+if [[ "$install_gpu" == true ]]; then
+    check_args+=(--intel-gpu)
+fi
+/usr/bin/python3 "$repo_dir/scripts/check-native-runtime.py" "${check_args[@]}"

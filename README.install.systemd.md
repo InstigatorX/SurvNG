@@ -90,7 +90,8 @@ sudo -u survng bash -lc "cd '$SURVNG_ROOT/frontend' && npm ci --no-audit --no-fu
 The production UI lands in `survng/static/`.
 
 The runtime installer adds Intel's signed DL Streamer and OpenVINO APT
-repositories, installs GStreamer introspection/plugins and system Python
+repositories and the Intel graphics PPA (required for DL Streamer's newer
+`libva2` dependency, including CPU inference). It installs GStreamer introspection/plugins and system Python
 bindings, and holds `intel-dlstreamer` at `2026.2.0`, matching the Docker build.
 These packages are required for live capture, including CPU inference;
 `pip install -r requirements.txt` does not install them. Capture uses
@@ -98,9 +99,12 @@ These packages are required for live capture, including CPU inference;
 
 The check verifies runtime loading and capture elements without opening cameras.
 For Intel GPU operation, complete section 10's driver setup before starting
-SurvNG. The runtime check does not validate GPU access or model inference.
+SurvNG. The basic check does not validate GPU access or model inference.
 On a new Intel GPU host, use `install-native-runtime.sh --intel-gpu` in the
 block above to install the coordinated, pinned Intel userspace stack too.
+Then run `sudo -u survng /usr/bin/python3 "$SURVNG_ROOT/scripts/check-native-runtime.py" --intel-gpu`
+to verify VA introspection and render-device access as the service user.
+This check does not compile a model or validate inference accuracy.
 
 ## 5. Private config and media path
 
@@ -334,6 +338,7 @@ alongside DL Streamer to match the branch's Docker build:
 ```bash
 sudo systemctl stop survng.service
 sudo bash "$SURVNG_ROOT/scripts/install-native-runtime.sh" --intel-gpu
+sudo -u survng /usr/bin/python3 "$SURVNG_ROOT/scripts/check-native-runtime.py" --intel-gpu
 sudo apt-get install -y clinfo libvpl-tools vainfo
 sudo -u survng mv "$SURVNG_ROOT/.cache/openvino" \
   "$SURVNG_ROOT/.cache/openvino-before-intel-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
