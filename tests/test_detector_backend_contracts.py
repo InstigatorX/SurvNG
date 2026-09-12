@@ -157,3 +157,56 @@ def test_openvino_declared_rank_two_output_keeps_ssd_contract():
     detector.output_layer = SimpleNamespace(shape=(100, 7))
     detector.output_layers = [detector.output_layer]
     assert detector._detect_output_format() == "ssd"
+
+
+@pytest.mark.parametrize("backend", ["opencv", "coreml"])
+@pytest.mark.parametrize("metadata", [{}, {"args": {"nms": False}}])
+def test_transposed_three_class_yolo_is_not_decoded_as_ssd(backend, metadata):
+    detector = OpenVinoDetector(DetectorConfig(enabled=False, labels=["person", "car", "cat"]))
+    detector.input_shape = (640, 640)
+    detector.enabled = True
+    detector.model_metadata = metadata
+    output = np.zeros((1, 8400, 7), dtype=np.float32)
+    output[0, 0] = [320, 320, 100, 200, .9, .1, .1]
+    if backend == "opencv":
+        detector.cv_net = CaptureNet(output)
+    else:
+        detector.coreml_model = SimpleNamespace(predict=lambda _inputs: {"detections": output})
+    objects = detector.detect(np.zeros((640, 640, 3), dtype=np.uint8))
+    assert detector.output_format == "yolo"
+    assert objects == [{"label": "person", "confidence": .9,
+                        "box": {"x1": 270, "y1": 220, "x2": 370, "y2": 420}}]
+
+
+@pytest.mark.parametrize("output_format", ["auto", "yolo-e2e"])
+@pytest.mark.parametrize("auxiliary_first", [True, False])
+def test_coreml_auxiliary_outputs_do_not_hide_detections(output_format, auxiliary_first):
+    detector = OpenVinoDetector(DetectorConfig(
+        enabled=False, labels=["person"], model_output_format=output_format,
+    ))
+    detector.input_shape = (640, 640)
+    detector.enabled = True
+    output = np.zeros((1, 300, 6), dtype=np.float32)
+    output[0, 0] = [270, 220, 370, 420, .9, 0]
+    auxiliary = {"auxiliary": np.array([0.]), "scalar": np.array(1.)}
+    outputs = {**auxiliary, "detections": output} if auxiliary_first else {"detections": output, **auxiliary}
+    detector.coreml_model = SimpleNamespace(predict=lambda _inputs: outputs)
+    objects = detector.detect(np.zeros((640, 640, 3), dtype=np.uint8))
+    assert objects == [{"label": "person", "confidence": .9,
+                        "box": {"x1": 270, "y1": 220, "x2": 370, "y2": 420}}]
+    assert detector.status()["model_settings"]["error"] == ""
+    assert detector.status()["runtime"]["failed_inferences"] == 0
+
+
+def test_coreml_unsupported_outputs_report_failure_and_recover():
+    detector = OpenVinoDetector(DetectorConfig(enabled=False, labels=["person"]))
+    detector.enabled = True
+    outputs = {"auxiliary": np.array([0.])}
+    detector.coreml_model = SimpleNamespace(predict=lambda _inputs: outputs)
+    frame = np.zeros((300, 300, 3), dtype=np.uint8)
+    assert detector.detect(frame) == [{"status": "detector_unavailable"}]
+    assert detector.status()["model_settings"]["error"]
+    assert detector.status()["runtime"]["failed_inferences"] == 1
+    outputs["detections"] = np.zeros((1, 300, 6), dtype=np.float32)
+    assert detector.detect(frame) == []
+    assert detector.status()["model_settings"]["error"] == ""

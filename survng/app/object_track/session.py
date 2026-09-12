@@ -1088,7 +1088,6 @@ class ObjectTrackingSession:
                 """Analyze one bounded batch, retaining the last successful cursor."""
                 nonlocal captured_at, last_persisted_at
                 nonlocal catchup_deferred, catchup_gap
-                catchup_deferred = False
                 catchup_gap = 0.0
                 if self.catchup_frame_provider is None or initial_frame is None:
                     return False
@@ -1118,6 +1117,10 @@ class ObjectTrackingSession:
                             break
                         if stop.is_set() or time.monotonic() >= self._deadline:
                             break
+                        # Reading the retry may consume the remaining budget.
+                        # Keep the previous deferral until we can check it;
+                        # an unattempted retry does not resolve that state.
+                        catchup_deferred = False
                         sample_epoch, frame = sample
                         if sample_epoch <= captured_at or sample_epoch > batch_end:
                             continue
@@ -1141,6 +1144,11 @@ class ObjectTrackingSession:
                         advanced = True
                         if not tracker.has_live_tracks(captured_at):
                             break
+                    else:
+                        # A completed empty read is a media stall, unless the
+                        # read itself ran out of budget before we could retry.
+                        if not stop.is_set() and time.monotonic() < self._deadline:
+                            catchup_deferred = False
                 finally:
                     close = getattr(samples, "close", None)
                     if callable(close):

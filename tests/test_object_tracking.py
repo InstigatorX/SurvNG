@@ -2144,6 +2144,12 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         )
 
     def test_deferred_catchup_does_not_expire_track_or_skip_to_live(self) -> None:
+        self._assert_deferred_catchup_deadline(retry_yields_frame=True)
+
+    def test_deferred_catchup_preserves_reason_when_retry_read_expires_empty(self) -> None:
+        self._assert_deferred_catchup_deadline(retry_yields_frame=False)
+
+    def _assert_deferred_catchup_deadline(self, *, retry_yields_frame: bool) -> None:
         live_processed = threading.Event()
         updates: list[dict] = []
         event_epoch = time.time() - 1.0
@@ -2166,6 +2172,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         detector = Detector()
         token = 0.0
+        catchup_calls = 0
 
         def live_frame():
             nonlocal token
@@ -2173,6 +2180,14 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             return np.ones((100, 100, 3), dtype=np.uint8), time.time(), token
 
         def catchup_provider(_start, _end, _fps, _width):
+            nonlocal catchup_calls
+            catchup_calls += 1
+            if catchup_calls == 2:
+                # Deterministically expire the budget while reading the retry,
+                # before the deferred inference can actually be attempted.
+                session._deadline = time.monotonic() - 1.0
+                if not retry_yields_frame:
+                    return
             yield event_epoch + 0.25, np.zeros((100, 100, 3), dtype=np.uint8)
 
         def update_event(_event_id, tracking, _tracked_objects):
@@ -2217,6 +2232,8 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         session.stop()
 
         self.assertEqual(detector.live_calls, 0)
+        self.assertEqual(catchup_calls, 2)
+        self.assertFalse(live_processed.is_set())
         self.assertEqual(updates[-1]["completion_reason"], "inference_unavailable")
         self.assertEqual(updates[-1]["tracks"][0]["state"], "confirmed")
         self.assertNotEqual(
