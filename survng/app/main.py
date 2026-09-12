@@ -53,6 +53,7 @@ from .face_routes import (
 from .frontend_routes import FrontendRouteDependencies, create_frontend_router
 from .help_docs import HelpRouteDependencies, create_help_router
 from .onvif_inspector_routes import create_onvif_inspector_router
+from .inference import _set_worker_process_name
 from .manager import AppManager, validate_manager_configuration
 from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
@@ -834,6 +835,7 @@ def _record_process_lifecycle(kind: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _set_worker_process_name("app")
     APPLICATION_STOPPING.clear()
     loop = asyncio.get_running_loop()
     early_onvif_thread: threading.Thread | None = None
