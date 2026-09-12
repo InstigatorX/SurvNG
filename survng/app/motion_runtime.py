@@ -454,6 +454,7 @@ class MotionRuntimeService:
         capture_generation: int = 0,
         lifecycle_generation: int = 0,
         source_pts: float = float("nan"),
+        source_session: str = "",
     ) -> None:
         stop_event = self._stop_event
         if stop_event is None:
@@ -467,6 +468,7 @@ class MotionRuntimeService:
             capture_generation=capture_generation,
             lifecycle_generation=lifecycle_generation,
             source_pts=source_pts,
+            source_session=source_session,
         )
 
     def runtime_status(self) -> dict[str, Any]:

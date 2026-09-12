@@ -528,6 +528,9 @@ class CameraWorkerTest(unittest.TestCase):
 
             worker._capture_frame(live)
             worker._capture_frame(main)
+            # Display previews lack retained frame identity and cannot become
+            # timestamped color evidence by borrowing the qualifier's clock.
+            self.assertEqual(list(worker.tracking_frames.live_frames), [])
 
             deadline = time.monotonic() + 1
             while not worker.motion_analysis.frames and time.monotonic() < deadline:

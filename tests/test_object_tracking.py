@@ -14,6 +14,9 @@ import numpy as np
 
 from survng.app.config import CameraConfig, ObjectTrackingConfig
 from survng.app.events import EventStore
+from survng.app.camera_capture import CapturedFrame
+from survng.app.live_detections import DetectionSnapshot
+from survng.app.object_track.types import TrackingFrame
 from survng.app.object_tracking import (
     ByteTrackObjectTracker,
     ObjectTrackerRegistry,
@@ -672,12 +675,24 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         )
         frame = np.zeros((32, 32, 3), dtype=np.uint8)
 
-        live = session._tracking_detections_for_frame(frame, catchup=False)
+        evidence = TrackingFrame(
+            CapturedFrame("live", frame, 1, 1, "", 32, 32, 1, source_session="test"),
+            DetectionSnapshot.parse({
+                "schema_version": 1, "source_pts": 1.0, "inference_sequence": 1,
+                "width": 32, "height": 32, "objects": sidecar,
+            }, session="test"),
+        )
+        live = session._tracking_detections_for_frame(frame, catchup=False, evidence=evidence)
         catchup = session._tracking_detections_for_frame(frame, catchup=True)
+        main = session._tracking_detections_for_frame(
+            frame, catchup=False,
+            evidence=TrackingFrame(CapturedFrame("main", frame, 1, 1, "", 32, 32, 1), evidence.detection),
+        )
 
-        self.assertEqual(detector.calls, 1)
+        self.assertEqual(detector.calls, 2)
         self.assertEqual(live[0]["box"]["x1"], 12)
         self.assertEqual(catchup[0]["box"]["x1"], 1)
+        self.assertEqual(main[0]["box"]["x1"], 1)
         sidecar[0]["box"]["x1"] = 99
         self.assertEqual(live[0]["box"]["x1"], 12)
 
@@ -711,6 +726,10 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         objects = session._tracking_detections_for_frame(
             np.zeros((32, 32, 3), dtype=np.uint8),
             catchup=False,
+            evidence=TrackingFrame(
+                CapturedFrame("live", np.zeros((32, 32), dtype=np.uint8), 1, 1, "", 32, 32, 1),
+                DetectionSnapshot(1.0, 1, 32, 32, (), "test"),
+            ),
         )
 
         self.assertEqual(objects, [])
@@ -1511,6 +1530,50 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(updates[0]["frame_height"], 100)
         self.assertEqual(updates[0]["lost_timeout_seconds"], 3.0)
         self.assertFalse(session.status()["active"])
+
+    def test_matched_live_result_is_consumed_once_and_missing_is_not_empty(self) -> None:
+        served = threading.Event()
+        updates = []
+        image = np.zeros((100, 100), np.uint8)
+        positive = DetectionSnapshot(10, 1, 100, 100,
+                                     (detection("person", .9, (12, 10, 42, 80)),), "s")
+        empty = DetectionSnapshot(10.4, 2, 100, 100, (), "s")
+        snapshots = [positive, positive, None, empty, empty]
+        calls = 0
+
+        def frame_provider():
+            nonlocal calls
+            calls += 1
+            if calls > len(snapshots):
+                served.set()
+                return None
+            return TrackingFrame(
+                CapturedFrame("live", image, time.time(), time.monotonic(), "", 100, 100, calls,
+                              source_pts=10 + calls * .1, source_session="s"),
+                snapshots[calls - 1],
+            )
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=.7)
+
+            def detect(self, *_args, **_kwargs):
+                raise AssertionError("matched live evidence must not run duplicate inference")
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://fixture.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=5, max_session_seconds=3),
+            detector=Detector(), frame_provider=frame_provider,
+            update_event=lambda _id, tracking, _objects: updates.append(tracking) or {},
+            publisher=None, limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+        try:
+            self.assertTrue(session.start(42, datetime.now(timezone.utc),
+                                          [detection("person", .9, (10, 10, 40, 80))]))
+            self.assertTrue(served.wait(2.0))
+        finally:
+            session.stop()
+        self.assertEqual(updates[-1]["frames_processed"], 2)
 
     def test_catchup_processing_is_capped_per_tick(self) -> None:
         catchup_ready = threading.Event()

@@ -267,9 +267,6 @@ class AdaptiveEmaBackgroundStage:
                 mad = float(np.median(np.abs(delta - median)))
                 robust_noise = max(1.0, median + 1.4826 * mad)
                 noise_ema = noise_ema * 0.92 + robust_noise * 0.08
-                stable_limit = max(6.0, noise_ema * 3.0)
-                changed = delta > stable_limit
-                changed_ratio = float(np.count_nonzero(changed)) / max(1, changed.size)
 
                 current_at = (
                     timestamps[frame_index]
@@ -297,6 +294,9 @@ class AdaptiveEmaBackgroundStage:
                     global_changes.append(0.0)
                     continue
 
+                stable_limit = max(6.0, noise_ema * 3.0)
+                changed = delta > stable_limit
+                changed_ratio = float(np.count_nonzero(changed)) / max(1, changed.size)
                 elapsed = 1.0 / sample_fps
                 if frame_index < len(timestamps):
                     previous_at = timestamps[frame_index - 1]
@@ -354,11 +354,12 @@ class AdaptiveEmaBackgroundStage:
 
                 differences.append(np.clip(delta, 0, 255).astype(np.uint8))
                 learning_rates.append(rate)
+                persistent_change_count = np.count_nonzero(persistent_change)
                 moving_learning_rates.append(
-                    stationary_rate if np.any(persistent_change) else moving_rate
+                    stationary_rate if persistent_change_count else moving_rate
                 )
                 persistent_change_ratios.append(
-                    float(np.count_nonzero(persistent_change)) / max(1, persistent_change.size)
+                    float(persistent_change_count) / max(1, persistent_change.size)
                 )
                 global_changes.append(changed_ratio)
                 brightness = float(np.mean(current))
@@ -390,6 +391,31 @@ class AdaptiveEmaBackgroundStage:
             "background_stale_transitions_skipped": stale_transition_count,
         })
         return context
+
+
+def _difference_statistics(difference: np.ndarray) -> tuple[float, float, float]:
+    """Use a byte histogram for median/MAD and NumPy for percentile interpolation."""
+    flat = difference.reshape(-1)
+    if difference.dtype != np.uint8 or not flat.size:
+        flat = flat.astype(np.float32, copy=False)
+        median = float(np.median(flat))
+        mad = float(np.median(np.abs(flat - median)))
+        return median, mad, float(np.percentile(flat, 80))
+
+    counts = np.bincount(flat, minlength=256)
+    cumulative = counts.cumsum()
+    middle_ranks = [(flat.size - 1) // 2, flat.size // 2]
+    median = float(np.mean(np.searchsorted(cumulative, middle_ranks, side="right")))
+
+    deviations = np.abs(np.arange(256, dtype=np.float32) - median)
+    order = np.argsort(deviations)
+    deviation_ranks = np.searchsorted(
+        counts[order].cumsum(), middle_ranks, side="right",
+    )
+    mad = float(np.mean(deviations[order[deviation_ranks]]))
+
+    percentile = float(np.percentile(flat.astype(np.float32, copy=False), 80))
+    return median, mad, percentile
 
 
 class AdaptiveStatisticalThresholdStage:
@@ -429,11 +455,8 @@ class AdaptiveStatisticalThresholdStage:
                 )
                 cached = state.statistics.get(timestamp) if timestamp is not None else None
                 if cached is None:
-                    flat = difference.reshape(-1).astype(np.float32, copy=False)
-                    median = float(np.median(flat))
-                    mad = float(np.median(np.abs(flat - median)))
+                    median, mad, percentile = _difference_statistics(difference)
                     noise = max(0.5, 1.4826 * mad)
-                    percentile = float(np.percentile(flat, 80))
                     candidate = min(
                         self.maximum,
                         max(
@@ -603,6 +626,21 @@ class ConnectedComponentBlobStage:
                 if context.motion_inclusion_mask is not None
                 else mask
             )
+            changed = int(cv2.countNonZero(effective_mask))
+            if (
+                effective_mask.dtype == np.uint8
+                and effective_mask.ndim == 2
+                and effective_mask.size
+                and changed == 0
+            ):
+                # Preserve empty observations for downstream tracking/scoring.
+                history.append(MotionFrameBlobs(
+                    frame_area=frame_area,
+                    changed_pixels=0,
+                    changed_ratio=0.0,
+                    blobs=(),
+                ))
+                continue
             count, labels, stats, centroids = cv2.connectedComponentsWithStats(effective_mask, 8)
             intensity = (
                 context.difference_history[index]
@@ -640,7 +678,6 @@ class ConnectedComponentBlobStage:
                     ignored_zone_overlap=0.0,
                     zone_names=(),
                 ))
-            changed = int(cv2.countNonZero(effective_mask))
             history.append(MotionFrameBlobs(
                 frame_area=frame_area,
                 changed_pixels=changed,

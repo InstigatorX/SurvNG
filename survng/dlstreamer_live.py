@@ -34,6 +34,9 @@ def _parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--fps", type=float, default=5.0)
+    parser.add_argument("--source-role", choices=("live", "main"), default="live")
+    parser.add_argument("--threshold", type=float, default=0.1,
+                        help="retain low-confidence candidates for two-pass tracking")
     parser.add_argument(
         "--detect-fps",
         type=float,
@@ -46,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="", help="OpenVINO IR XML for gvadetect")
     parser.add_argument("--model-proc", default="", help="optional gvadetect model-proc JSON")
     parser.add_argument("--labels", default="", help="optional gvadetect labels file")
+    parser.add_argument("--labels-list", default="", help="comma-separated labels when no labels file is configured")
     parser.add_argument(
         "--model-instance-id",
         default="",
@@ -185,48 +189,37 @@ def _set_gst_search_path(name: str, value: str) -> None:
 
 
 def _apply_dlstreamer_env() -> None:
-    """Expose gvadetect without hiding Ubuntu's uridecodebin3.
-
-    Intel DL Streamer's bundled libgstreamer compiles in a private system
-    plugin path. If that tree is on LD_LIBRARY_PATH at all, python3-gi loads
-    Intel's Gst before /usr/lib and Ubuntu playback plugins never register.
-    Keep the distro plugin dir on GST_PLUGIN_SYSTEM_PATH, drop the nested
-    Intel GStreamer lib dir, and force the 1.0-suffixed search variables
-    that otherwise override the unsuffixed ones.
-    """
-    system_plugins = _colon_path(
-        _SYSTEM_GST_PLUGINS,
-        os.environ.get("GST_PLUGIN_SYSTEM_PATH_1_0", ""),
-        os.environ.get("GST_PLUGIN_SYSTEM_PATH", ""),
-    )
-    _set_gst_search_path("GST_PLUGIN_SYSTEM_PATH", system_plugins)
-    for scanner in (
-        "/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner",
-        "/usr/libexec/gstreamer-1.0/gst-plugin-scanner",
-    ):
-        if Path(scanner).is_file():
-            os.environ["GST_PLUGIN_SCANNER"] = scanner
-            break
+    """Keep libraries, introspection data, plugins and scanner in one runtime."""
+    root = Path("/opt/intel/dlstreamer")
+    bundle = root / "gstreamer"
     os.environ.setdefault("LIBVA_DRIVER_NAME", "iHD")
     os.environ.setdefault("GST_VA_ALL_DRIVERS", "1")
-    root = Path("/opt/intel/dlstreamer")
-    if not root.is_dir():
-        return
-    plugin_path = _colon_path(
-        *_existing_dirs(
-            root / "lib",
-            root / "gstreamer/lib/gstreamer-1.0",
-            Path(_SYSTEM_GST_PLUGINS),
-        ),
-        os.environ.get("GST_PLUGIN_PATH_1_0", ""),
-        os.environ.get("GST_PLUGIN_PATH", ""),
-    )
-    _set_gst_search_path("GST_PLUGIN_PATH", plugin_path)
-    intel_gst_lib = str(root / "gstreamer/lib")
-    os.environ["LD_LIBRARY_PATH"] = _colon_path(
-        _drop_paths(os.environ.get("LD_LIBRARY_PATH", ""), intel_gst_lib),
-        *_existing_dirs(root / "lib", root / "lib/gstreamer-1.0"),
-    )
+    if (bundle / "lib").is_dir():
+        # Intel plugins can require APIs newer than Ubuntu's GStreamer.
+        # Never put a distro scanner or core library in front of this bundle.
+        _set_gst_search_path("GST_PLUGIN_SYSTEM_PATH", str(bundle / "lib/gstreamer-1.0"))
+        _set_gst_search_path("GST_PLUGIN_PATH", str(root / "lib"))
+        scanner = bundle / "bin/gstreamer-1.0/gst-plugin-scanner"
+        if scanner.is_file():
+            os.environ["GST_PLUGIN_SCANNER"] = str(scanner)
+            os.environ["GST_PLUGIN_SCANNER_1_0"] = str(scanner)
+        os.environ["LD_LIBRARY_PATH"] = _colon_path(
+            str(bundle / "lib"), str(root / "lib"), os.environ.get("LD_LIBRARY_PATH", ""),
+        )
+        os.environ["GI_TYPELIB_PATH"] = _colon_path(
+            str(bundle / "lib/girepository-1.0"), os.environ.get("GI_TYPELIB_PATH", ""),
+        )
+        python_dirs = _existing_dirs(root / "python", bundle / "lib/python3/dist-packages")
+        os.environ["PYTHONPATH"] = _colon_path(*python_dirs, os.environ.get("PYTHONPATH", ""))
+        for directory in reversed(python_dirs):
+            if directory not in sys.path:
+                sys.path.insert(0, directory)
+    else:
+        _set_gst_search_path("GST_PLUGIN_SYSTEM_PATH", _SYSTEM_GST_PLUGINS)
+        if (root / "lib").is_dir():
+            _set_gst_search_path("GST_PLUGIN_PATH", str(root / "lib"))
+        if (root / "python").is_dir():
+            sys.path.append(str(root / "python"))
 
 
 def _load_gstreamer():
@@ -237,7 +230,7 @@ def _load_gstreamer():
 
     Gst.init(None)
     registry = Gst.Registry.get()
-    if Path(_SYSTEM_GST_PLUGINS).is_dir():
+    if not Path("/opt/intel/dlstreamer/gstreamer/lib").is_dir() and Path(_SYSTEM_GST_PLUGINS).is_dir():
         registry.scan_path(_SYSTEM_GST_PLUGINS)
     return Gst
 
@@ -346,6 +339,38 @@ def _packed_gray(pixels: bytes, width: int, height: int) -> bytes:
     return b"".join(pixels[row * stride : row * stride + width] for row in range(height))
 
 
+def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gst_second: int, clock_time_none: int):
+    """Read GstGVAJSONMeta; mapping a video buffer yields pixels, not JSON."""
+    from survng.app.live_detections import DetectionSnapshot
+    buffer = sample.get_buffer()
+    if buffer.pts == clock_time_none:
+        raise ValueError("inferred frame has no source PTS")
+    caps = sample.get_caps()
+    structure = caps.get_structure(0)
+    messages = video_frame_type(buffer, caps=caps).messages()
+    if len(messages) != 1:
+        raise ValueError("expected one authoritative inference message")
+    payload = json.loads(messages[0])
+    if not isinstance(payload, dict):
+        raise ValueError("invalid inference metadata")
+    objects = payload.get("objects", [])
+    if not isinstance(objects, list):
+        raise ValueError("invalid inference objects")
+    normalized = _normalize_gva_objects(payload)
+    if len(normalized) != len(objects):
+        raise ValueError("incomplete inference metadata")
+    snapshot = {
+        "schema_version": 1,
+        "source_pts": float(buffer.pts) / gst_second,
+        "inference_sequence": inference_sequence,
+        "width": int(structure.get_value("width") or 0),
+        "height": int(structure.get_value("height") or 0),
+        "objects": normalized,
+    }
+    DetectionSnapshot.parse(snapshot)
+    return snapshot
+
+
 def _write(
     stdout,
     message: bytes,
@@ -390,6 +415,10 @@ def run(argv: list[str] | None = None) -> int:
         and model_path.is_file()
         and _factory_available(Gst, "gvadetect")
     )
+    if not args.no_detect and not detect:
+        raise RuntimeError("live detection requested but model or gvadetect is unavailable")
+    if not math.isfinite(args.threshold) or not 0 <= args.threshold <= 1:
+        raise ValueError("detection threshold must be between 0 and 1")
     instance_id = (
         model_instance_id(str(model_path or ""), args.device, args.model_instance_id)
         if detect
@@ -415,12 +444,12 @@ def run(argv: list[str] | None = None) -> int:
         args,
         url=url,
         stream_id="",
-        detect=detect,
+        detect=detect and args.source_role == "live",
         model_path=model_path,
         instance_id=instance_id,
         rate=rate,
         detect_rate=detect_rate,
-        qualifier_width=qualifier_width,
+        qualifier_width=qualifier_width if args.source_role == "live" else 640,
         jpeg_rate=jpeg_rate,
         open_timeout=open_timeout,
         stdout=stdout,
@@ -431,6 +460,7 @@ def run(argv: list[str] | None = None) -> int:
         encode_json=encode_json,
         TYPE_DETECTIONS=TYPE_DETECTIONS,
         TYPE_STATUS=TYPE_STATUS,
+        source_role=args.source_role,
     )
 
 
@@ -487,7 +517,7 @@ def _run_supervisor(
         event.set()
         thread.join(timeout=2.0)
 
-    def start_stream(stream_id: str, url: str) -> None:
+    def start_stream(stream_id: str, url: str, source_role: str = "live") -> None:
         stop_stream(stream_id)
         event = threading.Event()
 
@@ -498,13 +528,13 @@ def _run_supervisor(
                     args,
                     url=url,
                     stream_id=stream_id,
-                    detect=detect,
+                    detect=detect and source_role == "live",
                     model_path=model_path,
                     instance_id=instance_id,
-                    rate=rate,
+                    rate=rate if source_role == "live" else detect_rate,
                     detect_rate=detect_rate,
-                    qualifier_width=qualifier_width,
-                    jpeg_rate=jpeg_rate,
+                    qualifier_width=qualifier_width if source_role == "live" else 640,
+                    jpeg_rate=jpeg_rate if source_role == "live" else None,
                     open_timeout=open_timeout,
                     stdout=stdout,
                     stdout_lock=stdout_lock,
@@ -515,7 +545,8 @@ def _run_supervisor(
                     TYPE_DETECTIONS=TYPE_DETECTIONS,
                     TYPE_STATUS=TYPE_STATUS,
                     install_signals=False,
-                    test_source=False,
+                    test_source=args.test_source,
+                    source_role=source_role,
                 )
             except Exception as exc:
                 _write(
@@ -559,6 +590,9 @@ def _run_supervisor(
                 continue
             try:
                 url = _validate_camera_url(str(command.get("url") or ""))
+                source_role = str(command.get("source_role") or "live")
+                if source_role not in {"main", "live"}:
+                    raise ValueError("invalid capture source role")
             except ValueError as exc:
                 _write(
                     stdout,
@@ -570,7 +604,7 @@ def _run_supervisor(
                     lock=stdout_lock,
                 )
                 continue
-            start_stream(stream_id, url)
+            start_stream(stream_id, url, source_role)
     finally:
         request_stop()
         with workers_lock:
@@ -608,6 +642,7 @@ def _pump_pipeline(
     TYPE_STATUS,
     install_signals: bool = True,
     test_source: bool | None = None,
+    source_role: str = "live",
 ) -> int:
     use_test_source = args.test_source if test_source is None else test_source
     pipeline = Gst.Pipeline.new(_pipeline_name(stream_id))
@@ -649,7 +684,7 @@ def _pump_pipeline(
     capsfilter.set_property(
         "caps",
         Gst.Caps.from_string(
-            "video/x-raw,format=GRAY8,width="
+            f"video/x-raw,format={'BGR' if source_role == 'main' else 'GRAY8'},width="
             f"{qualifier_width},framerate={rate.numerator}/{rate.denominator}"
         ),
     )
@@ -702,7 +737,10 @@ def _pump_pipeline(
     meta_convert = None
     va_caps = None
     preprocess = ""
+    video_frame_type = None
     if detect:
+        from gstgva import VideoFrame
+        video_frame_type = VideoFrame
         detect_queue = _element(Gst, "queue", "detect-queue")
         detect_queue.set_property("max-size-buffers", 1)
         detect_queue.set_property("max-size-bytes", 0)
@@ -723,21 +761,25 @@ def _pump_pipeline(
         detector = _element(Gst, "gvadetect", "detect")
         detector.set_property("model", str(model_path))
         detector.set_property("device", args.device)
+        # Low-rate, event-driven streams need bounded latency, not an implicit
+        # auto-batch that can wait indefinitely for other cameras.
+        detector.set_property("batch-size", 1)
+        detector.set_property("nireq", 2)
         detector.set_property("inference-interval", 1)
+        detector.set_property("threshold", args.threshold)
         preprocess = "va" if args.decoder == "va" and not use_test_source else "opencv"
-        _set_optional_property(detector, "pre-process-backend", preprocess)
+        detector.set_property("pre-process-backend", preprocess)
         if instance_id:
-            _set_optional_property(detector, "model-instance-id", instance_id)
-            _set_optional_property(detector, "scheduling-policy", "latency")
+            detector.set_property("model-instance-id", instance_id)
+            detector.set_property("scheduling-policy", "latency")
         if args.model_proc:
-            _set_optional_property(detector, "model-proc", args.model_proc)
+            detector.set_property("model-proc", args.model_proc)
         if args.labels:
-            for property_name in ("labels", "labels-file"):
-                try:
-                    detector.set_property(property_name, args.labels)
-                    break
-                except Exception:
-                    continue
+            # `labels` is a comma-separated class list, NOT a filename. Both
+            # properties accept strings, so the old fallback silently succeeded.
+            detector.set_property("labels-file", args.labels)
+        elif args.labels_list:
+            detector.set_property("labels", args.labels_list)
         detect_output_queue = _element(Gst, "queue", "detect-output-queue")
         detect_output_queue.set_property("max-size-buffers", 1)
         detect_output_queue.set_property("max-size-bytes", 0)
@@ -753,20 +795,21 @@ def _pump_pipeline(
             elements.append(va_caps)
         if _factory_available(Gst, "gvametaconvert"):
             meta_convert = _element(Gst, "gvametaconvert", "detect-meta")
+            meta_convert.set_property("add-empty-results", True)
             try:
                 meta_convert.set_property("format", "json")
             except Exception:
                 pass
             meta_sink = _element(Gst, "appsink", "meta-sink")
             meta_sink.set_property("emit-signals", False)
-            meta_sink.set_property("max-buffers", 1)
+            # These are full video buffers (possibly VA surfaces), unlike the
+            # parent's small metadata-only history. Release them promptly.
+            meta_sink.set_property("max-buffers", 4)
             meta_sink.set_property("drop", True)
             meta_sink.set_property("sync", False)
             elements.extend([meta_convert, meta_sink])
         else:
-            fake = _element(Gst, "fakesink", "detect-sink")
-            fake.set_property("sync", False)
-            elements.append(fake)
+            raise RuntimeError("gvametaconvert is required for authoritative live detections")
 
     for element in elements:
         pipeline.add(element)
@@ -909,48 +952,17 @@ def _pump_pipeline(
                     raise RuntimeError(error)
                 break
             if meta_sink is not None:
-                meta_sample = meta_sink.emit("try-pull-sample", 0)
-                if meta_sample is not None:
-                    buffer = meta_sample.get_buffer()
-                    mapped, info = buffer.map(Gst.MapFlags.READ)
-                    if mapped:
-                        try:
-                            payload = json.loads(bytes(info.data).decode("utf-8"))
-                            if isinstance(payload, dict):
-                                caps = meta_sample.get_caps()
-                                structure = caps.get_structure(0)
-                                width = int(structure.get_value("width") or 0)
-                                height = int(structure.get_value("height") or 0)
-                                pts = float(buffer.pts) / float(Gst.SECOND)
-                                if (
-                                    width > 0
-                                    and height > 0
-                                    and buffer.pts != Gst.CLOCK_TIME_NONE
-                                    and math.isfinite(pts)
-                                ):
-                                    inference_sequence += 1
-                                    _write(
-                                        stdout,
-                                        encode_json(
-                                            TYPE_DETECTIONS,
-                                            {
-                                                "schema_version": 1,
-                                                "source_pts": pts,
-                                                "inference_sequence": inference_sequence,
-                                                "width": width,
-                                                "height": height,
-                                                # Empty is authoritative; it must clear
-                                                # a preceding positive snapshot.
-                                                "objects": _normalize_gva_objects(payload),
-                                            },
-                                            stream_id=stream_id,
-                                        ),
-                                        lock=stdout_lock,
-                                    )
-                        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                            pass
-                        finally:
-                            buffer.unmap(info)
+                for _ in range(32):
+                    meta_sample = meta_sink.emit("try-pull-sample", 0)
+                    if meta_sample is None:
+                        break
+                    inference_sequence += 1
+                    payload = _detection_metadata(
+                        meta_sample, video_frame_type,
+                        inference_sequence=inference_sequence,
+                        gst_second=Gst.SECOND, clock_time_none=Gst.CLOCK_TIME_NONE,
+                    )
+                    _write(stdout, encode_json(TYPE_DETECTIONS, payload, stream_id=stream_id), lock=stdout_lock)
             sample = sink.emit("try-pull-sample", 200 * Gst.MSECOND)
             if sample is None:
                 continue
@@ -966,7 +978,7 @@ def _pump_pipeline(
                 pixels = bytes(info.data)
             finally:
                 buffer.unmap(info)
-            pixels = _packed_gray(pixels, width, height)
+            pixels = _packed_gray(pixels, width * (3 if source_role == "main" else 1), height)
             jpeg_bytes = b""
             jpeg_width = 0
             jpeg_height = 0
@@ -1004,7 +1016,10 @@ def _pump_pipeline(
                                 (first_frame_at - started) * 1000.0,
                                 3,
                             ),
-                            "qualifier_format": "GRAY8",
+                            "qualifier_format": "BGR" if source_role == "main" else "GRAY8",
+                            "source_role": source_role,
+                            "metadata_contract": "GstGVAJSONMeta-v1" if detect else "disabled",
+                            "detection_threshold": args.threshold if detect else None,
                             "qualifier_width": qualifier_width,
                             "detect_fps": float(detect_rate),
                             "inference_interval": 1,
@@ -1073,4 +1088,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # dlopen consults the process-start library path. Re-exec once before GI
+    # imports if selecting Intel's bundle changed it.
+    previous_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+    _apply_dlstreamer_env()
+    if os.environ.get("LD_LIBRARY_PATH", "") != previous_library_path:
+        os.execv(sys.executable, [sys.executable, "-m", "survng.dlstreamer_live", *sys.argv[1:]])
     raise SystemExit(main())

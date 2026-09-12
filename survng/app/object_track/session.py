@@ -34,6 +34,7 @@ from .types import (
     CatchupFrameProvider,
     FrameProvider,
     FrameSample,
+    TrackingFrame,
     ObjectDetectorBackend,
     TrackingCoverFrameProvider,
     TrackingCoverPromoter,
@@ -261,10 +262,11 @@ class ObjectTrackingSession:
         frame: np.ndarray,
         *,
         catchup: bool,
+        evidence: TrackingFrame | None = None,
     ) -> list[dict[str, Any]]:
-        """Live ticks use gvadetect sidecar boxes; catch-up still runs OpenVINO."""
-        if not catchup and self.live_detections_provider is not None:
-            return _labeled_tracking_objects(self.live_detections_provider())
+        """Matched live frames reuse gvadetect; main/catch-up run OpenVINO."""
+        if not catchup and evidence is not None and evidence.captured.source == "live":
+            return evidence.detection.scaled_objects(frame.shape[1], frame.shape[0]) if evidence.detection else []
         return _detect_tracking_objects(
             self.detector,
             frame,
@@ -923,6 +925,7 @@ class ObjectTrackingSession:
                 if item.get("track_id") is not None
             }
             consecutive_failures = 0
+            last_sidecar_identity = None
 
             def interval() -> float:
                 return 1.0 / max(0.01, self._effective_sample_fps)
@@ -933,16 +936,26 @@ class ObjectTrackingSession:
                 *,
                 catchup: bool,
                 frame_reference: VideoFrameReference | None = None,
+                evidence: TrackingFrame | None = None,
             ) -> bool:
                 nonlocal consecutive_failures, frames_processed
                 nonlocal last_persisted_at, latest_tracked_objects
                 nonlocal stable_frames, track_states
+                nonlocal last_sidecar_identity
+                if evidence is not None and evidence.captured.source == "live":
+                    snapshot = evidence.detection
+                    if snapshot is None:
+                        return False
+                    identity = (snapshot.session, snapshot.inference_sequence)
+                    if identity == last_sidecar_identity:
+                        return False
+                    last_sidecar_identity = identity
                 source_height = int(frame.shape[0])
                 source_width = int(frame.shape[1])
                 if self._frame_width <= 0 or self._frame_height <= 0:
                     self._frame_width = source_width
                     self._frame_height = source_height
-                objects = self._tracking_detections_for_frame(frame, catchup=catchup)
+                objects = self._tracking_detections_for_frame(frame, catchup=catchup, evidence=evidence)
                 if _inference_deferred(objects):
                     return False
                 failure = detection_failure(objects)
@@ -965,16 +978,14 @@ class ObjectTrackingSession:
                     float(self.detector.config.confidence_threshold),
                     bool(getattr(self.detector.config, "require_incident_zone", True)),
                 )
-                objects = self._enrich_tracking_depth(
-                    frame,
-                    objects,
-                    frame_offset_s=sample_epoch - event_at.timestamp(),
-                )
-                self._annotate_appearances(
-                    frame,
-                    objects,
-                    lazy=self.config.implementation == "survng_hybrid",
-                )
+                color_evidence = evidence is None or evidence.captured.source == "main"
+                if color_evidence:
+                    objects = self._enrich_tracking_depth(
+                        frame, objects, frame_offset_s=sample_epoch - event_at.timestamp(),
+                    )
+                    self._annotate_appearances(
+                        frame, objects, lazy=self.config.implementation == "survng_hybrid",
+                    )
                 _rescale_detection_boxes(
                     objects,
                     source_width,
@@ -1012,13 +1023,10 @@ class ObjectTrackingSession:
                     stable_frames=stable_frames,
                 )
                 track_states = next_track_states
-                self._consider_cover_candidate(
-                    frame,
-                    sample_epoch,
-                    tracked,
-                    primary_track_ids,
-                    frame_reference,
-                )
+                if color_evidence:
+                    self._consider_cover_candidate(
+                        frame, sample_epoch, tracked, primary_track_ids, frame_reference,
+                    )
                 frames_processed += 1
                 if catchup:
                     self._catchup_frames_processed += 1
@@ -1204,7 +1212,16 @@ class ObjectTrackingSession:
                         break
                     next_sample = time.monotonic() + interval()
                     continue
-                frame, sample_epoch, frame_token = sample
+                evidence = sample if isinstance(sample, TrackingFrame) else None
+                if evidence is not None:
+                    captured = evidence.captured
+                    frame, sample_epoch, frame_token = captured.image, captured.captured_at_epoch, captured.captured_at_monotonic
+                    if frame.ndim == 2:
+                        # The qualifier is intentionally gray. Color appearance
+                        # evidence is collected from main/recorded frames.
+                        frame = np.repeat(frame[:, :, None], 3, axis=2)
+                else:
+                    frame, sample_epoch, frame_token = sample
                 if self._catchup_frames_processed and sample_epoch <= captured_at:
                     next_sample = time.monotonic() + interval()
                     continue
@@ -1297,7 +1314,7 @@ class ObjectTrackingSession:
                     next_sample = time.monotonic() + interval()
                     continue
                 last_frame_token = frame_token
-                if not process_frame(frame, sample_epoch, catchup=False):
+                if not process_frame(frame, sample_epoch, catchup=False, evidence=evidence):
                     next_sample = time.monotonic() + interval()
                     continue
                 captured_at = sample_epoch

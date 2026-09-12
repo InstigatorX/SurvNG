@@ -195,6 +195,7 @@ class ObjectTrackingLifecycle:
             if (
                 item.get("label")
                 and item.get("incident_eligible") is not False
+                and item.get("tracking_geometry_trusted") is not False
                 and session.config.tracks_label(item.get("label"))
             )
         ]

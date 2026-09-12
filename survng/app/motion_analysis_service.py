@@ -94,6 +94,7 @@ class MotionFrameSubmission:
     capture_generation: int = 0
     lifecycle_generation: int = 0
     source_pts: float = float("nan")
+    source_session: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,7 @@ class MotionEvidenceFrame:
     capture_generation: int
     lifecycle_generation: int
     source_pts: float = float("nan")
+    source_session: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,6 +394,7 @@ class MotionAnalysisService:
         capture_generation: int = 0,
         lifecycle_generation: int = 0,
         source_pts: float = float("nan"),
+        source_session: str = "",
     ) -> None:
         """Hand a stable raw frame to the analysis worker without preprocessing."""
         if not self._admit_frame(frame_clock, stop_event):
@@ -417,6 +420,7 @@ class MotionAnalysisService:
                 capture_generation=capture_generation,
                 lifecycle_generation=lifecycle_generation,
                 source_pts=source_pts,
+                source_session=source_session,
             ),
             stop_event,
         )
@@ -500,6 +504,7 @@ class MotionAnalysisService:
         capture_generation: int = 0,
         lifecycle_generation: int = 0,
         source_pts: float = float("nan"),
+        source_session: str = "",
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
         self._reset_for_clock_discontinuity(frame_epoch)
         preprocess_started = time.monotonic()
@@ -565,6 +570,7 @@ class MotionAnalysisService:
                 capture_generation=capture_generation,
                 lifecycle_generation=lifecycle_generation,
                 source_pts=source_pts,
+                source_session=source_session,
             ))
             if processed is not None:
                 self.processed_frames.append((frame_epoch, processed))
@@ -901,6 +907,7 @@ class MotionAnalysisService:
                         capture_generation=work.capture_generation,
                         lifecycle_generation=work.lifecycle_generation,
                         source_pts=work.source_pts,
+                        source_session=work.source_session,
                     )
                     if prepared is None:
                         continue

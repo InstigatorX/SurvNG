@@ -656,7 +656,7 @@ def test_live_recovers_after_relay_restart_without_a_persistent_consumer() -> No
     assert status["open_timeout_escalations"] >= 1
 
 
-def test_capture_stores_sidecar_detections(caplog) -> None:
+def test_capture_does_not_expose_untimestamped_sidecar_detections(caplog) -> None:
     class DetectingHandle(FakeHandle):
         def pop_detections(self):
             return [
@@ -693,7 +693,7 @@ def test_capture_stores_sidecar_detections(caplog) -> None:
         status = service.status()
         service.request_stop()
         assert service.wait_stopped(1.0) == {}
-    assert detections[0]["label"] == "person"
+    assert detections == []
     assert status["live_pipeline"]["preprocess_backend"] == "va"
     assert status["live_pipeline"]["hardware_decoder_selected"] is True
     assert status["live_pipeline"]["source_element"] == "uridecodebin3"

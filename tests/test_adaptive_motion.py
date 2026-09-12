@@ -982,6 +982,23 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertEqual(second.debug.values["background_stale_transitions_skipped"], 5)
         self.assertEqual(second.debug.values["tracker_stale_frames_skipped"], 5)
 
+    def test_partial_overlap_preserves_historical_noise_samples(self) -> None:
+        frames = [np.full((40, 60), 30, dtype=np.uint8) for _ in range(5)]
+        self.process_timed(frames[:4], [100.0, 100.2, 100.4, 100.6])
+
+        result = self.process_timed(frames[1:], [100.2, 100.4, 100.6, 100.8])
+
+        # Each four-frame window contributes three noise samples, even though
+        # two transitions in the second window are too old for scene learning.
+        expected_noise = 1.0 + (4.0 - 1.0) * 0.92 ** 6
+        state = self.pipeline.runtime.stage_state["background"]
+        self.assertAlmostEqual(state.noise_ema, expected_noise)
+        self.assertEqual(result.debug.values["scene_noise"], round(expected_noise, 4))
+        self.assertEqual(result.debug.values["background_stale_transitions_skipped"], 2)
+        self.assertEqual(result.debug.values["background_learning_rates"][:2], [0.0, 0.0])
+        self.assertGreater(result.debug.values["background_learning_rates"][-1], 0.0)
+        self.assertEqual(state.last_processed_at, 100.8)
+
     def test_motion_score_accumulates_across_incremental_invocations(self) -> None:
         frames = moving_subject_frames(5)
         first = self.process_timed(frames[:3], [100.0, 100.2, 100.4])

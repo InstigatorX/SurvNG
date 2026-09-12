@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from ..config import CameraConfig
+from ..live_detections import DetectionSnapshot
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
 from ..recording_media import mp4_video_dimensions
@@ -174,6 +175,8 @@ class TimestampedLiveFrame:
     width: int = 0
     height: int = 0
     source_pts: float = float("nan")
+    source_session: str = ""
+    spatial_alignment: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1027,7 +1030,7 @@ TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | tuple[Frame, 
 TimestampedEvidenceFrameProvider = Callable[
     [dict[str, Any]], TimestampedLiveFrame | tuple[Frame, float] | None
 ]
-LiveDetectionsProvider = Callable[[TimestampedLiveFrame], list[dict[str, Any]] | None]
+LiveDetectionsProvider = Callable[[TimestampedLiveFrame], DetectionSnapshot | None]
 StopRequested = Callable[[], bool]
 
 
@@ -1318,43 +1321,29 @@ class RecordedMotionObjectDetector:
                 refinement_pending=True,
             )
         sidecar_objects: list[dict[str, Any]] = []
+        snapshot = None
         if self.live_detections_provider is not None and isinstance(sample, TimestampedLiveFrame):
-            try:
-                raw_sidecar_objects = self.live_detections_provider(sample)
-            except TypeError:
-                # Pre-existing custom factories have a no-argument provider.
-                # They lack evidence identity, so keep their historical
-                # non-pinned-only behavior rather than admitting stale boxes.
-                raw_sidecar_objects = (
-                    self.live_detections_provider() if not has_evidence_token else []
-                )
-            sidecar_objects = _labeled_sidecar_objects(raw_sidecar_objects)
-            for detected in sidecar_objects:
-                detector_width = int(detected.pop("_sidecar_width", 0) or 0)
-                detector_height = int(detected.pop("_sidecar_height", 0) or 0)
-                if detector_width > 0 and detector_height > 0 and (
-                    detector_width != frame.shape[1] or detector_height != frame.shape[0]
-                ):
-                    box = detected.get("box")
-                    if isinstance(box, dict):
-                        for key in ("x1", "x2"):
-                            if isinstance(box.get(key), (int, float)):
-                                box[key] = float(box[key]) * frame.shape[1] / detector_width
-                        for key in ("y1", "y2"):
-                            if isinstance(box.get(key), (int, float)):
-                                box[key] = float(box[key]) * frame.shape[0] / detector_height
+            snapshot = self.live_detections_provider(sample)
+            if snapshot is not None:
+                sidecar_objects = snapshot.scaled_objects(frame.shape[1], frame.shape[0])
         objects = self._detect_objects(
             frame,
             timing=timing,
             enrich_faces=False,
             workload="initial",
             precomputed=sidecar_objects,
+            spatial_alignment=sample.spatial_alignment if isinstance(sample, TimestampedLiveFrame) else None,
         )
         zone_geometry_required = any(
             zone.enabled
             and zone.behavior in {"incident", "ignore"}
             and len(zone.points) >= 3
             for zone in self.camera.zones
+        )
+        alignment = sample.spatial_alignment if isinstance(sample, TimestampedLiveFrame) else {}
+        tracking_geometry_trusted = geometry_trusted and all(
+            abs(float(alignment.get(key, expected)) - expected) <= 0.02
+            for key, expected in (("scale_x", 1), ("scale_y", 1), ("offset_x", 0), ("offset_y", 0))
         )
         for detected in objects:
             if isinstance(detected, dict):
@@ -1367,6 +1356,10 @@ class RecordedMotionObjectDetector:
                     "camera_generation": generation,
                     "capture_generation": capture_generation,
                     "frame_geometry_trusted": geometry_trusted,
+                    # Zone projection does not transform track histories or
+                    # their seed image. A cropped live result may admit an
+                    # event, but must wait for main refinement to seed tracks.
+                    "tracking_geometry_trusted": tracking_geometry_trusted,
                 })
                 if zone_geometry_required and not geometry_trusted:
                     # A substream may use a different crop/FOV than the main
@@ -1575,6 +1568,18 @@ class RecordedMotionObjectDetector:
     ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
+        samples_by_source_frame: dict[tuple[str, float], _RecordedDetectionSample] = {}
+
+        def ordered_samples() -> list[_RecordedDetectionSample]:
+            # Different requested slots can resolve to one source frame. Keep
+            # those slots satisfied, but count their shared evidence only once.
+            unique: dict[int, _RecordedDetectionSample] = {}
+            for offset in planned_offsets:
+                sample = samples_by_offset.get(offset)
+                if sample is not None:
+                    unique.setdefault(id(sample), sample)
+            return list(unique.values())
+
         samples: list[_RecordedDetectionSample] = []
         default_required = max(
             1,
@@ -1747,29 +1752,39 @@ class RecordedMotionObjectDetector:
                         decoded = frames.get(frame_offset)
                         if decoded is None:
                             continue
-                        objects = self._detect_objects(
-                            decoded.frame,
-                            timing=timing,
-                            enrich_faces=False,
-                            workload="refinement",
+                        source_key = (
+                            (str(row["path"]), decoded.actual_offset)
+                            if decoded.exact_timestamp
+                            else None
                         )
-                        row_start = float(row.get("start_epoch") or 0.0)
-                        actual_offset = (
-                            row_start + decoded.actual_offset - event_epoch
+                        sample = (
+                            samples_by_source_frame.get(source_key)
+                            if source_key is not None
+                            else None
                         )
-                        samples_by_offset[sample_offset] = _RecordedDetectionSample(
-                            offset=actual_offset,
-                            requested_offset=sample_offset,
-                            exact_timestamp=decoded.exact_timestamp,
-                            frame=decoded.frame,
-                            objects=objects,
-                            recording_path=str(row["path"]),
-                        )
-                        samples = [
-                            samples_by_offset[offset]
-                            for offset in planned_offsets
-                            if offset in samples_by_offset
-                        ]
+                        if sample is None:
+                            objects = self._detect_objects(
+                                decoded.frame,
+                                timing=timing,
+                                enrich_faces=False,
+                                workload="refinement",
+                            )
+                            row_start = float(row.get("start_epoch") or 0.0)
+                            actual_offset = (
+                                row_start + decoded.actual_offset - event_epoch
+                            )
+                            sample = _RecordedDetectionSample(
+                                offset=actual_offset,
+                                requested_offset=sample_offset,
+                                exact_timestamp=decoded.exact_timestamp,
+                                frame=decoded.frame,
+                                objects=objects,
+                                recording_path=str(row["path"]),
+                            )
+                            if source_key is not None:
+                                samples_by_source_frame[source_key] = sample
+                        samples_by_offset[sample_offset] = sample
+                        samples = ordered_samples()
                         if _refinement_early_exit_ready(
                             stage_index=stage_index,
                             stage_offsets=stage_offsets,
@@ -1792,11 +1807,7 @@ class RecordedMotionObjectDetector:
                                     len(pending) - sample_index - 1
                                 )
 
-                samples = [
-                    samples_by_offset[offset]
-                    for offset in planned_offsets
-                    if offset in samples_by_offset
-                ]
+                samples = ordered_samples()
                 if samples:
                     selected, objects = _temporal_consensus(
                         samples,
@@ -1821,18 +1832,10 @@ class RecordedMotionObjectDetector:
                                 for sample in samples
                             )
                         )
-                        confirmed_labels = {
-                            str(item.get("label") or "").strip().lower()
-                            for item in objects
-                            if item.get("temporal_consensus") is True
-                        }
-                        unresolved_candidate = any(
-                            _candidate_detection(item)
-                            and not item.get("auxiliary_detection")
-                            and str(item.get("label") or "").strip().lower()
-                            not in confirmed_labels
-                            for sample in samples
-                            for item in sample.objects
+                        unresolved_candidate = not _refinement_stage_complete(
+                            samples,
+                            default_required,
+                            class_confirmations,
                         )
                         if (
                             adaptive_stage
@@ -2107,6 +2110,7 @@ class RecordedMotionObjectDetector:
         enrich_faces: bool = True,
         workload: str = "refinement",
         precomputed: list[dict[str, Any]] | None = None,
+        spatial_alignment: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
@@ -2181,6 +2185,21 @@ class RecordedMotionObjectDetector:
                         detected["face_quality_score"] = round(quality.score, 4)
                         detected["face_sharpness_score"] = round(quality.sharpness, 4)
                         detected["face_exposure_score"] = round(quality.exposure, 4)
+        # Zones are authored on main. Project boxes only for zone evaluation,
+        # then restore live coordinates for crops, snapshots, and EMA overlap.
+        original_boxes = []
+        if spatial_alignment and spatial_alignment.get("reliable"):
+            for detected in objects:
+                box = detected.get("box")
+                if not isinstance(box, dict):
+                    continue
+                original_boxes.append((detected, box))
+                detected["box"] = {
+                    key: box[key] * float(spatial_alignment.get("scale_x", 1.0)) + frame_width * float(spatial_alignment.get("offset_x", 0.0))
+                    if key.startswith("x") else
+                    box[key] * float(spatial_alignment.get("scale_y", 1.0)) + frame_height * float(spatial_alignment.get("offset_y", 0.0))
+                    for key in ("x1", "y1", "x2", "y2")
+                }
         apply_detection_zones(
             self.camera,
             objects,
@@ -2190,6 +2209,8 @@ class RecordedMotionObjectDetector:
             bool(getattr(self.detector.config, "require_incident_zone", True)),
             class_thresholds,
         )
+        for detected, box in original_boxes:
+            detected["box"] = box
         apply_depth_zone_filters(self.camera, objects)
         for detected in objects:
             if isinstance(detected, dict):

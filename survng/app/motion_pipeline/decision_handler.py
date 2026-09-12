@@ -624,6 +624,10 @@ class MotionDecisionHandler:
         ):
             frame_captured_at_epoch = None
         frame_source = str(getattr(provider_result, "frame_source", "") or "")
+        correlation_alignment = (
+            {"reliable": True, "scale_x": 1.0, "scale_y": 1.0, "offset_x": 0.0, "offset_y": 0.0}
+            if frame_source == "live_fast_path" else self.spatial_alignment
+        )
         frame_timestamp_exact = bool(
             getattr(provider_result, "frame_timestamp_exact", False)
         )
@@ -760,7 +764,7 @@ class MotionDecisionHandler:
                 frame,
                 objects,
                 qualification,
-                self.spatial_alignment,
+                correlation_alignment,
             )
             rescue_summary["trigger_source"] = str(
                 qualification.get("trigger_source") or "unknown"
@@ -793,7 +797,7 @@ class MotionDecisionHandler:
                 frame,
                 eligible_objects,
                 qualification,
-                self.spatial_alignment,
+                correlation_alignment,
                 depth_attribution_mode="shadow",
             )
             uncorrelated_eligible_objects -= len(eligible_objects)

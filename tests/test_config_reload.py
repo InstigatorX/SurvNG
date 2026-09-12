@@ -748,7 +748,7 @@ class ConfigReloadTest(unittest.TestCase):
             hot_camera_ids={"gate"},
         )
 
-    def test_detector_engine_change_restarts_only_object_inference(self) -> None:
+    def test_detector_device_change_rebuilds_native_capture_graph(self) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
@@ -762,15 +762,10 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_inference.assert_called_once_with(
-            effective.detector,
-            {"object"},
-            refresh_tracking=False,
-        )
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        active.reconfigure_inference.assert_not_called()
         active.reconfigure_detector_policy.assert_not_called()
-        self.assertEqual(result["subsystems_restarted"], ["object_inference"])
-        self.assertFalse(result["camera_workers_restarted"])
+        self.assertTrue(result["camera_workers_restarted"])
 
     def test_detector_worker_count_restarts_only_object_inference(self) -> None:
         active = Mock()
@@ -927,7 +922,7 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["depth_inference"])
         self.assertIn("detector_policy", result["hot_updated"])
 
-    def test_model_change_restarts_object_inference_and_tracking_sessions(self) -> None:
+    def test_model_change_rebuilds_native_capture_and_inference_together(self) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
@@ -942,17 +937,9 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_inference.assert_called_once_with(
-            effective.detector,
-            {"object"},
-            refresh_tracking=True,
-        )
-        self.assertEqual(
-            result["subsystems_restarted"],
-            ["tracking_sessions", "object_inference"],
-        )
-        self.assertFalse(result["camera_workers_restarted"])
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        active.reconfigure_inference.assert_not_called()
+        self.assertTrue(result["camera_workers_restarted"])
 
     def test_failed_tracking_session_apply_rolls_back_runtime(self) -> None:
         active = Mock()

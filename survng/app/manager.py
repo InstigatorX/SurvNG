@@ -41,6 +41,7 @@ from .detector import objects_to_json
 from .detection_watch import RouteDetectionWatch
 from .go2rtc import Go2RtcAdapter
 from .inference_lifecycle import InferenceLifecycle
+from .config_application import live_detection_threshold
 from .inference_runtime.worker_topology import object_worker_recommendation_from_status
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
@@ -335,6 +336,8 @@ class AppManager:
                     detector.enabled and detector.backend == "openvino"
                 ),
                 labels_path=detector.labels_path,
+                labels=tuple(detector.labels),
+                confidence_threshold=live_detection_threshold(config),
                 model_proc_path=adjacent_model_proc(detector.resolved_model_path()),
                 frame_width=self.config.motion_qualification.frame_width,
             ),
@@ -982,6 +985,9 @@ class AppManager:
             lambda: self.ema_route_candidates.close(timeout=2.0),
         )
 
+        capture_backend = getattr(self, "capture_backend", None)
+        if capture_backend is not None:
+            attempt("GStreamer capture supervisor", capture_backend.close)
         LOGGER.info("SurvNG shutdown: stopping inference lifecycle")
         attempt("inference lifecycle", self.inference.close)
 

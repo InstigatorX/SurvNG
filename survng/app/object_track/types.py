@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
 
 import numpy as np
 
 from ..config import ObjectTrackingConfig
+from ..camera_capture import CapturedFrame
+from ..live_detections import DetectionSnapshot
 from ..video_frames import DecodedVideoFrame, VideoFrameReference
 
 
 Box = tuple[float, float, float, float]
 FrameSample = tuple[np.ndarray, float, float]
-FrameProvider = Callable[[], FrameSample | None]
+
+@dataclass(frozen=True, slots=True)
+class TrackingFrame:
+    captured: CapturedFrame
+    detection: DetectionSnapshot | None = None
+
+
+FrameProvider = Callable[[], FrameSample | TrackingFrame | None]
 CatchupFrameProvider = Callable[
     [float, float, float, int],
     Iterable[tuple[float, np.ndarray] | DecodedVideoFrame],

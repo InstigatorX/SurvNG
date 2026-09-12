@@ -6,6 +6,7 @@ from typing import Any
 
 from ..config import ObjectTrackingConfig
 from .bytetrack import ByteTrackObjectTracker
+from .hybrid import HybridObjectTracker
 from .types import ObjectTrackerBackend, ObjectTrackerBuilder
 
 
@@ -140,7 +141,7 @@ class ObjectTrackerRegistry:
 
 def build_builtin_object_tracker_registry() -> ObjectTrackerRegistry:
     registry = ObjectTrackerRegistry()
-    registry.register("survng_hybrid", ByteTrackObjectTracker)
+    registry.register("survng_hybrid", HybridObjectTracker)
     # Compatibility alias for configurations created before the tracker gained
     # SurvNG-specific geometry and appearance association.
     registry.register("bytetrack", ByteTrackObjectTracker)

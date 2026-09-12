@@ -59,6 +59,19 @@ def _without_fields(value: dict, fields: frozenset[str]) -> dict:
 
 def manager_owned_config(config: AppConfig) -> dict:
     payload = config.model_dump(mode="json")
+    # GStreamer owns a shared child graph in addition to the OpenVINO workers.
+    # A targeted worker restart cannot change that graph. Rebuild the manager
+    # transactionally when native capture/model settings change.
+    payload["gstreamer_capture"] = {
+        "detector": {name: getattr(config.detector, name) for name in (
+            "enabled", "backend", "model_path", "model_xml", "labels_path", "labels", "device", "nms_threshold",
+        )},
+        "sample_fps": config.motion_qualification.sample_fps,
+        "frame_width": config.motion_qualification.frame_width,
+        "tracking_enabled": config.detector.tracking.enabled,
+        "tracking_fps": config.detector.tracking.sample_fps,
+        "threshold": live_detection_threshold(config),
+    }
     for field in HOT_CONFIG_FIELDS | RECORDER_CONFIG_FIELDS:
         payload.pop(field, None)
     for camera in payload.get("cameras", []):
@@ -79,6 +92,18 @@ def manager_owned_config(config: AppConfig) -> dict:
     if isinstance(depth, dict):
         payload["detector"]["depth"] = _without_fields(depth, DEPTH_HOT_POLICY_FIELDS)
     return payload
+
+
+def live_detection_threshold(config: AppConfig) -> float:
+    """Do not discard candidates needed by class/zone policy or ByteTrack."""
+    return min(
+        config.detector.confidence_threshold,
+        config.detector.event_candidate_confidence_threshold,
+        config.detector.tracking.low_confidence_threshold,
+        *config.detector.event_class_confidence_thresholds.values(),
+        *(zone.confidence_threshold for camera in config.cameras for zone in camera.zones
+          if zone.enabled and zone.confidence_threshold is not None),
+    )
 
 
 def _motion_structural_signature(config: AppConfig, camera_id: str) -> tuple[Any, ...]:

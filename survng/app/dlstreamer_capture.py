@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import math
 import os
 import queue
 import select
@@ -13,6 +14,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -40,6 +42,7 @@ from .dlstreamer_protocol import (
     decode_stream_payload,
 )
 from survng.dlstreamer_live import model_instance_id
+from .live_detections import DetectionSnapshot
 
 LOGGER = logging.getLogger(__name__)
 
@@ -70,11 +73,13 @@ class DlStreamerCaptureOptions:
     detection_frame_rate: Callable[[], float] | None = None
     model_path: str = ""
     labels_path: str = ""
+    labels: tuple[str, ...] = ()
     model_proc_path: str = ""
     inference_device: str = "GPU"
     detect_enabled: bool = False
     frame_width: int = 320
     jpeg_fps: float = 1.0
+    confidence_threshold: float = 0.1
 
 
 def live_python_executable(preferred: str = "") -> str:
@@ -103,20 +108,23 @@ class _StreamInbox:
         self.alive = True
         self.error = ""
         self.status: dict[str, object] = {}
-        self._frames: queue.Queue[tuple[np.ndarray, int, float]] = queue.Queue(maxsize=2)
+        self._frames: queue.Queue[tuple[np.ndarray, int, float, str]] = queue.Queue(maxsize=2)
         self._detections: list[dict[str, object]] = []
-        self._detection_snapshots: list[dict[str, object]] = []
+        self._detection_snapshots: deque[DetectionSnapshot] = deque(maxlen=32)
+        self.session = uuid.uuid4().hex
+        self._last_pts: dict[str, float] = {}
         self._jpeg: bytes | None = None
         self._lock = threading.Lock()
 
     def put_frame(self, frame: np.ndarray, sequence: int, pts: float) -> None:
+        session = self.qualify_pts("frame", pts)
         if self._frames.full():
             try:
                 self._frames.get_nowait()
             except queue.Empty:
                 pass
         try:
-            self._frames.put_nowait((frame, sequence, pts))
+            self._frames.put_nowait((frame, sequence, pts, session))
         except queue.Full:
             pass
 
@@ -125,7 +133,7 @@ class _StreamInbox:
         timeout_seconds: float,
         *,
         cancelled: Callable[[], bool] | None = None,
-    ) -> tuple[np.ndarray, int, float] | None:
+    ) -> tuple[np.ndarray, int, float, str] | None:
         deadline = time.monotonic() + timeout_seconds
         while True:
             if cancelled is not None and cancelled():
@@ -157,13 +165,36 @@ class _StreamInbox:
         with self._lock:
             self._detections = objects
 
-    def add_detection_snapshot(self, snapshot: dict[str, object]) -> None:
+    def qualify_pts(self, kind: str, pts: float) -> str:
+        with self._lock:
+            previous = self._last_pts.get(kind)
+            if previous is not None and math.isfinite(pts) and pts < previous:
+                self.session = uuid.uuid4().hex
+                self._last_pts.clear()
+                self._detection_snapshots.clear()
+                self._detections = []
+                self._jpeg = None
+                while not self._frames.empty():
+                    try:
+                        self._frames.get_nowait()
+                    except queue.Empty:
+                        break
+            if math.isfinite(pts):
+                self._last_pts[kind] = pts
+            return self.session
+
+    def add_detection_snapshot(self, payload: dict[str, object]) -> None:
+        # Parse before altering the session; corrupt metadata must not reset it.
+        snapshot = DetectionSnapshot.parse(payload)
+        session = self.qualify_pts("detection", snapshot.source_pts)
+        snapshot = DetectionSnapshot.parse(payload, session=session)
         with self._lock:
             self._detection_snapshots.append(snapshot)
 
-    def pop_detection_snapshots(self) -> list[dict[str, object]]:
+    def pop_detection_snapshots(self) -> list[DetectionSnapshot]:
         with self._lock:
-            snapshots, self._detection_snapshots = self._detection_snapshots, []
+            snapshots = list(self._detection_snapshots)
+            self._detection_snapshots.clear()
             return snapshots
 
     def set_jpeg(self, jpeg: bytes) -> None:
@@ -173,6 +204,9 @@ class _StreamInbox:
     def fail(self, error: str) -> None:
         self.error = error
         self.alive = False
+        with self._lock:
+            self._detection_snapshots.clear()
+            self._detections = []
 
 
 class _SharedLiveProcess:
@@ -190,7 +224,10 @@ class _SharedLiveProcess:
         self._reader_thread: threading.Thread | None = None
 
     def is_running(self) -> bool:
-        return self._process is not None and self._process.poll() is None
+        return (
+            self._process is not None and self._process.poll() is None
+            and (self._reader_thread is None or self._reader_thread.is_alive())
+        )
 
     def stderr_text(self) -> str:
         return self._stderr.decode("utf-8", errors="replace").strip()[-400:]
@@ -226,11 +263,11 @@ class _SharedLiveProcess:
         self._stderr_thread.start()
         self._reader_thread.start()
 
-    def add_stream(self, stream_id: str, source_url: str) -> _StreamInbox:
+    def add_stream(self, stream_id: str, source_url: str, *, source_role: str = "live") -> _StreamInbox:
         inbox = _StreamInbox()
         with self._lock:
             self._inboxes[stream_id] = inbox
-        self._send({"op": "add", "stream_id": stream_id, "url": source_url})
+        self._send({"op": "add", "stream_id": stream_id, "url": source_url, "source_role": source_role})
         return inbox
 
     def remove_stream(self, stream_id: str) -> None:
@@ -250,7 +287,7 @@ class _SharedLiveProcess:
             inboxes = list(self._inboxes.values())
             self._inboxes.clear()
         for inbox in inboxes:
-            inbox.alive = False
+            inbox.fail("DL Streamer supervisor closed")
         if process is None:
             return
         if process.poll() is None:
@@ -297,6 +334,7 @@ class _SharedLiveProcess:
         process = self._process
         if process is None or process.stdout is None:
             return
+        failure = "DL Streamer supervisor output ended"
         try:
             while True:
                 chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
@@ -308,11 +346,14 @@ class _SharedLiveProcess:
                     if popped is None:
                         break
                     self._dispatch(*popped)
+        except Exception as error:
+            failure = f"DL Streamer protocol reader failed ({type(error).__name__})"
+            LOGGER.warning("%s", failure)
         finally:
             with self._lock:
                 inboxes = list(self._inboxes.values())
             for inbox in inboxes:
-                inbox.alive = False
+                inbox.fail(failure)
 
     def _dispatch(self, message_type: int, payload: bytes) -> None:
         stream_id, inner = decode_stream_payload(payload)
@@ -342,13 +383,10 @@ class _SharedLiveProcess:
                 normalized = [item for item in objects if isinstance(item, dict)]
                 inbox.set_detections(normalized)
                 if all(key in decoded for key in ("source_pts", "inference_sequence", "width", "height")):
-                    inbox.add_detection_snapshot({
-                        "source_pts": decoded["source_pts"],
-                        "inference_sequence": decoded["inference_sequence"],
-                        "width": decoded["width"],
-                        "height": decoded["height"],
-                        "objects": normalized,
-                    })
+                    try:
+                        inbox.add_detection_snapshot(decoded)
+                    except ValueError:
+                        inbox.status["invalid_detection_snapshots"] = int(inbox.status.get("invalid_detection_snapshots", 0)) + 1
             return
         if message_type == TYPE_STATUS:
             decoded = decode_json_payload(inner)
@@ -368,13 +406,15 @@ class DlStreamerCaptureHandle:
         self._process: subprocess.Popen[bytes] | None = None
         self._reader = MessageReader()
         self._prefetched: np.ndarray | None = None
-        self._prefetched_identity: tuple[int, float] | None = None
-        self._last_frame_identity: tuple[int, float] | None = None
+        self._prefetched_identity: tuple[int, float, str] | None = None
+        self._last_frame_identity: tuple[int, float, str] | None = None
+        self._parsed_frame_identity: tuple[int, float, str] | None = None
+        self._local_inbox = _StreamInbox()
+        self.source_role = "live"
         self._stderr = bytearray()
         self._stderr_thread: threading.Thread | None = None
         self._status: dict[str, object] = {}
         self._detections: list[dict[str, object]] = []
-        self._detection_snapshots: list[dict[str, object]] = []
         self._detections_lock = threading.Lock()
         self._jpeg: bytes | None = None
         self._shared: _SharedLiveProcess | None = None
@@ -393,6 +433,11 @@ class DlStreamerCaptureHandle:
 
     def set_buffer_size(self, size: int) -> None:
         del size
+
+    def set_source_role(self, source: str) -> None:
+        if source not in {"live", "main"}:
+            raise ValueError("invalid capture source role")
+        self.source_role = source
 
     def start(self, command: list[str], source_url: str) -> None:
         env = os.environ.copy()
@@ -438,7 +483,7 @@ class DlStreamerCaptureHandle:
         if frame is None:
             return False
         self._prefetched = frame[0]
-        self._prefetched_identity = (frame[1], frame[2])
+        self._prefetched_identity = (frame[1], frame[2], frame[3])
         self._harvest_available_messages()
         return True
 
@@ -451,8 +496,8 @@ class DlStreamerCaptureHandle:
         received = self._next_frame(self._read_timeout_seconds)
         frame = None if received is None else received[0]
         if received is not None:
-            self._last_frame_identity = (received[1], received[2])
             self._harvest_available_messages()
+            self._last_frame_identity = (received[1], received[2], received[3])
         return (frame is not None), frame
 
     def pipeline_status(self) -> dict[str, object]:
@@ -470,15 +515,10 @@ class DlStreamerCaptureHandle:
             self._detections = []
         return detections
 
-    def pop_detection_snapshots(self) -> list[dict[str, object]]:
-        inbox = self._inbox
-        if inbox is not None:
-            return inbox.pop_detection_snapshots()
-        with self._detections_lock:
-            snapshots, self._detection_snapshots = self._detection_snapshots, []
-            return snapshots
+    def pop_detection_snapshots(self) -> list[DetectionSnapshot]:
+        return (self._inbox or self._local_inbox).pop_detection_snapshots()
 
-    def pop_frame_identity(self) -> tuple[int, float] | None:
+    def pop_frame_identity(self) -> tuple[int, float, str] | None:
         identity, self._last_frame_identity = self._last_frame_identity, None
         return identity
 
@@ -561,7 +601,7 @@ class DlStreamerCaptureHandle:
         timeout_seconds: float,
         *,
         cancelled: Callable[[], bool] | None = None,
-    ) -> tuple[np.ndarray, int, float] | None:
+    ) -> tuple[np.ndarray, int, float, str] | None:
         inbox = self._inbox
         if inbox is not None:
             return inbox.get_frame(timeout_seconds, cancelled=cancelled)
@@ -576,8 +616,8 @@ class DlStreamerCaptureHandle:
             if popped is not None:
                 frame = self._apply_message(*popped)
                 if frame is not None:
-                    sequence, pts = self._last_frame_identity or (0, float("nan"))
-                    return frame, sequence, pts
+                    sequence, pts, session = self._parsed_frame_identity or (0, float("nan"), "")
+                    return frame, sequence, pts, session
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -617,7 +657,8 @@ class DlStreamerCaptureHandle:
     def _apply_message(self, message_type: int, payload: bytes) -> np.ndarray | None:
         if message_type == TYPE_FRAME:
             width, height, sequence, pts, pixels = decode_frame_payload(payload)
-            self._last_frame_identity = (sequence, pts)
+            session = self._local_inbox.qualify_pts("frame", pts)
+            self._parsed_frame_identity = (sequence, pts, session)
             pixel_count = width * height
             if len(pixels) == pixel_count:
                 return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width).copy()
@@ -635,13 +676,10 @@ class DlStreamerCaptureHandle:
                     normalized = [item for item in objects if isinstance(item, dict)]
                     self._detections = normalized
                     if all(key in decoded for key in ("source_pts", "inference_sequence", "width", "height")):
-                        self._detection_snapshots.append({
-                            "source_pts": decoded["source_pts"],
-                            "inference_sequence": decoded["inference_sequence"],
-                            "width": decoded["width"],
-                            "height": decoded["height"],
-                            "objects": normalized,
-                        })
+                        try:
+                            self._local_inbox.add_detection_snapshot(decoded)
+                        except ValueError:
+                            self._status["invalid_detection_snapshots"] = int(self._status.get("invalid_detection_snapshots", 0)) + 1
             return None
         if message_type == TYPE_STATUS:
             decoded = decode_json_payload(payload)
@@ -747,7 +785,7 @@ class DlStreamerCaptureBackend:
                 self._shared.start()
             shared = self._shared
         stream_id = uuid.uuid4().hex
-        handle.attach(shared, stream_id, shared.add_stream(stream_id, source_url))
+        handle.attach(shared, stream_id, shared.add_stream(stream_id, source_url, source_role=handle.source_role))
         if cancelled():
             handle.close()
             return False
@@ -778,6 +816,8 @@ class DlStreamerCaptureBackend:
             f"{frame_rate:.6f}",
             "--detect-fps",
             f"{detection_rate:.6f}",
+            "--threshold",
+            str(self.options.confidence_threshold),
             "--open-timeout",
             f"{open_timeout:.3f}",
             "--rtsp-transport",
@@ -807,6 +847,8 @@ class DlStreamerCaptureBackend:
             labels_path = self.options.labels_path.strip()
             if labels_path:
                 command.extend(["--labels", labels_path])
+            elif self.options.labels:
+                command.extend(["--labels-list", ",".join(self.options.labels)])
             model_proc = (
                 self.options.model_proc_path.strip()
                 or adjacent_model_proc(model_path)

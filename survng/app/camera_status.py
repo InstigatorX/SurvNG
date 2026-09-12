@@ -212,6 +212,7 @@ class CameraStatusService:
             "main_last_error": capture["main_error"],
             "capture_stats": capture["capture_stats"],
             "live_pipeline": dict(capture.get("live_pipeline") or {}),
+            "live_detection_matching": dict(capture.get("live_detection_matching") or {}),
             "live_detections": [
                 dict(item) for item in capture.get("live_detections") or ()
             ],

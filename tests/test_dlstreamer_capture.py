@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from survng.app.camera_capture import CameraCaptureService, CaptureOpenLimiter
+from survng.app.live_detections import DetectionSnapshot
 from survng.app.dlstreamer_capture import (
     DlStreamerCaptureBackend,
     DlStreamerCaptureHandle,
@@ -380,13 +381,12 @@ def test_handle_preserves_authoritative_empty_detection_snapshot() -> None:
     message_type, payload = reader.pop() or (0, b"")
     assert handle._apply_message(message_type, payload) is None
     assert handle.pop_detections() == []
-    assert handle.pop_detection_snapshots() == [{
-        "source_pts": 12.5,
-        "inference_sequence": 4,
-        "width": 640,
-        "height": 360,
-        "objects": [],
-    }]
+    snapshots = handle.pop_detection_snapshots()
+    assert len(snapshots) == 1
+    assert snapshots[0].objects == ()
+    assert snapshots[0].source_pts == 12.5
+    assert snapshots[0].session
+    assert handle.pop_detection_snapshots() == []
 
 
 def test_capture_matches_only_a_recent_prior_snapshot_in_its_generation() -> None:
@@ -396,28 +396,17 @@ def test_capture_matches_only_a_recent_prior_snapshot_in_its_generation() -> Non
         backend=None,  # Matching is independent of a native backend.
     )
     with capture._lock:
-        capture._detection_snapshots["live"].extend((
-            {
-                "source_pts": 8.0,
-                "generation": 1,
-                "width": 640,
-                "height": 360,
-                "objects": [{"label": "car"}],
-            },
-            {
-                "source_pts": 8.2,
-                "generation": 1,
-                "width": 640,
-                "height": 360,
-                "objects": [],
-            },
-        ))
+        capture._generation = 1
+        history = capture._detection_history["live"]
+        history.reset("test")
+        history.add(DetectionSnapshot(8.0, 1, 640, 360, ({"label": "car"},), "test"))
+        history.add(DetectionSnapshot(8.2, 2, 640, 360, (), "test"))
     # The authoritative empty result clears the old car for later EMA input.
-    assert capture.matched_detections("live", source_pts=8.3, generation=1) == []
+    assert capture.matched_snapshot("live", source_pts=8.3, generation=1, source_session="test").objects == ()
     # A future result and a stale prior result are both rejected.
-    assert capture.matched_detections("live", source_pts=7.9, generation=1) == []
-    assert capture.matched_detections("live", source_pts=8.6, generation=1) == []
-    assert capture.matched_detections("live", source_pts=8.3, generation=2) == []
+    assert capture.matched_snapshot("live", source_pts=7.9, generation=1, source_session="test") is None
+    assert capture.matched_snapshot("live", source_pts=8.6, generation=1, source_session="test") is None
+    assert capture.matched_snapshot("live", source_pts=8.3, generation=2, source_session="test") is None
 
 
 def test_packed_gray_strips_row_stride() -> None:

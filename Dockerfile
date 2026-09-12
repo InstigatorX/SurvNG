@@ -36,6 +36,7 @@ RUN chmod 755 /usr/local/bin/add-apt-ppa-retry \
         procps \
         python3 \
         python3-gi \
+        python3-numpy \
         python3-venv \
         software-properties-common \
         tini \
@@ -99,6 +100,7 @@ CMD ["python", "-m", "survng.app", "--host", "0.0.0.0", "--port", "8088", "--loo
 # Pins match the prototype Noble + kobuk-team/intel-graphics stack.
 FROM runtime-base AS runtime-intel
 USER root
+ARG DLSTREAMER_VERSION=2026.1.0
 ARG INTEL_COMPUTE_VERSION=26.27.39122.14-1~24.04~ppa1
 ARG INTEL_IGC_VERSION=2.38.5-1~24.04
 ARG INTEL_GMMLIB_VERSION=22.10.0-1~24.04~ppa1
@@ -146,7 +148,8 @@ RUN apt-get update \
         "deb [signed-by=/usr/share/keyrings/intel-gpg-archive-keyring.gpg] https://apt.repos.intel.com/openvino ubuntu24 main" \
         > /etc/apt/sources.list.d/intel-openvino.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends intel-dlstreamer \
+    && apt-get install -y --no-install-recommends "intel-dlstreamer=${DLSTREAMER_VERSION}" \
+    && apt-mark hold intel-dlstreamer \
     && apt-get purge -y --auto-remove software-properties-common curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
