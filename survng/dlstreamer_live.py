@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import math
 import os
@@ -22,6 +23,12 @@ DECODERS = {
     "auto": ("vah264dec", "vah265dec", "avdec_h264", "avdec_h265"),
 }
 
+STREAM_STOP_TIMEOUT_SECONDS = 2.0
+
+
+class StreamShutdownError(RuntimeError):
+    """The native process must be replaced; admitting another graph is unsafe."""
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -38,6 +45,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-role", choices=("live", "main"), default="live")
     parser.add_argument("--threshold", type=float, default=0.1,
                         help="retain low-confidence candidates for two-pass tracking")
+    parser.add_argument("--nms-threshold", type=float, default=None,
+                        help="override native model NMS IoU; final-output models remain NMS-free")
     parser.add_argument(
         "--detect-fps",
         type=float,
@@ -420,6 +429,11 @@ def _write(
 
 
 def run(argv: list[str] | None = None) -> int:
+    with ExitStack() as resources:
+        return _run(argv, resources)
+
+
+def _run(argv: list[str] | None, resources: ExitStack) -> int:
     from survng.app.dlstreamer_protocol import (
         TYPE_DETECTIONS,
         TYPE_STATUS,
@@ -454,6 +468,11 @@ def run(argv: list[str] | None = None) -> int:
         if detect
         else ""
     )
+    from survng.dlstreamer_model import configured_model
+
+    model_path, args.model_proc = resources.enter_context(configured_model(
+        model_path, args.model_proc, args.nms_threshold if detect else None,
+    ))
     if args.supervisor:
         return _run_supervisor(
             Gst,
@@ -540,14 +559,18 @@ def _run_supervisor(
 
     def stop_stream(stream_id: str) -> None:
         with workers_lock:
-            worker = workers.pop(stream_id, None)
+            worker = workers.get(stream_id)
         if worker is None:
             return
         event, thread = worker
         event.set()
-        thread.join(timeout=2.0)
+        thread.join(timeout=STREAM_STOP_TIMEOUT_SECONDS)
+        if thread.is_alive():
+            raise StreamShutdownError("native stream shutdown timed out; supervisor replacement required")
+        with workers_lock:
+            workers.pop(stream_id, None)
 
-    def start_stream(stream_id: str, url: str, source_role: str = "live") -> None:
+    def start_stream(stream_id: str, url: str, source_role: str = "live", frame_width: int = qualifier_width) -> None:
         stop_stream(stream_id)
         event = threading.Event()
 
@@ -563,7 +586,7 @@ def _run_supervisor(
                     instance_id=instance_id,
                     rate=rate if source_role == "live" else _frame_rate(args.main_fps),
                     detect_rate=detect_rate,
-                    qualifier_width=qualifier_width if source_role == "live" else 640,
+                    qualifier_width=frame_width if source_role == "live" else 640,
                     jpeg_rate=jpeg_rate if source_role == "live" else None,
                     open_timeout=open_timeout,
                     stdout=stdout,
@@ -624,7 +647,8 @@ def _run_supervisor(
                 source_role = str(command.get("source_role") or "live")
                 if source_role not in {"main", "live"}:
                     raise ValueError("invalid capture source role")
-            except ValueError as exc:
+                frame_width = _qualifier_width(command.get("frame_width", qualifier_width))
+            except (TypeError, ValueError) as exc:
                 _write(
                     stdout,
                     encode_json(
@@ -635,17 +659,19 @@ def _run_supervisor(
                     lock=stdout_lock,
                 )
                 continue
-            start_stream(stream_id, url, source_role)
+            start_stream(stream_id, url, source_role, frame_width)
     finally:
         request_stop()
         with workers_lock:
             remaining = list(workers.items())
-            workers.clear()
+        deadline = time.monotonic() + STREAM_STOP_TIMEOUT_SECONDS
         for _stream_id, (event, thread) in remaining:
             event.set()
-            thread.join(timeout=2.0)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+        if any(thread.is_alive() for _stream_id, (_event, thread) in remaining):
+            raise StreamShutdownError("native stream shutdown timed out; supervisor replacement required")
     return 0
 
 
@@ -1078,6 +1104,7 @@ def _pump_pipeline(
                             "source_role": source_role,
                             "metadata_contract": "GstGVAJSONMeta-v1" if detect else "disabled",
                             "detection_threshold": args.threshold if detect else None,
+                            "requested_nms_threshold": args.nms_threshold if detect else None,
                             "qualifier_width": qualifier_width,
                             "detect_fps": float(detect_rate),
                             "inference_interval": 1,
