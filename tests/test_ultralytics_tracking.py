@@ -115,6 +115,9 @@ class UltralyticsDeepOCSortObjectTrackerTest(unittest.TestCase):
             reid_enabled=True,
             reid_model_path="person-reid.xml",
         ), 0.7)
+        # This test explicitly exercises appearance-only recovery. The adapter
+        # default deliberately retains a nonzero proximity gate.
+        tracker._tracker.proximity_thresh = 0.0
         first = tracker.update([
             detection("person", 0.9, (10, 10, 40, 80), (1.0, 0.0)),
         ], 10.0, confirm_new=True)
@@ -125,6 +128,20 @@ class UltralyticsDeepOCSortObjectTrackerTest(unittest.TestCase):
 
         self.assertEqual(recovered[0]["track_id"], first[0]["track_id"])
         self.assertNotIn("_tracking_embedding", recovered[0])
+
+    def test_default_proximity_gate_rejects_far_appearance_only_recovery(self) -> None:
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(
+            reid_enabled=True, reid_model_path="person-reid.xml",
+        ), 0.7)
+        self.assertGreater(tracker._tracker.proximity_thresh, 0.0)
+        first = tracker.update([
+            detection("person", 0.9, (10, 10, 40, 80), (1.0, 0.0)),
+        ], 10.0, confirm_new=True)
+        tracker.update([], 10.5)
+        far = detection("person", 0.9, (500, 300, 600, 700), (0.99, 0.01))
+        self.assertEqual(tracker.update([far], 11.0), [])
+        confirmed = tracker.update([far], 11.5)
+        self.assertNotEqual(confirmed[0]["track_id"], first[0]["track_id"])
 
     def test_dissimilar_person_starts_a_new_track(self) -> None:
         tracker = UltralyticsDeepOCSortObjectTracker(self.config(

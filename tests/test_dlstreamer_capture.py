@@ -347,6 +347,7 @@ def test_inference_watchdog_distinguishes_empty_results_from_stalled_metadata(mo
     shared._check_inference_progress(18.0)  # Empty inference is real progress.
     now[0] = 18.0
     live.add_detection_snapshot(payload)  # Repeated PTS cannot hide a stall.
+    live.last_frame_at = 18.8  # Video remains continuous during the inference stall.
     now[0] = 19.0
     live.put_frame(np.zeros((2, 2), dtype=np.uint8), 99, 9.0)
     with pytest.raises(RuntimeError, match="inference stalled"):

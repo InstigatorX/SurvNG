@@ -10,6 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from ..openvino_config import latency_compile_config
 from .config import DetectorConfig, auxiliary_openvino_device
 
 
@@ -88,9 +89,7 @@ class OpenVinoPersonReidentifier:
                 model.reshape({model.input(0).any_name: [1, 3, height, width]})
             self.input_layout, self.input_shape = self._image_input(model.input(0).shape)
             device = auxiliary_openvino_device(self.configured_device)
-            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
-            if device.upper() != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = latency_compile_config(device)
             try:
                 compiled = core.compile_model(model, device, compile_config)
                 self.loaded_device = device

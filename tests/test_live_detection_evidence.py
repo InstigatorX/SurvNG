@@ -243,6 +243,9 @@ def test_cropped_live_event_waits_for_main_tracking_seed():
         live_detections_provider=lambda _sample: DetectionSnapshot.parse(payload(objects=[car()]), session="s"),
     )
     result = backend.detect_initial(datetime.now(timezone.utc))
+    assert result.objects[0]["live_detection_session"] == "s"
+    assert result.objects[0]["live_inference_sequence"] == 1
+    assert result.objects[0]["live_detection_source_pts"] == 10.0
     assert result.objects[0]["incident_eligible"]
     assert result.objects[0]["tracking_geometry_trusted"] is False
     session = SimpleNamespace(config=ObjectTrackingConfig())

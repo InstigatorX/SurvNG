@@ -129,10 +129,14 @@ class _StreamInbox:
         self.inference_started_at: float | None = None
         self.last_inference_at: float | None = None
         self.last_frame_at: float | None = None
+        self.video_resumed_at: float | None = None
 
     def put_frame(self, frame: np.ndarray, sequence: int, pts: float) -> None:
         session = self.qualify_pts("frame", pts)
-        self.last_frame_at = time.monotonic()
+        now = time.monotonic()
+        if self.last_frame_at is None or now - self.last_frame_at > 1.0:
+            self.video_resumed_at = now
+        self.last_frame_at = now
         if self._frames.full():
             try:
                 self._frames.get_nowait()
@@ -396,6 +400,11 @@ class _SharedLiveProcess:
             progress = inbox.last_inference_at
             if progress is None:
                 progress = inbox.inference_started_at
+            if inbox.video_resumed_at is not None:
+                # A camera pause is not time spent awaiting inference on
+                # continuous video. Give its first resumed frame the normal
+                # bounded inference budget without inventing result progress.
+                progress = max(progress, inbox.video_resumed_at)
             if now - progress > DLSTREAMER_INFERENCE_STALL_SECONDS:
                 # The native model and its request pool are shared. Reopening
                 # one pipeline cannot recover a wedged shared inference pool.

@@ -10,6 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from ..openvino_config import latency_compile_config
 from .config import DetectorConfig, auxiliary_openvino_device
 
 
@@ -88,9 +89,7 @@ class OpenVinoFaceRecognizer:
                 landmark_model.input(0).shape
             )
             device = auxiliary_openvino_device(self.config.face_recognition_device)
-            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
-            if device.upper() != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = latency_compile_config(device)
             try:
                 self._compiled_model = core.compile_model(model, device, compile_config)
                 self.loaded_device = device
@@ -106,7 +105,9 @@ class OpenVinoFaceRecognizer:
             self._input = self._compiled_model.input(0)
             self._output = self._compiled_model.output(0)
             try:
-                compiled_landmarks = core.compile_model(landmark_model, self.loaded_device, compile_config)
+                compiled_landmarks = core.compile_model(
+                    landmark_model, self.loaded_device, latency_compile_config(self.loaded_device)
+                )
             except Exception:
                 if self.loaded_device.upper() == "CPU":
                     raise

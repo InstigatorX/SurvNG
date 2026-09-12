@@ -9,6 +9,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from ..openvino_config import latency_compile_config
 from .config import DepthConfig, DetectorConfig, auxiliary_openvino_device
 
 LOGGER = logging.getLogger(__name__)
@@ -216,9 +217,7 @@ class OpenVinoDepthEstimator:
                 elif shape[-1] == 3:
                     self.input_shape = (shape[2], shape[1])
             device = auxiliary_openvino_device(self.depth_config.device)
-            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
-            if device.upper() != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = latency_compile_config(device)
             try:
                 compiled = core.compile_model(model, device, compile_config)
                 self.loaded_device = device

@@ -16,6 +16,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from survng.openvino_config import latency_compile_config
 from survng.dlstreamer_live import (
     _apply_dlstreamer_env, _detection_metadata, _load_gstreamer,
     _prefer_decoder, _require_detection_plugin,
@@ -32,7 +33,11 @@ def main() -> None:
     parser.add_argument("--min-positive-frames", type=int, default=3)
     parser.add_argument("--negative-after", type=float)
     parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--results-json", type=Path,
+                        help="save inference evidence for offline downstream replay (must not exist)")
     args = parser.parse_args()
+    if args.results_json is not None and args.results_json.exists():
+        parser.error("results output already exists")
     if args.timeout <= 0 or args.min_positive_frames < 1:
         parser.error("timeout and minimum positive frames must be positive")
     for path in (args.video, args.model, args.labels):
@@ -51,19 +56,21 @@ def main() -> None:
     conversion = ("vapostproc ! video/x-raw(memory:VAMemory),format=NV12" if gpu
                   else "videoconvert ! video/x-raw,format=BGR")
     labels = f" labels-file={json.dumps(str(args.labels))}" if args.labels else ""
+    ie_config = ",".join(f"{key}={value}" for key, value in latency_compile_config(args.device).items())
     graph = (
         f"uridecodebin3 uri={json.dumps(args.video.resolve().as_uri())} ! "
         "videorate drop-only=true ! video/x-raw(ANY),framerate=1/1 ! "
         f"{conversion} ! gvadetect model={json.dumps(str(args.model))} "
         f"device={args.device} pre-process-backend={'va-surface-sharing' if gpu else 'opencv'} "
         "batch-size=1 nireq=1 inference-interval=1 threshold=0.25 "
-        f"ie-config=PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1{labels} ! "
+        f"ie-config={ie_config}{labels} ! "
         "queue ! gvametaconvert add-empty-results=true ! "
         "appsink name=results sync=false max-buffers=2"
     )
     pipeline = Gst.parse_launch(graph)
     sink, bus = pipeline.get_by_name("results"), pipeline.get_bus()
     frames = positives = negative_frames = false_positives = 0
+    results = []
     started = time.monotonic()
     eos = False
     try:
@@ -75,6 +82,8 @@ def main() -> None:
                 frames += 1
                 result = _detection_metadata(sample, VideoFrame, inference_sequence=frames,
                     gst_second=Gst.SECOND, clock_time_none=Gst.CLOCK_TIME_NONE)
+                if args.results_json is not None:
+                    results.append(result)
                 present = any(obj["label"] == args.expect_label for obj in result["objects"])
                 positives += present
                 if args.negative_after is not None and result["source_pts"] >= args.negative_after:
@@ -92,6 +101,9 @@ def main() -> None:
               "negative_frames": negative_frames, "negative_false_positives": false_positives,
               "eos": eos, "elapsed_seconds": round(time.monotonic() - started, 3)}
     print(json.dumps(report), flush=True)
+    if args.results_json is not None:
+        with args.results_json.open("x", encoding="utf-8") as output:
+            json.dump({"summary": report, "results": results}, output)
     if not eos or positives < args.min_positive_frames:
         raise SystemExit("FAIL: recording incomplete or expected object not recognized")
     if args.negative_after is not None and (not negative_frames or false_positives):

@@ -97,7 +97,9 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     if not detect:
         assert "detect" not in elements
     else:
-        assert elements["detect"].properties["ie-config"] == "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1"
+        assert elements["detect"].properties["ie-config"] == (
+            "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1,COMPILATION_NUM_THREADS=1"
+        )
         assert elements["detect"].properties["nireq"] == 1
         assert elements["detect"].properties["scheduling-policy"] == "throughput"
 

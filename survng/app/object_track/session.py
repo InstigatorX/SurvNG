@@ -876,9 +876,23 @@ class ObjectTrackingSession:
                 self.config,
                 float(self.detector.config.confidence_threshold),
             )
+            live_seed = any(item.get("frame_source") == "live_fast_path" for item in initial_objects)
+            color_seed = initial_frame is not None and initial_frame.ndim == 3 and not live_seed
+            seed_sidecars = {
+                (item["live_detection_session"], item["live_inference_sequence"])
+                for item in initial_objects
+                if item.get("frame_source") == "live_fast_path"
+                and isinstance(item.get("live_detection_session"), str)
+                and item["live_detection_session"]
+                and type(item.get("live_inference_sequence")) is int
+                and item["live_inference_sequence"] > 0
+            }
             if initial_frame is not None:
                 self._frame_height = int(initial_frame.shape[0])
                 self._frame_width = int(initial_frame.shape[1])
+            # EMA may expand luma into three channels. Its provenance, not
+            # array shape, determines whether ReID/cover pixels are color.
+            if color_seed:
                 self._annotate_appearances(
                     initial_frame,
                     initial_objects,
@@ -915,7 +929,7 @@ class ObjectTrackingSession:
                     for item in initial_tracked
                     if item.get("track_id") is not None
                 }
-            if initial_frame is not None:
+            if color_seed:
                 self._consider_cover_candidate(
                     initial_frame,
                     captured_at,
@@ -941,7 +955,7 @@ class ObjectTrackingSession:
                 if item.get("track_id") is not None
             }
             consecutive_failures = 0
-            last_sidecar_identity = None
+            last_sidecar_identity = next(iter(seed_sidecars)) if len(seed_sidecars) == 1 else None
 
             def interval() -> float:
                 return 1.0 / max(0.01, self._effective_sample_fps)
@@ -963,7 +977,9 @@ class ObjectTrackingSession:
                     if snapshot is None:
                         return False
                     identity = (snapshot.session, snapshot.inference_sequence)
-                    if identity == last_sidecar_identity:
+                    if (last_sidecar_identity is not None
+                            and identity[0] == last_sidecar_identity[0]
+                            and identity[1] <= last_sidecar_identity[1]):
                         return False
                     last_sidecar_identity = identity
                 source_height = int(frame.shape[0])

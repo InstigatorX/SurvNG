@@ -406,22 +406,29 @@ class CameraFrameTimeline:
 
         frames: list[tuple[float, np.ndarray] | DecodedVideoFrame | TrackingFrame] = []
         last_epoch = start_epoch - interval
+        last_priority = 3
         # Preference on near-ties: finalized recordings, then main history,
         # then live history for the open-segment tail only.
-        for sample in merge(
-            recorded_samples(),
-            main_buffered,
-            live_buffered,
-            key=lambda sample: sample[0],
+        for priority, sample in merge(
+            ((0, sample) for sample in recorded_samples()),
+            ((1, sample) for sample in main_buffered),
+            ((2, sample) for sample in live_buffered),
+            key=lambda item: item[1][0],
         ):
             captured_at, _frame = sample
             if self.stop_event.is_set():
                 return TrackingFrameBatch(tuple(frames), last_epoch)
-            if captured_at <= last_epoch + interval * 0.5:
-                continue
             if captured_at > readable_end + 1e-6:
                 break
+            if captured_at <= last_epoch + interval * 0.5:
+                # Near-ties must honor evidence priority, not whichever
+                # independent capture clock happened to timestamp first.
+                if frames and priority < last_priority:
+                    frames[-1] = sample
+                    last_epoch, last_priority = captured_at, priority
+                continue
             last_epoch = captured_at
+            last_priority = priority
             frames.append(sample)
         covered_through = frames[-1][0] if frames else start_epoch
         return TrackingFrameBatch(
