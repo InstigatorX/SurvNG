@@ -50,6 +50,7 @@ LOGGER = logging.getLogger(__name__)
 # Native GPU model compilation is part of opening a live inference pipeline,
 # not a stalled RTSP read. Keep parent and child startup budgets in agreement.
 DLSTREAMER_INFERENCE_STARTUP_TIMEOUT_MS = 30000
+DLSTREAMER_INFERENCE_STALL_SECONDS = 5.0
 
 
 def adjacent_model_proc(model_path: str) -> str:
@@ -76,6 +77,7 @@ class DlStreamerCaptureOptions:
     rtsp_transport: str = "tcp"
     frame_rate: Callable[[], float] | None = None
     detection_frame_rate: Callable[[], float] | None = None
+    main_frame_rate: Callable[[], float] | None = None
     model_path: str = ""
     labels_path: str = ""
     labels: tuple[str, ...] = ()
@@ -121,8 +123,15 @@ class _StreamInbox:
         self._jpeg: bytes | None = None
         self._lock = threading.Lock()
 
+        # Video progress is not inference progress. An empty result counts,
+        # but repeated metadata with the same PTS does not refresh liveness.
+        self.inference_started_at: float | None = None
+        self.last_inference_at: float | None = None
+        self.last_frame_at: float | None = None
+
     def put_frame(self, frame: np.ndarray, sequence: int, pts: float) -> None:
         session = self.qualify_pts("frame", pts)
+        self.last_frame_at = time.monotonic()
         if self._frames.full():
             try:
                 self._frames.get_nowait()
@@ -191,10 +200,13 @@ class _StreamInbox:
     def add_detection_snapshot(self, payload: dict[str, object]) -> None:
         # Parse before altering the session; corrupt metadata must not reset it.
         snapshot = DetectionSnapshot.parse(payload)
+        previous_pts = self._last_pts.get("detection")
         session = self.qualify_pts("detection", snapshot.source_pts)
         snapshot = DetectionSnapshot.parse(payload, session=session)
         with self._lock:
             self._detection_snapshots.append(snapshot)
+            if previous_pts != snapshot.source_pts:
+                self.last_inference_at = time.monotonic()
 
     def pop_detection_snapshots(self) -> list[DetectionSnapshot]:
         with self._lock:
@@ -227,10 +239,11 @@ class _SharedLiveProcess:
         self._stderr = bytearray()
         self._stderr_thread: threading.Thread | None = None
         self._reader_thread: threading.Thread | None = None
+        self._failed = False
 
     def is_running(self) -> bool:
         return (
-            self._process is not None and self._process.poll() is None
+            not self._failed and self._process is not None and self._process.poll() is None
             and (self._reader_thread is None or self._reader_thread.is_alive())
         )
 
@@ -328,7 +341,7 @@ class _SharedLiveProcess:
         if process is None or process.stderr is None:
             return
         while True:
-            chunk = process.stderr.read(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            chunk = process.stderr.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return
             self._stderr.extend(chunk)
@@ -342,6 +355,9 @@ class _SharedLiveProcess:
         failure = "DL Streamer supervisor output ended"
         try:
             while True:
+                self._check_inference_progress(time.monotonic())
+                if not select.select([process.stdout], [], [], 0.5)[0]:
+                    continue
                 chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
                 if not chunk:
                     break
@@ -356,10 +372,30 @@ class _SharedLiveProcess:
             failure = f"DL Streamer supervisor failed ({type(error).__name__}): {detail}"
             LOGGER.warning("%s", failure)
         finally:
+            self._failed = True
             with self._lock:
                 inboxes = list(self._inboxes.values())
             for inbox in inboxes:
                 inbox.fail(failure)
+
+    def _check_inference_progress(self, now: float) -> None:
+        with self._lock:
+            inboxes = list(self._inboxes.values())
+        for inbox in inboxes:
+            if not inbox.alive or inbox.inference_started_at is None:
+                continue
+            # An RTSP outage belongs to this camera's read/reconnect lifecycle,
+            # not to the shared model. Diagnose a silent inference stall only
+            # while the same stream is still delivering video.
+            if inbox.last_frame_at is None or now - inbox.last_frame_at > 1.0:
+                continue
+            progress = inbox.last_inference_at
+            if progress is None:
+                progress = inbox.inference_started_at
+            if now - progress > DLSTREAMER_INFERENCE_STALL_SECONDS:
+                # The native model and its request pool are shared. Reopening
+                # one pipeline cannot recover a wedged shared inference pool.
+                raise RuntimeError("shared live inference stalled: no new result for 5 seconds")
 
     def _dispatch(self, message_type: int, payload: bytes) -> None:
         if message_type == TYPE_FATAL:
@@ -400,8 +436,13 @@ class _SharedLiveProcess:
         if message_type == TYPE_STATUS:
             decoded = decode_json_payload(inner)
             inbox.status = decoded
+            if decoded.get("ok") is True and decoded.get("detect") is True:
+                if inbox.inference_started_at is None:
+                    inbox.inference_started_at = time.monotonic()
             error = str(decoded.get("error") or "").strip()
             if decoded.get("ok") is False:
+                if decoded.get("failure_scope") == "inference":
+                    raise RuntimeError(f"shared live inference failed: {error or 'native stream error'}")
                 inbox.fail(error or "DL Streamer stream failed")
             return
         raise RuntimeError(f"unsupported live-capture message type {message_type}")
@@ -598,7 +639,7 @@ class DlStreamerCaptureHandle:
         if process is None or process.stderr is None:
             return
         while True:
-            chunk = process.stderr.read(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            chunk = process.stderr.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return
             self._stderr.extend(chunk)
@@ -822,6 +863,7 @@ class DlStreamerCaptureBackend:
             else frame_rate
         )
         detection_rate = min(10.0, max(0.5, float(requested_detection_rate)))
+        main_rate = self.options.main_frame_rate() if self.options.main_frame_rate else frame_rate
         open_timeout = max(0.001, self.startup_timeout_ms / 1000.0)
         command = [
             live_python_executable(self.options.python_executable),
@@ -831,6 +873,8 @@ class DlStreamerCaptureBackend:
             f"{frame_rate:.6f}",
             "--detect-fps",
             f"{detection_rate:.6f}",
+            "--main-fps",
+            f"{min(10.0, max(0.5, float(main_rate))):.6f}",
             "--threshold",
             str(self.options.confidence_threshold),
             "--open-timeout",

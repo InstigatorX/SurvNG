@@ -88,13 +88,18 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert "qualifier-scale" not in elements  # resize before the host download
         assert ("qualifier-gray", "frame-caps") in links
         assert "width=320" in elements["frame-caps"].properties["caps"]
-        assert elements["detect"].properties["pre-process-backend"] == "va"
+        assert elements["detect"].properties["pre-process-backend"] == "va-surface-sharing"
+        assert elements["detect"].properties["pre-process-config"] == "VAAPI_THREAD_POOL_SIZE=1"
         assert elements["detect-rate-caps"].properties["caps"] == "video/x-raw(memory:VAMemory),framerate=5/2"
         assert ("detect-va-memory", "detect") in links
     else:
         assert elements["qualifier-scale"].factory == "videoscale"
     if not detect:
         assert "detect" not in elements
+    else:
+        assert elements["detect"].properties["ie-config"] == "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1"
+        assert elements["detect"].properties["nireq"] == 1
+        assert elements["detect"].properties["scheduling-policy"] == "throughput"
 
 
 def test_negotiated_memory_uses_actual_pad_caps():

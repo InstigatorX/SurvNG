@@ -730,6 +730,8 @@ class ObjectTrackingConfig(BaseModel):
 
 class DetectorConfig(BaseModel):
     enabled: bool = False
+    # Bound live inference independently of EMA and recorded-main tracking.
+    live_sample_fps: float = Field(default=5.0, ge=0.5, le=10.0)
     backend: Literal["openvino", "coreml"] = "openvino"
     object_worker_count: int = Field(default=2, ge=1, le=4)
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)

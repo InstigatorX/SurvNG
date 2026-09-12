@@ -229,6 +229,8 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("gir1.2-gstreamer-1.0", dockerfile)
         self.assertIn("python3-gi", dockerfile)
         self.assertIn("intel-dlstreamer", dockerfile)
+        # 2026.1's native OpenVINO GPU emits NaN scores for YOLO26 FP16.
+        self.assertIn("DLSTREAMER_VERSION=2026.2.0", dockerfile)
         self.assertIn("apt.repos.intel.com/edgeai/dlstreamer/ubuntu24", dockerfile)
         self.assertNotIn("intel-media-va-driver \\", dockerfile)
         # Legacy docker builders reject COPY --chmod (BuildKit-only).

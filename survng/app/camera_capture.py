@@ -275,6 +275,7 @@ class CameraCaptureService:
         self._detections: dict[str, list[dict[str, object]]] = {}
         self._detection_history = {source: DetectionHistory() for source in ("live", "main")}
         self._pipeline_status: dict[str, dict[str, object]] = {}
+        self._active_handles: dict[str, CaptureHandle] = {}
         self._jpegs: dict[str, bytes] = {}
         self._preview: dict[str, np.ndarray] = {}
         self._last_access: dict[str, float] = {}
@@ -601,7 +602,7 @@ class CameraCaptureService:
                 },
                 "live_detections": self._latest_detections_locked("live"),
                 "live_pipeline": dict(self._pipeline_status.get("live") or {}),
-                "live_detection_matching": self._detection_history["live"].status(),
+                "live_detection_matching": self._detection_status_locked("live"),
                 "capture_stats": capture_stats,
             }
 
@@ -694,6 +695,7 @@ class CameraCaptureService:
                         handle.set_buffer_size(1)
                         with self._lock:
                             stats = self._stats[source]
+                            self._active_handles[source] = handle
                             if stats["frames_received"] > 0:
                                 stats["reconnects"] += 1
                             stats["starts"] += 1
@@ -752,6 +754,8 @@ class CameraCaptureService:
                     )
                 finally:
                     with self._lock:
+                        if self._active_handles.get(source) is handle:
+                            self._active_handles.pop(source, None)
                         self._detection_history[source].reset()
                         self._detections.pop(source, None)
                     if handle is not None:
@@ -826,6 +830,7 @@ class CameraCaptureService:
             return self._latest_detections_locked(source)
 
     def _latest_detections_locked(self, source: str) -> list[dict[str, object]]:
+        self._harvest_detection_snapshots_locked(source)
         frame = self._frames.get(source)
         if frame is None or self._monotonic_clock() - frame.captured_at_monotonic > self.stale_seconds:
             return []
@@ -836,6 +841,15 @@ class CameraCaptureService:
     def _detect_fps(self, source: str) -> float:
         return float((self._pipeline_status.get(source) or {}).get("detect_fps") or 5.0)
 
+    def _detection_status_locked(self, source: str) -> dict[str, object]:
+        history = self._detection_history[source]
+        frame = self._frames.get(source)
+        snapshot = history.snapshots[-1] if history.snapshots else None
+        lag = None
+        if frame is not None and snapshot is not None and frame.source_session == snapshot.session:
+            lag = max(0.0, frame.source_pts - snapshot.source_pts)
+        return {**history.status(), "lag_seconds": lag}
+
     def matched_snapshot(
         self, source: str, *, source_pts: float, generation: int, source_session: str
     ) -> DetectionSnapshot | None:
@@ -844,6 +858,7 @@ class CameraCaptureService:
         with self._lock:
             if generation <= 0 or generation != self._generation:
                 return None
+            self._harvest_detection_snapshots_locked(source)
             return self._detection_history[source].match(
                 pts=source_pts, session=source_session, detect_fps=self._detect_fps(source)
             )
@@ -940,18 +955,31 @@ class CameraCaptureService:
         pop_snapshots = getattr(handle, "pop_detection_snapshots", None)
         if not callable(pop_snapshots):
             return
-        try:
-            snapshots = pop_snapshots()
-        except Exception:
-            return
+        with self._lock:
+            try:
+                snapshots = pop_snapshots()
+            except Exception:
+                return
+            self._accept_detection_snapshots_locked(source, snapshots)
+
+    def _harvest_detection_snapshots_locked(self, source: str) -> None:
+        # Inference is asynchronous. Results that arrive while read() waits
+        # for the next video frame must already be available to admission and
+        # display callers; video progress must not gate metadata consumption.
+        handle = self._active_handles.get(source)
+        pop = getattr(handle, "pop_detection_snapshots", None)
+        if callable(pop):
+            self._accept_detection_snapshots_locked(source, pop())
+
+    def _accept_detection_snapshots_locked(self, source: str, snapshots: object) -> None:
         if not isinstance(snapshots, list):
             return
-        with self._lock:
-            for snapshot in snapshots:
-                if isinstance(snapshot, DetectionSnapshot):
-                    self._detection_history[source].add(snapshot)
-                    if snapshot.session == self._detection_history[source].session:
-                        self._detections[source] = snapshot.scaled_objects(snapshot.width, snapshot.height)
+        history = self._detection_history[source]
+        for snapshot in snapshots:
+            if isinstance(snapshot, DetectionSnapshot):
+                history.add(snapshot)
+                if history.snapshots and history.snapshots[-1] is snapshot:
+                    self._detections[source] = snapshot.scaled_objects(snapshot.width, snapshot.height)
 
     def _publish_frame(
         self,

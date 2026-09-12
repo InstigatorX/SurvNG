@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 
 from survng.app.camera_capture import CameraCaptureService, CaptureOpenLimiter
 from survng.app.live_detections import DetectionSnapshot
@@ -69,6 +70,7 @@ def test_backend_command_keeps_url_and_uses_configured_policy() -> None:
     assert command[command.index("--rtsp-transport") + 1] == "udp"
     assert command[command.index("--fps") + 1] == "5.000000"
     assert command[command.index("--detect-fps") + 1] == "5.000000"
+    assert command[command.index("--main-fps") + 1] == "5.000000"
     assert command[command.index("--decoder") + 1] == "va"
     assert command[command.index("--frame-width") + 1] == "320"
     assert command[command.index("--jpeg-fps") + 1] == "1.000000"
@@ -94,6 +96,15 @@ def test_backend_includes_model_when_detect_enabled() -> None:
     assert command[command.index("--model-instance-id") + 1] == "survng-yolo-GPU"
     assert "--supervisor" in command
     assert "--no-detect" not in command
+
+
+def test_live_detection_rate_does_not_throttle_ema_or_main_capture():
+    backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(
+        frame_rate=lambda: 5, detection_frame_rate=lambda: 2.5, main_frame_rate=lambda: 5,
+    ))
+    command = backend.command()
+    for option, expected in (("--fps", 5), ("--detect-fps", 2.5), ("--main-fps", 5)):
+        assert float(command[command.index(option) + 1]) == expected
 
 
 @pytest.mark.parametrize("detect,configured,expected", [
@@ -306,7 +317,8 @@ def test_missing_detection_plugin_exposes_native_loader_error(monkeypatch) -> No
         _require_detection_plugin(gst)
 
 
-def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog) -> None:
+def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog, monkeypatch) -> None:
+    monkeypatch.setattr("survng.app.dlstreamer_capture.select.select", lambda *args: ([True], [], []))
     shared = _SharedLiveProcess([], read_timeout_ms=1000)
     shared._inboxes = {name: _StreamInbox() for name in ("gate", "downstairs")}
     shared._process = SimpleNamespace(stdout=io.BytesIO(encode_json(
@@ -319,6 +331,80 @@ def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog) 
         assert "secret" not in inbox.error
         assert "ProtocolError" not in inbox.error
     assert "secret" not in caplog.text
+
+
+def test_inference_watchdog_distinguishes_empty_results_from_stalled_metadata(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr("survng.app.dlstreamer_capture.time.monotonic", lambda: now[0])
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    live, main = _StreamInbox(), _StreamInbox()
+    live.inference_started_at = 10.0
+    shared._inboxes = {"live": live, "main": main}
+    payload = {"schema_version": 1, "source_pts": 1.0, "inference_sequence": 1,
+               "width": 320, "height": 240, "objects": []}
+    now[0] = 14.0
+    live.add_detection_snapshot(payload)
+    shared._check_inference_progress(18.0)  # Empty inference is real progress.
+    now[0] = 18.0
+    live.add_detection_snapshot(payload)  # Repeated PTS cannot hide a stall.
+    now[0] = 19.0
+    live.put_frame(np.zeros((2, 2), dtype=np.uint8), 99, 9.0)
+    with pytest.raises(RuntimeError, match="inference stalled"):
+        shared._check_inference_progress(19.1)
+    live.alive = False  # Removed/stopped cameras do not trigger recovery.
+    shared._check_inference_progress(100)
+
+
+def test_inference_watchdog_does_not_restart_other_cameras_for_rtsp_outage():
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    live = _StreamInbox()
+    live.inference_started_at = live.last_inference_at = live.last_frame_at = 10.0
+    shared._inboxes = {"live": live}
+    shared._check_inference_progress(20.0)
+
+
+def test_stream_error_is_local_but_native_inference_error_fails_shared_reader(monkeypatch):
+    monkeypatch.setattr("survng.app.dlstreamer_capture.select.select", lambda *args: ([True], [], []))
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    shared._inboxes = {name: _StreamInbox() for name in ("gate", "downstairs")}
+    reader = MessageReader()
+    reader.feed(encode_json(TYPE_STATUS, {"ok": False, "error": "RTSP disconnected", "failure_scope": "stream"}, stream_id="gate"))
+    shared._dispatch(*reader.pop())
+    assert not shared._inboxes["gate"].alive
+    assert shared._inboxes["downstairs"].alive
+    shared._process = SimpleNamespace(stdout=io.BytesIO(encode_json(
+        TYPE_STATUS, {"ok": False, "error": "VA surface failed", "failure_scope": "inference"}, stream_id="downstairs")))
+    shared._read_stdout()
+    assert shared._failed
+    assert all(not inbox.alive for inbox in shared._inboxes.values())
+
+
+def test_stalled_shared_process_is_replaced_and_sessions_are_not_reused(monkeypatch):
+    monkeypatch.setattr("survng.app.dlstreamer_capture.DLSTREAMER_INFERENCE_STALL_SECONDS", 0.05)
+
+    class StubBackend(DlStreamerCaptureBackend):
+        def command(self):
+            return [sys.executable, str(SUPERVISOR_STUB), "--supervisor"]
+
+    backend = StubBackend(CaptureOpenLimiter(2))
+    first, second = backend.create_handle(), backend.create_handle()
+    try:
+        assert backend.open(first, "rtsp://fixture.invalid/live", lambda: False)
+        old = backend._shared
+        old_process = old._process
+        old_session = first._inbox.session
+        deadline = time.monotonic() + 2
+        while old.is_running() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not old.is_running()
+        assert backend.open(second, "rtsp://fixture.invalid/live", lambda: False)
+        assert backend._shared is not old
+        assert old_process.poll() is not None
+        assert second._inbox.session != old_session
+    finally:
+        first.close()
+        second.close()
+        backend.close()
 
 
 def test_drop_paths_moves_intel_gstreamer_lib_out() -> None:
@@ -380,7 +466,7 @@ def test_capture_close_waits_for_stderr_drain_before_closing_stream() -> None:
             self.reader_finished = threading.Event()
             self.closed = False
 
-        def read(self, _size: int) -> bytes:
+        def read1(self, _size: int) -> bytes:
             self.read_started.set()
             assert self.eof.wait(1.0)
             self.reader_finished.set()

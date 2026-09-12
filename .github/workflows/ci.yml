@@ -56,5 +56,5 @@ jobs:
           docker run --rm --network none --cpus 2 --memory 2g \
             --cap-drop ALL --security-opt no-new-privileges \
             --entrypoint /bin/bash -v "$PWD:/work:ro" -w /work \
-            intel/dlstreamer:2026.1.0-ubuntu24@sha256:355435d2bdb986fe1d51f443d366da3ac1eb0c7175aa03ce2b31e4485f36b3bd \
+            intel/dlstreamer:2026.2.0-ubuntu24@sha256:3848efe52c047cf6b5961eb070deaf9eca53bd5328f0d819fbb68ad56c65fb19 \
             -lc 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$PYTHONPATH python3 scripts/gstreamer-smoke.py'

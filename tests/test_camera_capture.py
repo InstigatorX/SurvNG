@@ -4,10 +4,12 @@ import logging
 import threading
 import time
 from collections import deque
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
 import pytest
+from survng.app.live_detections import DetectionSnapshot
 
 from survng.app.camera_capture import (
     CameraCaptureService,
@@ -37,6 +39,46 @@ class FakeHandle:
 
     def close(self) -> None:
         self.closed = True
+
+
+def test_detection_lag_is_separate_from_video_freshness_and_session_scoped():
+    service = CameraCaptureService(camera_id="test", source_url=lambda source: "", backend=FakeBackend())
+    image = np.zeros((2, 2), dtype=np.uint8)
+    assert service.status()["live_detection_matching"]["lag_seconds"] is None
+    service._frames["live"] = CapturedFrame("live", image, time.time(), time.monotonic(), "", 2, 2, 1,
+                                            source_pts=20.0, source_session="current")
+    history = service._detection_history["live"]
+    history.reset("current")
+    history.add(DetectionSnapshot(12.0, 1, 2, 2, (), "current"))
+    status = service.status()
+    assert status["live_detection_matching"]["lag_seconds"] == 8.0
+    assert status["live_detections"] == []
+    history.reset("new-session")
+    assert service.status()["live_detection_matching"]["lag_seconds"] is None
+
+
+def test_completed_inference_is_visible_without_waiting_for_another_video_frame():
+    service = CameraCaptureService(camera_id="test", source_url=lambda source: "", backend=FakeBackend())
+    service._generation = 1
+    service._detection_history["live"].reset("current")
+    service._frames["live"] = CapturedFrame("live", np.zeros((2, 2), dtype=np.uint8), time.time(),
+        time.monotonic(), "", 2, 2, 1, generation=1, source_pts=10.0, source_session="current")
+    pending = []
+    def pop():
+        result = list(pending)
+        pending.clear()
+        return result
+    service._active_handles["live"] = SimpleNamespace(pop_detection_snapshots=pop)
+    def matched():
+        return service.matched_snapshot("live", source_pts=10.0, generation=1, source_session="current")
+    assert matched() is None
+    snapshot = DetectionSnapshot(10.0, 1, 2, 2, (), "current")
+    pending.append(snapshot)  # The GPU finishes while capture.read() is waiting.
+    assert matched() is snapshot  # A completed empty result is not missing.
+    assert service._frames["live"].sequence == 1
+    pending.append(DetectionSnapshot(11.0, 1, 2, 2, (), "old-session"))
+    assert matched() is snapshot
+    assert service._detection_history["live"].counts["wrong_session"] == 1
 
 
 class FakeBackend:

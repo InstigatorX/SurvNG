@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig, DepthConfig, DetectorConfig, ObjectTrackingConfig
 from survng.app.config_application import (
+    DETECTOR_CAPTURE_FIELDS,
     DEPTH_ENGINE_FIELDS,
     DEPTH_HOT_POLICY_FIELDS,
     DETECTOR_FACE_ENGINE_FIELDS,
@@ -163,6 +164,7 @@ class ConfigReloadTest(unittest.TestCase):
 
     def test_detector_reload_classification_covers_each_setting_once(self) -> None:
         detector_groups = (
+            DETECTOR_CAPTURE_FIELDS,
             DETECTOR_HOT_POLICY_FIELDS,
             DETECTOR_OBJECT_ENGINE_FIELDS,
             DETECTOR_FACE_ENGINE_FIELDS,
@@ -791,14 +793,23 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["object_inference"])
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_live_sample_rate_change_reloads_capture_processes(self) -> None:
+        self._assert_capture_rate_change_reloads_manager(live=True)
+
     def test_tracking_sample_rate_change_reloads_capture_processes(self) -> None:
+        self._assert_capture_rate_change_reloads_manager(live=False)
+
+    def _assert_capture_rate_change_reloads_manager(self, *, live: bool) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
         main.config = current
         main.manager = active
         incoming = current.model_copy(deep=True)
-        incoming.detector.tracking.sample_fps = 3.0
+        if live:
+            incoming.detector.live_sample_fps = 2.5
+        else:
+            incoming.detector.tracking.sample_fps = 3.0
 
         with (
             patch(

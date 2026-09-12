@@ -34,6 +34,7 @@ def _parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--fps", type=float, default=5.0)
+    parser.add_argument("--main-fps", type=float, default=5.0)
     parser.add_argument("--source-role", choices=("live", "main"), default="live")
     parser.add_argument("--threshold", type=float, default=0.1,
                         help="retain low-confidence candidates for two-pass tracking")
@@ -261,6 +262,10 @@ def _factory_available(Gst, name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
 
 
+class InferencePipelineError(RuntimeError):
+    """A native error in the shared model, rather than an RTSP source failure."""
+
+
 def _negotiated_memory(element, pad_name: str = "sink") -> str | None:
     """Report actual negotiated memory, not merely the requested backend."""
     if element is None:
@@ -472,7 +477,7 @@ def run(argv: list[str] | None = None) -> int:
         detect=detect and args.source_role == "live",
         model_path=model_path,
         instance_id=instance_id,
-        rate=rate,
+        rate=rate if args.source_role == "live" else _frame_rate(args.main_fps),
         detect_rate=detect_rate,
         qualifier_width=qualifier_width if args.source_role == "live" else 640,
         jpeg_rate=jpeg_rate,
@@ -556,7 +561,7 @@ def _run_supervisor(
                     detect=detect and source_role == "live",
                     model_path=model_path,
                     instance_id=instance_id,
-                    rate=rate if source_role == "live" else detect_rate,
+                    rate=rate if source_role == "live" else _frame_rate(args.main_fps),
                     detect_rate=detect_rate,
                     qualifier_width=qualifier_width if source_role == "live" else 640,
                     jpeg_rate=jpeg_rate if source_role == "live" else None,
@@ -578,7 +583,8 @@ def _run_supervisor(
                     stdout,
                     encode_json(
                         TYPE_STATUS,
-                        {"ok": False, "error": redact_secret_text(exc)},
+                        {"ok": False, "error": redact_secret_text(exc),
+                         "failure_scope": "inference" if isinstance(exc, InferencePipelineError) else "stream"},
                         stream_id=stream_id,
                     ),
                     lock=stdout_lock,
@@ -806,17 +812,25 @@ def _pump_pipeline(
         detector = _element(Gst, "gvadetect", "detect")
         detector.set_property("model", str(model_path))
         detector.set_property("device", args.device)
+        if "GPU" in args.device.upper():
+            detector.set_property("ie-config", "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1")
         # Low-rate, event-driven streams need bounded latency, not an implicit
         # auto-batch that can wait indefinitely for other cameras.
         detector.set_property("batch-size", 1)
-        detector.set_property("nireq", 2)
+        detector.set_property("nireq", 1)
         detector.set_property("inference-interval", 1)
         detector.set_property("threshold", args.threshold)
-        preprocess = "va" if args.decoder == "va" and not use_test_source else "opencv"
+        preprocess = "opencv"
+        if args.decoder == "va" and not use_test_source:
+            preprocess = "va-surface-sharing" if "GPU" in args.device.upper() else "va"
         detector.set_property("pre-process-backend", preprocess)
+        if preprocess.startswith("va"):
+            detector.set_property("pre-process-config", "VAAPI_THREAD_POOL_SIZE=1")
         if instance_id:
             detector.set_property("model-instance-id", instance_id)
-            detector.set_property("scheduling-policy", "latency")
+            # Each RTSP pipeline has its own running-time origin. Comparing
+            # their raw PTS unfairly prioritizes later-started cameras.
+            detector.set_property("scheduling-policy", "throughput")
         if args.model_proc:
             detector.set_property("model-proc", args.model_proc)
         if args.labels:
@@ -831,7 +845,7 @@ def _pump_pipeline(
         detect_output_queue.set_property("max-size-time", 0)
         detect_output_queue.set_property("leaky", 2)
         elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])
-        if preprocess == "va":
+        if preprocess.startswith("va"):
             va_caps = _element(Gst, "capsfilter", "detect-va-memory")
             va_caps.set_property(
                 "caps",
@@ -988,6 +1002,8 @@ def _pump_pipeline(
                     error = str(parsed_error)
                     if debug:
                         error = f"{error}: {debug[-400:]}"
+                    if detector is not None and message.src == detector:
+                        raise InferencePipelineError(error)
                     raise RuntimeError(error)
                 break
             if meta_sink is not None:

@@ -322,13 +322,10 @@ class AppManager:
             DlStreamerCaptureOptions(
                 rtsp_transport=config.capture_rtsp_transport,
                 frame_rate=lambda: self.config.motion_qualification.sample_fps,
-                detection_frame_rate=lambda: max(
+                detection_frame_rate=lambda: self.config.detector.live_sample_fps,
+                main_frame_rate=lambda: max(
                     self.config.motion_qualification.sample_fps,
-                    (
-                        self.config.detector.tracking.sample_fps
-                        if self.config.detector.tracking.enabled
-                        else 0.5
-                    ),
+                    self.config.detector.tracking.sample_fps if self.config.detector.tracking.enabled else 0.5,
                 ),
                 model_path=detector.resolved_model_path(),
                 inference_device=detector.device,

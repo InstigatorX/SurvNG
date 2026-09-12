@@ -1,5 +1,8 @@
 # Isolated GStreamer testing
 
+See the [September 12 replay findings](gstreamer-replay-2026-09-12.md) for the
+native-runtime accuracy fix, independent live cadence and real-model check.
+
 Work from the `gstreamer` checkout. Do not restart the v1.2 service, reuse its
 configuration/database/media directory, or combine this file with `compose.yaml`.
 The project name, loopback port, model mount and writable directories below are
@@ -12,7 +15,7 @@ later run both instances on the same machine.
 docker compose -f compose.gstreamer-test.yaml run --rm smoke
 ```
 
-This uses the digest-pinned Intel 2026.1.0 image, a read-only source mount, a
+This uses the digest-pinned Intel 2026.2.0 image, a read-only source mount, a
 temporary synthetic OpenVINO model, no network, 2 CPUs and 2 GiB RAM. Expect:
 
 - 5 FPS, 320-wide grayscale qualification, with approximately half as many
@@ -30,7 +33,7 @@ profile cannot be applied. The native test was run successfully with this
 docker run --rm --network none --cpus 2 --memory 2g \
   --cap-drop ALL --security-opt apparmor=unconfined --security-opt no-new-privileges \
   --entrypoint /bin/bash -v "$PWD:/work:ro" -w /work \
-  intel/dlstreamer:2026.1.0-ubuntu24@sha256:355435d2bdb986fe1d51f443d366da3ac1eb0c7175aa03ce2b31e4485f36b3bd \
+  intel/dlstreamer:2026.2.0-ubuntu24@sha256:3848efe52c047cf6b5961eb070deaf9eca53bd5328f0d819fbb68ad56c65fb19 \
   -lc 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$PYTHONPATH python3 scripts/gstreamer-smoke.py'
 ```
 

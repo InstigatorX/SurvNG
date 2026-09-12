@@ -93,10 +93,11 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "detection_enabled": bool(raw.get("detection_enabled")),
         "onvif_connected": bool(raw.get("onvif_connected")),
         "live_detection_matching": {
-            key: _number(matching.get(key)) for key in (
+            "lag_seconds": _optional_number(matching.get("lag_seconds")),
+            **{key: _number(matching.get(key)) for key in (
                 "history_size", "snapshots", "empty_snapshots", "matched", "unmatched",
                 "stale", "wrong_session", "invalid_pts", "out_of_order", "resets",
-            )
+            )},
         },
         "spatial_alignment": {
             "mode": str(alignment.get("mode") or "untrusted"),

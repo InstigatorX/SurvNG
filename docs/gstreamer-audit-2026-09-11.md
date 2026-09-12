@@ -93,6 +93,9 @@ is consistent with the principle in the
 
 ## Intel optimization: what is justified now
 
+Update: the [full-application replay findings](gstreamer-replay-2026-09-12.md)
+supersede the runtime and cadence settings below.
+
 Keep independent bounded branches, an output queue after `gvadetect`, model
 sharing, and hardware decode/preprocessing where supported. This increment
 chooses `batch-size=1`, `nireq=2`, and latency scheduling as a conservative

@@ -90,7 +90,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Refresh this set together: compute requires IGC >= 2.40.13, media GMM >= 22.10.1.
 FROM runtime-base AS intel-deps
 USER root
-ARG DLSTREAMER_VERSION=2026.1.0
+# 2026.1's native OpenVINO GPU produces NaN scores for YOLO26 FP16.
+# Upgrade the matched native bundle; upgrading the app's pip wheel is not enough.
+ARG DLSTREAMER_VERSION=2026.2.0
 ARG INTEL_COMPUTE_VERSION=26.31.39395.13-1~24.04~ppa1
 ARG INTEL_IGC_VERSION=2.40.13+ds1-1~24.04
 ARG INTEL_GMMLIB_VERSION=22.10.1-1~24.04~ppa1
@@ -148,6 +150,7 @@ COPY requirements.txt ./
 COPY survng/ ./survng/
 COPY docs/ ./docs/
 COPY scripts/gstreamer-smoke.py ./scripts/gstreamer-smoke.py
+COPY scripts/gstreamer-model-check.py ./scripts/gstreamer-model-check.py
 COPY config.example.json /usr/share/survng/config.example.json
 COPY docker/config.example.json /usr/share/survng/config.docker.example.json
 COPY docker/go2rtc.example.yaml /usr/share/survng/go2rtc.example.yaml

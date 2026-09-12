@@ -30,6 +30,7 @@ def _manager(secret: str = "must-not-leak") -> SimpleNamespace:
             "recording": True,
             "recording_enabled": True,
             "detection_enabled": True,
+            "live_detection_matching": {"lag_seconds": 7.5, "snapshots": 12, "private": secret},
             "onvif_connected": True,
             "last_error": secret,
             "stream_url": f"rtsp://admin:{secret}@camera/live",
@@ -132,6 +133,8 @@ def test_runtime_status_is_effective_and_strictly_allowlisted() -> None:
         "timeouts": 1,
     }
     assert payload["detector"]["ready"] is True
+    assert payload["cameras"][0]["live_detection_matching"]["lag_seconds"] == 7.5
+    assert "private" not in payload["cameras"][0]["live_detection_matching"]
     assert payload["detector"]["recorded_decode"] == {
         "configured_processes": 3,
         "active_processes": 1,
