@@ -37,59 +37,11 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt pytest anyio httpx2
-      - name: Run focused Python tests
+      - name: Run Python regression suite
+        env:
+          SURVNG_TEST_TIMEOUT_SECONDS: "600"
         run: |
-          scripts/run-tests.sh \
-            tests/test_event_store.py \
-            tests/test_camera_semantics*.py \
-            tests/test_app_lifespan.py \
-            tests/test_frontend_routes.py \
-            tests/test_recorder.py \
-            tests/test_calibration.py \
-            tests/test_live_delivery.py \
-            tests/test_detector*.py \
-            tests/test_detection*.py \
-            tests/test_depth_estimation.py \
-            tests/test_inference.py \
-            tests/test_inference_lifecycle.py \
-            tests/test_object_tracking.py \
-            tests/test_camera_worker.py \
-            tests/test_config_reload.py
-      - name: Run face and identity regression tests
-        run: |
-          scripts/run-tests.sh \
-            tests/test_face*.py \
-            tests/test_identity*.py \
-            tests/test_unknown_identity*.py \
-            tests/test_timeline_identity.py
-      - name: Run local observability regression tests
-        run: scripts/run-tests.sh tests/test_local_observability.py tests/test_camera_status.py
-      - name: Run motion subsystem regression tests
-        run: |
-          scripts/run-tests.sh \
-            tests/test_motion*.py \
-            tests/test_ema*.py \
-            tests/test_adaptive_motion.py \
-            tests/test_capture_protocols.py \
-            tests/test_onvif_inspector.py \
-            tests/test_recorded_object_detection.py \
-            tests/test_recorded_decode_budget.py \
-            tests/test_object_motion.py \
-            tests/test_stationary_policy.py \
-            tests/test_config.py \
-            tests/test_zones.py \
-            tests/test_training_routes.py \
-            tests/test_appearance_backfill.py \
-            tests/test_model_evaluation.py
-      - name: Run tracking evaluation regression tests
-        run: |
-          scripts/run-tests.sh \
-            tests/test_tracking_evaluation.py \
-            tests/test_tracking_candidate.py \
-            tests/test_tracking_comparison.py \
-            tests/test_object_tracking_lifecycle.py \
-            tests/test_tracking_frames.py \
-            tests/test_tracking_limiter.py
+          scripts/run-tests.sh -q
       - name: Install optional CPU tracking test runtime
         run: |
           .venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
@@ -101,3 +53,17 @@ jobs:
       - name: Post-job cleanup
         if: always()
         run: scripts/github-runner-cleanup.sh --publish
+
+  native-gstreamer:
+    # No camera, GPU, model download, production state, or self-hosted service.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Real Intel GStreamer metadata and multistream smoke test
+        run: |
+          docker run --rm --network none --cpus 2 --memory 2g \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --entrypoint /bin/bash -v "$PWD:/work:ro" -w /work \
+            intel/dlstreamer:2026.2.0-ubuntu24@sha256:3848efe52c047cf6b5961eb070deaf9eca53bd5328f0d819fbb68ad56c65fb19 \
+            -lc 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$PYTHONPATH python3 scripts/gstreamer-smoke.py'

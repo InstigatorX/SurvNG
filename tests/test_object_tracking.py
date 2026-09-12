@@ -14,6 +14,9 @@ import numpy as np
 
 from survng.app.config import CameraConfig, ObjectTrackingConfig
 from survng.app.events import EventStore
+from survng.app.camera_capture import CapturedFrame
+from survng.app.live_detections import DetectionSnapshot
+from survng.app.object_track.types import TrackingFrame
 from survng.app.object_tracking import (
     ByteTrackObjectTracker,
     ObjectTrackerRegistry,
@@ -647,6 +650,123 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             [call.kwargs["frame_offset_s"] for call in estimate_depth.call_args_list],
             [0.5, 1.5],
         )
+
+    def test_live_ticks_use_sidecar_boxes_instead_of_openvino(self) -> None:
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                return [detection("person", 0.4, (1, 1, 8, 8))]
+
+        detector = Detector()
+        sidecar = [detection("person", 0.9, (12, 10, 42, 80))]
+        session = ObjectTrackingSession(
+            camera=CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            config=ObjectTrackingConfig(),
+            detector=detector,
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            live_detections_provider=lambda: sidecar,
+        )
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+
+        evidence = TrackingFrame(
+            CapturedFrame("live", frame, 1, 1, "", 32, 32, 1, source_session="test"),
+            DetectionSnapshot.parse({
+                "schema_version": 1, "source_pts": 1.0, "inference_sequence": 1,
+                "width": 32, "height": 32, "objects": sidecar,
+            }, session="test"),
+        )
+        live = session._tracking_detections_for_frame(frame, catchup=False, evidence=evidence)
+        catchup = session._tracking_detections_for_frame(frame, catchup=True)
+        main = session._tracking_detections_for_frame(
+            frame, catchup=False,
+            evidence=TrackingFrame(CapturedFrame("main", frame, 1, 1, "", 32, 32, 1), evidence.detection),
+        )
+
+        self.assertEqual(detector.calls, 2)
+        self.assertEqual(live[0]["box"]["x1"], 12)
+        self.assertEqual(catchup[0]["box"]["x1"], 1)
+        self.assertEqual(main[0]["box"]["x1"], 1)
+        sidecar[0]["box"]["x1"] = 99
+        self.assertEqual(live[0]["box"]["x1"], 12)
+
+    def test_empty_live_sidecar_skips_openvino(self) -> None:
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                return [detection("person", 0.9, (12, 10, 42, 80))]
+
+        detector = Detector()
+        session = ObjectTrackingSession(
+            camera=CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            config=ObjectTrackingConfig(),
+            detector=detector,
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            live_detections_provider=lambda: [],
+        )
+
+        objects = session._tracking_detections_for_frame(
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            catchup=False,
+            evidence=TrackingFrame(
+                CapturedFrame("live", np.zeros((32, 32), dtype=np.uint8), 1, 1, "", 32, 32, 1),
+                DetectionSnapshot(1.0, 1, 32, 32, (), "test"),
+            ),
+        )
+
+        self.assertEqual(objects, [])
+        self.assertEqual(detector.calls, 0)
+
+    def test_live_ticks_without_sidecar_provider_still_call_detector(self) -> None:
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detection("person", 0.8, (12, 10, 42, 80))]
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            config=ObjectTrackingConfig(),
+            detector=Detector(),
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+
+        objects = session._tracking_detections_for_frame(
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            catchup=False,
+        )
+
+        self.assertEqual(objects[0]["label"], "person")
 
     def test_adaptive_sampling_slows_stable_tracks_and_boosts_uncertainty(self) -> None:
         config = ObjectTrackingConfig(
@@ -1415,6 +1535,50 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(updates[0]["frame_height"], 100)
         self.assertEqual(updates[0]["lost_timeout_seconds"], 3.0)
         self.assertFalse(session.status()["active"])
+
+    def test_matched_live_result_is_consumed_once_and_missing_is_not_empty(self) -> None:
+        served = threading.Event()
+        updates = []
+        image = np.zeros((100, 100), np.uint8)
+        positive = DetectionSnapshot(10, 1, 100, 100,
+                                     (detection("person", .9, (12, 10, 42, 80)),), "s")
+        empty = DetectionSnapshot(10.4, 2, 100, 100, (), "s")
+        snapshots = [positive, positive, None, empty, empty]
+        calls = 0
+
+        def frame_provider():
+            nonlocal calls
+            calls += 1
+            if calls > len(snapshots):
+                served.set()
+                return None
+            return TrackingFrame(
+                CapturedFrame("live", image, time.time(), time.monotonic(), "", 100, 100, calls,
+                              source_pts=10 + calls * .1, source_session="s"),
+                snapshots[calls - 1],
+            )
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=.7)
+
+            def detect(self, *_args, **_kwargs):
+                raise AssertionError("matched live evidence must not run duplicate inference")
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://fixture.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=5, max_session_seconds=3),
+            detector=Detector(), frame_provider=frame_provider,
+            update_event=lambda _id, tracking, _objects: updates.append(tracking) or {},
+            publisher=None, limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+        try:
+            self.assertTrue(session.start(42, datetime.now(timezone.utc),
+                                          [detection("person", .9, (10, 10, 40, 80))]))
+            self.assertTrue(served.wait(2.0))
+        finally:
+            session.stop()
+        self.assertEqual(updates[-1]["frames_processed"], 2)
 
     def test_catchup_processing_is_capped_per_tick(self) -> None:
         catchup_ready = threading.Event()

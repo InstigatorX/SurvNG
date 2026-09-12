@@ -1,8 +1,9 @@
 """Measurement-backed guidance for object_worker_count (Campaign 10).
 
 Guidance only — does not change process architecture. When tracking is
-enabled, DetectorConfig raises object_worker_count to at least 2 so live
-incident inference keeps a protected lane.
+enabled, DetectorConfig raises object_worker_count to at least 2 so recorded
+evidence inference keeps a protected lane. Live admission uses GStreamer
+boxes and does not consume this pool.
 """
 
 from __future__ import annotations

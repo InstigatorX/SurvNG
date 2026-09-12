@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ class ApiTokenScriptTest(unittest.TestCase):
     def run_cli(self, config_path: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
-                str(Path(__file__).resolve().parents[1] / ".venv/bin/python"),
+                sys.executable,
                 "scripts/create-api-token.py",
                 *arguments,
                 "--config",

@@ -3,8 +3,6 @@
 # License notices: docker/model-installer/NOTICE and THIRD_PARTY_MODELS.md
 FROM ubuntu:24.04 AS model-installer
 
-ARG SURVNG_GIT_SHA=
-
 ENV DEBIAN_FRONTEND=noninteractive \
     SURVNG_INSTALLER_IN_CONTAINER=1 \
     SURVNG_MODELS_DIR=/models-out \
@@ -35,8 +33,11 @@ COPY docker/model-installer/NOTICE \
      docker/model-installer/THIRD_PARTY_MODELS.md \
      ./
 
-RUN chmod 755 install-docker-models.sh \
-    && if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > SURVNG_GIT_SHA; fi
+RUN chmod 755 install-docker-models.sh
+# Declare the commit SHA after apt/COPY so a new commit does not bust those layers.
+ARG SURVNG_GIT_SHA=
+ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA
+RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > SURVNG_GIT_SHA; fi
 
 VOLUME ["/models-out", "/config-out", "/cache"]
 

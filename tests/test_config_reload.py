@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig, DepthConfig, DetectorConfig, ObjectTrackingConfig
 from survng.app.config_application import (
+    DETECTOR_CAPTURE_FIELDS,
     DEPTH_ENGINE_FIELDS,
     DEPTH_HOT_POLICY_FIELDS,
     DETECTOR_FACE_ENGINE_FIELDS,
@@ -163,6 +164,7 @@ class ConfigReloadTest(unittest.TestCase):
 
     def test_detector_reload_classification_covers_each_setting_once(self) -> None:
         detector_groups = (
+            DETECTOR_CAPTURE_FIELDS,
             DETECTOR_HOT_POLICY_FIELDS,
             DETECTOR_OBJECT_ENGINE_FIELDS,
             DETECTOR_FACE_ENGINE_FIELDS,
@@ -748,7 +750,7 @@ class ConfigReloadTest(unittest.TestCase):
             hot_camera_ids={"gate"},
         )
 
-    def test_detector_engine_change_restarts_only_object_inference(self) -> None:
+    def test_detector_device_change_rebuilds_native_capture_graph(self) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
@@ -762,15 +764,10 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_inference.assert_called_once_with(
-            effective.detector,
-            {"object"},
-            refresh_tracking=False,
-        )
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        active.reconfigure_inference.assert_not_called()
         active.reconfigure_detector_policy.assert_not_called()
-        self.assertEqual(result["subsystems_restarted"], ["object_inference"])
-        self.assertFalse(result["camera_workers_restarted"])
+        self.assertTrue(result["camera_workers_restarted"])
 
     def test_detector_worker_count_restarts_only_object_inference(self) -> None:
         active = Mock()
@@ -796,14 +793,23 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["object_inference"])
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_live_sample_rate_change_reloads_capture_processes(self) -> None:
+        self._assert_capture_rate_change_reloads_manager(live=True)
+
     def test_tracking_sample_rate_change_reloads_capture_processes(self) -> None:
+        self._assert_capture_rate_change_reloads_manager(live=False)
+
+    def _assert_capture_rate_change_reloads_manager(self, *, live: bool) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
         main.config = current
         main.manager = active
         incoming = current.model_copy(deep=True)
-        incoming.detector.tracking.sample_fps = 3.0
+        if live:
+            incoming.detector.live_sample_fps = 2.5
+        else:
+            incoming.detector.tracking.sample_fps = 3.0
 
         with (
             patch(
@@ -927,7 +933,7 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["depth_inference"])
         self.assertIn("detector_policy", result["hot_updated"])
 
-    def test_model_change_restarts_object_inference_and_tracking_sessions(self) -> None:
+    def test_model_change_rebuilds_native_capture_and_inference_together(self) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
@@ -942,17 +948,9 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_inference.assert_called_once_with(
-            effective.detector,
-            {"object"},
-            refresh_tracking=True,
-        )
-        self.assertEqual(
-            result["subsystems_restarted"],
-            ["tracking_sessions", "object_inference"],
-        )
-        self.assertFalse(result["camera_workers_restarted"])
+        reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+        active.reconfigure_inference.assert_not_called()
+        self.assertTrue(result["camera_workers_restarted"])
 
     def test_failed_tracking_session_apply_rolls_back_runtime(self) -> None:
         active = Mock()

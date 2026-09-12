@@ -28,4 +28,4 @@ _CONFIG_PATH.write_text(
 # its application manager at import time, so this must be set before any test
 # module can accidentally initialize or migrate the production databases.
 os.environ["SURVNG_CONFIG_PATH"] = str(_CONFIG_PATH)
-
+os.environ["SURVNG_OBSERVABILITY_SOCKET"] = str(_ROOT / "observability.sock")

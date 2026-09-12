@@ -7,12 +7,13 @@ from typing import Any, Callable, Iterable, Iterator, Protocol
 import numpy as np
 
 from ..config import ObjectTrackingConfig
+from ..camera_capture import CapturedFrame
+from ..live_detections import DetectionSnapshot
 from ..video_frames import DecodedVideoFrame, VideoFrameReference
 
 
 Box = tuple[float, float, float, float]
 FrameSample = tuple[np.ndarray, float, float]
-FrameProvider = Callable[[], FrameSample | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,14 @@ class CatchupFrameProvider(Protocol):
         ...
 
 
+
+@dataclass(frozen=True, slots=True)
+class TrackingFrame:
+    captured: CapturedFrame
+    detection: DetectionSnapshot | None = None
+
+
+FrameProvider = Callable[[], FrameSample | TrackingFrame | None]
 TrackingUpdate = Callable[[int, dict[str, Any], list[dict[str, Any]] | None], object | None]
 TrackingPublisher = Callable[[str, dict[str, Any]], None]
 AppearanceIndexWriter = Callable[[int, str, Iterable[dict[str, Any]]], int]
@@ -45,6 +54,7 @@ TrackingCoverFrameProvider = Callable[
 ]
 TrackingSnapshotWriter = Callable[[np.ndarray, datetime], str]
 TrackingCoverPromoter = Callable[..., dict[str, Any] | None]
+LiveDetectionsProvider = Callable[[], list[dict[str, Any]] | None]
 
 
 class ObjectDetectorBackend(Protocol):

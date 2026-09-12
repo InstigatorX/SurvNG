@@ -11,12 +11,13 @@ import numpy as np
 import cv2
 
 from .camera_capture import (
+    CAPTURE_OPEN_TIMEOUT_MS,
     CaptureBackend,
     CameraCaptureService,
     CapturedFrame,
     CaptureOpenLimiter,
-    FfmpegCaptureBackend,
 )
+from .dlstreamer_capture import DlStreamerCaptureBackend
 from .camera_status import CameraStatusService
 from .camera_media import CameraMediaService
 from .camera_lifecycle import (
@@ -39,6 +40,7 @@ from .motion_ingress import MotionEventIngressService
 from .motion_runtime import CameraMotionState, MotionRuntimeService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
+from .object_track.types import TrackingFrame
 from .object_activity import AttributionMode, ObjectActivityAttributor
 from .tracking_frames import CameraFrameTimeline, TrackingFrameBatch
 from .video_frames import DecodedVideoFrame
@@ -81,7 +83,18 @@ class _AutoStreamAlignment:
     def observe(self, frame: CapturedFrame) -> dict[str, Any] | None:
         if not self.enabled or frame.source not in {"main", "live"}:
             return None
+        previous = self._frames.get(frame.source)
+        changed = previous is not None and (
+            previous.generation != frame.generation
+            or previous.source_session != frame.source_session
+            or previous.width != frame.width or previous.height != frame.height
+        )
         self._frames[frame.source] = frame
+        if changed:
+            self._samples.clear()
+            self._last_attempt = 0.0
+            return {"mode": "untrusted", "reliable": False, "confidence": 0.0,
+                    "scale_x": 1.0, "scale_y": 1.0, "offset_x": 0.0, "offset_y": 0.0}
         main, live = self._frames.get("main"), self._frames.get("live")
         now = time.monotonic()
         if (
@@ -126,7 +139,8 @@ class _AutoStreamAlignment:
         def gray(image: np.ndarray) -> np.ndarray:
             height, width = image.shape[:2]
             scale = min(1.0, 640.0 / max(height, width))
-            return cv2.cvtColor(cv2.resize(image, (round(width * scale), round(height * scale))), cv2.COLOR_BGR2GRAY)
+            resized = cv2.resize(image, (round(width * scale), round(height * scale)))
+            return resized if resized.ndim == 2 else cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
         live_gray, main_gray = gray(live), gray(main)
         orb = cv2.ORB_create(nfeatures=600)
         live_keypoints, live_descriptors = orb.detectAndCompute(live_gray, None)
@@ -208,7 +222,9 @@ class CameraWorker:
         self._frame_lock = threading.Lock()
         self._stream_alignment = _AutoStreamAlignment(camera)
         self._effective_spatial_alignment = self._motion_spatial_alignment(camera)
-        effective_capture_backend = capture_backend or FfmpegCaptureBackend(
+        self._alignment_probe_until = 0.0
+        self._alignment_next_probe = 0.0
+        effective_capture_backend = capture_backend or DlStreamerCaptureBackend(
             CaptureOpenLimiter()
         )
         self.motion_debug = MotionDebugSnapshotStore()
@@ -217,6 +233,10 @@ class CameraWorker:
             live_frame_provider=lambda: self._get_latest_frame(),
             timestamped_live_frame_provider=self._get_latest_detection_frame,
             timestamped_evidence_frame_provider=self._get_evidence_detection_frame,
+            live_detections_provider=lambda frame: self.capture.matched_snapshot(
+                "live", source_pts=frame.source_pts, generation=frame.capture_generation,
+                source_session=frame.source_session,
+            ),
             stop_requested=lambda: (
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
@@ -231,11 +251,12 @@ class CameraWorker:
             rejected_sample_rate=lambda: self.motion_config.rejected_sample_rate,
             stop_requested=self._stop.is_set,
             media_storage=media_storage,
+            jpeg_provider=lambda source: self.capture.latest_jpeg(source),
         )
         self.tracking_lifecycle = ObjectTrackingLifecycle(
             camera=camera,
             factory=object_tracking_session_factory,
-            frame_provider=self._get_latest_tracking_frame_with_fallback,
+            frame_provider=self._get_tracking_capture,
             catchup_frame_provider=self._recorded_tracking_frames,
             prewarm_frame_provider=lambda: self._get_latest_tracking_frame("main"),
             history=lambda: self.tracking_frames,
@@ -403,6 +424,11 @@ class CameraWorker:
             frame_observer=self._capture_frame,
             source_started_observer=self._capture_source_started,
             source_stopped_observer=self._capture_source_stopped,
+            initial_open_timeout_ms=(
+                effective_capture_backend.startup_timeout_ms
+                if isinstance(effective_capture_backend, DlStreamerCaptureBackend)
+                else CAPTURE_OPEN_TIMEOUT_MS
+            ),
         )
         self.tracking_frames = CameraFrameTimeline(
             camera=camera,
@@ -616,6 +642,15 @@ class CameraWorker:
             self._effective_spatial_alignment = calibrated
             self.motion_decision_handler.spatial_alignment = dict(calibrated)
         if frame.source == "live":
+            # Warm main briefly for automatic registration, even before the
+            # first incident starts tracking. ensure_source is non-blocking.
+            if self._stream_alignment.enabled and not self._effective_spatial_alignment.get("reliable"):
+                now = time.monotonic()
+                if now >= self._alignment_next_probe:
+                    self._alignment_probe_until = now + 12.0
+                    self._alignment_next_probe = now + 300.0
+                if now < self._alignment_probe_until:
+                    self.capture.request_frame("main")
             with self.runtime_state.lock:
                 lifecycle_generation = self.runtime_state.generation
             self.motion_runtime.submit_frame(
@@ -625,13 +660,14 @@ class CameraWorker:
                 capture_sequence=frame.sequence,
                 capture_generation=frame.generation,
                 lifecycle_generation=lifecycle_generation,
+                source_pts=frame.source_pts,
+                source_session=frame.source_session,
             )
-            # Keep timestamped live history for bridging open main segments.
-            self._remember_tracking_frame(
-                frame.image,
-                frame.captured_at_epoch,
-                source="live",
-            )
+            # The preview accessor does not retain JPEG source identity. Do
+            # not stamp a cached 1 FPS preview with this 5 FPS qualifier's time
+            # and turn it into repeated temporal/color evidence. Main capture
+            # and finalized recordings supply timestamped catch-up frames;
+            # current live fallback uses the matched TrackingFrame path.
         elif frame.source == "main":
             self._remember_tracking_frame(
                 frame.image,
@@ -651,6 +687,9 @@ class CameraWorker:
         source = self.camera.normalized_source(source)
         if self._stop.is_set():
             return None
+        preview = self.capture.latest_preview_image(source)
+        if preview is not None:
+            return preview
         frame = self.capture.request_frame(source)
         return frame.image if frame is not None else None
 
@@ -673,6 +712,9 @@ class CameraWorker:
             geometry_trusted=bool(alignment.get("reliable", False)),
             width=width,
             height=height,
+            source_pts=frame.source_pts,
+            source_session=frame.source_session,
+            spatial_alignment=dict(alignment),
         )
 
     def _get_evidence_detection_frame(
@@ -714,6 +756,9 @@ class CameraWorker:
             geometry_trusted=bool(alignment.get("reliable", False)),
             width=width,
             height=height,
+            source_pts=selected.source_pts,
+            source_session=selected.source_session,
+            spatial_alignment=dict(alignment),
         )
 
     def _get_latest_tracking_frame(
@@ -728,6 +773,27 @@ class CameraWorker:
         return self._get_latest_tracking_frame("main") or self._get_latest_tracking_frame(
             "live"
         )
+
+    def _get_tracking_capture(self) -> TrackingFrame | None:
+        main = self.tracking_frames.captured("main")
+        if main is not None:
+            return TrackingFrame(main)
+        # Seed tracks and histories use main coordinates. Until cross-view
+        # track transforms are implemented, only identical FOV can bridge live.
+        alignment = self._effective_spatial_alignment
+        if not alignment.get("reliable") or any(
+            abs(float(alignment.get(key, expected)) - expected) > 0.02
+            for key, expected in (("scale_x", 1), ("scale_y", 1), ("offset_x", 0), ("offset_y", 0))
+        ):
+            return None
+        live = self.tracking_frames.captured("live")
+        if live is None:
+            return None
+        snapshot = self.capture.matched_snapshot(
+            "live", source_pts=live.source_pts, generation=live.generation,
+            source_session=live.source_session,
+        )
+        return TrackingFrame(live, snapshot)
 
     def _remember_tracking_frame(
         self,

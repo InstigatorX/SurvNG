@@ -26,6 +26,7 @@ def _service(
     stopped: list[bool] | None = None,
     detector: Mock | None = None,
     media_storage: MediaStorageRegistry | None = None,
+    jpeg_provider=None,
 ) -> CameraMediaService:
     camera = CameraConfig(
         id="gate",
@@ -46,6 +47,7 @@ def _service(
         time_ns=lambda: 123456789,
         sleeper=lambda _delay: None,
         media_storage=media_storage,
+        jpeg_provider=jpeg_provider,
     )
 
 
@@ -62,6 +64,20 @@ def test_snapshot_returns_decodable_jpeg_without_persisting_it() -> None:
         decoded = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
         assert decoded is not None
         assert decoded.shape == (24, 32, 3)
+        assert not service.snapshots_dir.exists()
+
+
+def test_snapshot_prefers_pipeline_jpeg_when_provided() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        provided = b"\xff\xd8pipeline-jpeg\xff\xd9"
+        service = _service(
+            Path(tmpdir),
+            frame=np.full((24, 32, 3), 91, dtype=np.uint8),
+            jpeg_provider=lambda _source: provided,
+        )
+
+        assert service.snapshot("live") == provided
+        # Live preview must not touch storage, including creating directories.
         assert not service.snapshots_dir.exists()
 
 

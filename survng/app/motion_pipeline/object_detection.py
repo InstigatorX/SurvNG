@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from ..config import CameraConfig
+from ..live_detections import DetectionSnapshot
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
 from ..recording_media import mp4_video_dimensions
@@ -228,6 +229,9 @@ class TimestampedLiveFrame:
     geometry_trusted: bool = True
     width: int = 0
     height: int = 0
+    source_pts: float = float("nan")
+    source_session: str = ""
+    spatial_alignment: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -357,6 +361,25 @@ def _box(detected: dict[str, Any]) -> tuple[float, float, float, float] | None:
     if not all(math.isfinite(value) for value in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
         return None
     return x1, y1, x2, y2
+
+
+def _labeled_sidecar_objects(raw: object) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    objects: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        if not label or _box(item) is None:
+            continue
+        copied = dict(item)
+        copied["label"] = label
+        box = item.get("box")
+        if isinstance(box, dict):
+            copied["box"] = dict(box)
+        objects.append(copied)
+    return objects
 
 
 def _temporal_association_score(
@@ -1137,6 +1160,7 @@ TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | tuple[Frame, 
 TimestampedEvidenceFrameProvider = Callable[
     [dict[str, Any]], TimestampedLiveFrame | tuple[Frame, float] | None
 ]
+LiveDetectionsProvider = Callable[[TimestampedLiveFrame], DetectionSnapshot | None]
 StopRequested = Callable[[], bool]
 
 
@@ -1275,6 +1299,7 @@ class RecordedMotionObjectDetector:
         live_frame_provider: LiveFrameProvider,
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
+        live_detections_provider: LiveDetectionsProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         decode_budget: RecordedDecodeBudget | None = None,
         motion_evidence: Any | None = None,
@@ -1285,6 +1310,7 @@ class RecordedMotionObjectDetector:
         self.live_frame_provider = live_frame_provider
         self.timestamped_live_frame_provider = timestamped_live_frame_provider
         self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
+        self.live_detections_provider = live_detections_provider
         self.stop_requested = stop_requested
         self.decode_budget = decode_budget
         # Compatibility-only: refinement depth no longer publishes rolling
@@ -1345,6 +1371,10 @@ class RecordedMotionObjectDetector:
         initial security path must not wait for that boundary. A stale or
         unavailable live frame therefore produces a provisional no-frame result
         rather than cancelling the authoritative recorded refinement.
+
+        Live admission uses GStreamer ``gvadetect`` boxes already produced on
+        the capture pipeline. OpenVINO stays on recorded evidence frames so
+        the live GPU is not a second detector.
         """
         workflow_started = time.monotonic()
         timing = {
@@ -1444,17 +1474,30 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=True,
             )
+        sidecar_objects: list[dict[str, Any]] = []
+        snapshot = None
+        if self.live_detections_provider is not None and isinstance(sample, TimestampedLiveFrame):
+            snapshot = self.live_detections_provider(sample)
+            if snapshot is not None:
+                sidecar_objects = snapshot.scaled_objects(frame.shape[1], frame.shape[0])
         objects = self._detect_objects(
             frame,
             timing=timing,
             enrich_faces=False,
             workload="initial",
+            precomputed=sidecar_objects,
+            spatial_alignment=sample.spatial_alignment if isinstance(sample, TimestampedLiveFrame) else None,
         )
         zone_geometry_required = any(
             zone.enabled
             and zone.behavior in {"incident", "ignore"}
             and len(zone.points) >= 3
             for zone in self.camera.zones
+        )
+        alignment = sample.spatial_alignment if isinstance(sample, TimestampedLiveFrame) else {}
+        tracking_geometry_trusted = geometry_trusted and all(
+            abs(float(alignment.get(key, expected)) - expected) <= 0.02
+            for key, expected in (("scale_x", 1), ("scale_y", 1), ("offset_x", 0), ("offset_y", 0))
         )
         for detected in objects:
             if isinstance(detected, dict):
@@ -1467,6 +1510,10 @@ class RecordedMotionObjectDetector:
                     "camera_generation": generation,
                     "capture_generation": capture_generation,
                     "frame_geometry_trusted": geometry_trusted,
+                    # Zone projection does not transform track histories or
+                    # their seed image. A cropped live result may admit an
+                    # event, but must wait for main refinement to seed tracks.
+                    "tracking_geometry_trusted": tracking_geometry_trusted,
                 })
                 if zone_geometry_required and not geometry_trusted:
                     # A substream may use a different crop/FOV than the main
@@ -2219,6 +2266,8 @@ class RecordedMotionObjectDetector:
         timing: dict[str, float] | None = None,
         enrich_faces: bool = True,
         workload: str = "refinement",
+        precomputed: list[dict[str, Any]] | None = None,
+        spatial_alignment: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
@@ -2244,15 +2293,26 @@ class RecordedMotionObjectDetector:
             )),
         )
         detector_started = time.monotonic()
-        detector_method = getattr(
-            self.detector,
-            "detect_initial" if workload == "initial" else "detect_refinement",
-            self.detector.detect,
-        )
-        objects = detector_method(
-            frame,
-            confidence_threshold=candidate_threshold,
-        )
+        if workload == "initial" and precomputed is None:
+            precomputed = []
+        if precomputed is not None:
+            objects = []
+            for item in precomputed:
+                if not isinstance(item, dict):
+                    continue
+                detected = dict(item)
+                detected.setdefault("detection_source", "gvadetect")
+                objects.append(detected)
+        else:
+            detector_method = getattr(
+                self.detector,
+                "detect_refinement",
+                self.detector.detect,
+            )
+            objects = detector_method(
+                frame,
+                confidence_threshold=candidate_threshold,
+            )
         detector_ms = (time.monotonic() - detector_started) * 1000.0
         if timing is not None:
             timing["detector_request_ms"] += detector_ms
@@ -2282,6 +2342,21 @@ class RecordedMotionObjectDetector:
                         detected["face_quality_score"] = round(quality.score, 4)
                         detected["face_sharpness_score"] = round(quality.sharpness, 4)
                         detected["face_exposure_score"] = round(quality.exposure, 4)
+        # Zones are authored on main. Project boxes only for zone evaluation,
+        # then restore live coordinates for crops, snapshots, and EMA overlap.
+        original_boxes = []
+        if spatial_alignment and spatial_alignment.get("reliable"):
+            for detected in objects:
+                box = detected.get("box")
+                if not isinstance(box, dict):
+                    continue
+                original_boxes.append((detected, box))
+                detected["box"] = {
+                    key: box[key] * float(spatial_alignment.get("scale_x", 1.0)) + frame_width * float(spatial_alignment.get("offset_x", 0.0))
+                    if key.startswith("x") else
+                    box[key] * float(spatial_alignment.get("scale_y", 1.0)) + frame_height * float(spatial_alignment.get("offset_y", 0.0))
+                    for key in ("x1", "y1", "x2", "y2")
+                }
         apply_detection_zones(
             self.camera,
             objects,
@@ -2291,6 +2366,8 @@ class RecordedMotionObjectDetector:
             bool(getattr(self.detector.config, "require_incident_zone", True)),
             class_thresholds,
         )
+        for detected, box in original_boxes:
+            detected["box"] = box
         apply_depth_zone_filters(self.camera, objects)
         for detected in objects:
             if isinstance(detected, dict):
@@ -2957,6 +3034,7 @@ class RecordedMotionObjectDetectorFactory:
         live_frame_provider: LiveFrameProvider,
         timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         timestamped_evidence_frame_provider: TimestampedEvidenceFrameProvider | None = None,
+        live_detections_provider: LiveDetectionsProvider | None = None,
         stop_requested: StopRequested = lambda: False,
         motion_evidence: Any | None = None,
     ) -> RecordedMotionObjectDetector:
@@ -2967,6 +3045,7 @@ class RecordedMotionObjectDetectorFactory:
             live_frame_provider=live_frame_provider,
             timestamped_live_frame_provider=timestamped_live_frame_provider,
             timestamped_evidence_frame_provider=timestamped_evidence_frame_provider,
+            live_detections_provider=live_detections_provider,
             stop_requested=stop_requested,
             decode_budget=self.decode_budget,
             motion_evidence=motion_evidence,

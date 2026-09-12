@@ -9,7 +9,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .config import DetectorConfig
+from .config import DetectorConfig, auxiliary_openvino_device
 
 
 LOGGER = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class OpenVinoFaceDetector:
             if len(shape) != 4 or shape[1] != 3:
                 raise ValueError(f"expected NCHW face detector input, got {shape}")
             self.input_shape = (shape[3], shape[2])
-            device = self.config.face_recognition_device or "AUTO"
+            device = auxiliary_openvino_device(self.config.face_recognition_device)
             compile_config = {"PERFORMANCE_HINT": "LATENCY"}
             if device.upper() != "AUTO":
                 compile_config["NUM_STREAMS"] = "1"
@@ -138,7 +138,7 @@ class OpenVinoFaceDetector:
             "enabled": self.enabled,
             "ready": self.ready,
             "error": self.error,
-            "device": self.loaded_device or self.config.face_recognition_device,
+            "device": self.loaded_device or self.config.resolved_face_recognition_device(),
             "model_path": self.config.face_detection_model_path,
             "input_shape": list(self.input_shape),
             "model_load_ms": self.model_load_ms,

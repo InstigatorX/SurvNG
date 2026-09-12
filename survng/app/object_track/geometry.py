@@ -40,6 +40,27 @@ def _rescale_detection_boxes(
         except (KeyError, TypeError, ValueError):
             continue
 
+
+def _labeled_tracking_objects(raw: object) -> list[dict[str, Any]]:
+    """Copy labeled sidecar boxes for live tracking without calling OpenVINO."""
+    if not isinstance(raw, list):
+        return []
+    objects: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        if not label or _box(item.get("box")) is None:
+            continue
+        copied = dict(item)
+        copied["label"] = label
+        box = item.get("box")
+        if isinstance(box, dict):
+            copied["box"] = dict(box)
+        objects.append(copied)
+    return objects
+
+
 def _detect_tracking_objects(
     detector: ObjectDetectorBackend,
     frame: np.ndarray,

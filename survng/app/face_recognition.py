@@ -10,7 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .config import DetectorConfig
+from .config import DetectorConfig, auxiliary_openvino_device
 
 
 LOGGER = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ class OpenVinoFaceRecognizer:
             self.landmark_input_layout, self.landmark_input_shape = self._image_input(
                 landmark_model.input(0).shape
             )
-            device = self.config.face_recognition_device or "AUTO"
+            device = auxiliary_openvino_device(self.config.face_recognition_device)
             compile_config = {"PERFORMANCE_HINT": "LATENCY"}
             if device.upper() != "AUTO":
                 compile_config["NUM_STREAMS"] = "1"
@@ -227,7 +227,7 @@ class OpenVinoFaceRecognizer:
             "enabled": self.enabled,
             "ready": self.ready,
             "error": self.error,
-            "device": self.loaded_device or self.config.face_recognition_device,
+            "device": self.loaded_device or self.config.resolved_face_recognition_device(),
             "model_path": self.config.face_embedding_model_path,
             "landmark_model_path": self.config.face_landmark_model_path,
             "alignment_enabled": self.alignment_enabled,

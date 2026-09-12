@@ -116,6 +116,9 @@ run_mode() {
     light)
       cleanup_docker_light
       ;;
+    publish)
+      cleanup_docker_publish
+      ;;
     standard)
       cleanup_docker_standard
       cleanup_tool_caches
@@ -136,6 +139,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --publish) MODE="publish"; shift ;;
     --light) MODE="light"; shift ;;
+    --publish) MODE="publish"; shift ;;
     --standard) MODE="standard"; shift ;;
     --aggressive) MODE="aggressive"; shift ;;
     -h|--help) usage; exit 0 ;;

@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .camera import CameraWorker
-from .camera_capture import (
-    CaptureOpenLimiter,
-    FfmpegCaptureOptions,
-    FfmpegCaptureBackend,
+from .camera_capture import CaptureOpenLimiter
+from .dlstreamer_capture import (
+    DlStreamerCaptureBackend,
+    DlStreamerCaptureOptions,
+    adjacent_model_proc,
 )
 from .camera_control import CameraControlService
 from .camera_fleet import CameraFleetLifecycle, CameraFleetOperationError
@@ -40,6 +41,7 @@ from .detector import objects_to_json
 from .detection_watch import RouteDetectionWatch
 from .go2rtc import Go2RtcAdapter
 from .inference_lifecycle import InferenceLifecycle
+from .config_application import live_detection_threshold
 from .inference_runtime.worker_topology import object_worker_recommendation_from_status
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
@@ -309,20 +311,32 @@ class AppManager:
         # lifecycle/reconfiguration ownership lives in ``self.recording``.
         self.recorder = self.recording.recorder
         self.go2rtc = Go2RtcAdapter()
-        # Camera startup pacing is an internal safety policy. Keep external
-        # FFmpeg admission and the startup coordinator on the same fixed cap.
+        # Camera startup pacing is an internal safety policy. Keep live
+        # DL Streamer admission and the startup coordinator on the same cap.
         self._capture_open_limiter = CaptureOpenLimiter(
             CAMERA_STARTUP_MAX_CONCURRENCY
         )
-        self.capture_backend = FfmpegCaptureBackend(
+        detector = config.detector
+        self.capture_backend = DlStreamerCaptureBackend(
             self._capture_open_limiter,
-            FfmpegCaptureOptions(
-                ffmpeg_path=config.ffmpeg_path,
+            DlStreamerCaptureOptions(
                 rtsp_transport=config.capture_rtsp_transport,
-                frame_rate=lambda: max(
+                frame_rate=lambda: self.config.motion_qualification.sample_fps,
+                detection_frame_rate=lambda: self.config.detector.live_sample_fps,
+                main_frame_rate=lambda: max(
                     self.config.motion_qualification.sample_fps,
-                    self.config.detector.tracking.sample_fps,
+                    self.config.detector.tracking.sample_fps if self.config.detector.tracking.enabled else 0.5,
                 ),
+                model_path=detector.resolved_model_path(),
+                inference_device=detector.device,
+                detect_enabled=(
+                    detector.enabled and detector.backend == "openvino"
+                ),
+                labels_path=detector.labels_path,
+                labels=tuple(detector.labels),
+                confidence_threshold=live_detection_threshold(config),
+                model_proc_path=adjacent_model_proc(detector.resolved_model_path()),
+                frame_width=self.config.motion_qualification.frame_width,
             ),
         )
         self.state_events = StateEventBroker()
@@ -968,6 +982,9 @@ class AppManager:
             lambda: self.ema_route_candidates.close(timeout=2.0),
         )
 
+        capture_backend = getattr(self, "capture_backend", None)
+        if capture_backend is not None:
+            attempt("GStreamer capture supervisor", capture_backend.close)
         LOGGER.info("SurvNG shutdown: stopping inference lifecycle")
         attempt("inference lifecycle", self.inference.close)
 
