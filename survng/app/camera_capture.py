@@ -282,6 +282,7 @@ class CameraCaptureService:
         self._active_handles: dict[str, CaptureHandle] = {}
         self._jpegs: dict[str, bytes] = {}
         self._preview: dict[str, np.ndarray] = {}
+        self._preview_received_at: dict[str, float] = {}
         self._last_access: dict[str, float] = {}
         self._errors: dict[str, str] = {}
         self._last_live_error = ""
@@ -510,6 +511,7 @@ class CameraCaptureService:
                 self._frames.clear()
                 self._jpegs.clear()
                 self._preview.clear()
+                self._preview_received_at.clear()
                 self._last_access.clear()
                 self._errors.clear()
                 self._last_live_error = ""
@@ -765,6 +767,9 @@ class CameraCaptureService:
                             self._active_handles.pop(source, None)
                         self._detection_history[source].reset()
                         self._detections.pop(source, None)
+                        self._jpegs.pop(source, None)
+                        self._preview.pop(source, None)
+                        self._preview_received_at.pop(source, None)
                     if handle is not None:
                         try:
                             handle.close()
@@ -880,6 +885,7 @@ class CameraCaptureService:
                 frame is None
                 or not payload
                 or now - frame.captured_at_monotonic > self.stale_seconds
+                or now - self._preview_received_at.get(source, float("-inf")) > self.stale_seconds
             ):
                 return None
             return bytes(payload)
@@ -893,6 +899,7 @@ class CameraCaptureService:
             if (
                 frame is None
                 or now - frame.captured_at_monotonic > self.stale_seconds
+                or now - self._preview_received_at.get(source, float("-inf")) > self.stale_seconds
             ):
                 return None
             return preview
@@ -914,6 +921,7 @@ class CameraCaptureService:
         with self._lock:
             self._jpegs[source] = bytes(jpeg)
             self._preview[source] = decoded
+            self._preview_received_at[source] = self._monotonic_clock()
 
     def _store_sidecar_state(self, source: str, handle: CaptureHandle) -> None:
         self._store_detections(source, handle)

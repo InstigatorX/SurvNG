@@ -9,6 +9,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from ..openvino_config import latency_compile_config
 from .config import DetectorConfig, auxiliary_openvino_device
 
 
@@ -60,9 +61,7 @@ class OpenVinoFaceDetector:
                 raise ValueError(f"expected NCHW face detector input, got {shape}")
             self.input_shape = (shape[3], shape[2])
             device = auxiliary_openvino_device(self.config.face_recognition_device)
-            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
-            if device.upper() != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = latency_compile_config(device)
             try:
                 compiled = core.compile_model(model, device, compile_config)
                 self.loaded_device = device

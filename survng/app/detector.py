@@ -12,6 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from ..openvino_config import latency_compile_config
 from .config import DetectorConfig
 from .detector_labels import load_detector_labels
 from .detector_model_settings import ModelSettingsError, read_model_metadata, resolve_output_format
@@ -251,9 +252,7 @@ class OpenVinoDetector:
             model = preprocessor.build()
             self._openvino_embedded_preprocess = True
             device = self.config.device.upper()
-            compile_config: dict[str, Any] = {"PERFORMANCE_HINT": "LATENCY"}
-            if device != "AUTO":
-                compile_config["NUM_STREAMS"] = "1"
+            compile_config = latency_compile_config(device)
             try:
                 self.compiled_model = core.compile_model(model=model, device_name=self.config.device, config=compile_config)
             except Exception:

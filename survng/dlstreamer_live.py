@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlsplit
 
+from survng.openvino_config import GPU_COMPILATION_NUM_THREADS
 
 DECODERS = {
     "va": ("vah264dec", "vah265dec"),
@@ -839,7 +840,8 @@ def _pump_pipeline(
         detector.set_property("model", str(model_path))
         detector.set_property("device", args.device)
         if "GPU" in args.device.upper():
-            detector.set_property("ie-config", "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1")
+            detector.set_property("ie-config", "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1,"
+                                  f"COMPILATION_NUM_THREADS={GPU_COMPILATION_NUM_THREADS}")
         # Low-rate, event-driven streams need bounded latency, not an implicit
         # auto-batch that can wait indefinitely for other cameras.
         detector.set_property("batch-size", 1)

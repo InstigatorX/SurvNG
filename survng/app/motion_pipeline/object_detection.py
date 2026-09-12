@@ -1510,6 +1510,9 @@ class RecordedMotionObjectDetector:
                     "camera_generation": generation,
                     "capture_generation": capture_generation,
                     "frame_geometry_trusted": geometry_trusted,
+                    "live_detection_session": snapshot.session if snapshot is not None else "",
+                    "live_inference_sequence": snapshot.inference_sequence if snapshot is not None else 0,
+                    "live_detection_source_pts": snapshot.source_pts if snapshot is not None else None,
                     # Zone projection does not transform track histories or
                     # their seed image. A cropped live result may admit an
                     # event, but must wait for main refinement to seed tracks.
