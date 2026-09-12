@@ -1372,9 +1372,9 @@ class RecordedMotionObjectDetector:
         unavailable live frame therefore produces a provisional no-frame result
         rather than cancelling the authoritative recorded refinement.
 
-        Live admission uses GStreamer ``gvadetect`` boxes already produced on
-        the capture pipeline. OpenVINO stays on recorded evidence frames so
-        the live GPU is not a second detector.
+        Qualification submits selected color evidence to the initial inference
+        workload. An explicit native metadata provider remains authoritative
+        for integrations using continuous inference.
         """
         workflow_started = time.monotonic()
         timing = {
@@ -1474,12 +1474,15 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=True,
             )
-        sidecar_objects: list[dict[str, Any]] = []
+        sidecar_objects: list[dict[str, Any]] | None = None
         snapshot = None
+        if self.live_detections_provider is not None:
+            sidecar_objects = []
         if self.live_detections_provider is not None and isinstance(sample, TimestampedLiveFrame):
             snapshot = self.live_detections_provider(sample)
             if snapshot is not None:
                 sidecar_objects = snapshot.scaled_objects(frame.shape[1], frame.shape[0])
+        inference_started = time.monotonic()
         objects = self._detect_objects(
             frame,
             timing=timing,
@@ -1488,6 +1491,33 @@ class RecordedMotionObjectDetector:
             precomputed=sidecar_objects,
             spatial_alignment=sample.spatial_alignment if isinstance(sample, TimestampedLiveFrame) else None,
         )
+        if self.live_detections_provider is None:
+            # Never attach a slow or previous-session response to newer pixels.
+            frame_age = max(
+                time.time() - float(captured_at),
+                frame_age + time.monotonic() - inference_started,
+            )
+            current = (
+                provider()
+                if provider is not None and isinstance(sample, TimestampedLiveFrame)
+                else sample
+            )
+            generation_changed = isinstance(sample, TimestampedLiveFrame) and (
+                not isinstance(current, TimestampedLiveFrame)
+                or current.camera_generation != generation
+                or current.capture_generation != capture_generation
+                or current.source_session != sample.source_session
+            )
+            if (generation_changed or not math.isfinite(frame_age)
+                    or frame_age > FAST_LIVE_FRAME_MAX_AGE_SECONDS
+                    or frame_age < -FAST_LIVE_FRAME_FUTURE_TOLERANCE_SECONDS):
+                return self._result(
+                    None,
+                    [{"status": "fast_frame_invalidated" if generation_changed else "fast_frame_stale",
+                      "frame_source": "live_fast_path", "frame_sequence": sequence,
+                      "camera_generation": generation, "capture_generation": capture_generation}],
+                    "", timing, workflow_started, refinement_pending=True,
+                )
         zone_geometry_required = any(
             zone.enabled
             and zone.behavior in {"incident", "ignore"}
@@ -1509,6 +1539,8 @@ class RecordedMotionObjectDetector:
                     "frame_sequence": sequence,
                     "camera_generation": generation,
                     "capture_generation": capture_generation,
+                    "frame_source_session": sample.source_session if isinstance(sample, TimestampedLiveFrame) else "",
+                    "frame_source_pts": sample.source_pts if isinstance(sample, TimestampedLiveFrame) and math.isfinite(sample.source_pts) else None,
                     "frame_geometry_trusted": geometry_trusted,
                     "live_detection_session": snapshot.session if snapshot is not None else "",
                     "live_inference_sequence": snapshot.inference_sequence if snapshot is not None else 0,
@@ -2296,8 +2328,6 @@ class RecordedMotionObjectDetector:
             )),
         )
         detector_started = time.monotonic()
-        if workload == "initial" and precomputed is None:
-            precomputed = []
         if precomputed is not None:
             objects = []
             for item in precomputed:
@@ -2309,7 +2339,7 @@ class RecordedMotionObjectDetector:
         else:
             detector_method = getattr(
                 self.detector,
-                "detect_refinement",
+                "detect_initial" if workload == "initial" else "detect_refinement",
                 self.detector.detect,
             )
             objects = detector_method(

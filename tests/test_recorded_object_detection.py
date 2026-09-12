@@ -1459,7 +1459,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
             def detect(self, frame, confidence_threshold=None):
                 observed.append(int(frame[0, 0, 0]))
-                raise AssertionError("live admission must not run OpenVINO")
+                return []
 
         backend = RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
@@ -1497,7 +1497,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(observed, [])
+        self.assertEqual(observed, [17])
         self.assertIs(result.frame, evidence)
         self.assertEqual(result.objects, [])
         self.assertEqual(result.frame_captured_at_epoch, event_epoch)
@@ -1843,7 +1843,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(result.objects[0]["provisional_zone_eligible"])
         self.assertTrue(result.objects[0]["fast_geometry_untrusted"])
 
-    def test_initial_skips_openvino_and_refinement_uses_recorded_workload(self) -> None:
+    def test_initial_and_refinement_use_separate_priority_workloads(self) -> None:
         event_epoch = 1_800_000_000.0
         calls: list[str] = []
 
@@ -1881,7 +1881,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             backend.detect_initial(datetime.fromtimestamp(event_epoch, timezone.utc))
         backend._detect_objects(frame, workload="refinement")
 
-        self.assertEqual(calls, ["refinement"])
+        self.assertEqual(calls, ["initial", "refinement"])
 
     def test_refinement_rejects_live_frame_outside_event_time_window(self) -> None:
         event_epoch = 1_800_000_000.0

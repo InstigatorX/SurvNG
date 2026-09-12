@@ -780,6 +780,7 @@ def _pump_pipeline(
         source.connect("source-setup", configure_rtsp)
 
     tee = _element(Gst, "tee", "branches")
+    color_frames = source_role == "main" or not detect
     va_memory = detect and args.decoder == "va" and not use_test_source
     frame_queue = _element(Gst, "queue", "frame-queue")
     frame_queue.set_property("max-size-buffers", 1)
@@ -808,7 +809,7 @@ def _pump_pipeline(
     capsfilter.set_property(
         "caps",
         Gst.Caps.from_string(
-            f"video/x-raw,format={'BGR' if source_role == 'main' else 'GRAY8'},width="
+            f"video/x-raw,format={'BGR' if color_frames else 'GRAY8'},width="
             f"{qualifier_width},pixel-aspect-ratio=1/1,framerate={rate.numerator}/{rate.denominator}"
         ),
     )
@@ -943,6 +944,8 @@ def _pump_pipeline(
             meta_sink.set_property("max-buffers", 4)
             meta_sink.set_property("drop", True)
             meta_sink.set_property("sync", False)
+            # Sparse inference output must not gate qualifier/video startup.
+            meta_sink.set_property("async", False)
             elements.extend([meta_convert, meta_sink])
         else:
             raise RuntimeError("gvametaconvert is required for authoritative live detections")
@@ -1110,7 +1113,7 @@ def _pump_pipeline(
                 pixels = bytes(info.data)
             finally:
                 buffer.unmap(info)
-            pixels = _packed_gray(pixels, width * (3 if source_role == "main" else 1), height)
+            pixels = _packed_gray(pixels, width * (3 if color_frames else 1), height)
             jpeg_bytes = b""
             jpeg_width = 0
             jpeg_height = 0
@@ -1151,7 +1154,7 @@ def _pump_pipeline(
                                 (first_frame_at - started) * 1000.0,
                                 3,
                             ),
-                            "qualifier_format": "BGR" if source_role == "main" else "GRAY8",
+                            "qualifier_format": "BGR" if color_frames else "GRAY8",
                             "source_role": source_role,
                             "metadata_contract": "GstGVAJSONMeta-v1" if detect else "disabled",
                             "detection_threshold": args.threshold if detect else None,

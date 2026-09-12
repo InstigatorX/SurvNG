@@ -108,9 +108,10 @@ def test_live_detection_rate_does_not_throttle_ema_or_main_capture():
 
 
 @pytest.mark.parametrize("detect,configured,expected", [
-    (False, 3000, 3000), (True, 3000, 30000), (True, 45000, 45000),
+    (False, 3000, 30000), (True, 3000, 30000),
+    (False, 45000, 45000), (True, 45000, 45000),
 ])
-def test_inference_startup_budget_agrees_between_parent_and_child(
+def test_native_startup_budget_agrees_between_parent_and_child(
     monkeypatch, detect, configured, expected,
 ) -> None:
     backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(

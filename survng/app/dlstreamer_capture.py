@@ -47,9 +47,9 @@ from .live_detections import DetectionSnapshot
 from .redact import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
-# Native GPU model compilation is part of opening a live inference pipeline,
-# not a stalled RTSP read. Keep parent and child startup budgets in agreement.
-DLSTREAMER_INFERENCE_STARTUP_TIMEOUT_MS = 30000
+# RTSP setup/keyframe wait also needs the native startup window when capture
+# does not compile a model. Keep parent and child budgets in agreement.
+DLSTREAMER_STARTUP_TIMEOUT_MS = 30000
 DLSTREAMER_INFERENCE_STALL_SECONDS = 5.0
 
 
@@ -817,9 +817,7 @@ class DlStreamerCaptureBackend:
 
     @property
     def startup_timeout_ms(self) -> int:
-        if self.options.detect_enabled:
-            return max(self.options.open_timeout_ms, DLSTREAMER_INFERENCE_STARTUP_TIMEOUT_MS)
-        return self.options.open_timeout_ms
+        return max(self.options.open_timeout_ms, DLSTREAMER_STARTUP_TIMEOUT_MS)
 
     def close(self) -> None:
         with self._shared_lock:

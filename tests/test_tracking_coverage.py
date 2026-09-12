@@ -6,10 +6,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
+
+from survng.app.camera_capture import CapturedFrame
 
 from survng.app.config import CameraConfig, ObjectTrackingConfig
 from survng.app.object_tracking import ObjectTrackingSession
-from survng.app.object_track.types import TrackingFrameBatch
+from survng.app.object_track.types import TrackingFrameBatch, TrackingFrame
 
 
 def detection():
@@ -227,12 +230,18 @@ def test_boundary_in_tolerated_tail_is_not_hidden_by_completion():
     assert updates[-1]["completion_reason"] == "capture_generation_changed"
 
 
-def test_deferred_live_inference_retries_retained_sample_beyond_media_settle_timeout():
+@pytest.mark.parametrize("qualified", [False, True])
+def test_deferred_live_inference_retries_retained_sample_beyond_media_settle_timeout(qualified):
     calls, live_reads = [], []
     def live(seed, frame):
         live_reads.append(True)
         # The live capture slot may disappear or advance after the first read.
-        return (frame, seed + 0.5, 1.0) if len(live_reads) == 1 else None
+        if len(live_reads) != 1:
+            return None
+        if qualified:
+            return TrackingFrame(CapturedFrame("live", frame, seed + 0.5, 1.0, "", 100, 100, 7,
+                generation=1, source_pts=.5, source_session="fixture"), requires_inference=True)
+        return frame, seed + 0.5, 1.0
     def detect(frame, **kwargs):
         calls.append(True)
         return [{"status": "inference_deferred"}] if len(calls) <= 5 else [detection()]

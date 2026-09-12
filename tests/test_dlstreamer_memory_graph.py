@@ -103,11 +103,13 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     else:
         assert elements["qualifier-scale"].factory == "videoscale"
     if not detect:
+        assert "format=BGR," in elements["frame-caps"].properties["caps"]
         assert "detect" not in elements
     else:
         assert elements["detect"].properties["ie-config"] == (
             "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1,COMPILATION_NUM_THREADS=1"
         )
+        assert elements["meta-sink"].properties["async"] is False
         assert elements["detect"].properties["nireq"] == 1
         assert elements["detect"].properties["scheduling-policy"] == "throughput"
 
