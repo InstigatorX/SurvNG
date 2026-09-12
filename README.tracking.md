@@ -120,7 +120,7 @@ runtime with:
 .venv/bin/pip install -r requirements-ultralytics-tracking.txt
 ```
 
-TrackTrack and BoT-SORT require the tested Ultralytics 8.4.129 API. These
+TrackTrack and BoT-SORT require the tested Ultralytics 8.4.148 API. These
 adapters reuse supplied embeddings and do not download another model.
 
 ## Practical conclusion

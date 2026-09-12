@@ -198,7 +198,7 @@ def _build_session_tracktrack(args: Any) -> Any:
         def __init__(self, args: Any) -> None:
             super().__init__(args)
             self._session_track_type = _session_track_type(TTSTrack)
-            # 8.4.129 constructs TTSTrack inside update rather than exposing an
+            # 8.4.148 constructs TTSTrack inside update rather than exposing an
             # init_track hook. Bind the unchanged upstream function to a private
             # globals dictionary; never mutate the module shared by other sessions.
             upstream = TRACKTRACK.update

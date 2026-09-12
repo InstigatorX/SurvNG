@@ -20,10 +20,11 @@ permissions:
 
 jobs:
   cleanup:
+    # Node 24 actions require Actions Runner >= 2.327.1.
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Clean runner disk
         run: |

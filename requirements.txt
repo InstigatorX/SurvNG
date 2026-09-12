@@ -1,13 +1,13 @@
 fastapi>=0.141.1,<1
 uvicorn[standard]>=0.52.4,<1
 python-multipart>=0.0.32,<1
-websockets>=17,<18
+websockets>=17.1,<18
 opencv-python==5.0.0.93
-openvino==2026.3.0
+openvino==2026.3.1
 ftfy>=6.3.1,<7
-regex>=2026.7.19,<2027
+regex>=2026.9.10,<2027
 coremltools>=9,<10; platform_system=="Darwin"
 Pillow>=12.3.0,<13; platform_system=="Darwin"
 onvif-zeep==0.2.12
-pydantic>=2.13.4,<3
+pydantic>=2.13.5,<3
 paho-mqtt>=2.1,<3

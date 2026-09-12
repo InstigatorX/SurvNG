@@ -188,7 +188,7 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("--lxc", text)
         self.assertIn("apparmor=unconfined", text)
         self.assertIn("download.pytorch.org/whl/cpu", text)
-        self.assertIn("opencv-python>=4.8,<5", text)
+        self.assertIn("opencv-python>=4.14.0.94,<5", text)
         self.assertIn("uninstall -y opencv-python-headless", text)
         self.assertIn("survng-install-venvs", text)
         self.assertIn("ensure_models_readable", text)

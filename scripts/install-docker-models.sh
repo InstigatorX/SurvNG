@@ -289,8 +289,8 @@ install_cpu_torch() {
   # pulls multi-GB NVIDIA wheels; pin the CPU index instead.
   "$venv_dir/bin/python" -m pip install --upgrade pip >/dev/null
   "$venv_dir/bin/python" -m pip install \
-    'torch>=2.5,<3' \
-    'torchvision>=0.20,<1' \
+    'torch>=2.14.0,<3' \
+    'torchvision>=0.29.0,<1' \
     --index-url https://download.pytorch.org/whl/cpu
 }
 
@@ -302,7 +302,7 @@ finalize_export_venv() {
   local venv_dir="$1"
   install_cpu_torch "$venv_dir"
   "$venv_dir/bin/python" -m pip uninstall -y opencv-python-headless >/dev/null 2>&1 || true
-  "$venv_dir/bin/python" -m pip install 'opencv-python>=4.8,<5'
+  "$venv_dir/bin/python" -m pip install 'opencv-python>=4.14.0.94,<5'
 }
 
 ensure_venv() {
@@ -407,9 +407,9 @@ install_detector() {
   # Full opencv-python: Ultralytics requires cv2.imshow at import time.
   # Pin <5 to stay on the manylinux builds exercised with libxcb in the image.
   ensure_venv "$venv" \
-    'opencv-python>=4.8,<5' \
-    'ultralytics>=8.4,<9' \
-    'openvino>=2025.1'
+    'opencv-python>=4.14.0.94,<5' \
+    'ultralytics>=8.4.148,<9' \
+    'openvino>=2026.3.1'
   finalize_export_venv "$venv"
   (
     cd "$work"
@@ -471,9 +471,9 @@ install_depth() {
   ensure_venv "$venv"
   install_cpu_torch "$venv"
   ensure_venv "$venv" \
-    'opencv-python>=4.8,<5' \
-    'ultralytics>=8.4.104,<9' \
-    'openvino>=2025.1'
+    'opencv-python>=4.14.0.94,<5' \
+    'ultralytics>=8.4.148,<9' \
+    'openvino>=2026.3.1'
   finalize_export_venv "$venv"
   (
     cd "$work"
@@ -568,11 +568,11 @@ install_semantic() {
   ensure_venv "$venv"
   install_cpu_torch "$venv"
   ensure_venv "$venv" \
-    'open_clip_torch>=3.2,<4' \
-    'timm>=1.0.20,<2' \
-    'huggingface_hub>=0.34,<2' \
-    'Pillow>=10,<13' \
-    'openvino>=2025.1'
+    'open_clip_torch>=3.3.0,<4' \
+    'timm>=1.0.29,<2' \
+    'huggingface_hub>=1.31.0,<2' \
+    'Pillow>=12.3.0,<13' \
+    'openvino>=2026.3.1'
   finalize_export_venv "$venv"
   local force_flag=()
   if [[ "$FORCE" -eq 1 ]]; then
@@ -609,7 +609,7 @@ install_face() {
 
   local venv
   venv="$(venv_root)/face-venv"
-  ensure_venv "$venv" 'openvino>=2025.1'
+  ensure_venv "$venv" 'openvino>=2026.3.1'
   local ovc_bin="$venv/bin/ovc"
   if [[ ! -x "$ovc_bin" ]]; then
     err "OpenVINO converter (ovc) missing from $venv after openvino install"

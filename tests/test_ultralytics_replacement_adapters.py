@@ -44,11 +44,11 @@ def test_dependency_status_does_not_import_dotted_modules():
         return original(name)
     with patch("survng.app.object_track.registry.importlib.util.find_spec", side_effect=guarded):
         for status in (ultralytics_tracktrack_dependency_status(), ultralytics_botsort_dependency_status()):
-            assert status["tested_version"] == "8.4.129"
-            assert status["supported_version_range"] == "==8.4.129"
+            assert status["tested_version"] == "8.4.148"
+            assert status["supported_version_range"] == "==8.4.148"
 
 
-@pytest.mark.skipif(not AVAILABLE, reason="requires optional ultralytics==8.4.129 and LAP")
+@pytest.mark.skipif(not AVAILABLE, reason="requires optional ultralytics==8.4.148 and LAP")
 @pytest.mark.parametrize("engine", ENGINES)
 class TestNativeReplacementAdapters:
     def test_supplied_embeddings_and_session_ids(self, engine):

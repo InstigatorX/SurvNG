@@ -11,7 +11,7 @@ from .hybrid import HybridObjectTracker
 from .types import ObjectTrackerBackend, ObjectTrackerBuilder
 
 
-TESTED_ULTRALYTICS_TRACKING_VERSION = "8.4.129"
+TESTED_ULTRALYTICS_TRACKING_VERSION = "8.4.148"
 MINIMUM_ULTRALYTICS_TRACKING_VERSION = (8, 4, 108)
 MAXIMUM_ULTRALYTICS_TRACKING_VERSION = (8, 5, 0)
 
@@ -77,7 +77,7 @@ def _ultralytics_tracking_dependency_status(
         "required_version": TESTED_ULTRALYTICS_TRACKING_VERSION,
         "tested_version": TESTED_ULTRALYTICS_TRACKING_VERSION,
         "is_tested_version": installed_version == TESTED_ULTRALYTICS_TRACKING_VERSION,
-        "supported_version_range": "==8.4.129" if tracker_name in {"TrackTrack", "BoT-SORT"} else ">=8.4.108,<8.5",
+        "supported_version_range": "==8.4.148" if tracker_name in {"TrackTrack", "BoT-SORT"} else ">=8.4.108,<8.5",
         "reason": reason,
     }
 
