@@ -277,8 +277,8 @@ class ObjectTrackingSession:
         catchup: bool,
         evidence: TrackingFrame | None = None,
     ) -> list[dict[str, Any]]:
-        """Live evidence (including buffered catch-up) reuses gvadetect."""
-        if evidence is not None and evidence.captured.source == "live":
+        """Infer demand-driven pixels or consume explicit native evidence."""
+        if evidence is not None and evidence.captured.source == "live" and not evidence.requires_inference:
             return evidence.detection.scaled_objects(frame.shape[1], frame.shape[0]) if evidence.detection else []
         return _detect_tracking_objects(
             self.detector,
@@ -973,7 +973,7 @@ class ObjectTrackingSession:
                 nonlocal last_persisted_at, latest_tracked_objects
                 nonlocal stable_frames, track_states
                 nonlocal last_sidecar_identity
-                if evidence is not None and evidence.captured.source == "live":
+                if evidence is not None and evidence.captured.source == "live" and not evidence.requires_inference:
                     snapshot = evidence.detection
                     if snapshot is None:
                         return False
@@ -1149,7 +1149,7 @@ class ObjectTrackingSession:
                             frame_reference=getattr(sample, "reference", None),
                             evidence=sample if isinstance(sample, TrackingFrame) else None,
                         ):
-                            if isinstance(sample, TrackingFrame) and sample.captured.source == "live":
+                            if isinstance(sample, TrackingFrame) and sample.captured.source == "live" and not sample.requires_inference:
                                 # Missing/repeated metadata is not negative
                                 # evidence or a deferred OpenVINO request.
                                 continue
@@ -1307,7 +1307,7 @@ class ObjectTrackingSession:
                             stalled_since = None
                             stop.wait(interval())
                             continue
-                        if evidence is not None and evidence.captured.source == "live":
+                        if evidence is not None and evidence.captured.source == "live" and not evidence.requires_inference:
                             # Missing/already-consumed sidecars are not deferred
                             # inference. Fetch a newer matched frame next tick;
                             # retrying this immutable sample would pin it forever.

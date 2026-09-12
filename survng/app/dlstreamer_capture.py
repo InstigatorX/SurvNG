@@ -47,9 +47,9 @@ from .live_detections import DetectionSnapshot
 from .redact import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
-# Native GPU model compilation is part of opening a live inference pipeline,
-# not a stalled RTSP read. Keep parent and child startup budgets in agreement.
-DLSTREAMER_INFERENCE_STARTUP_TIMEOUT_MS = 30000
+# RTSP setup/keyframe wait also needs the native startup window when capture
+# does not compile a model. Keep parent and child budgets in agreement.
+DLSTREAMER_STARTUP_TIMEOUT_MS = 30000
 DLSTREAMER_INFERENCE_STALL_SECONDS = 5.0
 
 
@@ -107,6 +107,19 @@ def live_python_executable(preferred: str = "") -> str:
         if candidate and Path(candidate).is_file():
             return candidate
     return sys.executable
+
+
+def _safe_stderr_tail(buffer: bytearray, limit: int = 400) -> str:
+    """Redact complete lines before truncation; partial URLs cannot be scrubbed."""
+    raw = bytes(buffer)
+    if len(raw) >= 8192:
+        # The rolling buffer may begin halfway through a credential.
+        raw = raw.partition(b"\n")[2]
+    # A pipe read may also end halfway through a credential-bearing URL.
+    raw = raw.rpartition(b"\n")[0]
+    if not raw:
+        return "[partial native stderr omitted]" if buffer else ""
+    return redact_secret_text(raw.decode("utf-8", errors="replace")).strip()[-limit:]
 
 
 class _StreamInbox:
@@ -253,7 +266,7 @@ class _SharedLiveProcess:
         )
 
     def stderr_text(self) -> str:
-        return self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+        return _safe_stderr_tail(self._stderr)
 
     def start(self) -> None:
         if self.is_running():
@@ -378,7 +391,13 @@ class _SharedLiveProcess:
         except Exception as error:
             detail = redact_secret_text(str(error))[:400]
             failure = f"DL Streamer supervisor failed ({type(error).__name__}): {detail}"
-            LOGGER.warning("%s", failure)
+            # One bounded diagnostic per supervisor failure. Keep the native
+            # cause beyond the source-file prefix; camera retries stay concise.
+            LOGGER.warning(
+                "DL Streamer supervisor failed (%s): %s; native stderr: %s",
+                type(error).__name__, redact_secret_text(str(error))[-4000:],
+                _safe_stderr_tail(self._stderr, 4000),
+            )
         finally:
             self._failed = True
             with self._lock:
@@ -389,8 +408,19 @@ class _SharedLiveProcess:
     def _check_inference_progress(self, now: float) -> None:
         with self._lock:
             inboxes = list(self._inboxes.values())
+        stalled = False
         for inbox in inboxes:
-            if not inbox.alive or inbox.inference_started_at is None:
+            if not inbox.alive:
+                continue
+            # A real completion proves the pool is working even if that
+            # camera's video has paused or its first status has not arrived.
+            # Startup/resume grace alone is not evidence of pool progress.
+            if (
+                inbox.last_inference_at is not None
+                and now - inbox.last_inference_at <= DLSTREAMER_INFERENCE_STALL_SECONDS
+            ):
+                return
+            if inbox.inference_started_at is None:
                 continue
             # An RTSP outage belongs to this camera's read/reconnect lifecycle,
             # not to the shared model. Diagnose a silent inference stall only
@@ -406,9 +436,11 @@ class _SharedLiveProcess:
                 # bounded inference budget without inventing result progress.
                 progress = max(progress, inbox.video_resumed_at)
             if now - progress > DLSTREAMER_INFERENCE_STALL_SECONDS:
-                # The native model and its request pool are shared. Reopening
-                # one pipeline cannot recover a wedged shared inference pool.
-                raise RuntimeError("shared live inference stalled: no new result for 5 seconds")
+                stalled = True
+        # Grace for a newly added/resumed stream must not keep an already
+        # stalled, continuously active pool alive indefinitely through churn.
+        if stalled:
+            raise RuntimeError("shared live inference stalled: no new result for 5 seconds")
 
     def _dispatch(self, message_type: int, payload: bytes) -> None:
         if message_type == TYPE_FATAL:
@@ -641,7 +673,7 @@ class DlStreamerCaptureHandle:
             process = self._process
             return_code = process.poll() if process is not None else None
             status_error = str(self._status.get("error") or "").strip()
-            detail = self._stderr.decode("utf-8", errors="replace").strip()[-400:]
+            detail = _safe_stderr_tail(self._stderr)
         parts = [part for part in (status_error, detail) if part]
         combined = ": ".join(parts)
         if return_code is None:
@@ -785,9 +817,7 @@ class DlStreamerCaptureBackend:
 
     @property
     def startup_timeout_ms(self) -> int:
-        if self.options.detect_enabled:
-            return max(self.options.open_timeout_ms, DLSTREAMER_INFERENCE_STARTUP_TIMEOUT_MS)
-        return self.options.open_timeout_ms
+        return max(self.options.open_timeout_ms, DLSTREAMER_STARTUP_TIMEOUT_MS)
 
     def close(self) -> None:
         with self._shared_lock:

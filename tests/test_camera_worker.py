@@ -223,10 +223,10 @@ def seed_capture_frame(
 
 
 class CameraWorkerTest(unittest.TestCase):
-    def test_native_inference_startup_budget_reaches_capture_service(self):
+    def test_native_startup_budget_reaches_capture_service(self):
         from survng.app.camera_capture import CaptureOpenLimiter
 
-        for detect, expected in ((False, CAPTURE_OPEN_TIMEOUT_MS), (True, 30000)):
+        for detect, expected in ((False, 30000), (True, 30000)):
             with self.subTest(detect=detect), tempfile.TemporaryDirectory() as directory:
                 backend = DlStreamerCaptureBackend(
                     CaptureOpenLimiter(1), DlStreamerCaptureOptions(detect_enabled=detect),

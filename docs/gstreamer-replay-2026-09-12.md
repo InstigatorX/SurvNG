@@ -5,6 +5,54 @@ Changes are confined to `gstreamer`; the v1.2 checkout is unchanged.
 
 ## Later stability findings and v1.3 integration
 
+### Native server follow-up (September 12, afternoon UTC)
+
+The native Ubuntu server initially lacked GStreamer introspection and DL
+Streamer. Installing the pinned runtime restored capture. Repeated live
+inference failures remained after upgrading the Intel userspace stack to the
+Docker pins. The full nested error was `Unable to convert image using VA-API`
+and `src_display.drvVtable().vaSyncSurface(...) failed, sts=1 operation failed`.
+This identifies DL Streamer's
+[cross-display surface conversion](https://github.com/open-edge-platform/dlstreamer/blob/v2026.2.0/src/monolithic/inference_backend/image_inference/async_with_va_api/va_api_wrapper/vaapi_converter.cpp),
+rather than an unavailable GStreamer plugin.
+
+The supervisor now owns a persistent VA display context, selected using the
+VA decoder's render device. It assigns that same context to every live/main
+pipeline before constructing elements and retains it through worker teardown.
+This removes per-camera VA display ownership from the shared inference pool.
+The GPU memory inference path, model, rates and thresholds remain unchanged.
+Bounded, redacted supervisor diagnostics now retain the native
+error cause beyond the source-file prefix; temporary diagnostic files were
+removed.
+
+An initial shared-context run stayed connected through several prior failure
+intervals. In the subsequent soak, the original VA surface error did not
+recur, but five-second inference-watchdog restarts occurred at 16:03:32 and
+16:06:37 UTC. Per-second observation of the latter showed Boiler's detection
+count staying at 304 while the other cameras continued completing inference.
+The watchdog incorrectly treated one delayed channel as a wedged shared pool.
+
+The shared watchdog now requires a loss of inference progress across all
+eligible active live streams before restarting the pool. A paused or retired
+stream and a video-only main stream cannot conceal a real stall. Per-camera
+snapshot freshness still rejects stale evidence; native inference errors still
+invalidate the supervisor. No watchdog timeout was increased.
+
+Tests cover context sharing across live/main reconnects, device selection,
+probe cleanup, secret redaction, native/Docker pin consistency, and delayed
+individual streams versus real pool-wide stalls. Bounded local observation is
+**not** proof of long-running stability or of the precise Intel-internal cause.
+
+After the watchdog correction, a five-minute observation from 16:09:09 to
+16:14:10 UTC found no shared-supervisor warning or reset. Twelve cameras each
+retained their initial capture session and continued producing fresh frames
+and inference results. Sherry Garage developed an independent RTSP `Not found`
+failure; its ONVIF connection also went down and a TCP connection to its
+configured ONVIF endpoint failed. Its local retries did not interrupt the
+other twelve cameras. This upstream camera outage remained at handoff.
+
+### Earlier test-host observations
+
 The bounded tests below do not establish long-running GPU stability. Later
 observation on the N100 found seven shared-supervisor VA-API image-conversion
 failures between 03:48 and 04:11 UTC on September 12, including failures with
@@ -19,10 +67,11 @@ the original VA-API error, but startup recording-prewarm errors and a supervisor
 output-ended warning occurred. A configuration save at 04:19:55 UTC restarted
 capture; its uninterrupted baseline must be measured from that restart.
 
-The `v1.3-gstreamer` integration preserves the existing GStreamer implementation
+The original `v1.3-gstreamer` integration preserved the existing GStreamer implementation
 and v1.3's newer recorded-tracking continuity, detector-contract, storage, and
-UI fixes. It does **not** implement the proposed supervisor-owned shared VA
-context or teardown acknowledgement; those remain a separate stability task.
+UI fixes. At that point it did **not** implement the proposed supervisor-owned
+shared VA context or teardown acknowledgement. The later context change is
+described above; teardown acknowledgement remains a separate stability task.
 The inference path remains GPU-resident; no system-memory inference fallback
 is introduced. Merge validation is not a substitute for a hardware soak and
 recorded-scene accuracy checks on the combined application.

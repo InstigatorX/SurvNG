@@ -6,6 +6,7 @@ The synthetic SSD-shaped model checks plumbing, not recognition accuracy.
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 from pathlib import Path
@@ -21,12 +22,14 @@ from survng.app.dlstreamer_protocol import MessageReader, TYPE_FRAME, TYPE_DETEC
 from survng.app.live_detections import DetectionHistory, DetectionSnapshot
 
 
-def consume(model: Path, proc: Path | None, threshold: float, source_role="live", *, nms_threshold=.45, expected_objects=None) -> dict:
+def consume(model: Path, proc: Path | None, threshold: float, source_role="live", *, nms_threshold=.45, expected_objects=None, detect=True) -> dict:
     command = [sys.executable, "-m", "survng.dlstreamer_live", "--test-source",
                "--decoder", "auto", "--device", "CPU", "--fps", "5", "--detect-fps", "2.5",
                "--model", str(model), "--threshold", str(threshold), "--nms-threshold", str(nms_threshold),
                "--jpeg-fps", "0", "--open-timeout", "15"]
     command.extend(["--source-role", source_role])
+    if not detect:
+        command.append("--no-detect")
     if proc is not None:
         command.extend(["--model-proc", str(proc)])
     command.extend(["--labels", str(model.with_suffix(".txt"))])
@@ -54,7 +57,7 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
                     if kind == TYPE_FRAME:
                         width, height, sequence, pts, pixels = decode_frame_payload(payload)
                         assert width == (320 if source_role == "live" else 640)
-                        assert len(pixels) == width * height * (1 if source_role == "live" else 3)
+                        assert len(pixels) == width * height * (1 if source_role == "live" and detect else 3)
                         assert math.isfinite(pts)
                         frames.append(pts)
                         matched += history.match(pts=pts, session="native", detect_fps=2.5) is not None
@@ -65,7 +68,7 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
                         history.add(snapshot)
                     elif kind == TYPE_STATUS:
                         status.update(decode_json_payload(payload))
-                if first and time.monotonic() - first >= 3 and (len(snapshots) >= 3 or source_role == "main"):
+                if first and time.monotonic() - first >= 3 and (len(snapshots) >= 3 or source_role == "main" or not detect):
                     break
         finally:
             process.terminate()
@@ -77,12 +80,12 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
             process.stdout.close()
         stderr.seek(0)
         errors = stderr.read().decode(errors="replace")
-    assert status.get("ok") and status.get("detect") == (source_role == "live"), (status, errors[-4000:])
+    assert status.get("ok") and status.get("detect") == (source_role == "live" and detect), (status, errors[-4000:])
     assert len(frames) >= 10, (len(frames), len(snapshots), errors[-4000:])
-    if source_role == "live":
+    if source_role == "live" and detect:
         assert len(snapshots) >= 3 and matched > 0, (len(snapshots), matched, errors[-4000:])
     else:
-        assert snapshots == [], "main capture must not instantiate a second gvadetect"
+        assert snapshots == [], "frames-only capture must not run gvadetect"
     assert all(b > a for a, b in zip(frames, frames[1:]))
     assert all(b.source_pts > a.source_pts for a, b in zip(snapshots, snapshots[1:]))
     assert all(bool(item.objects) == (threshold < 1) for item in snapshots)
@@ -98,13 +101,13 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
             "metadata_contract": status.get("metadata_contract")}
 
 
-def shared_supervisor(model: Path, proc: Path) -> dict:
+def shared_supervisor(model: Path, proc: Path, *, device: str = "CPU") -> dict:
     """Exercise the production demultiplexer contract and shared model pool."""
     roles = {"gate-live": "live", "yard-live": "live", "gate-main": "main"}
     widths = {"gate-live": 320, "yard-live": 960, "gate-main": 640}
     counts = {key: {"frames": 0, "snapshots": 0, "ok": False} for key in roles}
     command = [sys.executable, "-m", "survng.dlstreamer_live", "--supervisor", "--test-source",
-               "--decoder", "auto", "--device", "CPU", "--fps", "5", "--detect-fps", "2.5",
+               "--decoder", "auto", "--device", device, "--fps", "5", "--detect-fps", "2.5",
                "--model", str(model), "--model-proc", str(proc), "--labels", str(model.with_suffix(".txt")),
                "--threshold", "0.1", "--nms-threshold", "0.45", "--jpeg-fps", "0", "--open-timeout", "15"]
     reader = MessageReader()
@@ -163,7 +166,32 @@ def shared_supervisor(model: Path, proc: Path) -> dict:
     return {"shared_supervisor": counts}
 
 
+def sparse_metadata_preroll() -> dict:
+    """An inference branch without a result must not block qualifier video."""
+    from survng.dlstreamer_live import _load_gstreamer
+    gst = _load_gstreamer()
+    observed = {}
+    for asynchronous in (True, False):
+        pipeline = gst.parse_launch(
+            "videotestsrc is-live=true ! tee name=t "
+            "t. ! queue ! appsink name=frames sync=false max-buffers=1 drop=true "
+            "t. ! queue ! valve drop=true ! appsink sync=false async="
+            + str(asynchronous).lower()
+        )
+        try:
+            pipeline.set_state(gst.State.PLAYING)
+            frame = pipeline.get_by_name("frames").emit("try-pull-sample", gst.SECOND)
+            observed[str(asynchronous)] = frame is not None
+        finally:
+            pipeline.set_state(gst.State.NULL)
+    assert observed == {"True": False, "False": True}, observed
+    return {"sparse_metadata_preroll": observed}
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--shared-device", choices=("CPU", "GPU"), default="CPU")
+    args = parser.parse_args()
     import numpy as np
     import openvino as ov
     from openvino import opset13 as ops
@@ -185,9 +213,11 @@ def main() -> None:
             "output_postproc": [{"layer_name": "detection_out", "converter": "detection_output",
                                  "labels": ["background", "person"]}],
         }))
-        results = [consume(model_path, proc_path, threshold) for threshold in (0.1, 1.0)]
+        results = [sparse_metadata_preroll()]
+        results.extend(consume(model_path, proc_path, threshold) for threshold in (0.1, 1.0))
         results.append(consume(model_path, proc_path, .1, source_role="main"))
-        results.append(shared_supervisor(model_path, proc_path))
+        results.append(consume(model_path, proc_path, .1, detect=False))
+        results.append(shared_supervisor(model_path, proc_path, device=args.shared_device))
         # Two overlapping same-class raw YOLO boxes: native NMS must change
         # actual output, not merely accept a command-line/configuration value.
         raw = np.zeros((1, 5, 16), dtype=np.float32)

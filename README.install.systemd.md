@@ -1,8 +1,9 @@
 # SurvNG systemd installation
 
 Native virtualenv on Linux, run by a dedicated `survng` user and a systemd
-unit. The host needs Python 3.12+, Node.js 20+ (frontend build), Git, FFmpeg,
-and (for Intel GPU) a working `/dev/dri`.
+unit. This guide targets Ubuntu 24.04 amd64. The host needs Python 3.12+,
+Node.js 20+ (frontend build), Git, FFmpeg, GStreamer and Intel DL Streamer,
+and (for Intel GPU) a working `/dev/dri` and Intel userspace drivers.
 
 Do **not** run this next to the Docker container. Do **not** run SurvNG as
 root on a new install.
@@ -21,7 +22,7 @@ SURVNG_TZ=America/New_York
 SURVNG_ROOT=/opt/survng
 SURVNG_MEDIA_DIR=/srv/survng/media
 SURVNG_GIT_URL=https://github.com/InstigatorX/SurvNG.git
-SURVNG_GIT_BRANCH=v1.2
+SURVNG_GIT_BRANCH=v1.3-gstreamer
 
 getent passwd "$SURVNG_UID" || true
 getent group "$SURVNG_GID" || true
@@ -76,6 +77,9 @@ sudo -u survng git clone --branch "$SURVNG_GIT_BRANCH" --single-branch \
   "$SURVNG_GIT_URL" "$SURVNG_ROOT"
 cd "$SURVNG_ROOT"
 
+sudo bash "$SURVNG_ROOT/scripts/install-native-runtime.sh"
+sudo -u survng /usr/bin/python3 "$SURVNG_ROOT/scripts/check-native-runtime.py"
+
 sudo -u survng python3 -m venv "$SURVNG_ROOT/.venv"
 sudo -u survng "$SURVNG_ROOT/.venv/bin/pip" install --upgrade pip
 sudo -u survng "$SURVNG_ROOT/.venv/bin/pip" install -r "$SURVNG_ROOT/requirements.txt"
@@ -84,6 +88,23 @@ sudo -u survng bash -lc "cd '$SURVNG_ROOT/frontend' && npm ci --no-audit --no-fu
 ```
 
 The production UI lands in `survng/static/`.
+
+The runtime installer adds Intel's signed DL Streamer and OpenVINO APT
+repositories and the Intel graphics PPA (required for DL Streamer's newer
+`libva2` dependency, including CPU inference). It installs GStreamer introspection/plugins and system Python
+bindings, and holds `intel-dlstreamer` at `2026.2.0`, matching the Docker build.
+These packages are required for live capture, including CPU inference;
+`pip install -r requirements.txt` does not install them. Capture uses
+`/usr/bin/python3` separately from the application virtualenv.
+
+The check verifies runtime loading and capture elements without opening cameras.
+For Intel GPU operation, complete section 10's driver setup before starting
+SurvNG. The basic check does not validate GPU access or model inference.
+On a new Intel GPU host, use `install-native-runtime.sh --intel-gpu` in the
+block above to install the coordinated, pinned Intel userspace stack too.
+Then run `sudo -u survng /usr/bin/python3 "$SURVNG_ROOT/scripts/check-native-runtime.py" --intel-gpu`
+to verify VA introspection and render-device access as the service user.
+This check does not compile a model or validate inference accuracy.
 
 ## 5. Private config and media path
 
@@ -310,20 +331,15 @@ ffmpeg -hide_banner -hwaccels
 
 Expect `CPU` and `GPU`. Then select `GPU` or `AUTO` in Admin.
 
-Coordinated PPA upgrade (stops SurvNG; reboot after):
+Coordinated PPA upgrade (stops SurvNG; reboot after). The installer's
+`--intel-gpu` option pins media, compute, IGC, GMM and Level Zero versions
+alongside DL Streamer to match the branch's Docker build:
 
 ```bash
 sudo systemctl stop survng.service
-sudo apt-get update
-sudo apt-get install -y software-properties-common
-sudo add-apt-repository -y ppa:kobuk-team/intel-graphics
-sudo apt-get update
-sudo apt-get --simulate install \
-  intel-opencl-icd libze-intel-gpu1 libze1 clinfo \
-  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 libvpl-tools vainfo
-sudo apt-get install -y \
-  intel-opencl-icd libze-intel-gpu1 libze1 clinfo \
-  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 libvpl-tools vainfo
+sudo bash "$SURVNG_ROOT/scripts/install-native-runtime.sh" --intel-gpu
+sudo -u survng /usr/bin/python3 "$SURVNG_ROOT/scripts/check-native-runtime.py" --intel-gpu
+sudo apt-get install -y clinfo libvpl-tools vainfo
 sudo -u survng mv "$SURVNG_ROOT/.cache/openvino" \
   "$SURVNG_ROOT/.cache/openvino-before-intel-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
 sudo -u survng mkdir -p "$SURVNG_ROOT/.cache/openvino"
@@ -365,11 +381,20 @@ cd "$SURVNG_ROOT"
 sudo -u survng git status --short
 sudo -u survng git fetch --prune origin
 sudo -u survng git pull --ff-only origin "$SURVNG_GIT_BRANCH"
+sudo bash "$SURVNG_ROOT/scripts/install-native-runtime.sh"
+sudo -u survng /usr/bin/python3 "$SURVNG_ROOT/scripts/check-native-runtime.py"
 sudo -u survng "$SURVNG_ROOT/.venv/bin/pip" install -r requirements.txt
 sudo -u survng bash -lc "cd '$SURVNG_ROOT/frontend' && npm ci --no-audit --no-fund && npm run build"
 sudo systemctl restart survng.service
 curl -fsS http://127.0.0.1:8088/api/health
 ```
+
+When upgrading from v1.2, install the native runtime before restarting into
+v1.3-gstreamer. The in-app updater installs Python packages but cannot provision
+these host dependencies for the dedicated service account. An error such as
+`Namespace Gst not available` means the GStreamer introspection runtime is
+missing or inaccessible; `gvadetect` unavailable means the DL Streamer plugin
+cannot load. Run the installer and service-user check above for either failure.
 
 ## 13. Backup
 

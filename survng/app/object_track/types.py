@@ -42,6 +42,8 @@ class CatchupFrameProvider(Protocol):
 class TrackingFrame:
     captured: CapturedFrame
     detection: DetectionSnapshot | None = None
+    # Demand-driven pixels are distinct from missing native metadata.
+    requires_inference: bool = False
 
     def __iter__(self) -> Iterator[object]:
         yield self.captured.captured_at_epoch

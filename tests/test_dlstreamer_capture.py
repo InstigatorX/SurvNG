@@ -108,9 +108,10 @@ def test_live_detection_rate_does_not_throttle_ema_or_main_capture():
 
 
 @pytest.mark.parametrize("detect,configured,expected", [
-    (False, 3000, 3000), (True, 3000, 30000), (True, 45000, 45000),
+    (False, 3000, 30000), (True, 3000, 30000),
+    (False, 45000, 45000), (True, 45000, 45000),
 ])
-def test_inference_startup_budget_agrees_between_parent_and_child(
+def test_native_startup_budget_agrees_between_parent_and_child(
     monkeypatch, detect, configured, expected,
 ) -> None:
     backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(
@@ -285,6 +286,7 @@ def test_shared_supervisor_serves_two_handles_from_one_process() -> None:
 
 
 def test_apply_dlstreamer_env_keeps_ubuntu_playback_plugins(monkeypatch) -> None:
+    monkeypatch.setattr(Path, "is_dir", lambda p: str(p) == _SYSTEM_GST_PLUGINS)
     monkeypatch.delenv("GST_PLUGIN_SYSTEM_PATH", raising=False)
     monkeypatch.delenv("GST_PLUGIN_SYSTEM_PATH_1_0", raising=False)
     _apply_dlstreamer_env()
@@ -321,8 +323,10 @@ def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog, 
     monkeypatch.setattr("survng.app.dlstreamer_capture.select.select", lambda *args: ([True], [], []))
     shared = _SharedLiveProcess([], read_timeout_ms=1000)
     shared._inboxes = {name: _StreamInbox() for name in ("gate", "downstairs")}
+    shared._stderr.extend(b"native detail rtsp://admin:stderr-secret@camera/live\n")
     shared._process = SimpleNamespace(stdout=io.BytesIO(encode_json(
-        TYPE_FATAL, {"ok": False, "error": "libopencv missing; rtsp://admin:secret@camera/live"},
+        TYPE_FATAL, {"ok": False, "error": "libopencv missing; rtsp://admin:secret@camera/live"
+                    + "x" * 500 + "; native root cause beyond source prefix"},
     )))
     shared._read_stdout()
     for inbox in shared._inboxes.values():
@@ -331,6 +335,8 @@ def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog, 
         assert "secret" not in inbox.error
         assert "ProtocolError" not in inbox.error
     assert "secret" not in caplog.text
+    assert "native root cause beyond source prefix" in caplog.text
+    assert "native detail" in caplog.text
 
 
 def test_inference_watchdog_distinguishes_empty_results_from_stalled_metadata(monkeypatch):
@@ -378,6 +384,80 @@ def test_stream_error_is_local_but_native_inference_error_fails_shared_reader(mo
     shared._read_stdout()
     assert shared._failed
     assert all(not inbox.alive for inbox in shared._inboxes.values())
+
+
+def test_shared_watchdog_does_not_reset_working_pool_for_one_delayed_camera():
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    delayed, working, main = _StreamInbox(), _StreamInbox(), _StreamInbox()
+    for inbox in (delayed, working):
+        inbox.inference_started_at = 10.0
+        inbox.last_frame_at = 19.9
+    delayed.last_inference_at = 12.0
+    working.last_inference_at = 19.5
+    main.last_frame_at = 19.9
+    shared._inboxes = {"delayed": delayed, "working": working, "main": main}
+    shared._check_inference_progress(20.0)
+    assert all(inbox.alive for inbox in shared._inboxes.values())
+
+    # A real pool-wide stall still fails, even while main/video frames arrive.
+    working.last_inference_at = 12.0
+    with pytest.raises(RuntimeError, match="shared live inference stalled"):
+        shared._check_inference_progress(20.0)
+
+    # Results from a retired stream cannot conceal a stalled active pool.
+    working.last_inference_at = 19.5
+    working.alive = False
+    with pytest.raises(RuntimeError, match="shared live inference stalled"):
+        shared._check_inference_progress(20.0)
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+def test_new_or_resuming_stream_cannot_mask_existing_pool_stall(resumed):
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    stalled, newcomer = _StreamInbox(), _StreamInbox()
+    stalled.inference_started_at = stalled.last_inference_at = 10.0
+    stalled.last_frame_at = newcomer.last_frame_at = 19.9
+    newcomer.inference_started_at = 10.0 if resumed else 19.5
+    if resumed:
+        newcomer.video_resumed_at = 19.5
+    shared._inboxes = {"newcomer": newcomer, "stalled": stalled}
+    with pytest.raises(RuntimeError, match="shared live inference stalled"):
+        shared._check_inference_progress(20.0)
+
+
+@pytest.mark.parametrize("status_received", [True, False])
+def test_recent_inference_proves_pool_progress_without_recent_video_or_status(status_received):
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    delayed, recently_completed = _StreamInbox(), _StreamInbox()
+    delayed.inference_started_at = delayed.last_inference_at = 10.0
+    delayed.last_frame_at = 19.9
+    recently_completed.inference_started_at = 10.0 if status_received else None
+    recently_completed.last_frame_at = 18.0
+    recently_completed.last_inference_at = 19.8
+    shared._inboxes = {"delayed": delayed, "recent": recently_completed}
+    shared._check_inference_progress(20.0)
+
+
+def test_truncated_native_stderr_does_not_log_partial_credentials(monkeypatch, caplog):
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    raw = b"rtsp://admin:" + b"private-secret" * 800 + b"@camera/live\nuseful native error\n"
+    shared._process = SimpleNamespace(stderr=io.BytesIO(raw))
+    shared._drain_stderr()
+    assert len(shared._stderr) == 8192
+    monkeypatch.setattr("survng.app.dlstreamer_capture.select.select", lambda *args: ([True], [], []))
+    shared._process = SimpleNamespace(stdout=io.BytesIO(encode_json(TYPE_FATAL, {"error": "native failure"})))
+    shared._read_stdout()
+    assert "private-secret" not in caplog.text
+    assert "useful native error" in caplog.text
+
+
+def test_incomplete_stderr_line_waits_for_newline_before_redaction():
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    shared._stderr.extend(b"useful error\nrtsp://admin:partial-password")
+    assert shared.stderr_text() == "useful error"
+    shared._stderr.extend(b"@camera/live\n")
+    assert "partial-password" not in shared.stderr_text()
+    assert "rtsp://admin:***@camera/live" in shared.stderr_text()
 
 
 def test_stalled_shared_process_is_replaced_and_sessions_are_not_reused(monkeypatch):

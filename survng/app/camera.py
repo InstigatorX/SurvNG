@@ -233,10 +233,6 @@ class CameraWorker:
             live_frame_provider=lambda: self._get_latest_frame(),
             timestamped_live_frame_provider=self._get_latest_detection_frame,
             timestamped_evidence_frame_provider=self._get_evidence_detection_frame,
-            live_detections_provider=lambda frame: self.capture.matched_snapshot(
-                "live", source_pts=frame.source_pts, generation=frame.capture_generation,
-                source_session=frame.source_session,
-            ),
             stop_requested=lambda: (
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
@@ -437,6 +433,7 @@ class CameraWorker:
             recorder=self.motion_object_detector.recorder,
             stop_event=self._stop,
             sample_fps=self.tracking_lifecycle.sample_fps,
+            requires_inference=True,
         )
         self.onvif = OnvifEventListener(
             camera,
@@ -783,11 +780,7 @@ class CameraWorker:
         live = self.tracking_frames.captured("live")
         if live is None:
             return None
-        snapshot = self.capture.matched_snapshot(
-            "live", source_pts=live.source_pts, generation=live.generation,
-            source_session=live.source_session,
-        )
-        return TrackingFrame(live, snapshot)
+        return TrackingFrame(live, requires_inference=True)
 
     def _live_tracking_geometry_trusted(self) -> bool:
         alignment = self._effective_spatial_alignment
