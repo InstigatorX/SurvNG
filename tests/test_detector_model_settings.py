@@ -15,7 +15,10 @@ from survng.app.detector_model_settings import ModelSettingsError, read_model_me
     ({}, True, [1, -1, 6], "yolo-e2e"),
     ({}, False, [1, 84, 8400], "yolo"),
     ({}, False, [1, 6, 8400], "yolo"),
+    ({}, False, [1, 8400, 7], "yolo"),
+    ({"args": {"nms": False}}, False, [1, 8400, 7], "yolo"),
     ({}, False, [1, 300, 6], "yolo-e2e"),
+    ({}, False, [100, 7], "ssd"),
     ({}, False, [1, 1, 100, 7], "ssd"),
 ])
 def test_output_contract(metadata, graph, shape, expected):
@@ -26,6 +29,10 @@ def test_manual_override_resolves_two_class_ambiguity():
     shape = [[1, 6, 300]]
     assert resolve_output_format(shape, "auto", {})[2]
     assert resolve_output_format(shape, "yolo", {}) == ("yolo", "manual override", [])
+
+
+def test_rank_three_ssd_can_be_selected_explicitly():
+    assert resolve_output_format([[1, 100, 7]], "ssd", {}) == ("ssd", "manual override", [])
 
 
 @pytest.mark.parametrize("shapes,metadata", [
