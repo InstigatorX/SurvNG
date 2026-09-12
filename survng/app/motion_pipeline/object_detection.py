@@ -232,6 +232,7 @@ class TimestampedLiveFrame:
     source_pts: float = float("nan")
     source_session: str = ""
     spatial_alignment: dict[str, Any] = field(default_factory=dict)
+    pixel_format: str = ""
 
 
 @dataclass(frozen=True)
@@ -1534,6 +1535,7 @@ class RecordedMotionObjectDetector:
                 detected.update({
                     "frame_source": "live_fast_path",
                     "provisional_detection": True,
+                    "frame_pixel_format": sample.pixel_format if isinstance(sample, TimestampedLiveFrame) else "",
                     "frame_captured_at_epoch": round(float(captured_at), 6),
                     "frame_age_ms": round(max(0.0, frame_age) * 1000.0, 3),
                     "frame_sequence": sequence,
@@ -2178,6 +2180,7 @@ class RecordedMotionObjectDetector:
         if objects:
             for detected in objects:
                 detected["frame_source"] = "live_fallback"
+                detected["frame_pixel_format"] = fallback_sample.pixel_format
                 detected["recording_status"] = "no_recorded_frame"
             return self._result(
                 fallback,

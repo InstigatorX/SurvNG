@@ -145,6 +145,7 @@ def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     assert service.processed_frames[-1][1].shape == (90, 320)
     assert not service.frames[-1][1].flags.writeable
     assert not service.color_frames[-1][1].flags.writeable
+    assert service.evidence_frames[-1].pixel_format == "BGR"
     assert not service.processed_frames[-1][1].flags.writeable
     assert service.queue.get_nowait() == 100.0
     telemetry = service.telemetry_snapshot()
@@ -324,6 +325,7 @@ def test_gray_qualifier_frames_skip_bgr_to_gray_conversion() -> None:
     assert service.frames[-1][1][0, 0] == 77
     assert service.color_frames[-1][1].shape == (90, 320, 3)
     assert service.color_frames[-1][1][0, 0].tolist() == [77, 77, 77]
+    assert service.evidence_frames[-1].pixel_format == "GRAY8"
 
 
 def test_raw_submission_defers_preprocessing_to_analysis_worker() -> None:

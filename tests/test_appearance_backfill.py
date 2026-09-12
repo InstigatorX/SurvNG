@@ -241,9 +241,10 @@ class DeferredAppearanceBackfillTest(unittest.TestCase):
 
 
 @pytest.mark.parametrize("source", ["live_fast_path", "live_fallback"])
+@pytest.mark.parametrize("pixel_format", ["", "GRAY8", "BGR"])
 @pytest.mark.parametrize("provisional", [True, False])
 @pytest.mark.parametrize("promoted_source", ["recorded_main", "recorded_refinement", "object_tracking"])
-def test_luma_backfill_defers_until_cover_is_promoted(source, provisional, promoted_source):
+def test_luma_backfill_defers_until_cover_is_promoted(source, pixel_format, provisional, promoted_source):
     service = DeferredAppearanceBackfill.__new__(DeferredAppearanceBackfill)
     service.storage_dir = Path("/unused")
     service.media_storage = None
@@ -258,6 +259,7 @@ def test_luma_backfill_defers_until_cover_is_promoted(source, provisional, promo
     obj = {
         "label": "car", "incident_eligible": True, "frame_source": source,
         "provisional_detection": provisional,
+        "frame_pixel_format": pixel_format,
         "box": {"x1": 20, "y1": 10, "x2": 180, "y2": 90},
         "detection_frame_width": 200, "detection_frame_height": 100,
     }
@@ -270,6 +272,12 @@ def test_luma_backfill_defers_until_cover_is_promoted(source, provisional, promo
     with patch("survng.app.appearance_backfill.event_snapshot_path", return_value=Path("/unused")), \
          patch("survng.app.appearance_backfill.cv2.imread", return_value=frame):
         state, count, _ = service.process_event(7, on_inference_attempt=attempted)
+        if pixel_format == "BGR":
+            assert (state, count) == ("completed", 1)
+            service.encoder.embed_for_label.assert_called_once()
+            service.index.append_event.assert_called_once()
+            attempted.assert_called_once()
+            return
         assert (state, count) == ("deferred", 0)
         service.encoder.embed_for_label.assert_not_called()
         service.index.append_event.assert_not_called()

@@ -43,13 +43,16 @@ def test_virtual_device_compilation_scopes_thread_limit_to_gpu(device):
     ("live_fast_path", False), ("live_fallback", False),
     ("recorded_main", False), ("live_fast_path", True),
 ])
-def test_tracking_seed_respects_live_provenance_and_consumes_inference_once(monkeypatch, source, promoted):
+@pytest.mark.parametrize("pixel_format", ["", "GRAY8", "BGR"])
+def test_tracking_seed_respects_live_provenance_and_consumes_inference_once(monkeypatch, source, promoted, pixel_format):
     epoch = 1000.0
     obj = {"label": "person", "confidence": .9,
            "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 80},
            "incident_eligible": True}
     seed = dict(obj)
     seed["frame_source"] = source
+    if source.startswith("live_"):
+        seed["frame_pixel_format"] = pixel_format
     if source == "live_fast_path":
         seed.update(frame_source="live_fast_path", live_detection_session="s",
                     live_inference_sequence=1, live_detection_source_pts=epoch)
@@ -81,7 +84,7 @@ def test_tracking_seed_respects_live_provenance_and_consumes_inference_once(monk
         session.stop()
     assert updates[-1]["completion_reason"] == "tracking_window_complete"
     assert updates[-1]["frames_processed"] == (5 if source == "live_fast_path" else 6)
-    luma_seed = source in {"live_fast_path", "live_fallback"} and not promoted
+    luma_seed = source in {"live_fast_path", "live_fallback"} and not promoted and pixel_format != "BGR"
     assert appearances.call_count == covers.call_count == (0 if luma_seed else 1)
     detector.detect.assert_not_called()
 

@@ -34,20 +34,21 @@ ONVIF/manual notice or qualified EMA episode
   -> optionally promote a later identity-verified tracking cover
 ```
 
-The live check reduces time to first object evidence. It uses boxes already
-produced by GStreamer `gvadetect` on the capture pipeline rather than a second
-OpenVINO pass on the live GPU. Cameras share that detector through one
-`survng-dls` process and `model-instance-id`. The recorded pass supplies the
-stronger evidence. A fast negative, missing frame, stale frame, invalid frame, or empty
-sidecar never cancels the recorded pass.
+The live check reduces time to first object evidence. Production GStreamer
+capture supplies color frames; a qualified trigger submits its selected pixels
+to the inference supervisor's initial workload. The shared `survng-dls` process
+owns capture. Explicit continuous-inference integrations may instead supply
+matching `gvadetect` metadata. The recorded pass supplies stronger evidence.
+A fast negative, missing frame, stale frame, invalid frame, or empty sidecar
+never cancels the recorded pass.
 
 ## Why the live/substream frame is used
 
 At the live edge, the applicable main recording segment may still be open and
 cannot yet be decoded reliably. The live capture frame is already available in
-memory, and `gvadetect` boxes for that stream are stored beside it, so SurvNG
-can admit a provisional object without waiting for segment finalization or
-starting a second GPU detector.
+memory, so SurvNG can request initial inference and admit a provisional object
+without waiting for segment finalization. Initial inference shares the existing
+worker pool with recorded refinement and tracking.
 
 The source is the camera's live capture:
 
@@ -63,6 +64,7 @@ The fast frame is tagged with:
 
 - `frame_source=live_fast_path`
 - `provisional_detection=true`
+- `frame_pixel_format=BGR` or `GRAY8`, recording the original capture format
 - capture receipt time and frame age
 - camera and capture generation
 - frame sequence
@@ -71,6 +73,15 @@ The fast frame is tagged with:
 
 Receipt time establishes freshness; it is not a decoded camera PTS. The image
 can therefore be useful immediately without claiming exact recording time.
+After demand-driven inference completes, freshness and current camera/capture/
+source-session identity are checked again before attaching the result.
+
+EMA records the capture pixel format before expanding luma into three channels.
+That provenance survives the evidence buffer, inference and saved object
+metadata. Deferred ReID and tracker seeds accept known BGR live evidence and
+reject luma; unknown legacy live snapshots remain conservative. Recorded or
+verified tracking cover provenance supersedes the original detection source.
+Equal channels in a nighttime BGR frame do not make it luma evidence.
 
 ## Main-recording refinement
 
@@ -278,9 +289,11 @@ restart and is retried according to its lease/attempt policy. Cover promotion,
 face enrichment, and tracking presentation are optional enrichment: their
 failure cannot discard or downgrade admitted evidence.
 
-Tracking starts after recorded confirmation finishes, or immediately from live
-evidence when refinement cannot run. Handoff is idempotent per event, so later
-refinement cannot start a duplicate tracking session.
+Tracking starts after recorded confirmation finishes, or from admitted live
+evidence when refinement cannot run, raises an error, or returns unavailable
+evidence. Refinement still retries durably. Handoff is idempotent per event
+within the active service; it is optional and does not provide exactly-once
+execution across a process crash.
 
 ## Operator-visible diagnostics
 
