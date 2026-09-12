@@ -97,15 +97,16 @@ CMD ["python", "-m", "survng.app", "--host", "0.0.0.0", "--port", "8088", "--loo
 
 # Optional Intel OpenVINO GPU and VA-API/QSV userspace. Select this target with
 # docker compose -f compose.yaml -f compose.intel-gpu.yaml up -d --build.
-# Pins match the prototype Noble + kobuk-team/intel-graphics stack.
+# Pins match the Noble kobuk-team/intel-graphics repository on 2026-09-12.
+# Refresh this set together: compute requires IGC >= 2.40.13, media GMM >= 22.10.1.
 FROM runtime-base AS runtime-intel
 USER root
 ARG DLSTREAMER_VERSION=2026.1.0
-ARG INTEL_COMPUTE_VERSION=26.27.39122.14-1~24.04~ppa1
-ARG INTEL_IGC_VERSION=2.38.5-1~24.04
-ARG INTEL_GMMLIB_VERSION=22.10.0-1~24.04~ppa1
+ARG INTEL_COMPUTE_VERSION=26.31.39395.13-1~24.04~ppa1
+ARG INTEL_IGC_VERSION=2.40.13+ds1-1~24.04
+ARG INTEL_GMMLIB_VERSION=22.10.1-1~24.04~ppa1
 ARG INTEL_LEVEL_ZERO_VERSION=1.32.0-1~24.04~ppa1
-ARG INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1
+ARG INTEL_MEDIA_VERSION=26.3.2-1~24.04~ppa1
 ARG INTEL_VPL_VERSION=1:2.16.0-1~24.04~ppa1
 ENV LIBVA_DRIVER_NAME=iHD \
     GST_VA_ALL_DRIVERS=1

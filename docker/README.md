@@ -168,9 +168,12 @@ docker exec survng wget -qO- http://127.0.0.1:1984/api/streams || true
 
 ### Intel GPU userspace
 
-The Intel target uses Ubuntu 24.04 and pins the GPU userspace versions verified
-on the prototype host: Intel compute runtime **26.27.39122.14**, IGC **2.38.5**,
-Level Zero **1.32.0**, media driver **26.2.2**, and oneVPL **2.16**. The kernel
+The Intel target uses Ubuntu 24.04 and pins the GPU userspace versions available
+from the Noble Intel graphics PPA on 2026-09-12: compute runtime
+**26.31.39395.13**, IGC **2.40.13**, GMM **22.10.1**, Level Zero **1.32.0**,
+media driver **26.3.2**, and oneVPL **2.16**. The previous prototype pins were
+superseded in that rolling repository; the refreshed stack still needs GPU
+qualification on the test host. The kernel
 driver still comes from the Docker host through `/dev/dri`; it is never installed
 in the image. Update the version build arguments together and rebuild when
 intentionally qualifying a new Intel stack.
