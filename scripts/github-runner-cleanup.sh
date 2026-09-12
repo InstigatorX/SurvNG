@@ -9,10 +9,12 @@ MIN_FREE_PCT="${RUNNER_MIN_FREE_PCT:-15}"
 
 usage() {
   cat <<'EOF'
-Usage: github-runner-cleanup.sh [--light | --standard | --aggressive]
+Usage: github-runner-cleanup.sh [--light | --publish | --standard | --aggressive]
 
 Modes:
-  --light       Dangling Docker layers only; no age-based image deletion.
+  --light       Unused build cache/dangling images older than seven days.
+  --publish     Stopped containers only; preserves multi-stage build cache.
+                Never escalates to a cache wipe.
   --standard    Default. Prune build cache and images older than 24h.
   --aggressive  Prune all unused Docker images, stale runner temp dirs, tool caches.
 
@@ -43,6 +45,12 @@ report_disk() {
 
 maybe_escalate_mode() {
   local free_pct="$1"
+  if [[ "$MODE" == "publish" ]]; then
+    if (( free_pct < MIN_FREE_PCT )); then
+      log "Free space ${free_pct}% < ${MIN_FREE_PCT}% during publish; keeping build cache"
+    fi
+    return
+  fi
   if (( free_pct < MIN_FREE_PCT )); then
     case "$MODE" in
       light) MODE="standard"; log "Free space ${free_pct}% < ${MIN_FREE_PCT}%; escalating to standard" ;;
@@ -54,10 +62,16 @@ maybe_escalate_mode() {
   fi
 }
 
+cleanup_docker_publish() {
+  # Multi-stage intermediates may be dangling even with a tagged final image.
+  command -v docker >/dev/null 2>&1 || return 0
+  docker container prune -f || true
+}
+
 cleanup_docker_light() {
   command -v docker >/dev/null 2>&1 || return 0
-  docker builder prune -f || true
-  docker image prune -f || true
+  docker builder prune -f --filter "until=168h" || true
+  docker image prune -f --filter "until=168h" || true
   docker container prune -f || true
 }
 
@@ -96,6 +110,9 @@ cleanup_tool_caches() {
 
 run_mode() {
   case "$MODE" in
+    publish)
+      cleanup_docker_publish
+      ;;
     light)
       cleanup_docker_light
       ;;
@@ -117,6 +134,7 @@ run_mode() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --publish) MODE="publish"; shift ;;
     --light) MODE="light"; shift ;;
     --standard) MODE="standard"; shift ;;
     --aggressive) MODE="aggressive"; shift ;;

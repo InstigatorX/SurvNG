@@ -13,7 +13,7 @@ on:
           - light
           - standard
           - aggressive
-        default: standard
+        default: light
 
 permissions:
   contents: read
@@ -28,5 +28,5 @@ jobs:
 
       - name: Clean runner disk
         run: |
-          MODE="${{ github.event.inputs.mode || 'standard' }}"
+          MODE="${{ github.event.inputs.mode || 'light' }}"
           scripts/github-runner-cleanup.sh "--${MODE}"

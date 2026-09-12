@@ -27,7 +27,7 @@ jobs:
           python --version
           node --version
       - name: Free runner disk space
-        run: scripts/github-runner-cleanup.sh --light
+        run: scripts/github-runner-cleanup.sh --publish
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
       - name: Build frontend static assets
@@ -100,4 +100,4 @@ jobs:
         run: node frontend/tests/run-tests.mjs unit
       - name: Post-job cleanup
         if: always()
-        run: scripts/github-runner-cleanup.sh --light
+        run: scripts/github-runner-cleanup.sh --publish

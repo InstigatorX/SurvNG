@@ -49,7 +49,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free runner disk space
-        run: scripts/github-runner-cleanup.sh --standard
+        run: scripts/github-runner-cleanup.sh --publish
 
       # Self-hosted runners may lack docker-buildx. Keep the default (legacy)
       # builder; the Dockerfile avoids BuildKit-only features like COPY --chmod.
@@ -89,5 +89,8 @@ jobs:
             docker push "${tag}"
             echo "Pushed ${tag}"
           done
-          docker rmi "${primary}" $(printf ' %s' "${tags[@]:1}") 2>/dev/null || true
-          scripts/github-runner-cleanup.sh --standard
+          # Keep the moving tip and intermediate stages for subsequent builds.
+          if [ "${REF_TYPE}" != "tag" ]; then
+            docker rmi "${image}:sha-${short_sha}${SUFFIX}" 2>/dev/null || true
+          fi
+          scripts/github-runner-cleanup.sh --publish
