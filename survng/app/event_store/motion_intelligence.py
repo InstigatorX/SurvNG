@@ -66,8 +66,20 @@ class EventStoreMotionIntelligenceMixin:
         replaced_snapshot = ""
         persisted_snapshot = snapshot_path
         with self._lock, self._connect() as conn:
+            # Serialize ownership lookup and write across store instances too.
+            conn.execute("begin immediate")
+            if normalized_decision_id and event_id is not None:
+                owner = conn.execute(
+                    "select decision_id from motion_audits where event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if owner is not None and owner["decision_id"] != normalized_decision_id:
+                    # Backfill or another decision already owns the event's
+                    # primary audit. Preserve both identities and link this
+                    # decision as related evidence, including on completion retry.
+                    normalized_related_event_id = int(event_id)
+                    event_id = None
             if snapshot_path:
-                conn.execute("begin immediate")
                 if snapshot_deletion_claimed(conn, self.storage_dir, snapshot_path):
                     snapshot_path = ""
                     persisted_snapshot = ""
