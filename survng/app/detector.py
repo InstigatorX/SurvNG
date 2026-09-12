@@ -640,10 +640,22 @@ class OpenVinoDetector:
                 metadata,
             )
 
+        candidate_error: ModelSettingsError | None = None
         for value in outputs.values():
             array = np.asarray(value)
             squeezed = np.squeeze(array)
             if metadata is not None:
+                # Core ML dictionaries may include auxiliary tensors before
+                # detections. Probe without publishing an error for a tensor
+                # we can skip; report failure only if no output is supported.
+                try:
+                    resolve_output_format(
+                        [list(array.shape)], self.config.model_output_format,
+                        self.model_metadata, self._model_has_nms,
+                    )
+                except ModelSettingsError as exc:
+                    candidate_error = exc
+                    continue
                 self.output_format = self._resolve_output_format([list(array.shape)])
                 if self.output_format == "yolo-e2e":
                     return self._parse_yolo_e2e_output(array, metadata)
@@ -663,6 +675,9 @@ class OpenVinoDetector:
             if squeezed.ndim == 3 and min(squeezed.shape[-2:]) >= 5 and metadata is not None:
                 return self._parse_yolo_output(array, metadata)
 
+        if candidate_error is not None:
+            self.model_settings["error"] = str(candidate_error)
+            raise candidate_error
         return []
 
     def _preprocess_coreml_image(self, frame: np.ndarray) -> tuple[Any, dict[str, float]]:
@@ -795,6 +810,7 @@ class OpenVinoDetector:
             self.model_settings["error"] = str(exc)
             raise
         self.model_settings.update({
+            "error": "",
             "output_source": source,
             "nms": "SurvNG" if selected in {"yolo", "yolo-seg"} else "model final detections",
         })
