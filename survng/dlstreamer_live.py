@@ -261,6 +261,16 @@ def _factory_available(Gst, name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
 
 
+def _negotiated_memory(element, pad_name: str = "sink") -> str | None:
+    """Report actual negotiated memory, not merely the requested backend."""
+    if element is None:
+        return None
+    caps = element.get_static_pad(pad_name).get_current_caps()
+    if caps is None or caps.get_size() < 1:
+        return None
+    return caps.get_features(0).to_string()
+
+
 def _require_detection_plugin(Gst) -> None:
     if _factory_available(Gst, "gvadetect"):
         return
@@ -688,19 +698,36 @@ def _pump_pipeline(
         source.connect("source-setup", configure_rtsp)
 
     tee = _element(Gst, "tee", "branches")
+    va_memory = detect and args.decoder == "va" and not use_test_source
     frame_queue = _element(Gst, "queue", "frame-queue")
     frame_queue.set_property("max-size-buffers", 1)
     frame_queue.set_property("leaky", 2)
     videorate = _element(Gst, "videorate", "drop-only-rate")
     videorate.set_property("drop-only", True)
-    convert = _element(Gst, "videoconvert", "qualifier-gray")
-    scale = _element(Gst, "videoscale", "qualifier-scale")
+    # The tee carries VA surfaces when detection uses VA preprocessing. CPU
+    # consumers need an explicit download boundary; software videoconvert
+    # cannot negotiate that transition. Drop frames BEFORE the VA conversion
+    # and resize on the GPU before mapping the small EMA frame into host RAM.
+    frame_converters = []
+    if va_memory:
+        download = _element(Gst, "vapostproc", "qualifier-download")
+        download_caps = _element(Gst, "capsfilter", "qualifier-host-caps")
+        # Intel advertises GRAY8 VPP output on some devices that drop every
+        # frame converting to it. Download scaled NV12, then extract luma on
+        # the CPU. Explicit square pixels preserve geometry when scaling.
+        download_caps.set_property("caps", Gst.Caps.from_string(
+            f"video/x-raw,format=NV12,width={qualifier_width},pixel-aspect-ratio=1/1"
+        ))
+        frame_converters.extend([download, download_caps])
+    frame_converters.append(_element(Gst, "videoconvert", "qualifier-gray"))
+    if not va_memory:
+        frame_converters.append(_element(Gst, "videoscale", "qualifier-scale"))
     capsfilter = _element(Gst, "capsfilter", "frame-caps")
     capsfilter.set_property(
         "caps",
         Gst.Caps.from_string(
             f"video/x-raw,format={'BGR' if source_role == 'main' else 'GRAY8'},width="
-            f"{qualifier_width},framerate={rate.numerator}/{rate.denominator}"
+            f"{qualifier_width},pixel-aspect-ratio=1/1,framerate={rate.numerator}/{rate.denominator}"
         ),
     )
     sink = _element(Gst, "appsink", "frame-sink")
@@ -709,7 +736,8 @@ def _pump_pipeline(
     sink.set_property("drop", True)
     sink.set_property("sync", False)
 
-    elements = [source, tee, frame_queue, videorate, convert, scale, capsfilter, sink]
+    frame_chain = [frame_queue, videorate, *frame_converters, capsfilter, sink]
+    elements = [source, tee, *frame_chain]
     jpeg_queue = None
     jpeg_rate_el = None
     jpeg_convert = None
@@ -721,7 +749,9 @@ def _pump_pipeline(
         jpeg_queue.set_property("leaky", 2)
         jpeg_rate_el = _element(Gst, "videorate", "jpeg-rate")
         jpeg_rate_el.set_property("drop-only", True)
-        jpeg_convert = _element(Gst, "videoconvert", "jpeg-convert")
+        jpeg_convert = _element(
+            Gst, "vapostproc" if va_memory else "videoconvert", "jpeg-convert",
+        )
         jpeg_caps = _element(Gst, "capsfilter", "jpeg-caps")
         jpeg_caps.set_property(
             "caps",
@@ -829,13 +859,7 @@ def _pump_pipeline(
     for element in elements:
         pipeline.add(element)
 
-    for left, right in (
-        (frame_queue, videorate),
-        (videorate, convert),
-        (convert, scale),
-        (scale, capsfilter),
-        (capsfilter, sink),
-    ):
+    for left, right in zip(frame_chain, frame_chain[1:]):
         if not left.link(right):
             raise RuntimeError(
                 f"could not link {left.get_name()} to {right.get_name()}"
@@ -1027,6 +1051,9 @@ def _pump_pipeline(
                                 name.startswith("va") for name in selected
                             ),
                             "preprocess_backend": preprocess,
+                            "decoded_memory": _negotiated_memory(tee),
+                            "detection_memory": _negotiated_memory(detector),
+                            "qualifier_memory": _negotiated_memory(sink),
                             "first_frame_ms": round(
                                 (first_frame_at - started) * 1000.0,
                                 3,

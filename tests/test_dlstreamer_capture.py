@@ -96,6 +96,33 @@ def test_backend_includes_model_when_detect_enabled() -> None:
     assert "--no-detect" not in command
 
 
+@pytest.mark.parametrize("detect,configured,expected", [
+    (False, 3000, 3000), (True, 3000, 30000), (True, 45000, 45000),
+])
+def test_inference_startup_budget_agrees_between_parent_and_child(
+    monkeypatch, detect, configured, expected,
+) -> None:
+    backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(
+        detect_enabled=detect, open_timeout_ms=configured,
+    ))
+    observed = []
+
+    def open_shared(handle, url, cancelled, *, timeout_ms):
+        observed.append(timeout_ms)
+        return True
+
+    monkeypatch.setattr(backend, "_open_shared", open_shared)
+    command = backend.command()
+    assert backend.startup_timeout_ms == expected
+    assert float(command[command.index("--open-timeout") + 1]) == expected / 1000
+    assert backend.open(backend.create_handle(), "rtsp://fixture.invalid/live", lambda: False)
+    assert observed == [expected]
+    # Explicit caller deadlines still take precedence over the default budget.
+    assert backend.open(backend.create_handle(), "rtsp://fixture.invalid/live", lambda: False,
+                        open_timeout_ms=1000)
+    assert observed == [expected, 1000]
+
+
 def test_backend_passes_labels_and_adjacent_model_proc(tmp_path: Path) -> None:
     model = tmp_path / "yolo.xml"
     model.write_text("<net/>", encoding="utf-8")

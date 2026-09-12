@@ -25,6 +25,7 @@ from survng.app.camera_capture import (
 )
 from survng.app.config import CameraConfig, ImageStorageConfig, MotionQualificationConfig, ObjectTrackingConfig
 from survng.app.detector import objects_to_json
+from survng.app.dlstreamer_capture import DlStreamerCaptureBackend, DlStreamerCaptureOptions
 from survng.app.image_storage import DurableImageWriter
 from survng.app.motion import MotionQualificationResult
 from survng.app.ema_v2 import CameraNotice
@@ -101,6 +102,7 @@ def make_worker(
     recorder=None,
     motion_config: MotionQualificationConfig | None = None,
     event_callback=None,
+    capture_backend=None,
 ) -> CameraWorker:
     event_store = events or DummyEvents()
     detector_backend = detector or DummyDetector()
@@ -155,6 +157,7 @@ def make_worker(
         ),
         motion_analysis_limiter=FairMotionAnalysisLimiter(2),
         image_writer=DurableImageWriter(ImageStorageConfig()),
+        capture_backend=capture_backend,
     )
     # Most worker unit tests exercise motion ingress without starting camera
     # I/O. Production workers now begin in the explicit stopped/non-accepting
@@ -220,6 +223,21 @@ def seed_capture_frame(
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_native_inference_startup_budget_reaches_capture_service(self):
+        from survng.app.camera_capture import CaptureOpenLimiter
+
+        for detect, expected in ((False, CAPTURE_OPEN_TIMEOUT_MS), (True, 30000)):
+            with self.subTest(detect=detect), tempfile.TemporaryDirectory() as directory:
+                backend = DlStreamerCaptureBackend(
+                    CaptureOpenLimiter(1), DlStreamerCaptureOptions(detect_enabled=detect),
+                )
+                worker = make_worker(
+                    CameraConfig(id="gate", name="Gate", stream_url="rtsp://fixture.invalid/main"),
+                    Path(directory), capture_backend=backend,
+                )
+                self.assertEqual(worker.capture.initial_open_timeout_ms, expected)
+                self.assertGreaterEqual(worker.capture.reconnect_open_timeout_ms, expected)
+
     def test_scene_context_policy_uses_camera_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(

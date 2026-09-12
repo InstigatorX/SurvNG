@@ -11,6 +11,7 @@ import numpy as np
 import cv2
 
 from .camera_capture import (
+    CAPTURE_OPEN_TIMEOUT_MS,
     CaptureBackend,
     CameraCaptureService,
     CapturedFrame,
@@ -415,6 +416,11 @@ class CameraWorker:
             frame_observer=self._capture_frame,
             source_started_observer=self._capture_source_started,
             source_stopped_observer=self._capture_source_stopped,
+            initial_open_timeout_ms=(
+                effective_capture_backend.startup_timeout_ms
+                if isinstance(effective_capture_backend, DlStreamerCaptureBackend)
+                else CAPTURE_OPEN_TIMEOUT_MS
+            ),
         )
         self.tracking_frames = CameraFrameTimeline(
             camera=camera,

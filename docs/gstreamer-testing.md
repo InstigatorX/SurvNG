@@ -104,6 +104,26 @@ This uses the same client as `survngctl`, which is the preferred host-local
 command for a native installation. Do not use the host's default socket to
 assess the test container.
 
+### VA-memory and cold-start checks
+
+The CPU smoke test does not validate Intel VA negotiation. On real hardware,
+check pipeline status for `decoded_memory=memory:VAMemory`,
+`detection_memory=memory:VAMemory`, `qualifier_memory=memory:SystemMemory`,
+and `preprocess_backend=va` on a VA-enabled live inference stream. Detection
+keeps VA surfaces; the rate-limited EMA branch uses `vapostproc` to resize and
+download square-pixel NV12, then converts the small host frame to GRAY8.
+The rate-limited JPEG branch also has an explicit VA download boundary.
+Do not substitute direct VA-to-GRAY8 conversion based on advertised caps alone:
+the test host's driver negotiates it but produces no frames.
+
+Require actual grayscale frames, JPEG previews and timestamp/session-matched
+inference snapshots, not just successful negotiation or EOS. Main evidence
+must remain aspect-correct BGR with no live inference snapshots. Repeat with
+two live streams sharing the model, then close/reopen a stream and verify a
+new session with no old snapshots. Cold model compilation took about 16 seconds
+on the test host; inference-enabled capture uses at least 30 seconds for
+startup in both parent and child. Normal read timeouts remain unchanged.
+
 ## 4. Scene and regression acceptance
 
 Replay synchronized main/live clips through a disposable RTSP source, or use a
