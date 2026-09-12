@@ -67,6 +67,7 @@ def final_detection_hint(metadata: dict, has_nms: bool) -> tuple[bool | None, st
 
 def resolve_output_format(shapes: list[list[int]], override: str, metadata: dict,
                           has_nms: bool = False) -> tuple[str, str, list[str]]:
+    original_rank = len(shapes[0]) if shapes else 0
     shapes = [[1, *shape] if len(shape) == 2 else shape for shape in shapes]
     final, source = final_detection_hint(metadata, has_nms)
     warnings: list[str] = []
@@ -89,7 +90,10 @@ def resolve_output_format(shapes: list[list[int]], override: str, metadata: dict
                 warnings.append("Segmentation output inferred as final detections; use the output-format override for a raw two-class model.")
         else:
             selected = "yolo-seg"
-    elif len(shapes) == 1 and shape[-1] == 7 and len(shape) in (3, 4) and final is not False:
+    # SSD commonly declares [1, 1, N, 7] or [N, 7]. Preserve that
+    # distinction before normalizing batchless outputs: [1, N, 7] is also
+    # raw three-class YOLO (xywh plus three scores), not evidence of SSD.
+    elif len(shapes) == 1 and shape[-1] == 7 and original_rank in (2, 4) and final is not False:
         selected = "ssd"
     elif len(shapes) == 1 and len(shape) == 3:
         channels, anchors = min(shape[1:]), max(shape[1:])
