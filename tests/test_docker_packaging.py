@@ -148,6 +148,61 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertIn("github.ref_name == 'gstreamer'", workflow)
         self.assertIn("publish-gstreamer-intel", workflow)
 
+    def test_dependency_stages_are_independent_of_application_and_commit(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        intel = dockerfile.split("FROM runtime-base AS intel-deps\n", 1)[1].split("\nFROM ", 1)[0]
+        python = dockerfile.split("FROM runtime-base AS python-deps\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertNotIn("COPY survng", intel)
+        self.assertNotIn("SURVNG_GIT_SHA", intel)
+        self.assertNotIn("requirements.txt", intel)
+        self.assertNotIn("COPY survng", python)
+        self.assertIn("COPY requirements.txt", python)
+        final = dockerfile.split("FROM intel-deps AS runtime-intel\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertIn("COPY --from=python-deps", final)
+        self.assertIn("COPY --from=application", final)
+        self.assertNotIn("apt-get", final)
+        self.assertGreater(final.index("ARG SURVNG_GIT_SHA"), final.rindex("COPY "))
+
+    def test_ci_cleanup_preserves_recent_multistage_cache(self) -> None:
+        script = (ROOT / "scripts/github-runner-cleanup.sh").read_text()
+        publish = script.split("cleanup_docker_publish() {", 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("docker image prune", publish)
+        self.assertNotIn("docker builder prune", publish)
+        light = script.split("cleanup_docker_light() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn('docker builder prune -f --filter "until=168h"', light)
+        self.assertIn('docker image prune -f --filter "until=168h"', light)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("cleanup.sh --light", workflow)
+        maintenance = (ROOT / ".github/workflows/runner-maintenance.yml").read_text()
+        self.assertIn("default: light", maintenance)
+
+    def test_publish_checks_built_image_and_never_pushes_failed_smoke(self) -> None:
+        # Exercise the publishing script with a fake Docker CLI: no daemon,
+        # registry credentials, package installs or production image writes.
+        for smoke_exit in (0, 1):
+            with self.subTest(smoke_exit=smoke_exit), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fake = root / "docker"
+                log = root / "calls"
+                fake.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALLS"\n'
+                                'if [ "$1" = run ]; then exit "$SMOKE_EXIT"; fi\n')
+                fake.chmod(0o755)
+                env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                       "DOCKER_CALLS": str(log), "SMOKE_EXIT": str(smoke_exit),
+                       "GITHUB_REPOSITORY": "example/survng", "GIT_SHA": "abcdef0123",
+                       "REF_TYPE": "branch", "REF_NAME": "gstreamer", "TARGET": "runtime-intel",
+                       "DOCKERFILE": "Dockerfile", "SUFFIX": "-intel"}
+                result = subprocess.run([str(ROOT / "scripts/docker-publish-image.sh")],
+                                        env=env, capture_output=True, text=True)
+                calls = log.read_text().splitlines()
+                self.assertEqual(result.returncode, smoke_exit)
+                self.assertTrue(calls[0].startswith("build "))
+                self.assertTrue(calls[1].startswith("run "))
+                self.assertIn("ghcr.io/example/survng:gstreamer-intel /app/scripts/gstreamer-smoke.py", calls[1])
+                self.assertIn("--network none", calls[1])
+                self.assertIn("--read-only", calls[1])
+                self.assertEqual(any(c.startswith("push ") for c in calls), smoke_exit == 0)
+
     def test_lxc_override_is_explicit_and_not_part_of_default_compose(self) -> None:
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
         lxc_override = (ROOT / "compose.lxc.yaml").read_text(encoding="utf-8")

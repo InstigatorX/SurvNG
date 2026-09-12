@@ -12,8 +12,8 @@ usage() {
 Usage: github-runner-cleanup.sh [--light | --publish | --standard | --aggressive]
 
 Modes:
-  --light       Dangling Docker layers only; no age-based image deletion.
-  --publish     Dangling images/containers only. Keeps the Docker build cache
+  --light       Unused build cache/dangling images older than seven days.
+  --publish     Stopped containers only. Keeps the Docker build cache
                 used by GHCR publish. Never escalates to a cache wipe.
   --standard    Default. Prune build cache and images older than 24h.
   --aggressive  Prune all unused Docker images, stale runner temp dirs, tool caches.
@@ -63,17 +63,16 @@ maybe_escalate_mode() {
 }
 
 cleanup_docker_publish() {
-  # Keep layer cache. Do not builder prune -af. The next GHCR publish reuses
-  # local layers from the moving tip left on the runner.
+  # Legacy multi-stage intermediates (npm/pip/application) can be dangling
+  # even while the final image remains tagged. Image prune loses their cache.
   command -v docker >/dev/null 2>&1 || return 0
-  docker image prune -f || true
   docker container prune -f || true
 }
 
 cleanup_docker_light() {
   command -v docker >/dev/null 2>&1 || return 0
-  docker builder prune -f || true
-  docker image prune -f || true
+  docker builder prune -f --filter "until=168h" || true
+  docker image prune -f --filter "until=168h" || true
   docker container prune -f || true
 }
 

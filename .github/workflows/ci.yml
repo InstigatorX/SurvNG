@@ -26,7 +26,7 @@ jobs:
           python --version
           node --version
       - name: Free runner disk space
-        run: scripts/github-runner-cleanup.sh --light
+        run: scripts/github-runner-cleanup.sh --publish
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
       - name: Build frontend static assets
@@ -35,7 +35,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt pytest anyio
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
       - name: Run Python regression suite
         run: |
           scripts/run-tests.sh -q
@@ -43,7 +43,7 @@ jobs:
         run: node frontend/tests/run-tests.mjs unit
       - name: Post-job cleanup
         if: always()
-        run: scripts/github-runner-cleanup.sh --light
+        run: scripts/github-runner-cleanup.sh --publish
 
   native-gstreamer:
     # No camera, GPU, model download, production state, or self-hosted service.

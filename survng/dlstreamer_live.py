@@ -204,10 +204,16 @@ def _apply_dlstreamer_env() -> None:
             os.environ["GST_PLUGIN_SCANNER"] = str(scanner)
             os.environ["GST_PLUGIN_SCANNER_1_0"] = str(scanner)
         os.environ["LD_LIBRARY_PATH"] = _colon_path(
-            str(bundle / "lib"), str(root / "lib"), os.environ.get("LD_LIBRARY_PATH", ""),
+            str(bundle / "lib"), str(root / "lib"),
+            # The APT package uses /opt/opencv; Intel's reference image also
+            # supports dependencies nested under the DL Streamer prefix.
+            *_existing_dirs(root / "opencv/lib", root / "rdkafka/lib",
+                            "/opt/opencv", "/opt/rdkafka", "/opt/librealsense"),
+            os.environ.get("LD_LIBRARY_PATH", ""),
         )
         os.environ["GI_TYPELIB_PATH"] = _colon_path(
-            str(bundle / "lib/girepository-1.0"), os.environ.get("GI_TYPELIB_PATH", ""),
+            str(bundle / "lib/girepository-1.0"), str(root / "lib/girepository-1.0"),
+            os.environ.get("GI_TYPELIB_PATH", ""),
         )
         python_dirs = _existing_dirs(root / "python", bundle / "lib/python3/dist-packages")
         os.environ["PYTHONPATH"] = _colon_path(*python_dirs, os.environ.get("PYTHONPATH", ""))
@@ -253,6 +259,18 @@ def _element(Gst, factory: str, name: str):
 
 def _factory_available(Gst, name: str) -> bool:
     return Gst.ElementFactory.find(name) is not None
+
+
+def _require_detection_plugin(Gst) -> None:
+    if _factory_available(Gst, "gvadetect"):
+        return
+    plugin = Path("/opt/intel/dlstreamer/lib/libgstvideoanalytics.so")
+    if plugin.is_file():
+        # Retry a previously blacklisted plugin, and expose loader failures
+        # (e.g. missing OpenCV) instead of hiding them behind "unavailable".
+        Gst.Plugin.load_file(str(plugin))
+    if not _factory_available(Gst, "gvadetect"):
+        raise RuntimeError("required GStreamer element is unavailable: gvadetect")
 
 
 def _make_live_source(Gst, *, test_source: bool):
@@ -409,14 +427,11 @@ def run(argv: list[str] | None = None) -> int:
     _prefer_decoder(Gst, args.decoder)
 
     model_path = Path(args.model).expanduser() if args.model else None
-    detect = (
-        not args.no_detect
-        and model_path is not None
-        and model_path.is_file()
-        and _factory_available(Gst, "gvadetect")
-    )
-    if not args.no_detect and not detect:
-        raise RuntimeError("live detection requested but model or gvadetect is unavailable")
+    detect = not args.no_detect
+    if detect:
+        if model_path is None or not model_path.is_file():
+            raise RuntimeError("live detection requested but model file is unavailable")
+        _require_detection_plugin(Gst)
     if not math.isfinite(args.threshold) or not 0 <= args.threshold <= 1:
         raise ValueError("detection threshold must be between 0 and 1")
     instance_id = (
@@ -1073,14 +1088,17 @@ def _pump_pipeline(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from survng.app.dlstreamer_protocol import TYPE_STATUS, encode_json
+    from survng.app.dlstreamer_protocol import TYPE_FATAL, TYPE_STATUS, encode_json
     from survng.app.redact import redact_secret_text
 
     try:
         return run(argv)
     except Exception as exc:
         sys.stdout.buffer.write(
-            encode_json(TYPE_STATUS, {"ok": False, "error": redact_secret_text(exc)})
+            encode_json(
+                TYPE_FATAL if "--supervisor" in (sys.argv[1:] if argv is None else argv) else TYPE_STATUS,
+                {"ok": False, "error": redact_secret_text(exc)},
+            )
         )
         sys.stdout.buffer.flush()
         print(redact_secret_text(exc), file=sys.stderr)

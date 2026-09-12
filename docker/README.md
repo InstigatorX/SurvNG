@@ -98,6 +98,21 @@ The standalone `scripts/install-face-model.sh` remains for native checkouts.
 
 ## Build
 
+The Intel image keeps OS/GPU packages, Python requirements, frontend dependencies,
+and application code in separate stages. Code or commit-only rebuilds reuse the
+dependency layers; changing Python requirements does not reinstall Intel packages.
+CI retains the self-hosted runner's local multi-stage cache (no registry cache
+restore on its legacy builder). Publish/test jobs only prune stopped containers;
+nightly light maintenance expires unused cache after seven days, with stronger
+cleanup reserved for disk pressure or an explicit maintenance request.
+
+Before pushing either GStreamer image tag, CI runs the native CPU smoke test
+inside the **built SurvNG image**, as an unprivileged user with a read-only root,
+temporary scratch space, and no network or GPU. A failure blocks publication.
+This checks packaging and metadata delivery, not recognition accuracy or GPU
+qualification. DL Streamer's isolated child includes both the APT `/opt/opencv`
+dependency layout and Intel's nested bundle layout in its startup library path.
+
 On a normal Docker host, build the Intel image with:
 
 ```bash

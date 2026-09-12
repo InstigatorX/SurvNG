@@ -49,7 +49,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Reclaim dangling Docker state
+      - name: Reclaim stopped containers while preserving build cache
         run: scripts/github-runner-cleanup.sh --publish
 
       # Self-hosted runners may lack docker-buildx. Keep the default (legacy)
@@ -81,7 +81,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Reclaim dangling Docker state
+      - name: Reclaim stopped containers while preserving build cache
         run: scripts/github-runner-cleanup.sh --publish
 
       - name: Build and push Intel image

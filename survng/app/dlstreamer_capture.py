@@ -32,6 +32,7 @@ from .camera_capture import (
 )
 from .dlstreamer_protocol import (
     TYPE_DETECTIONS,
+    TYPE_FATAL,
     TYPE_FRAME,
     TYPE_JPEG,
     TYPE_STATUS,
@@ -43,6 +44,7 @@ from .dlstreamer_protocol import (
 )
 from survng.dlstreamer_live import model_instance_id
 from .live_detections import DetectionSnapshot
+from .redact import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
 
@@ -347,7 +349,8 @@ class _SharedLiveProcess:
                         break
                     self._dispatch(*popped)
         except Exception as error:
-            failure = f"DL Streamer protocol reader failed ({type(error).__name__})"
+            detail = redact_secret_text(str(error))[:400]
+            failure = f"DL Streamer supervisor failed ({type(error).__name__}): {detail}"
             LOGGER.warning("%s", failure)
         finally:
             with self._lock:
@@ -356,6 +359,9 @@ class _SharedLiveProcess:
                 inbox.fail(failure)
 
     def _dispatch(self, message_type: int, payload: bytes) -> None:
+        if message_type == TYPE_FATAL:
+            decoded = decode_json_payload(payload)
+            raise RuntimeError(str(decoded.get("error") or "DL Streamer startup failed"))
         stream_id, inner = decode_stream_payload(payload)
         with self._lock:
             inbox = self._inboxes.get(stream_id)

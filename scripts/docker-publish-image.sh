@@ -31,6 +31,17 @@ docker build \
   --tag "${primary}" \
   .
 
+# Validate the image we will ship, not only Intel's reference container. This
+# exercises CPU inference, frame/metadata delivery and the shared supervisor
+# without cameras, GPU access, secrets, or writable production mounts.
+if [ "${ref_name}" = "gstreamer" ] && [ "${target}" = "runtime-intel" ]; then
+  docker run --rm --network none --cpus 2 --memory 2g \
+    --user 1000:1000 --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --env PYTHONDONTWRITEBYTECODE=1 \
+    --entrypoint /usr/bin/python3 "${primary}" /app/scripts/gstreamer-smoke.py
+fi
+
 for tag in "${tags[@]:1}"; do
   docker tag "${primary}" "${tag}"
 done

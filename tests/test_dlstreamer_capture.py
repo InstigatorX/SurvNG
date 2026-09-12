@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import io
 import sys
 import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,15 +18,19 @@ from survng.app.dlstreamer_capture import (
     DlStreamerCaptureHandle,
     DlStreamerCaptureOptions,
     adjacent_model_proc,
+    _SharedLiveProcess,
+    _StreamInbox,
 )
 from survng.app.dlstreamer_protocol import (
     TYPE_FRAME,
+    TYPE_FATAL,
     TYPE_JPEG,
     TYPE_STATUS,
     MessageReader,
     decode_frame_payload,
     decode_json_payload,
     encode_detection_snapshot,
+    encode_json,
 )
 from survng.dlstreamer_live import (
     _SYSTEM_GST_PLUGINS,
@@ -35,6 +41,7 @@ from survng.dlstreamer_live import (
     _normalize_gva_objects,
     _packed_gray,
     _parser,
+    _require_detection_plugin,
     model_instance_id,
 )
 
@@ -245,6 +252,46 @@ def test_apply_dlstreamer_env_keeps_ubuntu_playback_plugins(monkeypatch) -> None
     _apply_dlstreamer_env()
     assert os.environ["GST_PLUGIN_SYSTEM_PATH"].split(":")[0] == _SYSTEM_GST_PLUGINS
     assert os.environ["GST_PLUGIN_SYSTEM_PATH_1_0"].split(":")[0] == _SYSTEM_GST_PLUGINS
+
+
+@pytest.mark.parametrize("opencv", ["/opt/opencv", "/opt/intel/dlstreamer/opencv/lib"])
+def test_intel_environment_includes_bundled_dependencies_and_is_idempotent(monkeypatch, opencv) -> None:
+    monkeypatch.setattr(os, "environ", {"LD_LIBRARY_PATH": "/custom/lib"})
+    directories = {"/opt/intel/dlstreamer/gstreamer/lib", opencv, "/opt/rdkafka", "/opt/librealsense"}
+    monkeypatch.setattr(Path, "is_dir", lambda p: str(p) in directories)
+    monkeypatch.setattr(Path, "is_file", lambda p: False)
+    _apply_dlstreamer_env()
+    expected = ":".join(["/opt/intel/dlstreamer/gstreamer/lib", "/opt/intel/dlstreamer/lib",
+                         opencv, "/opt/rdkafka", "/opt/librealsense", "/custom/lib"])
+    assert os.environ["LD_LIBRARY_PATH"] == expected
+    assert "/opt/intel/dlstreamer/lib/girepository-1.0" in os.environ["GI_TYPELIB_PATH"].split(":")
+    _apply_dlstreamer_env()
+    assert os.environ["LD_LIBRARY_PATH"] == expected  # prevents re-exec loops
+
+
+def test_missing_detection_plugin_exposes_native_loader_error(monkeypatch) -> None:
+    monkeypatch.setattr(Path, "is_file", lambda p: True)
+    def load(_path):
+        raise RuntimeError("libopencv_imgproc.so.413: cannot open shared object file")
+    gst = SimpleNamespace(ElementFactory=SimpleNamespace(find=lambda name: None),
+                          Plugin=SimpleNamespace(load_file=load))
+    with pytest.raises(RuntimeError, match="libopencv_imgproc.so.413"):
+        _require_detection_plugin(gst)
+
+
+def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog) -> None:
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    shared._inboxes = {name: _StreamInbox() for name in ("gate", "downstairs")}
+    shared._process = SimpleNamespace(stdout=io.BytesIO(encode_json(
+        TYPE_FATAL, {"ok": False, "error": "libopencv missing; rtsp://admin:secret@camera/live"},
+    )))
+    shared._read_stdout()
+    for inbox in shared._inboxes.values():
+        assert not inbox.alive
+        assert "libopencv missing" in inbox.error
+        assert "secret" not in inbox.error
+        assert "ProtocolError" not in inbox.error
+    assert "secret" not in caplog.text
 
 
 def test_drop_paths_moves_intel_gstreamer_lib_out() -> None:
@@ -549,7 +596,8 @@ def test_system_python_can_import_live_child_without_pydantic() -> None:
     assert "pydantic" not in result.stderr
 
 
-def test_system_python_live_main_redacts_errors_without_pydantic() -> None:
+@pytest.mark.parametrize("supervisor", [False, True])
+def test_system_python_live_main_redacts_errors_without_pydantic(supervisor) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(ROOT), env.get("PYTHONPATH", "")) if part
@@ -563,17 +611,22 @@ def test_system_python_live_main_redacts_errors_without_pydantic() -> None:
                 "def boom(argv=None):\n"
                 "    raise RuntimeError('rtsp://admin:secret@camera/live failed')\n"
                 "dlstreamer_live.run = boom\n"
-                "raise SystemExit(dlstreamer_live.main([]))\n"
+                f"raise SystemExit(dlstreamer_live.main({['--supervisor'] if supervisor else []!r}))\n"
             ),
         ],
         cwd=str(ROOT),
         env=env,
         capture_output=True,
-        text=True,
+        text=False,
         check=False,
     )
-    combined = result.stdout + result.stderr
+    combined = (result.stdout + result.stderr).decode(errors="replace")
     assert result.returncode == 1
     assert "secret" not in combined
     assert "pydantic" not in combined
     assert "rtsp://admin:***@camera/live" in combined
+    reader = MessageReader()
+    reader.feed(result.stdout)
+    kind, payload = reader.pop()
+    assert kind == (TYPE_FATAL if supervisor else TYPE_STATUS)
+    assert decode_json_payload(payload)["ok"] is False
