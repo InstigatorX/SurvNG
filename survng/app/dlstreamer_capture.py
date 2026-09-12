@@ -87,6 +87,7 @@ class DlStreamerCaptureOptions:
     frame_width: int = 320
     jpeg_fps: float = 1.0
     confidence_threshold: float = 0.1
+    nms_threshold: float = 0.45
 
 
 def live_python_executable(preferred: str = "") -> str:
@@ -281,11 +282,14 @@ class _SharedLiveProcess:
         self._stderr_thread.start()
         self._reader_thread.start()
 
-    def add_stream(self, stream_id: str, source_url: str, *, source_role: str = "live") -> _StreamInbox:
+    def add_stream(self, stream_id: str, source_url: str, *, source_role: str = "live", frame_width: int | None = None) -> _StreamInbox:
         inbox = _StreamInbox()
         with self._lock:
             self._inboxes[stream_id] = inbox
-        self._send({"op": "add", "stream_id": stream_id, "url": source_url, "source_role": source_role})
+        command = {"op": "add", "stream_id": stream_id, "url": source_url, "source_role": source_role}
+        if frame_width is not None:
+            command["frame_width"] = frame_width
+        self._send(command)
         return inbox
 
     def remove_stream(self, stream_id: str) -> None:
@@ -461,6 +465,7 @@ class DlStreamerCaptureHandle:
         self._parsed_frame_identity: tuple[int, float, str] | None = None
         self._local_inbox = _StreamInbox()
         self.source_role = "live"
+        self.frame_width: int | None = None
         self._stderr = bytearray()
         self._stderr_thread: threading.Thread | None = None
         self._status: dict[str, object] = {}
@@ -488,6 +493,11 @@ class DlStreamerCaptureHandle:
         if source not in {"live", "main"}:
             raise ValueError("invalid capture source role")
         self.source_role = source
+
+    def set_frame_width(self, width: int) -> None:
+        if not 240 <= width <= 960:
+            raise ValueError("capture frame width must be between 240 and 960")
+        self.frame_width = int(width)
 
     def start(self, command: list[str], source_url: str) -> None:
         env = os.environ.copy()
@@ -841,7 +851,9 @@ class DlStreamerCaptureBackend:
                 self._shared.start()
             shared = self._shared
         stream_id = uuid.uuid4().hex
-        handle.attach(shared, stream_id, shared.add_stream(stream_id, source_url, source_role=handle.source_role))
+        handle.attach(shared, stream_id, shared.add_stream(
+            stream_id, source_url, source_role=handle.source_role, frame_width=handle.frame_width,
+        ))
         if cancelled():
             handle.close()
             return False
@@ -877,6 +889,8 @@ class DlStreamerCaptureBackend:
             f"{min(10.0, max(0.5, float(main_rate))):.6f}",
             "--threshold",
             str(self.options.confidence_threshold),
+            "--nms-threshold",
+            str(self.options.nms_threshold),
             "--open-timeout",
             f"{open_timeout:.3f}",
             "--rtsp-transport",

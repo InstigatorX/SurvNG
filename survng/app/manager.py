@@ -335,6 +335,7 @@ class AppManager:
                 labels_path=detector.labels_path,
                 labels=tuple(detector.labels),
                 confidence_threshold=live_detection_threshold(config),
+                nms_threshold=detector.nms_threshold,
                 model_proc_path=adjacent_model_proc(detector.resolved_model_path()),
                 frame_width=self.config.motion_qualification.frame_width,
             ),

@@ -276,8 +276,8 @@ class ObjectTrackingSession:
         catchup: bool,
         evidence: TrackingFrame | None = None,
     ) -> list[dict[str, Any]]:
-        """Matched live frames reuse gvadetect; main/catch-up run OpenVINO."""
-        if not catchup and evidence is not None and evidence.captured.source == "live":
+        """Live evidence (including buffered catch-up) reuses gvadetect."""
+        if evidence is not None and evidence.captured.source == "live":
             return evidence.detection.scaled_objects(frame.shape[1], frame.shape[0]) if evidence.detection else []
         return _detect_tracking_objects(
             self.detector,
@@ -1127,7 +1127,12 @@ class ObjectTrackingSession:
                         if not process_frame(
                             frame, sample_epoch, catchup=True,
                             frame_reference=getattr(sample, "reference", None),
+                            evidence=sample if isinstance(sample, TrackingFrame) else None,
                         ):
+                            if isinstance(sample, TrackingFrame) and sample.captured.source == "live":
+                                # Missing/repeated metadata is not negative
+                                # evidence or a deferred OpenVINO request.
+                                continue
                             # Retry this sample, not a later frame. A deferred
                             # inference is not negative object evidence.
                             catchup_deferred = True

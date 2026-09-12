@@ -247,10 +247,12 @@ class CameraCaptureService:
         retry_max_seconds: float = CAPTURE_RETRY_MAX_SECONDS,
         initial_open_timeout_ms: int = CAPTURE_OPEN_TIMEOUT_MS,
         reconnect_open_timeout_ms: int = CAPTURE_RECONNECT_OPEN_TIMEOUT_MS,
+        frame_width: Callable[[], int] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self._source_url = source_url
         self.backend = backend
+        self._frame_width = frame_width
         self._source_started_observer = source_started_observer
         self._source_stopped_observer = source_stopped_observer
         self._wall_clock = wall_clock
@@ -668,6 +670,9 @@ class CameraCaptureService:
                     set_source_role = getattr(handle, "set_source_role", None)
                     if callable(set_source_role):
                         set_source_role(source)
+                    set_frame_width = getattr(handle, "set_frame_width", None)
+                    if self._frame_width is not None and callable(set_frame_width):
+                        set_frame_width(self._frame_width())
                     open_timeout_ms = (
                         self.reconnect_open_timeout_ms
                         if source == "live" and consecutive_open_failures > 0

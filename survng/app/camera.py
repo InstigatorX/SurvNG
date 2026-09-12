@@ -424,6 +424,7 @@ class CameraWorker:
             frame_observer=self._capture_frame,
             source_started_observer=self._capture_source_started,
             source_stopped_observer=self._capture_source_stopped,
+            frame_width=lambda: self.motion_qualification.settings()[2],
             initial_open_timeout_ms=(
                 effective_capture_backend.startup_timeout_ms
                 if isinstance(effective_capture_backend, DlStreamerCaptureBackend)
@@ -663,11 +664,8 @@ class CameraWorker:
                 source_pts=frame.source_pts,
                 source_session=frame.source_session,
             )
-            # The preview accessor does not retain JPEG source identity. Do
-            # not stamp a cached 1 FPS preview with this 5 FPS qualifier's time
-            # and turn it into repeated temporal/color evidence. Main capture
-            # and finalized recordings supply timestamped catch-up frames;
-            # current live fallback uses the matched TrackingFrame path.
+            if self._live_tracking_geometry_trusted():
+                self.tracking_frames.remember_capture(frame)
         elif frame.source == "main":
             self._remember_tracking_frame(
                 frame.image,
@@ -780,11 +778,7 @@ class CameraWorker:
             return TrackingFrame(main)
         # Seed tracks and histories use main coordinates. Until cross-view
         # track transforms are implemented, only identical FOV can bridge live.
-        alignment = self._effective_spatial_alignment
-        if not alignment.get("reliable") or any(
-            abs(float(alignment.get(key, expected)) - expected) > 0.02
-            for key, expected in (("scale_x", 1), ("scale_y", 1), ("offset_x", 0), ("offset_y", 0))
-        ):
+        if not self._live_tracking_geometry_trusted():
             return None
         live = self.tracking_frames.captured("live")
         if live is None:
@@ -794,6 +788,13 @@ class CameraWorker:
             source_session=live.source_session,
         )
         return TrackingFrame(live, snapshot)
+
+    def _live_tracking_geometry_trusted(self) -> bool:
+        alignment = self._effective_spatial_alignment
+        return bool(alignment.get("reliable")) and all(
+            abs(float(alignment.get(key, expected)) - expected) <= 0.02
+            for key, expected in (("scale_x", 1), ("scale_y", 1), ("offset_x", 0), ("offset_y", 0))
+        )
 
     def _remember_tracking_frame(
         self,

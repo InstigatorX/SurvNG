@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -17,7 +18,7 @@ import numpy as np
 
 from .camera_capture import CameraCaptureService, CapturedFrame
 from .config import CameraConfig
-from .object_track.types import TrackingFrameBatch
+from .object_track.types import TrackingFrame, TrackingFrameBatch
 from .security import redact_secret_text
 from .tracking_comparison import sampled_video_frames, video_frame_at_reference
 from .video_frames import DecodedVideoFrame, VideoFrameReference
@@ -79,7 +80,8 @@ class CameraFrameTimeline:
         size = self.buffer_size(sample_fps())
         # Main-stream history (existing callers/tests use ``frames``).
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=size)
-        self.live_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=size)
+        self.live_frames: deque[tuple[float, np.ndarray] | TrackingFrame] = deque(maxlen=size)
+        self._live_capture_session = ""
         self._last_main_sample_epoch = 0.0
         self._last_live_sample_epoch = 0.0
         self._boundaries: deque[_TimelineBoundary] = deque(maxlen=16)
@@ -232,6 +234,51 @@ class CameraFrameTimeline:
                 _TimelineBoundary(rollover_at, "recorder_epoch_changed", "main")
             )
 
+    def remember_capture(self, frame: CapturedFrame) -> None:
+        """Retain immutable, aligned live evidence, never cached preview pixels.
+
+        Metadata can arrive after its qualifier. Hydrate pending samples on
+        every callback so results survive eviction from capture's short history.
+        Missing results remain missing; a completed empty result is retained.
+        """
+        if (frame.source != "live" or frame.generation <= 0 or frame.sequence <= 0
+                or not frame.source_session or not math.isfinite(frame.source_pts)
+                or frame.source_pts < 0):
+            return
+        with self._lock:
+            if self._live_capture_session and self._live_capture_session != frame.source_session:
+                self._boundaries.append(_TimelineBoundary(
+                    frame.captured_at_epoch, "capture_generation_changed", "live",
+                ))
+            self._live_capture_session = frame.source_session
+            interval = 1.0 / max(0.1, float(self.sample_fps()))
+            if frame.captured_at_epoch - self._last_live_sample_epoch >= interval * 0.9:
+                self.live_frames.append(TrackingFrame(frame))
+                self._last_live_sample_epoch = frame.captured_at_epoch
+        self._hydrate_live_results()
+
+    def _hydrate_live_results(self) -> None:
+        # Never acquire capture's lock while holding the timeline lock.
+        with self._lock:
+            pending = tuple(item for item in self.live_frames if isinstance(item, TrackingFrame))
+        resolved = {}
+        for item in pending:
+            frame = item.captured
+            snapshot = self.capture.matched_snapshot(
+                "live", source_pts=frame.source_pts, generation=frame.generation,
+                source_session=frame.source_session,
+            )
+            if snapshot is not None and (
+                item.detection is None or snapshot.source_pts > item.detection.source_pts
+            ):
+                resolved[id(item)] = TrackingFrame(frame, snapshot)
+        if resolved:
+            with self._lock:
+                self.live_frames = deque(
+                    (resolved.get(id(item), item) for item in self.live_frames),
+                    maxlen=self.live_frames.maxlen,
+                )
+
     def read_recorded_frames(
         self,
         start_epoch: float,
@@ -247,6 +294,7 @@ class CameraFrameTimeline:
         if end_epoch <= continuity_start or frame_width <= 0:
             return TrackingFrameBatch((), continuity_start)
         self._refresh_recorder_boundary()
+        self._hydrate_live_results()
         with self._lock:
             boundary = next(
                 (
@@ -305,9 +353,9 @@ class CameraFrameTimeline:
             live_buffered = tuple(
                 sorted(
                     (
-                        (captured_at, frame)
-                        for captured_at, frame in self.live_frames
-                        if live_bridge_start <= captured_at <= end_epoch
+                        sample for sample in self.live_frames
+                        if live_bridge_start <= sample[0] <= end_epoch
+                        and (not isinstance(sample, TrackingFrame) or sample.detection is not None)
                     ),
                     key=lambda sample: sample[0],
                 )
@@ -356,7 +404,7 @@ class CameraFrameTimeline:
                         redact_secret_text(error),
                     )
 
-        frames: list[tuple[float, np.ndarray] | DecodedVideoFrame] = []
+        frames: list[tuple[float, np.ndarray] | DecodedVideoFrame | TrackingFrame] = []
         last_epoch = start_epoch - interval
         # Preference on near-ties: finalized recordings, then main history,
         # then live history for the open-segment tail only.
@@ -420,9 +468,11 @@ class CameraFrameTimeline:
             live_buffered = tuple(
                 sorted(
                     (
-                        (captured_at, frame)
-                        for captured_at, frame in self.live_frames
-                        if live_bridge_start <= captured_at <= end_epoch
+                        sample for sample in self.live_frames
+                        # These consumers run color refinement, not matched
+                        # tracking. Never present qualifier luma as main RGB.
+                        if not isinstance(sample, TrackingFrame)
+                        and live_bridge_start <= sample[0] <= end_epoch
                     ),
                     key=lambda sample: sample[0],
                 )

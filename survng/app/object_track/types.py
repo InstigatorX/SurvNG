@@ -20,11 +20,11 @@ FrameSample = tuple[np.ndarray, float, float]
 class TrackingFrameBatch:
     """Frames plus the truthful continuity boundary for a tracking read."""
 
-    frames: tuple[tuple[float, np.ndarray] | DecodedVideoFrame, ...]
+    frames: tuple[tuple[float, np.ndarray] | DecodedVideoFrame | TrackingFrame, ...]
     covered_through: float
     interruption: str | None = None
 
-    def __iter__(self) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
+    def __iter__(self) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame | TrackingFrame]:
         return iter(self.frames)
 
 
@@ -32,7 +32,7 @@ class CatchupFrameProvider(Protocol):
     def __call__(
         self, start_epoch: float, end_epoch: float, sample_fps: float, frame_width: int,
         *, after_epoch: float | None = None,
-    ) -> Iterable[tuple[float, np.ndarray] | DecodedVideoFrame]:
+    ) -> Iterable[tuple[float, np.ndarray] | DecodedVideoFrame | TrackingFrame]:
         """Read samples while checking continuity from the exclusive cursor."""
         ...
 
@@ -42,6 +42,17 @@ class CatchupFrameProvider(Protocol):
 class TrackingFrame:
     captured: CapturedFrame
     detection: DetectionSnapshot | None = None
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.captured.captured_at_epoch
+        yield self.captured.image
+
+    def __getitem__(self, index: int) -> float | np.ndarray:
+        if index == 0:
+            return self.captured.captured_at_epoch
+        if index == 1:
+            return self.captured.image
+        raise IndexError(index)
 
 
 FrameProvider = Callable[[], FrameSample | TrackingFrame | None]
