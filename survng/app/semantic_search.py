@@ -10,15 +10,18 @@ import itertools
 import multiprocessing
 import time
 import weakref
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 import numpy as np
 import cv2
 
 from .config import SemanticSearchConfig
+from ..openvino_config import latency_compile_config
+from .inference_runtime.types import InferenceUnavailable
 from .incident_utils import event_snapshot_path
 from .main_database import connect_main_database
 from .media_storage import MediaStorageRegistry
@@ -773,6 +776,11 @@ class DisabledSemanticSearch:
     def __init__(self, config: SemanticSearchConfig, index: SemanticIndex) -> None:
         self.config = config.model_copy(deep=True)
         self.index = index
+        self._device_lease: Callable[..., Any] = lambda **_kwargs: nullcontext()
+
+    def set_device_lease(self, lease_factory: Callable[..., Any]) -> None:
+        """Bind production admission; standalone indexing tools may run alone."""
+        self._device_lease = lease_factory
 
     def status(self) -> dict[str, Any]:
         return {
@@ -973,8 +981,9 @@ class OpenVinoManifestEncoder:
         if not image_model.is_file() or not text_model.is_file():
             raise RuntimeError("semantic image or text OpenVINO model is missing")
         core = Core()
-        self._image_model = core.compile_model(str(image_model), device)
-        self._text_model = core.compile_model(str(text_model), device)
+        compile_config = latency_compile_config(device)
+        self._image_model = core.compile_model(str(image_model), device, compile_config)
+        self._text_model = core.compile_model(str(text_model), device, compile_config)
         self._tokenizer = _semantic_tokenizer(self.model_dir, text_spec)
         self._image_spec = image_spec
         self._text_spec = text_spec
@@ -1294,6 +1303,19 @@ class _SemanticEventRevision:
     valid: bool = True
 
 
+class _SemanticWorkQueue(queue.PriorityQueue):
+    """Bound producers to N, retaining one single-consumer retry reservation."""
+
+    def retry_inflight(self, item) -> None:
+        # Transfer an already-counted in-flight item back to the heap. Only
+        # the sole consumer may use this method, after get(), so occupancy
+        # cannot exceed maxsize + 1 even when producers fill the freed slot.
+        # Use Queue's own mutex/heap protocol; normal producer put is unchanged.
+        with self.not_empty:
+            self._put(item)
+            self.not_empty.notify()
+
+
 class SemanticSearchService(DisabledSemanticSearch):
     """Low-priority asynchronous incident indexer and text search service."""
 
@@ -1302,9 +1324,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         self.model_dir = model_dir
         self.manifest = manifest
         self.encoder: SemanticEncoder | None = None
-        self._queue: queue.PriorityQueue[tuple[int, int, dict[str, Any] | None]] = (
-            queue.PriorityQueue(config.worker_queue_size)
-        )
+        self._queue = _SemanticWorkQueue(config.worker_queue_size)
         self._queue_sequence = itertools.count()
         self._live_queue_reserve = max(1, min(16, config.worker_queue_size // 4))
         self._thread: threading.Thread | None = None
@@ -1327,6 +1347,16 @@ class SemanticSearchService(DisabledSemanticSearch):
         # Tokens are retained by queued/in-flight work, not by process lifetime.
         self._event_revisions: weakref.WeakValueDictionary[int, _SemanticEventRevision] = weakref.WeakValueDictionary()
         self._event_store: Any = None
+
+    @contextmanager
+    def _inference_lease(self):
+        # Acquire after _encoder_lock so queued searches do not reserve device
+        # time while waiting for another semantic request. Includes worker
+        # restart/compilation performed inside an encoder call.
+        with self._device_lease(cancel_event=self._stop):
+            if self._stop.is_set():
+                raise RuntimeError("semantic search is stopping")
+            yield
 
     def start(self, event_store: Any, storage_dir: Path, media_storage: MediaStorageRegistry | None = None) -> None:
         with self._lifecycle_lock:
@@ -1356,11 +1386,18 @@ class SemanticSearchService(DisabledSemanticSearch):
         configured_device_failures = 0
         while not self._stop.is_set():
             try:
-                encoder = IsolatedOpenVinoManifestEncoder(
-                    self.model_dir,
-                    self.manifest,
-                    target_device,
-                )
+                with self._inference_lease():
+                    encoder = IsolatedOpenVinoManifestEncoder(
+                        self.model_dir,
+                        self.manifest,
+                        target_device,
+                    )
+            except InferenceUnavailable:
+                # Contention/cancellation is not a compiler failure and must
+                # never consume GPU retries or trigger CPU fallback.
+                if self._stop.wait(0.25):
+                    return
+                continue
             except Exception as exc:
                 reason = str(exc).strip() or "semantic inference worker exited during startup"
                 if target_device == configured_device:
@@ -1592,6 +1629,16 @@ class SemanticSearchService(DisabledSemanticSearch):
                 self._error = ""
                 if priority > 0:
                     self._stop.wait(self.config.backfill_pause_seconds)
+            except InferenceUnavailable:
+                # The single consumer retains its in-flight event even when
+                # producers filled the queue while admission was waiting.
+                # At most N queued + one in-flight item existed already; this
+                # reserved retry slot preserves that bound and normal put()
+                # still limits producers to N. Original priority keeps live
+                # evidence ahead of deferred historical indexing.
+                if self._stop.wait(0.25):
+                    break
+                self._queue.retry_inflight((priority, next(self._queue_sequence), event))
             except Exception as exc:
                 self._error = str(exc)
                 LOGGER.warning("semantic indexing failed for event %s: %s", event.get("id"), exc)
@@ -1678,7 +1725,17 @@ class SemanticSearchService(DisabledSemanticSearch):
             with self._encoder_lock:
                 if self.encoder is None:
                     return 0
-                embeddings = self.encoder.encode_images(images)
+                batches = []
+                for image in images:
+                    with self._event_revision_lock:
+                        if not revision.valid:
+                            return 0
+                    # Dynamic semantic models commonly execute batch_size=1.
+                    # Yield between the cover and each crop so waiting
+                    # security work can run before another native call.
+                    with self._inference_lease():
+                        batches.append(self.encoder.encode_images([image]))
+                embeddings = np.concatenate(batches, axis=0)
             with self._event_revision_lock:
                 if not revision.valid:
                     return 0
@@ -1754,7 +1811,8 @@ class SemanticSearchService(DisabledSemanticSearch):
         with self._encoder_lock:
             if self.encoder is None:
                 raise RuntimeError(self._error or "semantic search is unavailable")
-            embedding = self.encoder.encode_images([image])
+            with self._inference_lease():
+                embedding = self.encoder.encode_images([image])
             identity = self.encoder.identity
         return self.index.search(
             embedding,
@@ -1784,7 +1842,8 @@ class SemanticSearchService(DisabledSemanticSearch):
         with self._encoder_lock:
             if self.encoder is None:
                 raise RuntimeError(self._error or "semantic search is unavailable")
-            embedding = self.encoder.encode_text(list(plan.prompts.values()))
+            with self._inference_lease():
+                embedding = self.encoder.encode_text(list(plan.prompts.values()))
             identity = self.encoder.identity
         return self.index.search(
             embedding,

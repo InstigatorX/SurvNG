@@ -15,6 +15,7 @@ import numpy as np
 
 from .appearance_index import AppearanceIndex
 from .config import ObjectTrackingConfig
+from .evidence_pixels import snapshot_has_luma_only_pixels
 from .incident_utils import event_snapshot_path
 from .inference import InferenceUnavailable
 from .main_database import connect_main_database
@@ -265,6 +266,11 @@ class DeferredAppearanceBackfill:
                 continue
             label = str(detected.get("label") or "").strip().lower()
             if not label or not self.config.reid_enabled_for_label(label):
+                continue
+            if snapshot_has_luma_only_pixels(detected):
+                # Never publish a partial/weak vector set: has_event would
+                # then prevent retry when refinement promotes a usable cover.
+                deferred_reason = "waiting for main/recorded snapshot appearance evidence"
                 continue
             box = detected.get("box")
             if not isinstance(box, dict):

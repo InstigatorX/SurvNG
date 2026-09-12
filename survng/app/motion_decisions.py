@@ -294,6 +294,7 @@ class MotionDecisionOrchestrator:
             self._events.set_active(None)
             return
         self._mark_episode_intents_running(triggers)
+        self._events.refresh_authority(triggers)
         intents = [
             intent
             for item in triggers
@@ -306,6 +307,9 @@ class MotionDecisionOrchestrator:
             for intent in intents
             for source in intent.sources
         }
+        authoritative_sources.update(
+            source for trigger in triggers for source in trigger.admitted_sources
+        )
         priority_triggers = [
             item for item in triggers if priority_motion_topic(item.topic, item.message)
         ]
@@ -346,7 +350,7 @@ class MotionDecisionOrchestrator:
             (trigger.topic, trigger.message, trigger.camera_semantics)
             for trigger in triggers
         ] + [
-            (notice.topic, notice.message, None)
+            (notice.topic, notice.message, notice.camera_semantics)
             for notice in retained_notices
         ]
         labels = self._model_labels()

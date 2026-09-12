@@ -230,6 +230,28 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _worker_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
+    """Project worker health without model paths, PIDs or raw errors."""
+    alive = bool(raw.get("worker_alive"))
+    loaded = raw.get("loaded_devices")
+    loaded = loaded if isinstance(loaded, dict) else {}
+    return {
+        "configured_device": str(raw.get("configured_device") or ""),
+        "loaded_device": str(raw.get("loaded_device") or "") if alive else "",
+        "loaded_devices": {
+            role: str(loaded.get(role) or "") if alive else ""
+            for role in ("person", "vehicle") if role in loaded
+        },
+        "alive": alive,
+        "pending_requests": int(_number(raw.get("pending_requests"))),
+        "restart_count": int(_number(raw.get("restart_count"))),
+        "crash_count": int(_number(raw.get("crash_count"))),
+        "last_exit_code": _optional_number(raw.get("last_exit_code")),
+        "fallback_active": bool(raw.get("fallback_active")),
+        "fallback_seconds_remaining": _number(raw.get("fallback_seconds_remaining")),
+    }
+
+
 def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]:
     runtime = raw.get("runtime")
     runtime = runtime if isinstance(runtime, dict) else {}
@@ -239,6 +261,21 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
     recorded_decode = raw.get("recorded_decode")
     recorded_decode = recorded_decode if isinstance(recorded_decode, dict) else {}
+    instances = isolation.get("instances")
+    instances = instances if isinstance(instances, list) else []
+    worker_instances = [
+        {"index": int(_number(item.get("index"), index + 1)), **_worker_snapshot(item)}
+        for index, item in enumerate(instances) if isinstance(item, dict)
+    ]
+    # Aggregate actual devices from every worker, not just worker zero. Empty
+    # means unknown/unloaded, not that configured GPU execution is proven.
+    loaded_devices = sorted({
+        item["loaded_device"] for item in worker_instances if item["loaded_device"]
+    })
+    if not worker_instances and (not isolation.get("enabled") or isolation.get("worker_alive")):
+        loaded_devices = [str(raw["loaded_device"])] if raw.get("loaded_device") else []
+    workers = raw.get("workers")
+    workers = workers if isinstance(workers, dict) else {}
     ready_value = raw.get("ready")
     if ready_value is None:
         ready_value = bool(
@@ -253,6 +290,8 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
         "enabled": bool(config.detector.enabled),
         "backend": str(config.detector.backend),
         "device": str(raw.get("configured_device") or config.detector.device),
+        "loaded_devices": loaded_devices,
+        "fallback_active": bool(isolation.get("fallback_active")),
         "ready": bool(ready_value),
         "runtime": {
             "queue_depth": int(_number(runtime.get("queue_depth"))),
@@ -277,6 +316,13 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
                 )
             ),
             "pending_requests": int(_number(isolation.get("pending_requests"))),
+            "restart_count": int(_number(isolation.get("restart_count"))),
+            "crash_count": int(_number(isolation.get("crash_count"))),
+            "instances": worker_instances,
+        },
+        "auxiliary_workers": {
+            role: _worker_snapshot(workers[role])
+            for role in ("face", "reid", "depth") if isinstance(workers.get(role), dict)
         },
         "recorded_decode": {
             "configured_processes": int(

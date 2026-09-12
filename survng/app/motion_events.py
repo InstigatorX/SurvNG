@@ -12,7 +12,8 @@ from enum import StrEnum
 from typing import Any, Callable, Iterable, Iterator, Protocol
 
 from .motion import MotionQualificationResult
-from .ema_v2 import MotionEpisodeController
+from .ema_v2 import CameraNotice, EpisodeDecision, MotionEpisodeController
+from .motion_trigger_authority import merge_trigger_authority
 
 StatCallback = Callable[[str], None]
 TerminalRetryCallback = Callable[["MotionTriggerBatch"], None]
@@ -25,6 +26,8 @@ class MotionTriggerStore(Protocol):
     def release_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None: ...
     def fail_motion_trigger(self, job_id: str, error: str, *, payload: dict[str, Any] | None = None, maximum_attempts: int = 5, lease_owner: str = "") -> bool | None: ...
     def motion_trigger_status(self, camera_id: str) -> dict[str, int]: ...
+    def merge_motion_trigger_authority(self, *, camera_id: str, job_id: str, lifecycle_generation: int, authority: dict[str, Any]) -> None: ...
+    def motion_trigger_authority(self, *, camera_id: str, job_id: str) -> dict[str, Any] | None: ...
 
 
 class RetryDisposition(StrEnum):
@@ -85,6 +88,7 @@ class MotionTrigger:
     evidence_capture_generation: int = 0
     delivery_job_id: str = ""
     camera_semantics: dict[str, Any] | None = None
+    admitted_sources: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.topic, str) or not self.topic.strip():
@@ -126,6 +130,11 @@ class MotionTrigger:
             raise TypeError("motion trigger lifecycle generation must be an integer")
         if not isinstance(self.delivery_job_id, str):
             raise TypeError("motion trigger delivery job ID must be a string")
+        if not isinstance(self.admitted_sources, tuple) or any(
+            source not in {"camera", "manual", "ema"}
+            for source in self.admitted_sources
+        ):
+            raise TypeError("motion trigger admitted sources are invalid")
         if self.camera_semantics is not None and not isinstance(
             self.camera_semantics, dict
         ):
@@ -183,6 +192,7 @@ class MotionTrigger:
             "evidence_frame_sequence": self.evidence_frame_sequence,
             "evidence_capture_generation": self.evidence_capture_generation,
             "camera_semantics": self.camera_semantics,
+            "admitted_sources": list(self.admitted_sources),
         }
 
     @classmethod
@@ -243,6 +253,7 @@ class MotionTrigger:
                 if isinstance(payload.get("camera_semantics"), dict)
                 else None
             ),
+            admitted_sources=tuple(payload.get("admitted_sources") or ()),
             delivery_job_id=job_id,
         )
 
@@ -301,6 +312,9 @@ class MotionEventCoordinator:
         self.episode_controller = MotionEpisodeController(camera_id)
         self.camera_id = camera_id
         self.durable_store = durable_store
+        # Order camera merges against initial persistence. A merge before the
+        # row exists is captured by enqueue; a later merge updates that row.
+        self._authority_lock = threading.RLock()
         self._lease_owner = uuid.uuid4().hex
         self._retry_limit = retry_limit
         self._lock = threading.RLock()
@@ -316,6 +330,60 @@ class MotionEventCoordinator:
             "durable_deferred": 0,
         }
 
+    def _intent_authority(self, intent_id: str) -> dict[str, Any]:
+        intent = self.episode_controller.intent(intent_id)
+        if intent is None:
+            return {}
+        return {
+            "admitted_sources": [source.value for source in intent.sources],
+            "camera_semantics": (
+                intent.camera_notice.camera_semantics
+                if intent.camera_notice is not None else None
+            ),
+        }
+
+    @staticmethod
+    def _apply_authority(trigger: MotionTrigger, authority: dict[str, Any]) -> None:
+        merged = merge_trigger_authority({
+            "admitted_sources": trigger.admitted_sources,
+            "camera_semantics": trigger.camera_semantics,
+        }, authority)
+        trigger.admitted_sources = tuple(merged["admitted_sources"])
+        trigger.camera_semantics = merged.get("camera_semantics")
+
+    def observe_camera(self, notice: CameraNotice, *, generation: int) -> EpisodeDecision:
+        """Keep merged camera authority durable before returning from ingress."""
+        with self._authority_lock:
+            decision = self.episode_controller.observe_camera(notice, generation=generation)
+            intent = decision.intent
+            if intent is not None and self.durable_store is not None:
+                self.durable_store.merge_motion_trigger_authority(
+                    camera_id=self.camera_id,
+                    job_id=intent.intent_id,
+                    lifecycle_generation=intent.generation,
+                    authority=self._intent_authority(intent.intent_id),
+                )
+            return decision
+
+    def refresh_authority(self, triggers: MotionTriggerBatch) -> None:
+        """Snapshot source authority at decision start, including late merges.
+
+        Processing does not hold this lock during inference. Later ingress can
+        still enrich durable authority for a retry, and stale checkpoints must
+        merge it atomically instead of replacing it.
+        """
+        with self._authority_lock:
+            for trigger in triggers:
+                self._apply_authority(
+                    trigger, self._intent_authority(trigger.detection_intent_id)
+                )
+                if self.durable_store is not None and trigger.delivery_job_id:
+                    authority = self.durable_store.motion_trigger_authority(
+                        camera_id=self.camera_id, job_id=trigger.delivery_job_id
+                    )
+                    if authority is not None:
+                        self._apply_authority(trigger, authority)
+
     def enqueue(
         self,
         trigger: MotionTrigger,
@@ -328,18 +396,18 @@ class MotionEventCoordinator:
             raise TypeError("motion coordinator accepts only MotionTrigger values")
         if on_trigger is not None:
             on_trigger("triggers")
-        if self.durable_store is not None and not trigger.delivery_job_id:
-            trigger.delivery_job_id = trigger.detection_intent_id or uuid.uuid4().hex
-            inserted = self.durable_store.enqueue_motion_trigger(
-                job_id=trigger.delivery_job_id,
-                camera_id=self.camera_id,
-                payload=trigger.durable_payload(),
-            )
-            if not inserted:
-                # The durable record is already queued or running.  Adding a
-                # second in-memory wake for it lets this worker reclaim its
-                # own lease while the first delivery is still active.
-                return True
+        with self._authority_lock:
+            self._apply_authority(trigger, self._intent_authority(trigger.detection_intent_id))
+            if self.durable_store is not None and not trigger.delivery_job_id:
+                trigger.delivery_job_id = trigger.detection_intent_id or uuid.uuid4().hex
+                inserted = self.durable_store.enqueue_motion_trigger(
+                    job_id=trigger.delivery_job_id,
+                    camera_id=self.camera_id,
+                    payload=trigger.durable_payload(),
+                )
+                if not inserted:
+                    # The durable record already owns delivery of this intent.
+                    return True
         try:
             self.queue.put_nowait(trigger)
             self._record_enqueue()

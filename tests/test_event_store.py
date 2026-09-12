@@ -411,7 +411,7 @@ class EventStoreTest(unittest.TestCase):
 
                 def execute(self, sql, parameters=()):
                     result = self.connection.execute(sql, parameters)
-                    if sql.startswith("select attempts from motion_trigger_jobs"):
+                    if sql.startswith("select attempts, payload_json from motion_trigger_jobs"):
                         selected.set()
                         assert release.wait(1.0)
                     return result

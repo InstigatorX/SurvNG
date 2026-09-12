@@ -302,6 +302,7 @@ class CameraNotice:
     topic: str
     message: str = ""
     manual: bool = False
+    camera_semantics: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

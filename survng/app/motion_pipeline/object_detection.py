@@ -2825,7 +2825,10 @@ class RecordedMotionObjectDetector:
                 "0:v:0",
                 "-an",
                 "-vf",
-                f"{filter_prefix}select={expression},showinfo@event_sample",
+                # Select by decoded PTS while frames are still on the device;
+                # only selected evidence needs downloading to CPU/BGR. Keep
+                # showinfo after conversion so it describes returned pixels.
+                f"select={expression},{filter_prefix}showinfo@event_sample",
                 "-fps_mode",
                 "passthrough",
                 "-frames:v",

@@ -96,6 +96,7 @@ class InferenceLifecycle:
                 semantic_config,
                 semantic_index,
             )
+            semantic_search.set_device_lease(self.detector.offline_device_lease)
             self.tracking_limiter = self._build_limiter(config)
             self.tracking_factory = self._build_tracking_factory(
                 config,
@@ -408,6 +409,7 @@ class InferenceLifecycle:
         with self._lock:
             self._ensure_open()
             replacement = build_semantic_search(config, self.semantic_index)
+            replacement.set_device_lease(self.detector.offline_device_lease)
             try:
                 if self._auxiliary_started:
                     replacement.start(self.events, self.storage_dir)

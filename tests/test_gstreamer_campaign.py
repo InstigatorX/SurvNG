@@ -39,16 +39,22 @@ def test_virtual_device_compilation_scopes_thread_limit_to_gpu(device):
     assert ("NUM_STREAMS" in settings) == (device != "AUTO")
 
 
-@pytest.mark.parametrize("live_seed", [True, False])
-def test_tracking_seed_respects_live_provenance_and_consumes_inference_once(monkeypatch, live_seed):
+@pytest.mark.parametrize("source,promoted", [
+    ("live_fast_path", False), ("live_fallback", False),
+    ("recorded_main", False), ("live_fast_path", True),
+])
+def test_tracking_seed_respects_live_provenance_and_consumes_inference_once(monkeypatch, source, promoted):
     epoch = 1000.0
     obj = {"label": "person", "confidence": .9,
            "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 80},
            "incident_eligible": True}
     seed = dict(obj)
-    if live_seed:
+    seed["frame_source"] = source
+    if source == "live_fast_path":
         seed.update(frame_source="live_fast_path", live_detection_session="s",
                     live_inference_sequence=1, live_detection_source_pts=epoch)
+    if promoted:
+        seed["snapshot_source"] = "recorded_main"
     timeline = _service(capture=SimpleNamespace(matched_snapshot=lambda *_a, **_k: None))
     for index in range(1, 7):
         result = snapshot(epoch if index == 1 else epoch + index / 2, index, [obj])
@@ -74,8 +80,9 @@ def test_tracking_seed_respects_live_provenance_and_consumes_inference_once(monk
     finally:
         session.stop()
     assert updates[-1]["completion_reason"] == "tracking_window_complete"
-    assert updates[-1]["frames_processed"] == (5 if live_seed else 6)
-    assert appearances.call_count == covers.call_count == (0 if live_seed else 1)
+    assert updates[-1]["frames_processed"] == (5 if source == "live_fast_path" else 6)
+    luma_seed = source in {"live_fast_path", "live_fallback"} and not promoted
+    assert appearances.call_count == covers.call_count == (0 if luma_seed else 1)
     detector.detect.assert_not_called()
 
 
