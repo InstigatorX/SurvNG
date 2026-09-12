@@ -1,4 +1,4 @@
-"""Dependency-free one-to-one assignment for offline tracking evaluation."""
+"""Dependency-free one-to-one assignment for SurvNG tracking."""
 
 from __future__ import annotations
 

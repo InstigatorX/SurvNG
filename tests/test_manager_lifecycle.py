@@ -95,6 +95,16 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_shutdown_closes_shared_capture_after_camera_workers(self) -> None:
+        manager = manager_with_mocks()
+        order = []
+        manager.capture_backend = Mock()
+        manager.workers["gate"].wait_stopped.side_effect = lambda *_args, **_kwargs: order.append("camera") or True
+        manager.capture_backend.close.side_effect = lambda: order.append("capture")
+        manager.stop_all()
+        manager.capture_backend.close.assert_called_once_with()
+        self.assertLess(order.index("camera"), order.index("capture"))
+
     def test_restart_reconstructs_unexpired_route_watch_from_incident_store(self) -> None:
         now = datetime.now(timezone.utc)
         manager = object.__new__(AppManager)

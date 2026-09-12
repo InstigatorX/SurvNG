@@ -78,13 +78,15 @@ with an ad-hoc Dockerfile or `docker commit`.
 
 Pushing to a release branch (`v1.0`, `v1.1`, or `v1.2`) or a version tag such as
 `v1.2.0` runs `.github/workflows/docker-publish.yml` on the self-hosted runner
-and publishes all Dockerfile targets to GHCR:
+and publishes all Dockerfile targets to GHCR. Pushing to `gstreamer` publishes
+only the Intel runtime.
 
 | Image | When | Target |
 | --- | --- | --- |
 | `ghcr.io/instigatorx/survng:v1.2` | Every push to `v1.2` | `runtime` (CPU tip) |
 | `ghcr.io/instigatorx/survng:v1.2-intel` | Every push to `v1.2` | `runtime-intel` tip |
 | `ghcr.io/instigatorx/survng:v1.2-model-installer` | Every push to `v1.2` | `model-installer` tip |
+| `ghcr.io/instigatorx/survng:gstreamer-intel` | Every push to `gstreamer` | `runtime-intel` tip |
 | `ghcr.io/instigatorx/survng:sha-<7chars>` | Every push to a release branch | Immutable CPU commit |
 | `ghcr.io/instigatorx/survng:sha-<7chars>-intel` | Every push to a release branch | Immutable Intel commit |
 | `ghcr.io/instigatorx/survng:sha-<7chars>-model-installer` | Every push to a release branch | Immutable model-installer commit |
@@ -111,14 +113,20 @@ Each publish builds three large targets sequentially, but CI and prior builds
 still accumulate Docker layer cache, old images, and tool caches under the runner
 account.
 
-SurvNG automates cleanup in three layers:
+SurvNG automates cleanup in four layers:
 
-1. **Per job** — `scripts/github-runner-cleanup.sh` runs before Docker publish
-   and lightly before/after CI tests.
-2. **Nightly** — `.github/workflows/runner-maintenance.yml` runs at 05:00 UTC
+1. **Per publish job** — `scripts/github-runner-cleanup.sh --publish` reclaims
+   dangling images and containers only. It does not wipe the Docker build
+   cache. Sequential `v1.2` matrix targets keep the moving tip locally so
+   `runtime-intel` can reuse `runtime-base`. Do not `--cache-from` a pulled
+   GHCR image on the legacy builder; that restore fails on this multi-stage
+   Dockerfile.
+2. **Per CI test job** — `--light` cleanup before/after focused tests.
+3. **Nightly** — `.github/workflows/runner-maintenance.yml` runs at 05:00 UTC
    with `--standard` cleanup (build cache, images older than 24h, npm/pip cache).
-3. **Auto-escalation** — when root filesystem free space drops below 15%, the
-   script escalates to a stronger mode automatically.
+4. **Auto-escalation** — when root filesystem free space drops below 15%,
+   `--light` and `--standard` escalate to a stronger mode. `--publish` never
+   escalates to a cache wipe.
 
 Manual cleanup on the runner host (or via **Actions → Runner maintenance → Run
 workflow**):

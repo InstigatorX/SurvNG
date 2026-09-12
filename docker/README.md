@@ -19,9 +19,10 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `compose.lxc.yaml` | Explicit AppArmor compatibility override for nested Docker |
 | `.env.example` | Non-secret host path, identity, timezone, and GPU group settings |
 | `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
+| `scripts/docker-publish-image.sh` | GHCR publish helper: keep the moving tip locally for layer cache |
 | `scripts/install-docker-models.sh` | Download detector/ReID/Smart Search models and patch `config.json` (uses `survng-model-installer` container by default) |
 | `Dockerfile.model-installer` | One-shot installer image published as `ghcr.io/.../survng:v1.2-model-installer` |
-| `.github/workflows/docker-publish.yml` | Build and push all image targets to GHCR on release-branch commits and `v*` tags |
+| `.github/workflows/docker-publish.yml` | Build and push image targets to GHCR on release-branch commits and `v*` tags; `gstreamer` publishes only `runtime-intel` |
 | `docker/config.example.json` | Camera-free initial configuration |
 | `docker/go2rtc.example.yaml` | Seeded go2rtc config for the bundled restreamer |
 
@@ -97,6 +98,21 @@ The standalone `scripts/install-face-model.sh` remains for native checkouts.
 
 ## Build
 
+The Intel image keeps OS/GPU packages, Python requirements, frontend dependencies,
+and application code in separate stages. Code or commit-only rebuilds reuse the
+dependency layers; changing Python requirements does not reinstall Intel packages.
+CI retains the self-hosted runner's local multi-stage cache (no registry cache
+restore on its legacy builder). Publish/test jobs only prune stopped containers;
+nightly light maintenance expires unused cache after seven days, with stronger
+cleanup reserved for disk pressure or an explicit maintenance request.
+
+Before pushing either GStreamer image tag, CI runs the native CPU smoke test
+inside the **built SurvNG image**, as an unprivileged user with a read-only root,
+temporary scratch space, and no network or GPU. A failure blocks publication.
+This checks packaging and metadata delivery, not recognition accuracy or GPU
+qualification. DL Streamer's isolated child includes both the APT `/opt/opencv`
+dependency layout and Intel's nested bundle layout in its startup library path.
+
 On a normal Docker host, build the Intel image with:
 
 ```bash
@@ -123,12 +139,28 @@ is not privileged.
 Both image targets install FFmpeg **8.1.2** from `ppa:ubuntuhandbook1/ffmpeg8`
 (`ffmpeg=10:8.1.2-0build1~ubuntu24.04`), held so apt cannot silently roll back
 to Noble's 6.1 package. Override `FFMPEG_VERSION` at build time only when
-intentionally qualifying a new build.
+intentionally qualifying a new build. FFmpeg remains the recorder, exporter,
+and recorded-evidence decoder. Live camera capture does not use it.
 
 ```bash
 docker exec survng ffmpeg -version | head -1
 docker exec survng ffmpeg -hide_banner -hwaccels
 ```
+
+### Live capture (GStreamer / DL Streamer)
+
+Live tiles, motion qualification, MJPEG, and tracking frames come from an
+isolated `python -m survng.dlstreamer_live` child. The camera URL is passed on
+stdin. Both image targets include GStreamer; the Intel target also installs
+`intel-dlstreamer` so `gvadetect` can run on VAMemory with `pre-process-backend=va`.
+
+```bash
+docker exec survng gst-inspect-1.0 vah264dec
+docker exec survng gst-inspect-1.0 gvadetect
+```
+
+There is no FFmpeg live-capture fallback. If the child dies, that camera
+reconnects the same pipeline.
 
 ### go2rtc
 
@@ -151,9 +183,12 @@ docker exec survng wget -qO- http://127.0.0.1:1984/api/streams || true
 
 ### Intel GPU userspace
 
-The Intel target uses Ubuntu 24.04 and pins the GPU userspace versions verified
-on the prototype host: Intel compute runtime **26.31.39395.13**, IGC **2.40.13**,
-Level Zero **1.32.0**, media driver **26.3.2**, and oneVPL **2.16**. The kernel
+The Intel target uses Ubuntu 24.04 and pins the GPU userspace versions available
+from the Noble Intel graphics PPA on 2026-09-12: compute runtime
+**26.31.39395.13**, IGC **2.40.13**, GMM **22.10.1**, Level Zero **1.32.0**,
+media driver **26.3.2**, and oneVPL **2.16**. The previous prototype pins were
+superseded in that rolling repository; the refreshed stack still needs GPU
+qualification on the test host. The kernel
 driver still comes from the Docker host through `/dev/dri`; it is never installed
 in the image. Update the version build arguments together and rebuild when
 intentionally qualifying a new Intel stack.

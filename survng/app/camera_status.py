@@ -224,6 +224,11 @@ class CameraStatusService:
             "last_error": capture["last_error"],
             "main_last_error": capture["main_error"],
             "capture_stats": capture["capture_stats"],
+            "live_pipeline": dict(capture.get("live_pipeline") or {}),
+            "live_detection_matching": dict(capture.get("live_detection_matching") or {}),
+            "live_detections": [
+                dict(item) for item in capture.get("live_detections") or ()
+            ],
             "stream_dimensions": capture["stream_dimensions"],
             "onvif_enabled": self.camera.onvif.enabled,
             "onvif_connected": self.onvif.connected,

@@ -1,0 +1,45 @@
+# Standalone project: never combine with compose.yaml or its production mounts.
+name: survng-gstreamer-test
+
+services:
+  smoke:
+    image: intel/dlstreamer:2026.2.0-ubuntu24@sha256:3848efe52c047cf6b5961eb070deaf9eca53bd5328f0d819fbb68ad56c65fb19
+    network_mode: none
+    cpus: 2
+    mem_limit: 2g
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    working_dir: /work
+    volumes:
+      - .:/work:ro
+    entrypoint: [/bin/bash, -lc]
+    command: 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$$PYTHONPATH python3 scripts/gstreamer-smoke.py'
+
+  app:
+    profiles: [app]
+    build:
+      context: .
+      target: runtime-intel
+    image: survng:gstreamer-test
+    restart: "no"
+    stop_grace_period: 60s
+    cpus: 4
+    mem_limit: 6g
+    ports:
+      - "127.0.0.1:18088:8088"
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      TZ: America/New_York
+      SURVNG_CONFIG_PATH: /config/config.json
+      SURVNG_UID: ${GSTREAMER_TEST_UID:-1000}
+      SURVNG_GID: ${GSTREAMER_TEST_GID:-1000}
+      SURVNG_VIDEO_GID: ${GSTREAMER_TEST_VIDEO_GID:-44}
+      SURVNG_RENDER_GID: ${GSTREAMER_TEST_RENDER_GID:-993}
+      SURVNG_OBSERVABILITY_SOCKET: /data/observability.sock
+    volumes:
+      - ./docker-data/gstreamer-test/config:/config
+      - ./docker-data/gstreamer-test/data:/data
+      - ./docker-data/gstreamer-test/media:/media
+      - ./docker-data/gstreamer-test/models:/models:ro
+    security_opt: [no-new-privileges:true]

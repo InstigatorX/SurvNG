@@ -177,6 +177,8 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
     alignment = raw.get("spatial_alignment")
     alignment = alignment if isinstance(alignment, dict) else {}
+    matching = raw.get("live_detection_matching")
+    matching = matching if isinstance(matching, dict) else {}
     return {
         "id": str(raw.get("id") or ""),
         "name": str(raw.get("name") or ""),
@@ -191,6 +193,13 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "onvif_connected": bool(raw.get("onvif_connected")),
         "lifecycle_generation": _optional_number(lifecycle.get("generation")),
         "motion": _motion_snapshot(raw.get("motion_qualification"), tracking),
+        "live_detection_matching": {
+            "lag_seconds": _optional_number(matching.get("lag_seconds")),
+            **{key: _number(matching.get(key)) for key in (
+                "history_size", "snapshots", "empty_snapshots", "matched", "unmatched",
+                "stale", "wrong_session", "invalid_pts", "out_of_order", "resets",
+            )},
+        },
         "spatial_alignment": {
             "mode": str(alignment.get("mode") or "untrusted"),
             "reliable": bool(alignment.get("reliable")),

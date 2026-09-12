@@ -34,6 +34,7 @@ from .types import (
     CatchupFrameProvider,
     FrameProvider,
     FrameSample,
+    TrackingFrame,
     ObjectDetectorBackend,
     TrackingCoverFrameProvider,
     TrackingCoverPromoter,
@@ -41,6 +42,7 @@ from .types import (
     TrackingSnapshotWriter,
     TrackingUpdate,
     TrackingFrameBatch,
+    LiveDetectionsProvider,
 )
 
 LOGGER = logging.getLogger("survng.app.object_tracking")
@@ -131,6 +133,7 @@ class ObjectTrackingSession:
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
         cover_promoter: TrackingCoverPromoter | None = None,
+        live_detections_provider: LiveDetectionsProvider | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -156,6 +159,7 @@ class ObjectTrackingSession:
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
         self.cover_promoter = cover_promoter
+        self.live_detections_provider = live_detections_provider
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -264,6 +268,22 @@ class ObjectTrackingSession:
         )
         apply_depth_zone_filters(self.camera, enriched)
         return enriched
+
+    def _tracking_detections_for_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        catchup: bool,
+        evidence: TrackingFrame | None = None,
+    ) -> list[dict[str, Any]]:
+        """Matched live frames reuse gvadetect; main/catch-up run OpenVINO."""
+        if not catchup and evidence is not None and evidence.captured.source == "live":
+            return evidence.detection.scaled_objects(frame.shape[1], frame.shape[0]) if evidence.detection else []
+        return _detect_tracking_objects(
+            self.detector,
+            frame,
+            self.config.low_confidence_threshold,
+        )
 
     def start(
         self,
@@ -921,6 +941,7 @@ class ObjectTrackingSession:
                 if item.get("track_id") is not None
             }
             consecutive_failures = 0
+            last_sidecar_identity = None
 
             def interval() -> float:
                 return 1.0 / max(0.01, self._effective_sample_fps)
@@ -931,20 +952,26 @@ class ObjectTrackingSession:
                 *,
                 catchup: bool,
                 frame_reference: VideoFrameReference | None = None,
+                evidence: TrackingFrame | None = None,
             ) -> bool:
                 nonlocal consecutive_failures, frames_processed
                 nonlocal last_persisted_at, latest_tracked_objects
                 nonlocal stable_frames, track_states
+                nonlocal last_sidecar_identity
+                if evidence is not None and evidence.captured.source == "live":
+                    snapshot = evidence.detection
+                    if snapshot is None:
+                        return False
+                    identity = (snapshot.session, snapshot.inference_sequence)
+                    if identity == last_sidecar_identity:
+                        return False
+                    last_sidecar_identity = identity
                 source_height = int(frame.shape[0])
                 source_width = int(frame.shape[1])
                 if self._frame_width <= 0 or self._frame_height <= 0:
                     self._frame_width = source_width
                     self._frame_height = source_height
-                objects = _detect_tracking_objects(
-                    self.detector,
-                    frame,
-                    self.config.low_confidence_threshold,
-                )
+                objects = self._tracking_detections_for_frame(frame, catchup=catchup, evidence=evidence)
                 if _inference_deferred(objects):
                     return False
                 failure = detection_failure(objects)
@@ -967,16 +994,14 @@ class ObjectTrackingSession:
                     float(self.detector.config.confidence_threshold),
                     bool(getattr(self.detector.config, "require_incident_zone", True)),
                 )
-                objects = self._enrich_tracking_depth(
-                    frame,
-                    objects,
-                    frame_offset_s=sample_epoch - event_at.timestamp(),
-                )
-                self._annotate_appearances(
-                    frame,
-                    objects,
-                    lazy=self.config.implementation == "survng_hybrid",
-                )
+                color_evidence = evidence is None or evidence.captured.source == "main"
+                if color_evidence:
+                    objects = self._enrich_tracking_depth(
+                        frame, objects, frame_offset_s=sample_epoch - event_at.timestamp(),
+                    )
+                    self._annotate_appearances(
+                        frame, objects, lazy=self.config.implementation == "survng_hybrid",
+                    )
                 _rescale_detection_boxes(
                     objects,
                     source_width,
@@ -1014,13 +1039,10 @@ class ObjectTrackingSession:
                     stable_frames=stable_frames,
                 )
                 track_states = next_track_states
-                self._consider_cover_candidate(
-                    frame,
-                    sample_epoch,
-                    tracked,
-                    primary_track_ids,
-                    frame_reference,
-                )
+                if color_evidence:
+                    self._consider_cover_candidate(
+                        frame, sample_epoch, tracked, primary_track_ids, frame_reference,
+                    )
                 self._last_analyzed_epoch = sample_epoch
                 frames_processed += 1
                 if catchup:
@@ -1136,6 +1158,7 @@ class ObjectTrackingSession:
                 self._maximum_coverage_gap_seconds = max(
                     self._maximum_coverage_gap_seconds, gap,
                 )
+
                 self._completion_reason = (
                     self._coverage_interruption or "missing_media_while_object_active"
                 )
@@ -1146,7 +1169,7 @@ class ObjectTrackingSession:
 
             stalled_since: float | None = None
             last_frame_token: float | None = None
-            pending_live: FrameSample | None = None
+            pending_live: FrameSample | TrackingFrame | None = None
             while not stop.is_set():
                 if not tracker.has_live_tracks(captured_at):
                     self._completion_reason = (
@@ -1209,7 +1232,16 @@ class ObjectTrackingSession:
                     )
                     break
                 if sample is not None:
-                    frame, sample_epoch, frame_token = sample
+                    evidence = sample if isinstance(sample, TrackingFrame) else None
+                    if evidence is not None:
+                        captured = evidence.captured
+                        frame = captured.image
+                        sample_epoch = captured.captured_at_epoch
+                        frame_token = captured.captured_at_monotonic
+                        if frame.ndim == 2:
+                            frame = np.repeat(frame[:, :, None], 3, axis=2)
+                    else:
+                        frame, sample_epoch, frame_token = sample
                     gap = sample_epoch - captured_at
                     allowed_gap = continuity_interval if has_recorded_provider else max(
                         self.config.lost_timeout_seconds, 1.5 * interval(),
@@ -1237,12 +1269,20 @@ class ObjectTrackingSession:
                         if time.monotonic() >= self._deadline:
                             self._completion_reason = "processing_budget_exhausted"
                             break
-                        if process_frame(frame, sample_epoch, catchup=False):
+                        if process_frame(frame, sample_epoch, catchup=False, evidence=evidence):
                             captured_at = sample_epoch
                             last_frame_token = frame_token
                             pending_live = None
                             catchup_deferred = False
                             stalled_since = None
+                            stop.wait(interval())
+                            continue
+                        if evidence is not None and evidence.captured.source == "live":
+                            # Missing/already-consumed sidecars are not deferred
+                            # inference. Fetch a newer matched frame next tick;
+                            # retrying this immutable sample would pin it forever.
+                            pending_live = None
+                            catchup_deferred = False
                             stop.wait(interval())
                             continue
                         pending_live = sample
@@ -1730,6 +1770,7 @@ class ObjectTrackingSessionFactory:
         catchup_frame_provider: CatchupFrameProvider | None = None,
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
+        live_detections_provider: LiveDetectionsProvider | None = None,
     ) -> ObjectTrackingSession:
         return ObjectTrackingSession(
             camera=camera,
@@ -1746,4 +1787,5 @@ class ObjectTrackingSessionFactory:
             cover_frame_provider=cover_frame_provider,
             snapshot_writer=snapshot_writer,
             cover_promoter=self.cover_promoter,
+            live_detections_provider=live_detections_provider,
         )

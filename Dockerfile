@@ -35,9 +35,18 @@ RUN chmod 755 /usr/local/bin/add-apt-ppa-retry \
         openssl \
         procps \
         python3 \
+        python3-gi \
+        python3-numpy \
         python3-venv \
         software-properties-common \
         tini \
+        gir1.2-gst-plugins-base-1.0 \
+        gir1.2-gstreamer-1.0 \
+        gstreamer1.0-libav \
+        gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-tools \
     && /usr/local/bin/add-apt-ppa-retry ppa:ubuntuhandbook1/ffmpeg8 \
     && apt-get update \
     && apt-get install -y --no-install-recommends "ffmpeg=${FFMPEG_VERSION}" \
@@ -57,23 +66,6 @@ RUN chmod 755 /usr/local/bin/add-apt-ppa-retry \
     && python3 -m venv /opt/survng-venv
 
 WORKDIR /app
-ARG SURVNG_GIT_SHA=
-ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
-
-COPY survng/ ./survng/
-COPY docs/ ./docs/
-COPY config.example.json /usr/share/survng/config.example.json
-COPY docker/config.example.json /usr/share/survng/config.docker.example.json
-COPY docker/go2rtc.example.yaml /usr/share/survng/go2rtc.example.yaml
-COPY docker/entrypoint.sh /usr/local/bin/survng-entrypoint
-COPY docker/healthcheck.py /usr/local/bin/survng-healthcheck
-RUN chmod 755 /usr/local/bin/survng-entrypoint /usr/local/bin/survng-healthcheck
-COPY --from=frontend /build/survng/static/ ./survng/static/
-RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi
-
 RUN mkdir -p /config /data /models \
     && chown survng:survng /config /data /models
 
@@ -85,17 +77,30 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/survng-entrypoint"]
 CMD ["python", "-m", "survng.app", "--host", "0.0.0.0", "--port", "8088", "--loop", "asyncio", "--timeout-graceful-shutdown", "45"]
 
+# Independent dependency stages: app/UI/SHA changes must not reinstall Intel
+# packages, and Python requirement changes must not invalidate GPU userspace.
+FROM runtime-base AS python-deps
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
 # Optional Intel OpenVINO GPU and VA-API/QSV userspace. Select this target with
 # docker compose -f compose.yaml -f compose.intel-gpu.yaml up -d --build.
-# Pins match the prototype Noble + kobuk-team/intel-graphics stack.
-FROM runtime-base AS runtime-intel
+# Pins match the Noble kobuk-team/intel-graphics repository on 2026-09-12.
+# Refresh this set together: compute requires IGC >= 2.40.13, media GMM >= 22.10.1.
+FROM runtime-base AS intel-deps
 USER root
+# 2026.1's native OpenVINO GPU produces NaN scores for YOLO26 FP16.
+# Upgrade the matched native bundle; upgrading the app's pip wheel is not enough.
+ARG DLSTREAMER_VERSION=2026.2.0
 ARG INTEL_COMPUTE_VERSION=26.31.39395.13-1~24.04~ppa1
 ARG INTEL_IGC_VERSION=2.40.13+ds1-1~24.04
 ARG INTEL_GMMLIB_VERSION=22.10.1-1~24.04~ppa1
 ARG INTEL_LEVEL_ZERO_VERSION=1.32.0-1~24.04~ppa1
 ARG INTEL_MEDIA_VERSION=26.3.2-1~24.04~ppa1
 ARG INTEL_VPL_VERSION=1:2.16.0-1~24.04~ppa1
+ENV LIBVA_DRIVER_NAME=iHD \
+    GST_VA_ALL_DRIVERS=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         software-properties-common \
@@ -112,6 +117,8 @@ RUN apt-get update \
         "libze-intel-gpu1=${INTEL_COMPUTE_VERSION}" \
         "libze1=${INTEL_LEVEL_ZERO_VERSION}" \
         ocl-icd-libopencl1 \
+        curl \
+        gnupg \
     && apt-mark hold \
         intel-media-va-driver-non-free \
         intel-opencl-icd \
@@ -122,7 +129,51 @@ RUN apt-get update \
         libvpl2 \
         libze-intel-gpu1 \
         libze1 \
-    && apt-get purge -y --auto-remove software-properties-common \
+    && curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+        | gpg --dearmor > /usr/share/keyrings/intel-gpg-archive-keyring.gpg \
+    && curl -fsSL https://apt.repos.intel.com/edgeai/dlstreamer/GPG-PUB-KEY-INTEL-DLS.gpg \
+        > /usr/share/keyrings/dls-archive-keyring.gpg \
+    && printf '%s\n' \
+        "deb [signed-by=/usr/share/keyrings/dls-archive-keyring.gpg] https://apt.repos.intel.com/edgeai/dlstreamer/ubuntu24 ubuntu24 main" \
+        > /etc/apt/sources.list.d/intel-dlstreamer.list \
+    && printf '%s\n' \
+        "deb [signed-by=/usr/share/keyrings/intel-gpg-archive-keyring.gpg] https://apt.repos.intel.com/openvino ubuntu24 main" \
+        > /etc/apt/sources.list.d/intel-openvino.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "intel-dlstreamer=${DLSTREAMER_VERSION}" \
+    && apt-mark hold intel-dlstreamer \
+    && apt-get purge -y --auto-remove software-properties-common curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
+FROM runtime-base AS application
+COPY requirements.txt ./
+COPY survng/ ./survng/
+COPY docs/ ./docs/
+COPY scripts/gstreamer-smoke.py ./scripts/gstreamer-smoke.py
+COPY scripts/gstreamer-model-check.py ./scripts/gstreamer-model-check.py
+COPY config.example.json /usr/share/survng/config.example.json
+COPY docker/config.example.json /usr/share/survng/config.docker.example.json
+COPY docker/go2rtc.example.yaml /usr/share/survng/go2rtc.example.yaml
+COPY docker/entrypoint.sh /usr/local/bin/survng-entrypoint
+COPY docker/healthcheck.py /usr/local/bin/survng-healthcheck
+RUN chmod 755 /usr/local/bin/survng-entrypoint /usr/local/bin/survng-healthcheck
+COPY --from=frontend /build/survng/static/ ./survng/static/
+
+FROM intel-deps AS runtime-intel
+COPY --from=python-deps /opt/survng-venv /opt/survng-venv
+COPY --from=application /app /app
+COPY --from=application /usr/share/survng /usr/share/survng
+COPY --from=application /usr/local/bin/survng-entrypoint /usr/local/bin/survng-healthcheck /usr/local/bin/
+# Stamp only the final image, after every dependency and application layer.
+ARG SURVNG_GIT_SHA=
+ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA
+RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi
+
 FROM runtime-base AS runtime
+COPY --from=python-deps /opt/survng-venv /opt/survng-venv
+COPY --from=application /app /app
+COPY --from=application /usr/share/survng /usr/share/survng
+COPY --from=application /usr/local/bin/survng-entrypoint /usr/local/bin/survng-healthcheck /usr/local/bin/
+ARG SURVNG_GIT_SHA=
+ENV SURVNG_GIT_SHA=$SURVNG_GIT_SHA
+RUN if [ -n "$SURVNG_GIT_SHA" ]; then printf '%s\n' "$SURVNG_GIT_SHA" > /app/SURVNG_GIT_SHA; fi

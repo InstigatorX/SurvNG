@@ -156,6 +156,7 @@ class DepthConfigTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertEqual(config.input_size, 768)
         self.assertEqual(config.max_distance_m, 150.0)
+        self.assertEqual(config.device, "CPU")
 
     def test_depth_ranges_must_not_be_inverted(self) -> None:
         from pydantic import ValidationError

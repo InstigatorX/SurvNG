@@ -5,7 +5,7 @@ describes the implementation currently in the repository, not an aspirational
 design. Update it whenever ingest, recording, motion qualification, inference,
 incident generation, media storage, or browser playback behavior changes.
 
-Last reviewed: 2026-08-24
+Last reviewed: 2026-09-02
 
 ## Motion Pipeline Migration
 
@@ -96,7 +96,7 @@ Camera
   |                                                          v
   |                                                  OpenVINO detection
   |                                                          |
-  +-- live/substream --> FFmpeg capture --> grayscale ring    |
+  +-- live/substream --> DL Streamer live --> grayscale ring  |
   |                            |                    |          |
   |                            |             motion qualifier  |
   |                            |                    |          |
@@ -137,7 +137,7 @@ URLs are normalized by configuration before workers start (`video_backend` is
 always URL-backed).
 
 Process startup uses a camera-level admission coordinator instead of launching
-every FFmpeg capture, ONVIF listener, and recorder at once. By default, two
+every live capture process, ONVIF listener, and recorder at once. By default, two
 cameras enter startup concurrently. Each camera gets a bounded first-frame
 window; a camera that misses it is marked degraded and keeps reconnecting in
 its capture worker while the coordinator advances to the next camera. Capture,
@@ -152,7 +152,7 @@ through core service construction and persistence, then expose the same
 progressive camera admission rather than blocking the configuration request on
 unavailable feeds.
 
-The configured camera concurrency is also the shared external FFmpeg-open limit,
+The configured camera concurrency is also the shared live-capture open limit,
 so a simultaneous reconnect after a network interruption cannot bypass startup
 admission and create a second connection storm. Before admission begins,
 orphaned recorder processes are terminated concurrently within one cleanup
@@ -167,13 +167,35 @@ paths.
 | Camera tiles | `live` | Faster startup and lower browser/network cost |
 | Full-screen live view | `main` | Highest available detail |
 | Motion qualification | `live` | Low-cost temporal analysis |
-| Object detection | Recorded `main` | High-resolution evidence near event time |
+| Object detection | Live GVA boxes, then recorded `main` | Fast admission from the capture sidecar; high-resolution evidence near event time |
 | Main recording | `main` | Archival quality |
 | Optional sub recording | `live` | Fast mobile playback and alternate view |
 
 ## 2. Live Capture And Browser Delivery
 
-`CameraCaptureService` keeps the live source open through external FFmpeg. A successful
+`CameraCaptureService` keeps live sources open through one shared
+GStreamer / Intel DL Streamer child (`survng-dls`). Cameras are added and
+removed over stdin JSON; URLs never appear in process arguments. Every
+`gvadetect` element uses the same `model-instance-id` so OpenVINO loads the
+IR once per process (`scheduling-policy=latency`). The child prefers
+`vah264dec` / `vah265dec`, keeps detect on `VAMemory` when `gvadetect` and an
+OpenVINO model are available (`pre-process-backend=va` on Intel), and tees a
+drop-only GRAY8 appsink at `sample_fps` for motion qualification plus a ~1 fps
+JPEG preview. Decode uses `uridecodebin3` when that factory can be instantiated, otherwise
+`uridecodebin`. Instantiation, not registry lookup, is the gate: a stale
+`uridecodebin3` factory that cannot `make()` still falls through. The child
+keeps Ubuntu's GStreamer plugin directory on `GST_PLUGIN_SYSTEM_PATH` and
+`GST_PLUGIN_SYSTEM_PATH_1_0`, and it removes Intel's nested `gstreamer/lib`
+from `LD_LIBRARY_PATH` so python3-gi loads distro libgstreamer. The child runs system ``/usr/bin/python3`` so GStreamer
+GI plugins resolve; it does not import the SurvNG venv or pydantic. There is no
+FFmpeg live-capture fallback: if the supervisor exits, every camera reconnects the
+same pipeline. The child's latest boxes are
+stored on `CameraCaptureService.latest_detections()` and used as the live
+fast-path detector for incident admission. `detect_initial` never runs a second
+OpenVINO pass on a live or pinned evidence frame. Zone and confidence filters
+still apply to sidecar boxes. Recorded refinement remains the OpenVINO evidence
+path: FFmpeg decodes finalized main recordings, then the object worker runs.
+Recording, exports, and recorded evidence frames remain FFmpeg. A successful
 capture read transfers exclusive ownership of its NumPy buffer to the capture
 service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
 motion observers share that buffer; only consumers that explicitly request a
@@ -195,8 +217,8 @@ without polling or blocking preprocessing; its grant evaluates the latest
 coherent window. Capture sequence provides processing order, while wall-clock
 time remains event metadata. A backward camera-clock discontinuity resets the
 affected temporal runtime instead of suspending motion analysis. Main-source
-FFmpeg capture is demand-driven and stops after an idle
-period; continuous main recording is handled by its own FFmpeg process.
+live capture is demand-driven and stops after an idle period; continuous main
+recording is handled by its own FFmpeg process.
 
 Live capture reconnects with exponential backoff when a stream read or open
 fails. After the first failure on a live source, the open deadline escalates to
@@ -210,7 +232,7 @@ Browser live-view modes currently include:
 
 - Automatic motion mode: snapshot while idle, WebRTC while camera motion is
   active.
-- MJPEG: frames served by SurvNG from the latest FFmpeg capture.
+- MJPEG: frames served by SurvNG from the latest live-capture tee.
 - WebRTC: SurvNG relays go2rtc signaling; media remains a shared go2rtc stream.
 - MSE: if WebRTC fails, SurvNG relays go2rtc fragmented MP4 over the existing
   WebSocket connection before falling back to MJPEG. This keeps go2rtc's API
@@ -392,9 +414,13 @@ control and restrict its filesystem permissions.
 
 ## 6. High-Resolution Object Detection
 
-An accepted motion burst uses finalized main recording fragments rather than
-the low-resolution qualification frames. By default SurvNG samples five target
-times around the ONVIF event:
+Live incident admission uses GStreamer `gvadetect` boxes from the capture
+pipeline. `RecordedMotionObjectDetector.detect_initial` never calls the
+OpenVINO object worker: labeled sidecar boxes are filtered in Python, and an
+empty sidecar or pinned evidence frame stays provisional until recorded
+refinement. Recorded OpenVINO is evidence-only. An accepted motion burst uses
+finalized main recording fragments rather than the low-resolution qualification
+frames. By default SurvNG samples five target times around the ONVIF event:
 
 ```text
 -1.0s, -0.5s, event time, +0.5s, +1.0s
@@ -422,9 +448,11 @@ zone-specific threshold. Ignore zones always take precedence in both modes.
 
 Object detection and face embedding execute in two independent spawned
 inference processes. The object worker owns the configured detector and uses
-the latency-focused GPU device. The face worker owns the embedding and landmark
-models and uses the independently configured CPU or AUTO device. Face backlog
-therefore cannot queue ahead of a motion-triggered object request.
+the latency-focused GPU device for recorded evidence. The face worker owns the
+embedding and landmark models and defaults to CPU so it does not compete with
+live GStreamer `gvadetect` on Intel iGPU. Saved `AUTO` is treated as CPU at
+compile time; explicit GPU remains available. Face backlog therefore cannot
+queue ahead of a motion-triggered object request.
 
 Each worker has its own reusable 64 MB shared-memory frame buffer and duplex IPC
 connection. Uvicorn sends only request metadata and compact results, preserving
@@ -449,10 +477,12 @@ latest live frame and marks that source in event metadata.
 
 ### Monocular depth enrichment
 
-When `detector.depth.enabled` and a model path are configured, the object worker
-runs depth estimation on the representative recorded frame after object
-detection. It records each object's median and bounded depth statistics in
-meters. The global `max_incident_distance_m` policy and per-zone
+When `detector.depth.enabled` and a model path are configured, the isolated
+depth worker runs depth estimation on the representative recorded frame after
+object detection. Depth defaults to CPU; `AUTO` compiles as CPU so live
+`gvadetect` keeps the Intel GPU. It records each object's median and bounded
+depth statistics in meters. The global `max_incident_distance_m` policy and
+per-zone
 `min_depth_m`/`max_depth_m` policies can mark recorded objects ineligible;
 ordinary confidence, temporal, and zone checks still apply.
 
@@ -468,10 +498,12 @@ When the selected event frame contains an incident-eligible object and
 `detector.tracking.enabled` is true, SurvNG starts a bounded per-camera
 tracking session **after recorded refinement has finished** (or after live
 evidence if refinement cannot run). Tracking is identification and cover
-enrichment; it does not admit the incident. The existing OpenVINO detector
-remains responsible for frame-level boxes, classes, and confidence. A
-separate ByteTrack-style tracking-by-detection stage associates those boxes
-over time and assigns camera-local track IDs.
+enrichment; it does not admit the incident. Live tracking ticks reuse the
+same GStreamer `gvadetect` sidecar boxes used for incident admission. An
+empty sidecar skips OpenVINO and lets tracks coast until the lost timeout.
+Recorded catch-up frames and cover verification still call the OpenVINO
+object worker. A separate ByteTrack-style tracking-by-detection stage
+associates those boxes over time and assigns camera-local track IDs.
 
 The initial incident-eligible detections are confirmed immediately, including
 per-camera detections admitted by a threshold lower than the global default.
@@ -485,8 +517,10 @@ not carry across a service restart or between cameras.
 Association first uses predicted overlap, then a conservative center-distance
 and containment fallback for rapidly changing boxes. Optional person and
 vehicle ReID can reconnect a recently lost track using whole-object appearance
-embeddings. ReID runs in its own isolated inference worker and is disabled
-unless the corresponding feature and compatible OpenVINO model are configured.
+embeddings. ReID runs in its own isolated inference worker, defaults to CPU,
+and is disabled unless the corresponding feature and compatible OpenVINO model
+are configured. Saved `AUTO` compiles as CPU so live `gvadetect` keeps the
+Intel GPU; explicit GPU remains available.
 Face-recognition embedding models are not interchangeable with person ReID.
 
 The default SurvNG Hybrid tracker computes embeddings on demand: once when a
@@ -684,9 +718,11 @@ worker joins run without holding the state lock. Status and health reads
 therefore remain available while a camera connection is slow to open or close,
 and failures retain their last lifecycle error for diagnosis.
 
-The object process owns its OpenVINO `Core`, compiled detector, and GPU context.
-The face process separately owns the embedding and landmark models on its
-configured CPU or AUTO device. Uvicorn does not perform OpenVINO device or
+The object process owns its OpenVINO `Core`, compiled detector, and GPU context
+for recorded evidence. The face, ReID, and depth processes default to CPU so
+they do not compete with live GStreamer `gvadetect` on Intel iGPU. Saved
+`AUTO` for those auxiliary models compiles as CPU. Uvicorn does not perform
+OpenVINO device or
 model probes directly. A native OpenVINO, OpenCL, or IGC fault therefore
 terminates only the affected inference child; the other inference workload,
 live view, recording, ONVIF, MQTT, and HTTP control plane remain available.
@@ -754,7 +790,7 @@ Object inference and optional depth enrichment:
     "depth": {
       "enabled": false,
       "model_path": "",
-      "device": "AUTO",
+      "device": "CPU",
       "input_size": 768,
       "min_distance_m": 0.05,
       "max_distance_m": 150.0,

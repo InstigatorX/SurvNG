@@ -53,6 +53,7 @@ class CameraMediaService:
         time_ns: Callable[[], int] = time.time_ns,
         sleeper: Callable[[float], None] = time.sleep,
         media_storage: MediaStorageRegistry | None = None,
+        jpeg_provider: Callable[[str], bytes | None] | None = None,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -70,8 +71,13 @@ class CameraMediaService:
         # is full or offline. Select a writable root per save.
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
         self._snapshot_storage_failed = False
+        self.jpeg_provider = jpeg_provider
 
     def snapshot(self, source: str = "live") -> bytes | None:
+        if self.jpeg_provider is not None:
+            encoded = self.jpeg_provider(source)
+            if encoded:
+                return encoded
         frame = self.frame_provider(source)
         if frame is None:
             return None
