@@ -21,12 +21,14 @@ from survng.app.dlstreamer_protocol import MessageReader, TYPE_FRAME, TYPE_DETEC
 from survng.app.live_detections import DetectionHistory, DetectionSnapshot
 
 
-def consume(model: Path, proc: Path, threshold: float, source_role="live") -> dict:
+def consume(model: Path, proc: Path | None, threshold: float, source_role="live", *, nms_threshold=.45, expected_objects=None) -> dict:
     command = [sys.executable, "-m", "survng.dlstreamer_live", "--test-source",
                "--decoder", "auto", "--device", "CPU", "--fps", "5", "--detect-fps", "2.5",
-               "--model", str(model), "--model-proc", str(proc), "--threshold", str(threshold),
+               "--model", str(model), "--threshold", str(threshold), "--nms-threshold", str(nms_threshold),
                "--jpeg-fps", "0", "--open-timeout", "15"]
     command.extend(["--source-role", source_role])
+    if proc is not None:
+        command.extend(["--model-proc", str(proc)])
     command.extend(["--labels", str(model.with_suffix(".txt"))])
     reader = MessageReader()
     frames = []
@@ -85,8 +87,11 @@ def consume(model: Path, proc: Path, threshold: float, source_role="live") -> di
     assert all(b.source_pts > a.source_pts for a, b in zip(snapshots, snapshots[1:]))
     assert all(bool(item.objects) == (threshold < 1) for item in snapshots)
     assert all(obj["label"] == "car" for item in snapshots for obj in item.objects), "labels-file must override model-proc labels"
+    if expected_objects is not None:
+        assert all(len(item.objects) == expected_objects for item in snapshots), [len(item.objects) for item in snapshots]
     assert len(frames) > len(snapshots), "detector cadence must not throttle EMA"
     return {"threshold": threshold, "source_role": source_role, "frames": len(frames), "snapshots": len(snapshots),
+            "nms_threshold": nms_threshold, "objects_per_snapshot": expected_objects,
             "positive_snapshots": sum(bool(s.objects) for s in snapshots),
             "matched_at_receipt": matched,
             "frame_fps": round((len(frames)-1)/(frames[-1]-frames[0]), 2),
@@ -96,18 +101,20 @@ def consume(model: Path, proc: Path, threshold: float, source_role="live") -> di
 def shared_supervisor(model: Path, proc: Path) -> dict:
     """Exercise the production demultiplexer contract and shared model pool."""
     roles = {"gate-live": "live", "yard-live": "live", "gate-main": "main"}
+    widths = {"gate-live": 320, "yard-live": 960, "gate-main": 640}
     counts = {key: {"frames": 0, "snapshots": 0, "ok": False} for key in roles}
     command = [sys.executable, "-m", "survng.dlstreamer_live", "--supervisor", "--test-source",
                "--decoder", "auto", "--device", "CPU", "--fps", "5", "--detect-fps", "2.5",
                "--model", str(model), "--model-proc", str(proc), "--labels", str(model.with_suffix(".txt")),
-               "--threshold", "0.1", "--jpeg-fps", "0", "--open-timeout", "15"]
+               "--threshold", "0.1", "--nms-threshold", "0.45", "--jpeg-fps", "0", "--open-timeout", "15"]
     reader = MessageReader()
     with tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=stderr)
         try:
             for stream_id, role in roles.items():
                 process.stdin.write((json.dumps({"op": "add", "stream_id": stream_id,
-                                                "source_role": role, "url": "rtsp://fixture.invalid/video"}) + "\n").encode())
+                                                "source_role": role, "frame_width": widths[stream_id],
+                                                "url": "rtsp://fixture.invalid/video"}) + "\n").encode())
             process.stdin.flush()
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
@@ -123,7 +130,7 @@ def shared_supervisor(model: Path, proc: Path) -> dict:
                     entry = counts[stream_id]
                     if kind == TYPE_FRAME:
                         width, height, _seq, _pts, pixels = decode_frame_payload(body)
-                        assert width == (640 if roles[stream_id] == "main" else 320)
+                        assert width == widths[stream_id]
                         assert len(pixels) == width * height * (3 if roles[stream_id] == "main" else 1)
                         entry["frames"] += 1
                     elif kind == TYPE_DETECTIONS:
@@ -181,6 +188,43 @@ def main() -> None:
         results = [consume(model_path, proc_path, threshold) for threshold in (0.1, 1.0)]
         results.append(consume(model_path, proc_path, .1, source_role="main"))
         results.append(shared_supervisor(model_path, proc_path))
+        # Two overlapping same-class raw YOLO boxes: native NMS must change
+        # actual output, not merely accept a command-line/configuration value.
+        raw = np.zeros((1, 5, 16), dtype=np.float32)
+        raw[0, :, 0] = [32, 32, 32, 32, .9]
+        raw[0, :, 1] = [34, 32, 32, 32, .8]
+        output = ops.add(ops.constant(raw), zero, name="raw_boxes")
+        output.output(0).get_tensor().set_names({"raw_boxes"})
+        model = ov.Model([output], [image])
+        model.set_rt_info("yolo_v8", ["model_info", "model_type"])
+        model.set_rt_info("0.7", ["model_info", "iou_threshold"])
+        raw_path = Path(directory) / "raw.xml"
+        ov.save_model(model, raw_path, compress_to_fp16=False)
+        raw_path.with_suffix(".txt").write_text("car\n")
+        raw_proc = Path(directory) / "raw.json"
+        raw_proc.write_text(json.dumps({
+            "json_schema_version": "2.2.0", "input_preproc": [{"layer_name": "image", "format": "image"}],
+            "output_postproc": [{"layer_name": "raw_boxes", "converter": "yolo_v8", "iou_threshold": .7}],
+        }))
+        for policy in (None, raw_proc):
+            for iou, expected in ((.1, 1), (.95, 2)):
+                results.append(consume(raw_path, policy, .1, nms_threshold=iou, expected_objects=expected))
+        # YOLO26 already emits final boxes. Changing external NMS policy must
+        # not suppress either result or lose adjacent exporter metadata.
+        final = np.zeros((1, 300, 6), dtype=np.float32)
+        final[0, 0] = [16, 16, 48, 48, .9, 0]
+        final[0, 1] = [18, 16, 50, 48, .8, 0]
+        output = ops.add(ops.constant(final), zero, name="final_boxes")
+        model = ov.Model([output], [image])
+        model.set_rt_info("YOLO", ["model_info", "model_type"])
+        final_dir = Path(directory) / "end_to_end"
+        final_dir.mkdir()
+        final_path = final_dir / "final.xml"
+        ov.save_model(model, final_path, compress_to_fp16=False)
+        (final_dir / "metadata.yaml").write_text("description: YOLO26 synthetic fixture\ntask: detect\n")
+        final_path.with_suffix(".txt").write_text("car\n")
+        for iou in (.1, .95):
+            results.append(consume(final_path, None, .1, nms_threshold=iou, expected_objects=2))
         print(json.dumps({"native_gstreamer_smoke": results}, indent=2))
 
 
