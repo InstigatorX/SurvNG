@@ -4511,8 +4511,17 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
             <details className="detection-compact-details">
               <summary>Model paths and startup options</summary>
+              <p className="settings-help">{detectorStatus?.model_settings ? `Loaded model: ${(detectorStatus.input_shape || []).join(" × ")} · ${detectorStatus.model_settings.input_precision} input · ${detectorStatus.model_settings.input_layout} · ${detectorStatus.output_format || "unknown"} · NMS: ${detectorStatus.model_settings.nms}. Graph floating-point constants: ${(detectorStatus.model_settings.constant_precisions || []).join(", ") || "unknown"}.` : "Model settings appear after the detector loads."}</p>
+              {detectorStatus?.model_settings?.error ? <p className="settings-help" role="alert">{detectorStatus.model_settings.error}</p> : null}
+              {(detectorStatus?.model_settings?.warnings || []).map((warning) => <p className="settings-help" key={warning}>{warning}</p>)}
               <div className="detection-field-grid">
                 <label className="wide-field">OpenVINO / ONNX path<input value={activeModelPath} onChange={(event) => selectOpenvinoModel(event.target.value)} placeholder="openvino_model/best.xml or best.onnx" /></label>
+                <label>Output format<select value={config.detector?.model_output_format || "auto"} onChange={(event) => updateConfig(["detector", "model_output_format"], event.target.value)}>
+                  <option value="auto">Automatic</option><option value="yolo">Raw YOLO (apply NMS)</option><option value="yolo-e2e">Final detections (embedded NMS / end-to-end)</option><option value="yolo-seg">Raw YOLO segmentation</option><option value="yolo-seg-e2e">Final YOLO segmentation</option><option value="ssd">SSD</option>
+                </select><small>Leave on Automatic unless the model's output is ambiguous. The NMS threshold applies only to raw outputs.</small></label>
+                <label>OpenVINO input layout<select value={config.detector?.model_input_layout || "auto"} onChange={(event) => updateConfig(["detector", "model_input_layout"], event.target.value)} disabled={detectorBackend !== "openvino"}>
+                  <option value="auto">Automatic</option><option value="NCHW">NCHW</option><option value="NHWC">NHWC</option>
+                </select><small>FP16 / FP32 input precision is read from the model.</small></label>
                 <label>Labels path<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} placeholder="Automatic from metadata" /></label>
                 <label>Compiled model cache<input value={config.detector?.cache_dir || ".cache/openvino"} onChange={(event) => updateConfig(["detector", "cache_dir"], event.target.value)} disabled={config.detector?.cache_enabled === false} /></label>
                 <label className="compact-toggle"><input type="checkbox" checked={config.detector?.cache_enabled ?? true} onChange={(event) => updateConfig(["detector", "cache_enabled"], event.target.checked)} /><span>Cache compiled model</span></label>

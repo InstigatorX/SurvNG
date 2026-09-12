@@ -3,12 +3,21 @@ import { appUrl } from "./api.js";
 export function eventSnapshotUrl(event) {
   if (event?.snapshot_url) return appUrl(event.snapshot_url);
   const eventId = Number(event?.representative_event_id || event?.id);
-  return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/snapshot.jpg`) : "";
+  if (!Number.isFinite(eventId)) return "";
+  // Refinement replaces the selected snapshot while retaining the event ID.
+  // Version the raster alongside its boxes so cached trigger frames cannot
+  // be displayed underneath annotations from a later selected frame.
+  const params = new URLSearchParams();
+  if (event?.snapshot_path) params.set("v", event.snapshot_path);
+  const query = params.size ? `?${params}` : "";
+  return appUrl(`/api/events/${eventId}/snapshot.jpg${query}`);
 }
 
 export function eventSnapshotDownloadUrl(event) {
   const snapshotUrl = eventSnapshotUrl(event);
-  return snapshotUrl ? `${snapshotUrl}?download=true` : "";
+  if (!snapshotUrl) return "";
+  const [path, hash] = snapshotUrl.split("#", 2);
+  return `${path}${path.includes("?") ? "&" : "?"}download=true${hash == null ? "" : `#${hash}`}`;
 }
 
 export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}) {
@@ -19,6 +28,7 @@ export function eventThumbnailUrl(event, width = 720, quality = 82, options = {}
     width: String(Math.max(160, Math.min(2560, Math.round(Number(width) || 720)))),
     quality: String(Math.max(50, Math.min(95, Math.round(Number(quality) || 82)))),
   });
+  if (event?.snapshot_path) params.set("v", event.snapshot_path);
   if (options?.objectFocus) {
     params.set("object_focus", "true");
     if (options.incidentEligibleOnly) params.set("incident_eligible_only", "true");

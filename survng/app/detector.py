@@ -14,6 +14,7 @@ import numpy as np
 
 from .config import DetectorConfig
 from .detector_labels import load_detector_labels
+from .detector_model_settings import ModelSettingsError, read_model_metadata, resolve_output_format
 
 LOGGER = logging.getLogger(__name__)
 DETECTION_FAILURE_STATUSES = frozenset({"detector_unavailable", "inference_error"})
@@ -112,6 +113,13 @@ class OpenVinoDetector:
         self.output_layers: list[Any] = []
         self.input_shape: tuple[int, int] = (300, 300)
         self.output_format = "unknown"
+        self.model_metadata: dict[str, Any] = {}
+        self.model_settings: dict[str, Any] = {
+            "input_precision": "unknown", "constant_precisions": [],
+            "input_layout": "unknown", "output_source": "", "nms": "unknown",
+            "warnings": [], "error": "",
+        }
+        self._model_has_nms = False
         self.backend = ""
         self.loaded_device = ""
         self.cache_dir = ""
@@ -199,14 +207,47 @@ class OpenVinoDetector:
                 core.set_property({"CACHE_DIR": str(cache_dir)})
                 self.cache_dir = str(cache_dir)
             model = core.read_model(model=model_path)
+            self.model_metadata, warnings = read_model_metadata(model_path, model)
+            self.model_settings["warnings"] = warnings
+            if hasattr(model.input(0), "get_partial_shape") and model.input(0).get_partial_shape().is_dynamic:
+                raise ModelSettingsError("Dynamic image inputs are not supported; export a static input size and batch of one.")
             original_shape = [int(value) for value in model.input(0).shape]
-            if len(original_shape) >= 4:
-                self.input_shape = (original_shape[-1], original_shape[-2])
-                original_input_shape = self.input_shape
+            if len(original_shape) != 4 or original_shape[0] != 1:
+                raise ModelSettingsError("Detector requires a static, single-image rank-four input.")
+            layout = self.config.model_input_layout
+            if layout == "auto":
+                if original_shape[1] == 3 and original_shape[-1] != 3:
+                    layout = "NCHW"
+                elif original_shape[-1] == 3 and original_shape[1] != 3:
+                    layout = "NHWC"
+                else:
+                    raise ModelSettingsError("Ambiguous input layout; select NCHW or NHWC in model settings.")
+            if original_shape[1 if layout == "NCHW" else 3] != 3:
+                raise ModelSettingsError("Detector requires a three-channel image input.")
+            self.input_shape = tuple(original_shape[i] for i in ((3, 2) if layout == "NCHW" else (2, 1)))
+            original_input_shape = self.input_shape
+            input_type = model.input(0).get_element_type() if hasattr(model.input(0), "get_element_type") else Type.f32
+            precision = input_type.get_type_name() if hasattr(input_type, "get_type_name") else str(input_type)
+            if precision not in {"f16", "f32"}:
+                raise ModelSettingsError("Detector requires FP16 or FP32 image input; integer input preprocessing is not supported.")
+            ops = model.get_ops() if hasattr(model, "get_ops") else []
+            self._model_has_nms = any(op.get_type_name() in {"NonMaxSuppression", "MulticlassNms", "MatrixNms"} for op in ops)
+            self.model_settings.update({
+                "input_precision": precision, "input_layout": layout,
+                "constant_precisions": sorted({op.get_output_element_type(0).get_type_name() for op in ops
+                                             if op.get_type_name() == "Constant" and op.get_output_element_type(0).is_real()}),
+            })
+            self._apply_metadata_labels()
+            if hasattr(model, "outputs"):
+                self.output_format = self._resolve_output_format([
+                    [dim.get_length() if dim.is_static else -1 for dim in layer.get_partial_shape()]
+                    for layer in model.outputs
+                ])
             preprocessor = PrePostProcessor(model)
             preprocessor.input().tensor().set_element_type(Type.u8).set_layout(Layout("NHWC")).set_color_format(ColorFormat.BGR)
-            preprocessor.input().model().set_layout(Layout("NCHW"))
+            preprocessor.input().model().set_layout(Layout(layout))
             preprocessor.input().preprocess().convert_color(ColorFormat.RGB).convert_element_type(Type.f32).scale(255.0)
+            preprocessor.input().preprocess().convert_element_type(input_type)
             model = preprocessor.build()
             self._openvino_embedded_preprocess = True
             device = self.config.device.upper()
@@ -256,10 +297,21 @@ class OpenVinoDetector:
             self.output_layer = None
             self.output_layers = []
             self._openvino_embedded_preprocess = False
+            if isinstance(exc, ModelSettingsError):
+                self.model_settings["error"] = str(exc)
+                LOGGER.error("Detector model settings: %s", exc)
+                return False
             if model_path.suffix.lower() != ".onnx":
                 LOGGER.exception("OpenVINO detector failed to load %s", model_path)
                 return False
+            if self.model_settings["input_precision"] == "f16" or self.model_settings["input_layout"] == "NHWC":
+                self.model_settings["error"] = "This input contract requires OpenVINO; FP16 or NHWC input cannot use the FP32 NCHW OpenCV fallback."
+                LOGGER.exception("OpenVINO detector failed; incompatible OpenCV fallback input")
+                return False
             LOGGER.warning("OpenVINO failed to load %s, falling back to OpenCV DNN: %s", model_path, exc)
+            if not self.model_metadata:
+                self.model_metadata, warnings = read_model_metadata(model_path)
+                self.model_settings["warnings"].extend(warnings)
             try:
                 self.cv_net = cv2.dnn.readNetFromONNX(str(model_path))
             except Exception:
@@ -268,6 +320,7 @@ class OpenVinoDetector:
                 return False
             self.input_shape = original_input_shape or (640, 640)
             self.output_format = "unknown"
+            self.model_settings["warnings"].append("OpenCV fallback uses FP32 NCHW input; OpenVINO model inspection may be incomplete.")
             self.backend = "opencv-dnn"
             self.loaded_device = "CPU"
             return True
@@ -303,6 +356,8 @@ class OpenVinoDetector:
                 compute_units=ct.ComputeUnit.CPU_ONLY,
             )
             spec = self.coreml_model.get_spec()
+            self.model_metadata, warnings = read_model_metadata(model_path)
+            self.model_settings["warnings"] = warnings
             if not spec.description.input:
                 LOGGER.warning("Core ML model has no input description: %s", model_path)
                 self.coreml_model = None
@@ -372,7 +427,7 @@ class OpenVinoDetector:
                 inference = self.infer_request.infer([tensor])
                 stages["inference"] = (time.perf_counter() - inference_started) * 1000
                 postprocess_started = time.perf_counter()
-                if self.output_format == "yolo-seg":
+                if self.output_format in {"yolo-seg", "yolo-seg-e2e"}:
                     outputs = [np.asarray(inference[layer]) for layer in self.output_layers]
                     objects = self._parse_yolo_seg_outputs(outputs, metadata)
                     stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
@@ -382,7 +437,7 @@ class OpenVinoDetector:
             else:
                 self.cv_net.setInput(tensor)
                 output = self.cv_net.forward()
-                self.output_format = self._output_format_from_shapes([list(output.shape)], allow_batchless=True)
+                self.output_format = self._resolve_output_format([list(output.shape)])
                 stages["inference"] = (time.perf_counter() - inference_started) * 1000
                 postprocess_started = time.perf_counter()
             if self.output_format == "yolo":
@@ -528,6 +583,7 @@ class OpenVinoDetector:
             "loaded_device": self.loaded_device,
             "input_shape": list(self.input_shape),
             "output_format": self.output_format,
+            "model_settings": {**self.model_settings, "output_format": self.output_format},
             "labels": len(self.labels),
             "coreml_loaded": self.coreml_model is not None,
             "coreml_input_name": self.coreml_input_name,
@@ -574,6 +630,8 @@ class OpenVinoDetector:
         coordinates_key = lower_keys.get("coordinates")
         confidence_key = lower_keys.get("confidence")
         if coordinates_key and confidence_key:
+            self.model_settings["nms"] = "model final detections"
+            self.model_settings["output_source"] = "Core ML coordinates/confidence"
             return self._parse_coreml_coordinates(
                 np.asarray(outputs[coordinates_key]),
                 np.asarray(outputs[confidence_key]),
@@ -585,8 +643,14 @@ class OpenVinoDetector:
         for value in outputs.values():
             array = np.asarray(value)
             squeezed = np.squeeze(array)
-            if metadata is not None and self._output_format_from_shapes([list(array.shape)], allow_batchless=True) == "yolo-e2e":
-                return self._parse_yolo_e2e_output(array, metadata)
+            if metadata is not None:
+                self.output_format = self._resolve_output_format([list(array.shape)])
+                if self.output_format == "yolo-e2e":
+                    return self._parse_yolo_e2e_output(array, metadata)
+                if self.output_format == "yolo":
+                    return self._parse_yolo_output(array, metadata)
+                if self.output_format == "ssd":
+                    return self._parse_ssd_output(array, image_width, image_height, metadata)
             if squeezed.ndim == 2:
                 if metadata is not None and min(squeezed.shape) >= 5 and (
                     squeezed.shape[0] == len(self.labels) + 4
@@ -702,27 +766,42 @@ class OpenVinoDetector:
         return objects
 
     def _detect_output_format(self) -> str:
-        shapes = [[int(dim) for dim in layer.shape if int(dim) > 0] for layer in self.output_layers]
-        return self._output_format_from_shapes(shapes or [list(self.output_layer.shape)])
+        shapes = [
+            [dim.get_length() if dim.is_static else -1 for dim in layer.get_partial_shape()]
+            if hasattr(layer, "get_partial_shape") else list(layer.shape)
+            for layer in (self.output_layers or [self.output_layer])
+        ]
+        return self._resolve_output_format(shapes)
 
-    @staticmethod
-    def _output_format_from_shapes(shapes: list[list[int]], *, allow_batchless: bool = False) -> str:
-        # OpenCV and Core ML can omit the single-image batch dimension.
-        if allow_batchless:
-            shapes = [[1, *shape] if len(shape) == 2 else shape for shape in shapes]
-        if any(len(shape) == 4 and shape[1] == 32 for shape in shapes) and any(
-            len(shape) == 3 and max(shape[1:]) > min(shape[1:]) >= 5 for shape in shapes
-        ):
-            return "yolo-seg"
-        shape = shapes[0]
-        if len(shape) == 3:
-            channels = min(shape[1], shape[2])
-            anchors = max(shape[1], shape[2])
-            if channels == 6 and 6 < anchors <= YOLO_END_TO_END_MAX_DETECTIONS:
-                return "yolo-e2e"
-            if channels >= 5 and anchors > channels:
-                return "yolo"
-        return "ssd"
+    def _apply_metadata_labels(self) -> None:
+        if self.config.labels or self.config.labels_path:
+            return
+        names = self.model_metadata.get("names", self.model_metadata.get("labels"))
+        if isinstance(names, dict):
+            try:
+                names = [names[key] for key in sorted(names, key=lambda key: int(key))]
+            except (TypeError, ValueError):
+                self.model_settings["warnings"].append("Invalid model class metadata; retaining package labels.")
+                return
+        if isinstance(names, (list, tuple)) and names:
+            self.labels = [str(name) for name in names]
+
+    def _resolve_output_format(self, shapes: list[list[int]]) -> str:
+        try:
+            selected, source, warnings = resolve_output_format(
+                shapes, self.config.model_output_format, self.model_metadata, self._model_has_nms,
+            )
+        except ModelSettingsError as exc:
+            self.model_settings["error"] = str(exc)
+            raise
+        self.model_settings.update({
+            "output_source": source,
+            "nms": "SurvNG" if selected in {"yolo", "yolo-seg"} else "model final detections",
+        })
+        for warning in warnings:
+            if warning not in self.model_settings["warnings"]:
+                self.model_settings["warnings"].append(warning)
+        return selected
 
     def _parse_yolo_seg_outputs(
         self,
@@ -738,7 +817,10 @@ class OpenVinoDetector:
         mask_channels = int(prototypes.shape[0]) if prototypes is not None else 0
         if detections.ndim != 2:
             return []
-        if detections.shape[0] < detections.shape[1]:
+        if self.output_format == "yolo-seg-e2e":
+            if detections.shape[1] != 6 + mask_channels:
+                detections = detections.T
+        elif detections.shape[0] < detections.shape[1]:
             detections = detections.T
         image_width = int(metadata["image_width"])
         image_height = int(metadata["image_height"])
@@ -757,6 +839,8 @@ class OpenVinoDetector:
             and detections.shape[1] == 4 + raw_class_count + mask_channels
             and raw_class_count > 0
         )
+        if self.output_format in {"yolo-seg", "yolo-seg-e2e"}:
+            raw_format = self.output_format == "yolo-seg"
 
         for detection in detections:
             if raw_format:
@@ -807,7 +891,7 @@ class OpenVinoDetector:
             class_ids,
             self.config.confidence_threshold,
             self.config.nms_threshold,
-        )
+        ) if raw_format else list(range(len(boxes)))
         objects: list[dict[str, Any]] = []
         for index in selected:
             x1, y1, width, height = boxes[index]
@@ -972,6 +1056,8 @@ class OpenVinoDetector:
         metadata: dict[str, float],
     ) -> list[dict[str, Any]]:
         detections = np.squeeze(output)
+        if detections.ndim == 1 and detections.size == 6:
+            detections = detections.reshape(1, 6)
         if detections.ndim != 2:
             return []
         if detections.shape[0] == 6 and detections.shape[1] != 6:

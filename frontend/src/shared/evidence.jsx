@@ -375,7 +375,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
                 />
               ) : null}
             </div>
-          ) : <img className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? thumbnailSrc : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey)} />
+          ) : <img key={thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey} className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? thumbnailSrc : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, thumbnail && useServerObjectCrop ? focusImageKey : progressiveImageKey)} />
         ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {imageReady && showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
           <div className={`object-box-layer${onSelectObject ? " interactive" : ""}`} aria-hidden={onSelectObject ? undefined : "true"}>

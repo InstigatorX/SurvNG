@@ -731,6 +731,8 @@ class DetectorConfig(BaseModel):
     recorded_decode_max_processes: int = Field(default=2, ge=1, le=16)
     model_path: str = ""
     model_xml: str = ""
+    model_output_format: Literal["auto", "yolo", "yolo-e2e", "yolo-seg", "yolo-seg-e2e", "ssd"] = "auto"
+    model_input_layout: Literal["auto", "NCHW", "NHWC"] = "auto"
     coreml_model_path: str = ""
     labels_path: str = ""
     device: str = "CPU"
