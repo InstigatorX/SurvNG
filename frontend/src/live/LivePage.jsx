@@ -32,7 +32,7 @@ import { focusLiveMosaicLayout, focusedLiveCameraId as validFocusCameraId } from
 import { detectionStatus, recordingStatus } from "../liveCameraStatus.mjs";
 import { createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident } from "../incidentNavigation.mjs";
 import { appUrl, incidentRecordingContext, recordingsHref, fetch } from "../shared/api.js";
-import { INCIDENT_REFRESH_FALLBACK_MS, STREAM_MODES, STREAM_LABELS, MOTION_WEBRTC_HOLD_MS } from "../shared/constants.js";
+import { INCIDENT_REFRESH_FALLBACK_MS, MOTION_WEBRTC_HOLD_MS } from "../shared/constants.js";
 import { formatTimeOnly } from "../shared/format.js";
 import { useStoredState, useViewportQuery, useModalFocus } from "../shared/hooks.js";
 import { clearLegacyIncidentFilterStorage, preferredStreamSource, sourceLabel, liveTransportLabel } from "../shared/cameras.js";
@@ -91,13 +91,11 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   const [tileVisible, setTileVisible] = useState(true);
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
   const [mediaActive, setMediaActive] = useState(true);
-  const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
-  const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
+  const sourceMode = "live";
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
-  const normalizedStreamMode = STREAM_MODES.includes(streamMode) ? streamMode : "motion";
   const lastMotionMs = new Date(camera.last_motion_at || 0).getTime();
   const motionActive = camera.running && Number.isFinite(lastMotionMs) && motionWindowNow - lastMotionMs <= MOTION_WEBRTC_HOLD_MS;
-  const activeTransport = normalizedStreamMode === "motion" ? (motionActive ? "webrtc" : "snapshot") : normalizedStreamMode;
+  const activeTransport = motionActive ? "webrtc" : "snapshot";
   const [deliveredSource, setDeliveredSource] = useState(sourceMode === "main" ? "main" : "live");
   const [aspect, setAspect] = useState(() => initialCameraAspect(camera, sourceMode, browserStorage(window)));
   const [mjpegToken, setMjpegToken] = useState(() => String(Date.now()));
@@ -311,10 +309,6 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
   }
 
   useEffect(() => {
-    if (!STREAM_MODES.includes(streamMode)) setStreamMode("motion");
-  }, [streamMode, setStreamMode]);
-
-  useEffect(() => {
     const now = Date.now();
     setMotionWindowNow(now);
     if (!Number.isFinite(lastMotionMs)) return undefined;
@@ -467,18 +461,6 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
     }
   }
 
-  function cycleStreamMode() {
-    const index = STREAM_MODES.indexOf(normalizedStreamMode);
-    setStreamMode(STREAM_MODES[(index + 1) % STREAM_MODES.length]);
-  }
-
-  function toggleSourceMode() {
-    const nextSource = sourceMode === "main" ? "live" : "main";
-    setDeliveredSource(nextSource);
-    setAspect(initialCameraAspect(camera, nextSource, browserStorage(window)));
-    setSourceMode(nextSource);
-  }
-
   const posterSource = activeTransport === "webrtc" && sourceMode === "main" ? "live" : sourceMode;
   const imageUrl = appUrl(shouldUseMjpegStream
     ? `/api/cameras/${camera.id}/stream.mjpg?source=${sourceMode}&t=${mjpegToken}`
@@ -614,20 +596,6 @@ export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, o
               <GripVertical size={16} />
               <span>Move camera</span>
             </button> : null}
-            <button type="button" className="tile-control-button" onClick={toggleSourceMode} title="Switch main/sub stream">
-              <Radio size={15} />
-              <span>Stream: {sourceMode === "main" ? "Main" : "Sub"}</span>
-            </button>
-            <button
-              type="button"
-              className="tile-control-button"
-              onClick={cycleStreamMode}
-              title={normalizedStreamMode === "motion" ? `Automatic motion switching: ${activeTransport === "webrtc" ? "WebRTC active" : "snapshot idle"}` : "Cycle transport: Auto, MJPEG, WebRTC"}
-            >
-              <span>
-                {normalizedStreamMode === "motion" ? `Auto ${activeTransport === "webrtc" ? "RTC" : "Snap"}` : STREAM_LABELS[normalizedStreamMode]}
-              </span>
-            </button>
             <button
               type="button"
               className={`status-pill hud-toggle hud-icon ${camera.recording_enabled ? "ok" : ""} ${recordingError ? "bad" : ""}`}

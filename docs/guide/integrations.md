@@ -164,3 +164,22 @@ people. Stored images can be refined; this is not an archive of every image
 revision sent to a phone. If the lifecycle journal has expired, retained events
 still resolve the link and the status reads **Recorded**. Deleted evidence shows
 an unavailable state. Existing browser authentication and proxy prefixes apply.
+
+### Per-camera incident notifications
+
+In camera settings under **Motion/Object → HA/MQTT Options**, **Send incident
+notifications** controls native HA and MQTT incident lifecycle messages for that
+camera. It defaults to enabled. Disabling it also excludes the camera from native
+incident replay and recovery snapshots; local detection, recording, and evidence
+remain available. Shared motion filtering and zone notification settings still apply.
+
+The camera-control API exposes `PUT /api/cameras/{camera_id}/incident-notifications`
+with `{"enabled": false}` or `{"enabled": true}`. This changes the saved setting
+without restarting camera workers. Camera status includes
+`incident_notifications_enabled` for the native HA switch.
+
+The global **API & MQTT/HA → MQTT/HA → General → Enable incident notifications**
+switch defaults to on. Turning it off suppresses native HA and MQTT incident
+lifecycle delivery for every camera, including replay and recovery snapshots.
+It preserves the individual camera/zone preferences, detection, recording, and
+broker connection settings. Save settings to apply; no camera restart is needed.

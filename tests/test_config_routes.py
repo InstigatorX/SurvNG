@@ -91,6 +91,40 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertTrue(restored.integration_notifications.exclude_motion)
         self.assertEqual(hot_config_changes(self.config, restored), ["integration_notifications"])
 
+    def test_global_notification_control_persists_and_preserves_camera_preferences(self):
+        from survng.app.config_routes import CameraNotificationRequest
+        from survng.app.security import required_api_scope
+        endpoint = self.endpoint("/api/incident-notifications", "PUT")
+        self.assertEqual(required_api_scope("PUT", "/api/incident-notifications"), "camera:control")
+        before = self.config.cameras[0].model_dump()
+        self.assertFalse(endpoint(CameraNotificationRequest(enabled=False))["enabled"])
+        self.assertFalse(self.config.integration_notifications.enabled)
+        self.assertEqual(self.config.cameras[0].model_dump(), before)
+        self.apply.assert_not_called()
+        self.save.side_effect = OSError("disk full")
+        with self.assertRaises(OSError):
+            endpoint(CameraNotificationRequest(enabled=True))
+        self.assertFalse(self.config.integration_notifications.enabled)
+
+    def test_camera_notification_control_persists_without_restarting(self):
+        from survng.app.config_routes import CameraNotificationRequest
+        from survng.app.security import required_api_scope
+        endpoint = self.endpoint("/api/cameras/{camera_id}/incident-notifications", "PUT")
+        self.assertEqual(required_api_scope("PUT", "/api/cameras/gate/incident-notifications"), "camera:control")
+        result = endpoint("gate", CameraNotificationRequest(enabled=False))
+        self.assertFalse(result["incident_notifications_enabled"])
+        self.assertFalse(self.config.cameras[0].incident_notifications_enabled)
+        self.save.assert_called_once()
+        self.apply.assert_not_called()
+        self.assertFalse(self.manager.workers["gate"].mock_calls)
+        self.save.side_effect = OSError("disk full")
+        with self.assertRaises(OSError):
+            endpoint("gate", CameraNotificationRequest(enabled=True))
+        self.assertFalse(self.config.cameras[0].incident_notifications_enabled)
+        with self.assertRaises(HTTPException) as error:
+            endpoint("missing", CameraNotificationRequest(enabled=True))
+        self.assertEqual(error.exception.status_code, 404)
+
     def test_zone_notification_control_preserves_detection_and_persists(self):
         zone = DetectionZone(name="Porch", exclude_from_ema=True)
         self.assertTrue(zone.notifications_enabled)

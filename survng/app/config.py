@@ -163,6 +163,7 @@ class DetectionZone(BaseModel):
 
 
 class IntegrationNotificationConfig(BaseModel):
+    enabled: bool = True
     exclude_motion: bool = False
     base_url: str = ""
 
@@ -528,6 +529,7 @@ class CameraLiveViewConfig(BaseModel):
 
 
 class CameraConfig(BaseModel):
+    incident_notifications_enabled: bool = True
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
     video_backend: str = "url"
