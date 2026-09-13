@@ -1616,7 +1616,7 @@ class AppManager:
             self._refresh_incident_notification(camera_id, event_id)
             self.state_events.publish("incident", payload)
             return
-        if event_type == "incident" or (event_type == "object" and payload.get("source") == "manual_openvino"):
+        if event_type in {"incident", "object"}:
             self._refresh_incident_notification(
                 camera_id, int(payload.get("event_id") or 0), allow_new=event_type == "incident",
             )
