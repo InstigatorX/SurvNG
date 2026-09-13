@@ -390,8 +390,8 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
                 raise HTTPException(status_code=404, detail="API token not found")
             next_config = current.model_copy(deep=True)
             next_config.api_auth.tokens = retained
-            if not retained:
-                next_config.api_auth.enabled = False
+            if not retained and current.api_auth.enabled:
+                raise HTTPException(status_code=409, detail="Create a replacement token or explicitly disable API authentication before deleting the last token")
             effective, result = deps.apply_config(next_config, assign_ids=False)
         return {
             "ok": True,

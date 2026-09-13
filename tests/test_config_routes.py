@@ -224,7 +224,7 @@ class ConfigRoutesTest(unittest.TestCase):
         }])
         self.assertNotIn("token_hash", str(result))
 
-    def test_api_token_delete_disables_auth_when_last_token_is_removed(self) -> None:
+    def test_api_token_delete_rejects_last_enabled_token(self) -> None:
         self.config.api_auth.enabled = True
         self.config.api_auth.tokens = [ApiTokenConfig(
             id="ha", name="Home Assistant", token_hash="a" * 64, scopes=["read"],
@@ -233,12 +233,12 @@ class ConfigRoutesTest(unittest.TestCase):
             "apply_mode": "hot", "camera_workers_restarted": False,
             "subsystems_restarted": [], "hot_updated": ["api_auth"],
         })
-        result = self.endpoint("/api/config/api-tokens/{token_id}", "DELETE")("ha")
-
-        applied = self.apply.call_args.args[0]
-        self.assertEqual(applied.api_auth.tokens, [])
-        self.assertFalse(applied.api_auth.enabled)
-        self.assertFalse(result["enabled"])
+        with self.assertRaises(HTTPException) as raised:
+            self.endpoint("/api/config/api-tokens/{token_id}", "DELETE")("ha")
+        self.assertEqual(raised.exception.status_code, 409)
+        self.apply.assert_not_called()
+        self.assertTrue(self.config.api_auth.enabled)
+        self.assertEqual(len(self.config.api_auth.tokens), 1)
 
     def test_order_rejects_missing_runtime_worker_before_persistence(self) -> None:
         self.manager.workers = {}
