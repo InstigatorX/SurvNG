@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -619,6 +620,34 @@ class IncidentQueryService:
                 return hydrated[0] if hydrated else summary
         return None
 
+    def notification_detail(self, manager: AppManager, incident_id: str) -> dict[str, Any]:
+        match = re.fullmatch(r"incident-(.+)-([1-9][0-9]*)", incident_id)
+        if not match:
+            raise HTTPException(status_code=404, detail="incident was not found")
+        camera_id, anchor_id = match.group(1), int(match.group(2))
+        notification = manager.incidents.get(incident_id)
+        if notification:
+            rows = [row for row in manager.events.get_many(notification["event_ids"])
+                    if row.get("camera_id") == camera_id]
+            if not rows:
+                raise HTTPException(status_code=404, detail="incident was not found")
+            summaries = [_incident_row(camera_id, [_event_row(row) for row in rows])]
+            hydrated = self.with_faces(manager, self.hydrate(manager, summaries))
+            detail = hydrated[0] if hydrated else None
+        else:
+            detail = self.resolve_event(manager, anchor_id)
+        if detail is None or detail.get("camera_id") != camera_id:
+            raise HTTPException(status_code=404, detail="incident was not found")
+        camera = next((camera for camera in manager.config.cameras if camera.id == camera_id), None)
+        # The notification journal is bounded. Old links still resolve from
+        # stored evidence, without inventing a lifecycle state after eviction.
+        return {
+            "incident": detail,
+            "notification": notification,
+            "camera_name": camera.name if camera else camera_id,
+            "incident_id": incident_id,
+        }
+
     def cross_camera_trace(
         self,
         manager: AppManager,
@@ -751,6 +780,10 @@ def create_incident_query_router(
                 gap_seconds=gap_seconds,
             )
         )
+
+    @router.get("/api/incidents/notification/{incident_id}")
+    def notification_incident(incident_id: str) -> dict[str, Any]:
+        return with_manager(lambda active: service.notification_detail(active, incident_id))
 
     @router.get("/api/incidents/by-event/{event_id}")
     def incident_for_event(event_id: int) -> dict[str, Any]:

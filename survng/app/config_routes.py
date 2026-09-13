@@ -53,6 +53,11 @@ class ApiTokenCreateRequest(BaseModel):
     scopes: list[ApiScope] = Field(default_factory=lambda: ["read"], min_length=1)
 
 
+class ZoneNotificationRequest(BaseModel):
+    zone: str = Field(min_length=1)
+    enabled: bool
+
+
 class ConfigRuntime(Protocol):
     """Narrow runtime surface required by configuration HTTP handlers."""
 
@@ -385,8 +390,8 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
                 raise HTTPException(status_code=404, detail="API token not found")
             next_config = current.model_copy(deep=True)
             next_config.api_auth.tokens = retained
-            if not retained:
-                next_config.api_auth.enabled = False
+            if not retained and current.api_auth.enabled:
+                raise HTTPException(status_code=409, detail="Create a replacement token or explicitly disable API authentication before deleting the last token")
             effective, result = deps.apply_config(next_config, assign_ids=False)
         return {
             "ok": True,
@@ -394,6 +399,25 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             "enabled": effective.api_auth.enabled,
             **result,
         }
+
+    @router.put("/api/cameras/{camera_id}/zone-notifications")
+    def put_zone_notifications(camera_id: str, state: ZoneNotificationRequest) -> dict:
+        with deps.lock:
+            next_config = deps.get_config().model_copy(deep=True)
+            camera = camera_by_id(next_config, camera_id)
+            if camera is None:
+                raise HTTPException(status_code=404, detail="camera not found")
+            matches = [zone for zone in camera.zones if zone.name == state.zone]
+            if not matches:
+                raise HTTPException(status_code=404, detail="zone not found")
+            if len(matches) != 1:
+                raise HTTPException(status_code=409, detail="zone name is ambiguous")
+            matches[0].notifications_enabled = state.enabled
+            # Notification policy is read from the canonical config; no capture,
+            # detection, or zone geometry worker needs to restart for this change.
+            deps.save_config(next_config, assign_ids=False)
+            deps.publish_config(next_config)
+        return {"ok": True, "camera_id": camera_id, "zone": state.zone, "notifications_enabled": state.enabled}
 
     @router.put("/api/config/cameras/{camera_id}/zones")
     def put_camera_zones(camera_id: str, zones: list[DetectionZone]) -> dict:

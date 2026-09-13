@@ -17,8 +17,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .motion_pipeline import motion_pipeline_catalog
 from .detector_labels import openvino_package_classes
+from .motion_pipeline import motion_pipeline_catalog
+from .security import authenticate_api_token, authenticate_session
 
 
 SSE_HEARTBEAT_SECONDS = 15.0
@@ -98,6 +99,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
         return {
             "schema_version": 1,
             "base_path": config.base_path,
+            "incident_notifications": {"schema_version": 2, "transport": "sse", "mqtt_required": False},
             "mqtt": {
                 "enabled": config.mqtt.enabled,
                 "topic_prefix": config.mqtt.topic_prefix,
@@ -111,6 +113,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     {
                         "name": zone.name,
                         "object_classes": list(zone.object_classes),
+                        "notifications_enabled": zone.notifications_enabled,
                     }
                     for zone in camera.zones
                     if zone.enabled
@@ -120,12 +123,29 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
 
     @router.get("/api/events/stream")
     async def application_event_stream(request: Request) -> StreamingResponse:
+        initial_config = deps.get_config()
+        authorization = request.headers.get("authorization", "")
+        cookie = request.headers.get("cookie", "")
+        token = authenticate_api_token(authorization, initial_config.api_auth) if initial_config.api_auth.enabled else None
+        session = authenticate_session(cookie, initial_config.web_auth) if initial_config.web_auth.enabled and token is None else None
+
+        def authorized() -> bool:
+            current = deps.get_config()
+            if token is not None:
+                principal = authenticate_api_token(authorization, current.api_auth) if current.api_auth.enabled else None
+            elif session is not None:
+                principal = authenticate_session(cookie, current.web_auth) if current.web_auth.enabled else None
+            else:
+                return not (current.api_auth.enabled or current.web_auth.enabled)
+            return principal is not None and principal.permits("read")
+
         async def generate():
             active_manager = deps.get_manager()
             subscriber = active_manager.state_events.subscribe()
             try:
                 yield "retry: 3000\n\n"
                 query_params = getattr(request, "query_params", {})
+                incidents_only = query_params.get("incidents_only") == "1"
                 last_event_id = (
                     request.headers.get("last-event-id", "")
                     or query_params.get("last_event_id", "")
@@ -136,24 +156,41 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 if replay is None:
                     connection_cursor = active_manager.state_events.cursor
                     snapshot_sequence = active_manager.state_events.sequence(connection_cursor)
-                    yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
-                    yield _sse_message(
-                        "system_state",
-                        await asyncio.to_thread(deps.system_telemetry.system_status, active_manager),
-                    )
+                    if incidents_only:
+                        yield _sse_message("incident_notifications_state", {
+                            "schema_version": 2,
+                            "incidents": [active_manager.incident_notification_payload(item)
+                                          for item in await asyncio.to_thread(active_manager.incidents.snapshot)
+                                          if active_manager.incident_notification_allowed(item)],
+                        })
+                    else:
+                        yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
+                        yield _sse_message(
+                            "system_state",
+                            await asyncio.to_thread(deps.system_telemetry.system_status, active_manager),
+                        )
                 else:
                     for event in replay:
                         replayed_ids.add(event.id)
-                        yield _sse_message(event.type, event.data, event.id)
+                        if incidents_only and (
+                            event.type != "incident_lifecycle"
+                            or not active_manager.incident_notification_allowed(event.data)
+                        ):
+                            continue
+                        yield _sse_message(event.type, (
+                            active_manager.incident_notification_payload(event.data)
+                            if event.type == "incident_lifecycle" else event.data
+                        ), event.id)
                     connection_cursor = replay[-1].id if replay else last_event_id
                 yield _sse_message(
                     "connected",
                     {"instance": active_manager.state_events.instance_id},
                     connection_cursor,
                 )
+                last_sequence = active_manager.state_events.sequence(connection_cursor)
                 next_heartbeat = time.monotonic() + SSE_HEARTBEAT_SECONDS
                 while True:
-                    if await request.is_disconnected():
+                    if not authorized() or await request.is_disconnected():
                         return
                     try:
                         event = subscriber.get_nowait()
@@ -179,12 +216,37 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                         and event_sequence <= snapshot_sequence
                     ):
                         continue
-                    yield _sse_message(event.type, event.data, event.id)
+                    if last_sequence is not None and event_sequence != last_sequence + 1:
+                        # A slow subscriber lost queued events. Reconnect/replay
+                        # from the last delivered cursor instead of skipping data.
+                        return
+                    last_sequence = event_sequence
+                    if incidents_only and (
+                        event.type != "incident_lifecycle"
+                        or not active_manager.incident_notification_allowed(event.data)
+                    ):
+                        continue
+                    yield _sse_message(event.type, (
+                        active_manager.incident_notification_payload(event.data)
+                        if event.type == "incident_lifecycle" else event.data
+                    ), event.id)
             finally:
                 active_manager.state_events.unsubscribe(subscriber)
 
+        async def authorized_chunks():
+            source = generate()
+            try:
+                async for chunk in source:
+                    # Recheck after awaited snapshot work and before every replay,
+                    # live event, and heartbeat leaves the server.
+                    if not authorized():
+                        return
+                    yield chunk
+            finally:
+                await source.aclose()
+
         return StreamingResponse(
-            generate(),
+            authorized_chunks(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
