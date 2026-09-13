@@ -138,16 +138,18 @@ class EmaRouteCandidateCacheTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache = EmaRouteCandidateCache(Path(tmpdir) / "ema-route-cache.sqlite3")
             cache.start()
-            blocker = sqlite3.connect(cache.path, timeout=1.0)
-            blocker.execute("begin immediate")
-            captured_at = math.floor(time.time() * 2.0) / 2.0 + 0.01
-            self.assertEqual(cache.submit("gate", captured_at, _payload(0.6)), "queued")
-            self.assertEqual(
-                cache.submit("gate", captured_at + 0.2, _payload(0.8)), "coalesced"
-            )
-            blocker.rollback()
-            blocker.close()
-            cache.close()
+            try:
+                captured_at = math.floor(time.time() * 2.0) / 2.0 + 0.01
+                # Coalescing applies to pending items. A SQLite write lock does
+                # not prevent the writer from taking the first item off this
+                # queue, so hold its condition across both submissions.
+                with cache._condition:
+                    self.assertEqual(cache.submit("gate", captured_at, _payload(0.6)), "queued")
+                    self.assertEqual(
+                        cache.submit("gate", captured_at + 0.2, _payload(0.8)), "coalesced"
+                    )
+            finally:
+                cache.close()
             rows = cache.between("gate", captured_at - 1.0, captured_at + 1.0)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0][1]["score"], 0.8)
