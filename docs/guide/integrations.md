@@ -64,6 +64,11 @@ Use `ON` to turn it back on. Replace `survng` with your configured topic prefix 
 
 Optional bearer tokens let automations call SurvNG safely when authentication is enabled.
 
+Deleting the last token while API authentication is enabled is rejected. Create a
+replacement token first, or explicitly disable API authentication if anonymous
+access is intended. Open event streams recheck credentials and read permissions
+before delivery and while idle, so revocation also closes existing streams.
+
 Scopes:
 
 | Scope | Allows |

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import survng.app.system_routes as system_routes
+from survng.app.config import AppConfig
 from survng.app.state_events import StateEventBroker
 from survng.app.system_routes import SystemRouteDependencies, create_system_router
 
@@ -16,10 +17,10 @@ class StreamRequest:
         return False
 
 
-def stream_handler(manager, telemetry, get_manager=None):
+def stream_handler(manager, telemetry, get_manager=None, config=None):
     dependencies = SystemRouteDependencies(
         get_manager=get_manager or Mock(return_value=manager),
-        get_config=Mock(),
+        get_config=lambda: config or AppConfig(),
         system_telemetry=telemetry,
         ffprobe_path=Mock(),
         ffplay_path=Mock(),
@@ -232,4 +233,69 @@ def test_live_motion_filter_keeps_sequence_and_allows_object_promotion():
             assert f"id: {motion.id}" in await asyncio.wait_for(anext(iterator), 1)
         finally:
             await iterator.aclose()
+    asyncio.run(run())
+
+
+def test_open_stream_stops_after_token_revocation_or_scope_reduction():
+    from survng.app.config import ApiTokenConfig
+    from survng.app.security import hash_api_token
+
+    async def run(change, replay):
+        config = AppConfig()
+        config.api_auth.enabled = True
+        config.api_auth.tokens = [ApiTokenConfig(id="ha", name="HA", token_hash=hash_api_token("secret"), scopes=["read"])]
+        broker = StateEventBroker()
+        first = broker.publish("camera_state", {})
+        broker.publish("camera_state", {"private": "replay"})
+        manager = SimpleNamespace(state_events=broker, statuses=lambda: [])
+        request = StreamRequest(header_cursor=first.id if replay else "")
+        request.headers["authorization"] = "Bearer secret"
+        response = await stream_handler(manager, SimpleNamespace(system_status=lambda _: {}), config=config)(request)
+        iterator = response.body_iterator
+        for _ in range(1 if replay else 4):
+            await anext(iterator)
+        change(config)
+        broker.publish("camera_state", {"private": "after revocation"})
+        try:
+            await asyncio.wait_for(anext(iterator), 1)
+        except StopAsyncIteration:
+            pass
+        else:
+            raise AssertionError("revoked stream delivered data")
+        assert not broker._subscribers
+
+    for change in (
+        lambda config: config.api_auth.tokens.clear(),
+        lambda config: setattr(config.api_auth.tokens[0], "scopes", ["camera:control"]),
+        lambda config: setattr(config.api_auth, "enabled", False),
+    ):
+        for replay in (True, False):
+            asyncio.run(run(change, replay))
+
+
+def test_idle_stream_stops_after_session_revocation():
+    from survng.app.config import WebUserConfig
+    from survng.app.security import SESSION_COOKIE_NAME, encode_session
+
+    async def run():
+        config = AppConfig()
+        config.web_auth.enabled = True
+        config.web_auth.session_key = "a" * 64
+        config.web_auth.users = [WebUserConfig(id="viewer", username="viewer", password_hash="__SURVNG_SECRET_SET__")]
+        request = StreamRequest()
+        request.headers["cookie"] = f"{SESSION_COOKIE_NAME}={encode_session('viewer', config.web_auth.session_key)}"
+        broker = StateEventBroker()
+        manager = SimpleNamespace(state_events=broker, statuses=lambda: [])
+        response = await stream_handler(manager, SimpleNamespace(system_status=lambda _: {}), config=config)(request)
+        iterator = response.body_iterator
+        for _ in range(4):
+            await anext(iterator)
+        config.web_auth.users[0].session_epoch += 1
+        try:
+            await asyncio.wait_for(anext(iterator), 1)
+        except StopAsyncIteration:
+            pass
+        else:
+            raise AssertionError("revoked idle session remained open")
+        assert not broker._subscribers
     asyncio.run(run())

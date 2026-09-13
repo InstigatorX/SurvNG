@@ -17,8 +17,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .motion_pipeline import motion_pipeline_catalog
 from .detector_labels import openvino_package_classes
+from .motion_pipeline import motion_pipeline_catalog
+from .security import authenticate_api_token, authenticate_session
 
 
 SSE_HEARTBEAT_SECONDS = 15.0
@@ -122,6 +123,22 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
 
     @router.get("/api/events/stream")
     async def application_event_stream(request: Request) -> StreamingResponse:
+        initial_config = deps.get_config()
+        authorization = request.headers.get("authorization", "")
+        cookie = request.headers.get("cookie", "")
+        token = authenticate_api_token(authorization, initial_config.api_auth) if initial_config.api_auth.enabled else None
+        session = authenticate_session(cookie, initial_config.web_auth) if initial_config.web_auth.enabled and token is None else None
+
+        def authorized() -> bool:
+            current = deps.get_config()
+            if token is not None:
+                principal = authenticate_api_token(authorization, current.api_auth) if current.api_auth.enabled else None
+            elif session is not None:
+                principal = authenticate_session(cookie, current.web_auth) if current.web_auth.enabled else None
+            else:
+                return not (current.api_auth.enabled or current.web_auth.enabled)
+            return principal is not None and principal.permits("read")
+
         async def generate():
             active_manager = deps.get_manager()
             subscriber = active_manager.state_events.subscribe()
@@ -173,7 +190,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 last_sequence = active_manager.state_events.sequence(connection_cursor)
                 next_heartbeat = time.monotonic() + SSE_HEARTBEAT_SECONDS
                 while True:
-                    if await request.is_disconnected():
+                    if not authorized() or await request.is_disconnected():
                         return
                     try:
                         event = subscriber.get_nowait()
@@ -216,8 +233,20 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
             finally:
                 active_manager.state_events.unsubscribe(subscriber)
 
+        async def authorized_chunks():
+            source = generate()
+            try:
+                async for chunk in source:
+                    # Recheck after awaited snapshot work and before every replay,
+                    # live event, and heartbeat leaves the server.
+                    if not authorized():
+                        return
+                    yield chunk
+            finally:
+                await source.aclose()
+
         return StreamingResponse(
-            generate(),
+            authorized_chunks(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
