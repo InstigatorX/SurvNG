@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from survng.app.config import AppConfig, CameraConfig, MediaStorageConfig, MediaStorageLocationConfig
+from survng.app.config import AppConfig, CameraConfig, DetectionZone, MediaStorageConfig, MediaStorageLocationConfig
 from survng.app.camera_fleet import CameraFleetLifecycle
 from survng.app.camera_control import CameraControlService
 from survng.app.camera_startup import CameraStartupCoordinator
@@ -62,6 +62,8 @@ def manager_with_mocks() -> AppManager:
         recorder=manager.recorder,
     )
     manager.mqtt = Mock()
+    manager.incidents = Mock()
+    manager.faces.for_event_ids.return_value = []
     manager.state_events = Mock()
     manager.detection_watch = Mock()
     manager.detection_watch.observe_incident.return_value = ()
@@ -329,6 +331,70 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         assert target.consider_route_detection_watch.call_count == 3
         assert manager._restored_detection_watches == []
+
+    def test_native_incident_publication_does_not_require_mqtt(self) -> None:
+        manager = manager_with_mocks()
+        manager.config.mqtt.enabled = False
+        payload = {"incident_id": "incident-gate-41", "state": "complete", "revision": 2}
+        manager._publish_incident_notification(payload)
+        manager.state_events.publish.assert_called_once_with("incident_lifecycle", {**payload, "notifications_enabled": True, "incident_path": "/incidents/incident-gate-41", "event_url": f"{manager.config.base_path}/incidents/incident-gate-41"})
+        manager.mqtt.publish.assert_not_called()
+        manager.config.mqtt.enabled = True
+        manager.config.mqtt.incident_events_enabled = True
+        manager._publish_incident_notification(payload)
+        manager.mqtt.publish.assert_called_once_with("events/incidents", {**payload, "notifications_enabled": True, "incident_path": "/incidents/incident-gate-41", "event_url": f"{manager.config.base_path}/incidents/incident-gate-41"}, retain=False)
+
+    def test_notification_link_stays_stable_when_representative_changes(self):
+        manager = manager_with_mocks()
+        manager.config.integration_notifications.base_url = "https://ha.example/survng"
+        for event_id in (41, 99):
+            payload = manager.incident_notification_payload({
+                "incident_id": "incident-gate-41", "representative_event_id": event_id,
+            })
+            self.assertEqual(payload["event_url"], "https://ha.example/survng/incidents/incident-gate-41")
+            self.assertEqual(payload["incident_path"], "/incidents/incident-gate-41")
+
+    def test_public_notification_url_applies_to_mqtt_and_native_payloads(self):
+        manager = manager_with_mocks()
+        manager.config.integration_notifications.base_url = "https://ha.loebees.com/survng"
+        manager.config.mqtt.enabled = True
+        manager.config.mqtt.incident_events_enabled = True
+        manager._publish_incident_notification({"camera_id": "gate", "representative_event_id": 41})
+        native = manager.state_events.publish.call_args.args[1]
+        mqtt = manager.mqtt.publish.call_args.args[1]
+        self.assertEqual(native, mqtt)
+        self.assertEqual(native["event_url"], "https://ha.loebees.com/survng/incidents?event_ids=41")
+        self.assertEqual(native["snapshot_url"], "https://ha.loebees.com/survng/api/events/41/snapshot.jpg")
+        self.assertEqual(manager.incident_notification_payload({})["event_url"],
+                         "https://ha.loebees.com/survng/incidents")
+
+    def test_shared_motion_filter_gates_mqtt_without_disabling_object_updates(self):
+        manager = manager_with_mocks()
+        manager.config.mqtt.enabled = True
+        manager.config.mqtt.incident_events_enabled = True
+        self.assertTrue(manager.incident_notification_allowed({}))
+        manager.config.integration_notifications.exclude_motion = True
+        for evidence, allowed in (({}, False), ({"classes": ["person"]}, True),
+                                  ({"objects": [{"label": "car"}]}, True), ({"has_objects": True}, True)):
+            for state in ("new", "updated", "complete"):
+                manager.mqtt.publish.reset_mock()
+                manager._publish_incident_notification({"camera_id": "gate", "state": state, **evidence})
+                self.assertEqual(manager.mqtt.publish.called, allowed)
+
+    def test_zone_policy_gates_mqtt_but_preserves_native_incidents(self):
+        manager = manager_with_mocks()
+        manager.config.mqtt.enabled = True
+        manager.config.mqtt.incident_events_enabled = True
+        manager.config.cameras[0].zones = [
+            DetectionZone(name="Porch", notifications_enabled=False),
+            DetectionZone(name="Driveway"),
+        ]
+        for zones, allowed in ((["Porch"], False), (["Porch", "Driveway"], True),
+                               ([], True), (["unknown"], True)):
+            manager.mqtt.publish.reset_mock()
+            manager._publish_incident_notification({"camera_id": "gate", "zones": zones})
+            self.assertEqual(manager.state_events.publish.call_args.args[1]["notifications_enabled"], allowed)
+            self.assertEqual(manager.mqtt.publish.called, allowed)
 
     def test_confirmed_object_event_opens_route_detection_watch(self) -> None:
         manager = manager_with_mocks()

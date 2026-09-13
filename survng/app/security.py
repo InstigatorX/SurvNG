@@ -416,6 +416,7 @@ _CAMERA_CONTROL_SUFFIXES = frozenset({
     "/recording/stop",
     "/recording",
     "/detection",
+    "/zone-notifications",
 })
 
 # These POST endpoints only query existing media/index data. They use POST to

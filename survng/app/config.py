@@ -160,6 +160,7 @@ class DetectionZone(BaseModel):
     max_depth_m: float | None = Field(default=None, ge=0.01, le=500.0)
     behavior: Literal["incident", "ignore", "none"] = "incident"
     exclude_from_ema: bool = False
+    notifications_enabled: bool = True
     trigger: Literal["bottom_center"] = "bottom_center"
 
     @model_validator(mode="after")
@@ -171,6 +172,28 @@ class DetectionZone(BaseModel):
         ):
             raise ValueError("zone minimum depth must not exceed its maximum depth")
         return self
+
+
+class IntegrationNotificationConfig(BaseModel):
+    exclude_motion: bool = False
+    base_url: str = ""
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or any(char.isspace() for char in value)):
+            raise ValueError("Notification URL must be an HTTP(S) base URL without credentials, query, or fragment")
+        try:
+            parsed.port
+        except ValueError as error:
+            raise ValueError("Notification URL has an invalid port") from error
+        return value
 
 
 class MqttConfig(BaseModel):
@@ -1027,6 +1050,7 @@ class AppConfig(BaseModel):
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)
     semantic_search: SemanticSearchConfig = Field(default_factory=SemanticSearchConfig)
+    integration_notifications: IntegrationNotificationConfig = Field(default_factory=IntegrationNotificationConfig)
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
