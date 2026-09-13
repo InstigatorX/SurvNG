@@ -1,19 +1,34 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Camera, ImageOff, Play, RefreshCw, X } from "lucide-react";
+import { incidentEvidenceFrames } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 import { IncidentClipLayer } from "./IncidentCard.jsx";
 import "./incident-detail.css";
 
-function EvidenceImage({ eventId, revision, label, onClick }) {
+function EvidenceImage({ eventId, revision, label, onClick, src }) {
   const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [eventId, revision]);
-  const content = !eventId || failed
+  useEffect(() => setFailed(false), [eventId, revision, src]);
+  const content = (!eventId && !src) || failed
     ? <span className="incident-detail-image-empty"><ImageOff size={28} />Image unavailable</span>
-    : <img src={appUrl(`/api/events/${eventId}/thumbnail.jpg?width=1280&quality=85&revision=${encodeURIComponent(revision || 0)}`)} alt={label} onError={() => setFailed(true)} />;
+    : <img loading={onClick ? "lazy" : "eager"} src={appUrl(src || `/api/events/${eventId}/thumbnail.jpg?width=1280&quality=85&revision=${encodeURIComponent(revision || 0)}`)} alt={label} onError={() => setFailed(true)} />;
   return onClick
     ? <button className="incident-detail-frame" onClick={onClick} aria-label={label}>{content}<span>{label}</span></button>
     : <div className="incident-detail-hero">{content}</div>;
+}
+
+function EvidenceViewer({ frames, selected, revision, onClose }) {
+  const dialog = useRef(null);
+  const [index, setIndex] = useState(selected);
+  useEffect(() => {
+    dialog.current.showModal();
+  }, []);
+  const frame = frames[index];
+  return <dialog ref={dialog} className="incident-evidence-viewer" aria-label="Evidence image viewer" onCancel={onClose} onClose={onClose}>
+    <header><span>{frame.label} · {index + 1} / {frames.length}</span><button autoFocus onClick={onClose} aria-label="Close evidence"><X size={22} /></button></header>
+    <EvidenceImage src={frame.src} revision={revision} label={frame.label} />
+    <nav aria-label="Evidence navigation"><button disabled={index === 0} onClick={() => setIndex(index - 1)}>Previous</button><button disabled={index === frames.length - 1} onClick={() => setIndex(index + 1)}>Next</button></nav>
+  </dialog>;
 }
 
 export function IncidentDetailPage({ incidentId, timeZone }) {
@@ -62,7 +77,19 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
   const events = useMemo(() => [...(incident?.events || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)), [incident?.events]);
   const representative = events.some((event) => Number(event.id) === Number(notification?.representative_event_id))
     ? notification.representative_event_id : incident?.representative_event_id;
-  const firstId = events[0]?.id;
+  const evidenceFrames = useMemo(() => {
+    const seen = new Set();
+    return events.flatMap((event) => incidentEvidenceFrames(event).map((frame) => {
+      const src = frame.kind === "snapshot"
+        ? `/api/events/${event.id}/thumbnail.jpg?width=1280&quality=85&revision=${encodeURIComponent(notification?.revision || incident?.end_at || 0)}`
+        : `/api/cameras/${encodeURIComponent(incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
+      return { ...frame, src, label: `${frame.label} · ${formatDateTime(new Date(frame.epoch * 1000).toISOString(), timeZone)}` };
+    })).filter((frame) => {
+      if (seen.has(frame.src)) return false;
+      seen.add(frame.src);
+      return true;
+    });
+  }, [events, incident?.camera_id, incident?.end_at, notification?.revision, timeZone]);
   const labels = notification?.classes || incident?.labels || [];
   const people = notification?.people || (incident?.identities || []).map((item) => item.name).filter(Boolean);
   const zones = notification?.zones || incident?.zones || [];
@@ -84,7 +111,7 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
           </section>
           <section className="incident-detail-media" aria-label="Incident evidence">
             {playbackIncident ? <div className="incident-detail-player"><IncidentClipLayer key={playbackKey} event={playbackIncident} active /><button className="incident-detail-close-player" onClick={() => setPlaybackIncident(null)} aria-label="Close playback"><X size={20} /></button></div>
-              : <EvidenceImage eventId={selectedFrame || representative} revision={revision} label={`Incident at ${data.camera_name}`} />}
+              : <EvidenceImage eventId={representative} revision={revision} label={`Incident at ${data.camera_name}`} />}
           </section>
           <div className="incident-detail-actions">
             <button className="primary" disabled={!representative} onClick={() => { setSelectedFrame(null); setPlaybackIncident(incident); setPlaybackKey((value) => value + 1); }}><Play size={20} />{playbackIncident ? "Replay incident" : "Play incident"}</button>
@@ -92,9 +119,9 @@ export function IncidentDetailPage({ incidentId, timeZone }) {
           </div>
           <p className="incident-detail-hint">Playback includes the recording just before detection, when available.</p>
           <section className="incident-detail-section"><h2>Evidence</h2><div className="incident-detail-frames">
-            {firstId && firstId !== representative ? <EvidenceImage eventId={firstId} revision={revision} label="First detection" onClick={() => { setPlaybackIncident(null); setSelectedFrame(firstId); }} /> : null}
-            <EvidenceImage eventId={representative} revision={revision} label={notification?.state === "complete" ? "Final image" : "Latest image"} onClick={() => { setPlaybackIncident(null); setSelectedFrame(null); }} />
-          </div><p className="incident-detail-hint">Images show the currently saved evidence for each detection.</p></section>
+            {evidenceFrames.map((frame, index) => <EvidenceImage key={frame.src} src={frame.src} revision={revision} label={frame.label} onClick={() => setSelectedFrame({ frames: evidenceFrames, index })} />)}
+          </div>{!evidenceFrames.length ? <p>No evidence images are available.</p> : <p className="incident-detail-hint">Tap an image to open it. Frames from expired recordings may be unavailable.</p>}</section>
+          {selectedFrame ? <EvidenceViewer frames={selectedFrame.frames} selected={selectedFrame.index} revision={revision} onClose={() => setSelectedFrame(null)} /> : null}
           <section className="incident-detail-section"><h2>What happened</h2><ol className="incident-detail-timeline">
             {events.map((event) => <li key={event.id}><time dateTime={event.created_at}>{showTime(event.created_at)}</time><strong>{event.labels?.length ? `${event.labels.join(", ")} detected` : "Motion detected"}</strong>{event.zones?.length ? <span>{event.zones.join(", ")}</span> : null}</li>)}
             {people.length ? <li><strong>Recognized: {people.join(", ")}</strong></li> : null}
