@@ -17,6 +17,8 @@ Admin is grouped into practical jobs.
 | **Access** | Browser users, admin/viewer roles, HTTPS, and trusted reverse proxies |
 | **Server** | General service options, appearance, updates |
 
+Server Preferences also includes the optional [Live weather and radar tile](weather.md).
+
 ## Observe
 
 | Area | What you do there |

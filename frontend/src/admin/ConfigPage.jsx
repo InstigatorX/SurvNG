@@ -1,3 +1,4 @@
+import { WeatherSettings } from "./WeatherSettings.jsx";
 import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -4154,6 +4155,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
         {serverPreferencesSection === "general" ? (
         <div className="sub-panel general-preferences-panel">
           <h3>Server Preferences</h3>
+          <WeatherSettings value={config.weather} onChange={(value) => updateConfig(["weather"], value)} />
           <label>Timezone<select value={timeZone} onChange={(event) => setTimeZone(event.target.value)}>
             {US_TIME_ZONES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></label>
