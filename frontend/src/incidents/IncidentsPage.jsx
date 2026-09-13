@@ -9,13 +9,14 @@ import {
   Maximize2,
   Minimize2,
   Search,
+  SlidersHorizontal,
   Rows3,
 } from "lucide-react";
 import { useVisiblePolling } from "../visibilityPolling.mjs";
 import { incidentTrackingSource, storedObjectTracks } from "../objectTrackReplay.mjs";
 import { incidentDetailQuery, incidentSelectionHref, incidentThumbnailPageSize, incidentGalleryPageSize, linkedIncidentEventFilter } from "../incidentNavigation.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
-import { APP_BASE_PATH, incidentRecordingContext, fetch } from "../shared/api.js";
+import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
 import { formatDateTime } from "../shared/format.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
@@ -25,6 +26,7 @@ import { useAppEvents } from "../shared/events.js";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
 import { incidentLabels, IncidentObjectBadges, IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
 import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
+import "./mobile-incidents.css";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
 
 export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange, onAskAssistant = null }) {
@@ -32,6 +34,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
   const thumbnailObjectFocusZoom = appConfig?.incident_thumbnail_object_focus_zoom ?? 1;
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [eventFilter, setEventFilter] = useState("object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
@@ -627,7 +630,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   function toggleIncident(incidentId) {
     if (mobileView) {
       const incident = visibleIncidents.find((candidate) => sameIncidentId(candidate.id, incidentId));
-      if (incident) openIncidentOverlay(incident);
+      if (incident) window.location.assign(appUrl(`/incidents/${encodeURIComponent(incident.id)}`));
       return;
     }
     if (!sameIncidentId(incidentId, linkedIncidentDetail?.id)) {
@@ -883,42 +886,45 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   return (
     <main className="bento-grid incidents-grid">
-      <section className="bento-card events-zone incidents-page-zone">
+      <section className="bento-card events-zone incidents-page-zone mobile-incidents">
         <div className="section-head compact incident-head">
           <div><h2>Incidents</h2></div>
           <div className="incident-head-actions">
-            <div className="incident-filter-toggle compact" aria-label="Incident type filter">
-              <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Object</button>
-              <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
-            </div>
-            <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
+            <button type="button" className="mobile-filter-button" aria-expanded={mobileFiltersOpen} aria-controls="mobile-incident-filters" onClick={() => setMobileFiltersOpen((open) => !open)}>
+              <SlidersHorizontal size={17} /> Filters{activeIncidentFilterCount || incidentDay !== today || eventFilter !== "object" || semanticIncidentActive ? <span className="mobile-filter-active" aria-label="Filters active" /> : null}
+            </button>
           </div>
         </div>
-        <div className="event-filter incident-filter-panel" aria-label="Incident filters">
+        {mobileFiltersOpen ? <div id="mobile-incident-filters" className="event-filter incident-filter-panel" aria-label="Incident filters">
           <div className="incident-filter-selects">
+            <label><span>Activity</span><select value={eventFilter} aria-label="Incident type" onChange={(event) => { resetSemanticIncidentSearch(); setEventFilter(event.target.value); }}><option value="object">Objects</option><option value="motion">Motion</option></select></label>
             <label>
               <span>Day</span>
               <input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" />
             </label>
             <label>
+              <span>Camera</span>
               <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)} aria-label="Incident camera">
                 <option value="all">All cameras</option>
                 {incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}
               </select>
             </label>
             <label>
+              <span>Object type</span>
               <select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)} aria-label="Incident object">
                 <option value="all">All objects</option>
                 {incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}
               </select>
             </label>
             <label>
+              <span>Zone</span>
               <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)} aria-label="Incident zone">
                 <option value="all">All zones</option>
                 {incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}
               </select>
             </label>
             <label>
+              <span>Person</span>
               <select value={incidentPersonFilter} onChange={(event) => { resetSemanticIncidentSearch(); setIncidentPersonFilter(event.target.value); }} aria-label="Known person">
                 <option value="all">All people</option>
                 {incidentPeople.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}
@@ -926,7 +932,11 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
             </label>
           </div>
           {semanticIncidentControl}
-        </div>
+          <div className="mobile-filter-actions">
+            <button type="button" onClick={() => { clearIncidentFilters(); setIncidentDay(today); setEventFilter("object"); resetSemanticIncidentSearch(); }}>Reset filters</button>
+            <button type="button" onClick={() => setMobileFiltersOpen(false)}>Done</button>
+          </div>
+        </div> : null}
         <div className="incident-gallery">
           {displayedIncidentLoading ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
           {!displayedIncidentLoading && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
@@ -941,7 +951,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                 thumbnailObjectFocus={thumbnailObjectFocus}
                 thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
                 onToggle={toggleIncident}
-                onSelect={openIncidentOverlay}
+                onSelect={() => toggleIncident(incident.id)}
               />
             ))
             : null}

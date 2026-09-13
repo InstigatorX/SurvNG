@@ -41,3 +41,10 @@
   .incident-detail-heading { margin-top: 8px; }
   .incident-detail-hero, .incident-detail-player { aspect-ratio: 4 / 3; }
 }
+
+.incident-evidence-viewer { width: min(100vw, 1100px); max-width: 100vw; max-height: 100dvh; padding: 12px; border: 1px solid var(--border, #39463e); background: #111512; color: #f0f3f1; border-radius: 12px; }
+.incident-evidence-viewer::backdrop { background: rgb(0 0 0 / 85%); }
+.incident-evidence-viewer header, .incident-evidence-viewer nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.incident-evidence-viewer header span { overflow-wrap: anywhere; }
+.incident-evidence-viewer button { min-width: 44px; min-height: 44px; }
+.incident-evidence-viewer .incident-detail-hero { height: min(68dvh, 750px); aspect-ratio: auto; margin: 12px 0; }
