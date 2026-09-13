@@ -201,4 +201,3 @@ class IncidentPayloadBuilder:
             "snapshot_url": f"{base_path}/api/events/{representative_id}/snapshot.jpg",
             "incidents_url": f"{base_path}/incidents",
         }
-
