@@ -77,6 +77,7 @@ def manager_owned_config(config: AppConfig) -> dict:
     for field in HOT_CONFIG_FIELDS | RECORDER_CONFIG_FIELDS:
         payload.pop(field, None)
     for camera in payload.get("cameras", []):
+        camera.pop("incident_notifications_enabled", None)
         camera.pop("retention", None)
         camera.pop("live_view", None)
         camera.pop("object_activity_attribution", None)

@@ -417,6 +417,7 @@ _CAMERA_CONTROL_SUFFIXES = frozenset({
     "/recording",
     "/detection",
     "/zone-notifications",
+    "/incident-notifications",
 })
 
 # These POST endpoints only query existing media/index data. They use POST to
@@ -444,6 +445,8 @@ def required_api_scope(method: str, path: str) -> ApiScope:
         return "read"
     if normalized_method == "POST" and path in _READ_ONLY_POST_PATHS:
         return "read"
+    if normalized_method == "PUT" and path == "/api/incident-notifications":
+        return "camera:control"
     if path.startswith("/api/cameras/") and any(
         path.endswith(suffix) for suffix in _CAMERA_CONTROL_SUFFIXES
     ):

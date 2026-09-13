@@ -299,3 +299,38 @@ def test_idle_stream_stops_after_session_revocation():
             raise AssertionError("revoked idle session remained open")
         assert not broker._subscribers
     asyncio.run(run())
+
+
+def test_disabled_camera_is_filtered_from_snapshot_and_replay():
+    from survng.app.config import CameraConfig
+    manager = notification_manager()
+    manager.config.cameras = [CameraConfig(id="gate", name="Gate", stream_url="rtsp://example", incident_notifications_enabled=False)]
+    payload = {"camera_id": "gate", "incident_id": "hidden", "classes": ["person"]}
+    manager.incidents.snapshot = lambda: [payload]
+    request = StreamRequest()
+    request.query_params["incidents_only"] = "1"
+    chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 3))
+    assert "hidden" not in "".join(chunks)
+    first = manager.state_events.publish("camera_state", {})
+    last = manager.state_events.publish("incident_lifecycle", payload)
+    request.headers["last-event-id"] = first.id
+    chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 2))
+    assert "hidden" not in "".join(chunks)
+    assert f"id: {last.id}" in chunks[-1]
+
+
+def test_global_notifications_off_filters_recovery_and_replay():
+    manager = notification_manager()
+    manager.config.integration_notifications.enabled = False
+    payload = {"camera_id": "gate", "incident_id": "suppressed", "classes": ["person"]}
+    manager.incidents.snapshot = lambda: [payload]
+    request = StreamRequest()
+    request.query_params["incidents_only"] = "1"
+    chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 3))
+    assert "suppressed" not in "".join(chunks)
+    first = manager.state_events.publish("camera_state", {})
+    last = manager.state_events.publish("incident_lifecycle", payload)
+    request.headers["last-event-id"] = first.id
+    chunks = asyncio.run(read_chunks(stream_handler(manager, Mock()), request, 2))
+    assert "suppressed" not in "".join(chunks)
+    assert f"id: {last.id}" in chunks[-1]

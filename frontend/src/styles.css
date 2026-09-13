@@ -4568,6 +4568,16 @@ button.live-overlay-backdrop:active {
   margin-top: 2px;
 }
 
+.integration-panes {
+  display: grid;
+  gap: 16px;
+}
+
+.integration-panes .detection-settings-subhead {
+  margin: 0;
+}
+
+
 .mqtt-access-settings .admin-field-grid {
   border-top: 1px solid var(--line);
   padding-top: 10px;
@@ -6405,7 +6415,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: grid;
   align-self: end;
   min-height: 38px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px 8px;
 }
 
@@ -6425,8 +6435,10 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .zone-toggle-stack input {
-  width: auto;
-  min-height: auto;
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  min-height: 13px;
   margin: 0;
 }
 
@@ -7223,7 +7235,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   padding-top: 14px;
 }
 
-.media-storage-settings {
+.media-storage-settings,
+.integration-pane {
   display: grid;
   gap: 10px;
   border: 1px solid var(--line);
@@ -7236,7 +7249,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   gap: 8px;
 }
 
-.media-location-card {
+.media-location-card,
+.integration-card {
   display: grid;
   gap: 10px;
   border: 1px solid var(--line);
@@ -7276,7 +7290,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .media-location-roles label,
-.media-location-flags label {
+.media-location-flags label,
+.integration-card .check-field {
   display: inline-flex;
   min-width: 0;
   min-height: 44px;
@@ -7293,7 +7308,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .media-location-roles input[type="checkbox"],
-.media-location-flags input[type="checkbox"] {
+.media-location-flags input[type="checkbox"],
+.integration-card input[type="checkbox"] {
   width: 16px;
   height: 16px;
   min-width: 16px;
