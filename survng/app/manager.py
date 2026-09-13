@@ -69,6 +69,7 @@ from .motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
 from .motion_analysis import FairMotionAnalysisLimiter
 from .recording_lifecycle import RecordingLifecycle
 from .state_events import StateEventBroker
+from .incident_lifecycle import IncidentLifecycle
 from .security import redact_secret_text
 from .telemetry_store import TelemetryStore
 from .telemetry_migration import migrate_legacy_runtime_telemetry
@@ -327,6 +328,9 @@ class AppManager:
         )
         self.state_events = StateEventBroker()
         try:
+            self.incidents = IncidentLifecycle(
+                self._publish_incident_notification, self.database_dir / "incident_notifications.json",
+            )
             self.inference = InferenceLifecycle(
                 config=config.detector,
                 semantic_config=config.semantic_search,
@@ -478,6 +482,7 @@ class AppManager:
         )
         self.state_events.publish("identity_update", event)
         self.mqtt.publish("events/identity", event)
+        self._refresh_incident_notification(str(event.get("camera_id") or ""), int(event.get("event_id") or 0))
 
     def _tracking_burst_available(self) -> bool:
         """Allow the optional extra tracker only while inference and memory are healthy."""
@@ -823,6 +828,7 @@ class AppManager:
                 # Publish discovery only after persisted recording/detection preferences
                 # have been applied to every worker.
                 phase_started = time.monotonic()
+                self.incidents.start()
                 self.mqtt.start()
                 self.mqtt.set_server_lifecycle("starting")
                 self.runtime_monitor.start()
@@ -973,6 +979,7 @@ class AppManager:
 
         LOGGER.info("SurvNG shutdown: stopping recorder processes")
         attempt("recording lifecycle", self.recording.close)
+        attempt("incident notifications", self.incidents.close)
         attempt("state event broker", self.state_events.close)
         LOGGER.info("SurvNG shutdown complete in %.2fs", time.monotonic() - started)
         if errors:
@@ -1483,6 +1490,90 @@ class AppManager:
             self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(status.get("recording_enabled")))
             self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(status.get("detection_enabled")))
 
+    def incident_notification_allowed(self, payload: dict) -> bool:
+        if not self.config.integration_notifications.exclude_motion:
+            return True
+        return bool(
+            payload.get("has_objects") is True
+            or payload.get("classes")
+            or any(item.get("label") for item in (payload.get("objects") or []) if isinstance(item, dict))
+        )
+
+    def incident_notification_payload(self, payload: dict) -> dict:
+        camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
+        settings = {zone.name: zone.notifications_enabled for zone in camera.zones} if camera else {}
+        zones = payload.get("zones") or []
+        result = {**payload, "notifications_enabled": not zones or any(settings.get(zone, True) for zone in zones)}
+        base_url = self.config.integration_notifications.base_url
+        incident_id = str(payload.get("incident_id") or "")
+        if incident_id:
+            from urllib.parse import quote
+            result["incident_path"] = f"/incidents/{quote(incident_id, safe='')}"
+            result["event_url"] = f"{base_url or self.config.base_path}{result['incident_path']}"
+        if base_url:
+            event_id = payload.get("representative_event_id")
+            result["incidents_url"] = f"{base_url}/incidents"
+            if not incident_id:
+                result["event_url"] = f"{base_url}/incidents?event_ids={int(event_id)}" if event_id else result["incidents_url"]
+            if event_id:
+                result["snapshot_url"] = f"{base_url}/api/events/{int(event_id)}/snapshot.jpg"
+        return result
+
+    def _publish_incident_notification(self, payload: dict) -> None:
+        payload = self.incident_notification_payload(payload)
+        self.state_events.publish("incident_lifecycle", payload)
+        if (self.incident_notification_allowed(payload) and payload["notifications_enabled"]
+                and self.config.mqtt.enabled and self.config.mqtt.incident_events_enabled):
+            self.mqtt.publish("events/incidents", payload, retain=False)
+
+    def _refresh_incident_notification(self, camera_id: str, event_id: int, *, allow_new: bool = False) -> None:
+        event = self.events.get(event_id) if event_id else None
+        camera = self.camera(camera_id)
+        if event is not None:
+            event = dict(event)
+            faces: list[dict] = []
+            for observation in self.faces.for_event_ids([event_id]):
+                person_id = observation.get("person_id")
+                if person_id is None:
+                    continue
+                faces.append({
+                    "observation_id": int(observation.get("observation_id") or 0),
+                    "identity_id": int(person_id),
+                    "person_id": int(person_id),
+                    "name": str(
+                        observation.get("person_name")
+                        or f"Person {int(person_id)}"
+                    ),
+                    "status": (
+                        "automatic"
+                        if bool(observation.get("auto_identified"))
+                        or str(observation.get("review_status") or "")
+                        == "auto_identified"
+                        else "confirmed"
+                    ),
+                    "review_status": str(
+                        observation.get("review_status") or "confirmed"
+                    ),
+                    "source": (
+                        "automatic"
+                        if bool(observation.get("auto_identified"))
+                        or str(observation.get("review_status") or "")
+                        == "auto_identified"
+                        else "operator"
+                    ),
+                    "confidence": float(
+                        observation.get("match_confidence") or 0.0
+                    ),
+                })
+            event["faces"] = faces
+            event = apply_event_identity(event)
+            self.incidents.track_incident(
+                event,
+                camera.name if camera is not None else camera_id,
+                self.config.base_path,
+                allow_new=allow_new,
+            )
+
     def publish_event(self, event_type: str, payload: dict) -> None:
         camera_id = str(payload.get("camera_id") or "")
         if not camera_id:
@@ -1495,56 +1586,13 @@ class AppManager:
                 # image-derived indexes without reopening an MQTT incident or
                 # emitting another object notification.
                 self.semantic_search.refresh_event(event)
+            self._refresh_incident_notification(camera_id, event_id)
             self.state_events.publish("incident", payload)
             return
         if event_type == "incident" or (event_type == "object" and payload.get("source") == "manual_openvino"):
-            event_id = int(payload.get("event_id") or 0)
-            event = self.events.get(event_id) if event_id else None
-            camera = self.camera(camera_id)
-            if event is not None:
-                event = dict(event)
-                faces: list[dict] = []
-                for observation in self.faces.for_event_ids([event_id]):
-                    person_id = observation.get("person_id")
-                    if person_id is None:
-                        continue
-                    faces.append({
-                        "observation_id": int(observation.get("observation_id") or 0),
-                        "identity_id": int(person_id),
-                        "person_id": int(person_id),
-                        "name": str(
-                            observation.get("person_name")
-                            or f"Person {int(person_id)}"
-                        ),
-                        "status": (
-                            "automatic"
-                            if bool(observation.get("auto_identified"))
-                            or str(observation.get("review_status") or "")
-                            == "auto_identified"
-                            else "confirmed"
-                        ),
-                        "review_status": str(
-                            observation.get("review_status") or "confirmed"
-                        ),
-                        "source": (
-                            "automatic"
-                            if bool(observation.get("auto_identified"))
-                            or str(observation.get("review_status") or "")
-                            == "auto_identified"
-                            else "operator"
-                        ),
-                        "confidence": float(
-                            observation.get("match_confidence") or 0.0
-                        ),
-                    })
-                event["faces"] = faces
-                event = apply_event_identity(event)
-                self.mqtt.track_incident(
-                    event,
-                    camera.name if camera is not None else camera_id,
-                    self.config.base_path,
-                    allow_new=event_type == "incident",
-                )
+            self._refresh_incident_notification(
+                camera_id, int(payload.get("event_id") or 0), allow_new=event_type == "incident",
+            )
         if event_type == "object":
             objects = payload.get("objects") or []
             incident_objects = payload.get("incident_objects")
@@ -1620,6 +1668,7 @@ class AppManager:
                     # The full-frame and object-crop embeddings must describe
                     # the newly promoted cover, not the original early sample.
                     self.semantic_search.refresh_event(event)
+            self._refresh_incident_notification(camera_id, int(payload.get("event_id") or 0))
             # Existing incident clients already use this event to coalesce refreshes.
             self.state_events.publish("incident", {
                 "event_id": payload.get("event_id"),
@@ -1627,7 +1676,7 @@ class AppManager:
                 "updated": True,
             })
         if event_type == "object":
-            camera = self.camera(camera_id)
+            camera = next((camera for camera in self.config.cameras if camera.id == camera_id), None)
             if camera is not None:
                 self.mqtt.publish_zone_objects(
                     camera_id,
@@ -1635,6 +1684,7 @@ class AppManager:
                         {
                             "name": zone.name,
                             "enabled": zone.enabled,
+                            "notifications_enabled": zone.notifications_enabled,
                             "object_classes": zone.object_classes or self.detector.labels,
                         }
                         for zone in camera.zones

@@ -2351,7 +2351,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 <span className="tree-group-label">System</span>
                 <button type="button" aria-current={generalSection === "general" ? "page" : undefined} className={generalSection === "general" ? "active" : ""} onClick={() => selectAdminSubsection("general", setGeneralSection, "general")}><Cog size={16} /><span>Server</span></button>
                 <button type="button" aria-current={generalSection === "storage" ? "page" : undefined} className={generalSection === "storage" ? "active" : ""} onClick={() => selectAdminSubsection("storage", setGeneralSection, "general")}><HardDrive size={16} /><span>Storage &amp; Retention</span></button>
-                <button type="button" aria-current={generalSection === "mqtt" ? "page" : undefined} className={generalSection === "mqtt" ? "active" : ""} onClick={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}><Radio size={16} /><span>API &amp; MQTT</span></button>
+                <button type="button" aria-current={generalSection === "mqtt" ? "page" : undefined} className={generalSection === "mqtt" ? "active" : ""} onClick={() => selectAdminSubsection("mqtt", setGeneralSection, "general")}><Radio size={16} /><span>API &amp; MQTT/HA</span></button>
                 <button type="button" aria-current={generalSection === "access" ? "page" : undefined} className={generalSection === "access" ? "active" : ""} onClick={() => selectAdminSubsection("access", setGeneralSection, "general")}><KeyRound size={16} /><span>Access</span></button>
                 <span className="tree-group-label">Intelligence</span>
                 <button type="button" aria-current={generalSection === "detection" ? "page" : undefined} className={generalSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setGeneralSection, "general")}><Cpu size={16} /><span>Object Detection</span></button>
@@ -2808,6 +2808,7 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
       confidence_threshold: null,
       behavior: "incident",
       exclude_from_ema: false,
+      notifications_enabled: true,
       trigger: "bottom_center",
     }];
     onChange(next);
@@ -2994,6 +2995,7 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
                 <label className="zone-field-confidence">Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder={selectedZone.behavior === "none" ? "N/A" : "Global"} disabled={selectedZone.behavior === "none"} value={selectedZone.confidence_threshold ?? ""} onChange={(event) => replaceZone(selectedIndex, { confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
                 <div className="zone-toggle-stack">
                   <label title="Motion inside this zone will not validate or trigger EMA activity. Object incident rules remain unchanged."><input type="checkbox" checked={selectedZone.exclude_from_ema === true} onChange={(event) => replaceZone(selectedIndex, { exclude_from_ema: event.target.checked })} /> Exclude from EMA</label>
+                  <label title="Allow Home Assistant and MQTT incident notifications for this zone."><input type="checkbox" checked={selectedZone.notifications_enabled !== false} onChange={(event) => replaceZone(selectedIndex, { notifications_enabled: event.target.checked })} /> HA/MQTT Notifications</label>
                   <label><input type="checkbox" checked={selectedZone.enabled !== false} onChange={(event) => replaceZone(selectedIndex, { enabled: event.target.checked })} /> Enabled</label>
                 </div>
                 <button type="button" className="danger zone-remove-button" onClick={() => removeZone(selectedIndex)}><Trash2 size={15} /> Remove Zone</button>
@@ -4364,8 +4366,8 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
 
       {section === "mqtt" ? (
         <div className="sub-panel subsection-workspace">
-          <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="API and MQTT settings">
-            {[["tokens", "API Tokens", KeyRound], ["mqtt", "MQTT", Radio], ["ai", "AI Provider", Sparkles]].map(([value, label, Icon]) => <button type="button" key={value} className={apiSection === value ? "active" : ""} aria-pressed={apiSection === value} onClick={() => setApiSection(value)}><Icon size={15} />{label}</button>)}
+          <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="API and MQTT/HA settings">
+            {[["tokens", "API Tokens", KeyRound], ["mqtt", "MQTT/HA", Radio], ["ai", "AI Provider", Sparkles]].map(([value, label, Icon]) => <button type="button" key={value} className={apiSection === value ? "active" : ""} aria-pressed={apiSection === value} onClick={() => setApiSection(value)}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="subsection-workspace-content">
           <section className="api-access-settings api-token-settings" hidden={apiSection !== "tokens"}>
@@ -4410,8 +4412,18 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           </section>
           <section className="api-access-settings mqtt-access-settings" hidden={apiSection !== "mqtt"}>
             <div className="detection-settings-subhead">
-              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>MQTT</strong><small>Broker connection, Home Assistant discovery, incident publishing, and server telemetry.</small></div>
+              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>MQTT/HA</strong><small>Shared notification settings, broker connection, Home Assistant discovery, and server telemetry.</small></div>
               <div className="admin-action-status"><span className="admin-action-kind">Save settings to apply</span><span className={`retention-state ${mqttStatus?.connected ? "running" : "idle"}`}>{mqttStatus?.connected ? "Connected" : config.mqtt?.enabled ? "Disconnected" : "Disabled"}</span></div>
+            </div>
+            <div className="detection-settings-subhead">
+              <div><strong>General</strong><small>Applies to native Home Assistant and MQTT incident notifications, including initial events, updates, and completion. Detection and recording continue normally.</small></div>
+            </div>
+            <div className="admin-field-grid">
+              <label className="check-field"><input type="checkbox" checked={config.integration_notifications?.exclude_motion ?? false} onChange={(event) => updateConfig(["integration_notifications", "exclude_motion"], event.target.checked)} /> Exclude motion-only incidents</label>
+              <label>Notification URL<input type="url" value={config.integration_notifications?.base_url || ""} onChange={(event) => updateConfig(["integration_notifications", "base_url"], event.target.value)} placeholder="https://ha.loebees.com/survng" /><small>Public SurvNG base URL for HA and MQTT incident links, including any path prefix. Leave blank to use existing URLs. HA notification images remain served through Home Assistant.</small></label>
+            </div>
+            <div className="detection-settings-subhead">
+              <div><strong>MQTT broker</strong><small>Connection and publishing options for MQTT.</small></div>
             </div>
             <div className="admin-field-grid">
               <label className="check-field"><input type="checkbox" checked={config.mqtt?.enabled || false} onChange={(event) => updateConfig(["mqtt", "enabled"], event.target.checked)} /> Enabled</label>

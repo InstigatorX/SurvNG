@@ -7,6 +7,14 @@ const rootDir = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
   base: "/static/",
+  experimental: {
+    // Resolve lazy chunks and CSS beside their importing JS file. The server
+    // rewrites HTML asset URLs for its runtime proxy prefix; an absolute build
+    // base in JS would escape that prefix and hit the proxy's root application.
+    renderBuiltUrl(_filename, { hostType }) {
+      if (hostType === "js") return { relative: true };
+    },
+  },
   plugins: [react()],
   build: {
     outDir: "../survng/static",

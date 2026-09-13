@@ -107,6 +107,7 @@ def test_manual_correction_invalidates_search_and_updates_clients(manual_detecti
     manager.semantic_search = search
     manager.state_events = Mock()
     manager.mqtt = Mock()
+    manager._refresh_incident_notification = Mock()
     manager.publish_event = lambda kind, payload: AppManager.publish_event(manager, kind, payload)
     manager.detector.detect.return_value = objects
 
@@ -123,6 +124,7 @@ def test_manual_correction_invalidates_search_and_updates_clients(manual_detecti
     )
     manager.mqtt.publish.assert_not_called()
     manager.mqtt.track_incident.assert_not_called()
+    manager._refresh_incident_notification.assert_called_once_with("gate", event["id"])
     if objects:
         queued = search._queue.get_nowait()[2]
         revision = queued.pop("_semantic_revision")

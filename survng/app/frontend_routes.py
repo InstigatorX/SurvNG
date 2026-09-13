@@ -69,6 +69,10 @@ def create_frontend_router(
             },
         )
 
+    @router.get("/incidents/{incident_id}", include_in_schema=False)
+    def notification_incident_page(incident_id: str) -> HTMLResponse:
+        return deps.frontend_response("index.html")
+
     pages = {
         "index": ("/", "index.html"),
         "recordings_page": ("/recordings", "recordings.html"),

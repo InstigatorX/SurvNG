@@ -12,7 +12,7 @@ from .motion_pipeline.configuration import resolve_motion_pipeline_graphs
 
 LOGGER = logging.getLogger(__name__)
 
-HOT_CONFIG_FIELDS = frozenset({"base_path", "event_clip_before_seconds", "event_clip_after_seconds", "incident_thumbnail_annotations", "incident_thumbnail_object_focus", "incident_thumbnail_object_focus_zoom", "image_storage", "recording_cache_max_gb", "recording_cache_max_days", "recording_cache_prewarm", "api_auth", "web_auth", "tls", "proxy", "audit_ai", "mqtt", "retention", "semantic_search"})
+HOT_CONFIG_FIELDS = frozenset({"base_path", "event_clip_before_seconds", "event_clip_after_seconds", "incident_thumbnail_annotations", "incident_thumbnail_object_focus", "incident_thumbnail_object_focus_zoom", "image_storage", "recording_cache_max_gb", "recording_cache_max_days", "recording_cache_prewarm", "api_auth", "web_auth", "tls", "proxy", "audit_ai", "integration_notifications", "mqtt", "retention", "semantic_search"})
 # The configured FFmpeg binary also owns live capture and reloads the manager.
 # Acceleration remains recorder/refinement-only and can be applied in place.
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
