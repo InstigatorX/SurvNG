@@ -99,7 +99,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
         return {
             "schema_version": 1,
             "base_path": config.base_path,
-            "incident_notifications": {"schema_version": 2, "transport": "sse", "mqtt_required": False},
+            "incident_notifications": {"enabled": config.integration_notifications.enabled, "schema_version": 2, "transport": "sse", "mqtt_required": False},
             "mqtt": {
                 "enabled": config.mqtt.enabled,
                 "topic_prefix": config.mqtt.topic_prefix,

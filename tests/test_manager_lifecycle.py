@@ -371,6 +371,38 @@ class ManagerLifecycleTest(unittest.TestCase):
                 manager._publish_incident_notification({"camera_id": "gate", "state": state, **evidence})
                 self.assertEqual(manager.mqtt.publish.called, allowed)
 
+    def test_global_notification_switch_gates_both_transports(self):
+        manager = manager_with_mocks()
+        manager.config.mqtt.enabled = True
+        manager.config.mqtt.incident_events_enabled = True
+        for enabled in (False, True):
+            manager.config.integration_notifications.enabled = enabled
+            for state in ("new", "updated", "complete"):
+                manager.state_events.publish.reset_mock()
+                manager.mqtt.publish.reset_mock()
+                payload = {"camera_id": "gate", "state": state, "classes": ["person"]}
+                self.assertEqual(manager.incident_notification_allowed(payload), enabled)
+                self.assertEqual(manager.incident_notification_payload(payload)["notifications_enabled"], enabled)
+                manager._publish_incident_notification(payload)
+                self.assertEqual(manager.state_events.publish.called, enabled)
+                self.assertEqual(manager.mqtt.publish.called, enabled)
+
+    def test_camera_notification_switch_gates_both_transports(self):
+        manager = manager_with_mocks()
+        manager.config.mqtt.enabled = True
+        manager.config.mqtt.incident_events_enabled = True
+        camera = manager.config.cameras[0]
+        for enabled in (False, True):
+            camera.incident_notifications_enabled = enabled
+            for state in ("new", "updated", "complete"):
+                manager.state_events.publish.reset_mock()
+                manager.mqtt.publish.reset_mock()
+                payload = {"camera_id": camera.id, "state": state, "classes": ["person"]}
+                self.assertEqual(manager.incident_notification_allowed(payload), enabled)
+                manager._publish_incident_notification(payload)
+                self.assertEqual(manager.state_events.publish.called, enabled)
+                self.assertEqual(manager.mqtt.publish.called, enabled)
+
     def test_zone_policy_gates_mqtt_but_preserves_native_incidents(self):
         manager = manager_with_mocks()
         manager.config.mqtt.enabled = True

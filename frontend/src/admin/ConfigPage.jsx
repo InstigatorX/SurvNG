@@ -2601,6 +2601,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                     </> : null}
 
                     <div className="config-panels">
+                      {cameraSection === "motion" ? <section className="sub-panel">
+                        <h3 className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>HA/MQTT Options</h3>
+                        <label className="check-field"><input type="checkbox" role="switch" checked={selectedCamera.incident_notifications_enabled !== false} onChange={(event) => updateCamera(selectedCamera.id, ["incident_notifications_enabled"], event.target.checked)} /> Send incident notifications</label>
+                        <small>Publish this camera's incident messages to Home Assistant and MQTT. Recording and detection continue when disabled.</small>
+                      </section> : null}
+
                       {cameraSection === "motion" ? <div className="sub-panel">
                         <h3>Motion Triggers &amp; Filtering</h3>
                         <MotionDecisionEditor
@@ -4410,22 +4416,23 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             {apiTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this token now</strong><code>{apiTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(apiTokenSecret)}><Copy size={14} /> Copy</button><small>It cannot be displayed again after you leave this page.</small></div> : null}
             {apiTokenError ? <div className="error-banner">{apiTokenError}</div> : null}
           </section>
-          <section className="api-access-settings mqtt-access-settings" hidden={apiSection !== "mqtt"}>
+          <section className="mqtt-access-settings integration-panes" hidden={apiSection !== "mqtt"}>
+            <section className="integration-pane">
             <div className="detection-settings-subhead">
-              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>MQTT/HA</strong><small>Shared notification settings, broker connection, Home Assistant discovery, and server telemetry.</small></div>
-              <div className="admin-action-status"><span className="admin-action-kind">Save settings to apply</span><span className={`retention-state ${mqttStatus?.connected ? "running" : "idle"}`}>{mqttStatus?.connected ? "Connected" : config.mqtt?.enabled ? "Disconnected" : "Disabled"}</span></div>
+              <div><h3 className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>General</h3><small>Applies to native Home Assistant and MQTT incident notifications, including initial events, updates, and completion. Detection and recording continue normally.</small></div>
             </div>
-            <div className="detection-settings-subhead">
-              <div><strong>General</strong><small>Applies to native Home Assistant and MQTT incident notifications, including initial events, updates, and completion. Detection and recording continue normally.</small></div>
-            </div>
-            <div className="admin-field-grid">
+            <div className="admin-field-grid integration-card">
+              <label className="check-field"><input type="checkbox" role="switch" checked={config.integration_notifications?.enabled ?? true} onChange={(event) => updateConfig(["integration_notifications", "enabled"], event.target.checked)} /> Enable incident notifications</label>
               <label className="check-field"><input type="checkbox" checked={config.integration_notifications?.exclude_motion ?? false} onChange={(event) => updateConfig(["integration_notifications", "exclude_motion"], event.target.checked)} /> Exclude motion-only incidents</label>
               <label>Notification URL<input type="url" value={config.integration_notifications?.base_url || ""} onChange={(event) => updateConfig(["integration_notifications", "base_url"], event.target.value)} placeholder="https://ha.loebees.com/survng" /><small>Public SurvNG base URL for HA and MQTT incident links, including any path prefix. Leave blank to use existing URLs. HA notification images remain served through Home Assistant.</small></label>
             </div>
+            </section>
+            <section className="integration-pane">
             <div className="detection-settings-subhead">
-              <div><strong>MQTT broker</strong><small>Connection and publishing options for MQTT.</small></div>
+              <div><h3 className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>MQTT broker</h3><small>Connection and publishing options for MQTT.</small></div>
+              <div className="admin-action-status"><span className="admin-action-kind">Save settings to apply</span><span className={`retention-state ${mqttStatus?.connected ? "running" : "idle"}`}>{mqttStatus?.connected ? "Connected" : config.mqtt?.enabled ? "Disconnected" : "Disabled"}</span></div>
             </div>
-            <div className="admin-field-grid">
+            <div className="admin-field-grid integration-card">
               <label className="check-field"><input type="checkbox" checked={config.mqtt?.enabled || false} onChange={(event) => updateConfig(["mqtt", "enabled"], event.target.checked)} /> Enabled</label>
               <label>Broker Host<input value={config.mqtt?.host || ""} onChange={(event) => updateConfig(["mqtt", "host"], event.target.value)} placeholder="mqtt.local" /></label>
               <label>Port<input type="number" min="1" max="65535" value={config.mqtt?.port || 1883} onChange={(event) => updateConfig(["mqtt", "port"], Number(event.target.value))} /></label>
@@ -4443,6 +4450,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label className="check-field"><input type="checkbox" checked={config.mqtt?.tls || false} onChange={(event) => updateConfig(["mqtt", "tls"], event.target.checked)} /> TLS</label>
             </div>
             {mqttStatus ? <div className={`probe-result ${mqttStatus.connected ? "ok" : ""}`}><strong>Connection details</strong><span>{mqttStatus.host || "No broker"}:{mqttStatus.port || 1883}</span><span>{mqttStatus.messages_published || 0} published · {mqttStatus.publish_failures || 0} publish failures</span><span>Commands: {mqttStatus.command_subscriptions_active ? "ready" : mqttStatus.connected ? "not subscribed" : "offline"} · {mqttStatus.commands_received || 0} accepted · {mqttStatus.commands_rejected || 0} rejected · {mqttStatus.command_errors || 0} failed · {mqttStatus.command_queue_depth || 0} queued</span>{mqttStatus.server_status_enabled ? <span>Server: {mqttStatus.server_lifecycle || "starting"} · {mqttStatus.server_state?.health || "pending"} · {mqttStatus.server_state?.activity || "idle"} · every {mqttStatus.server_metrics_interval_seconds || 30}s · {mqttStatus.server_state_topic}</span> : null}{mqttStatus.incident_events_enabled ? <span>Incidents: {mqttStatus.incident_topic} ({mqttStatus.pending_incidents || 0} pending)</span> : null}{mqttStatus.server_status_error ? <span>Server metrics: {mqttStatus.server_status_error}</span> : null}{mqttStatus.last_error ? <span>{mqttStatus.last_error}</span> : null}</div> : null}
+            </section>
           </section>
           <section className="api-access-settings ai-provider-settings" id="ai-provider-settings" hidden={apiSection !== "ai"}>
             <div className="detection-settings-subhead">

@@ -1491,6 +1491,11 @@ class AppManager:
             self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(status.get("detection_enabled")))
 
     def incident_notification_allowed(self, payload: dict) -> bool:
+        if not self.config.integration_notifications.enabled:
+            return False
+        camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
+        if camera is not None and not camera.incident_notifications_enabled:
+            return False
         if not self.config.integration_notifications.exclude_motion:
             return True
         return bool(
@@ -1503,7 +1508,7 @@ class AppManager:
         camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
         settings = {zone.name: zone.notifications_enabled for zone in camera.zones} if camera else {}
         zones = payload.get("zones") or []
-        result = {**payload, "notifications_enabled": not zones or any(settings.get(zone, True) for zone in zones)}
+        result = {**payload, "notifications_enabled": self.config.integration_notifications.enabled and (camera is None or camera.incident_notifications_enabled) and (not zones or any(settings.get(zone, True) for zone in zones))}
         base_url = self.config.integration_notifications.base_url
         incident_id = str(payload.get("incident_id") or "")
         if incident_id:
@@ -1520,7 +1525,12 @@ class AppManager:
         return result
 
     def _publish_incident_notification(self, payload: dict) -> None:
+        if not self.config.integration_notifications.enabled:
+            return
         payload = self.incident_notification_payload(payload)
+        camera = next((camera for camera in self.config.cameras if camera.id == payload.get("camera_id")), None)
+        if camera is not None and not camera.incident_notifications_enabled:
+            return
         self.state_events.publish("incident_lifecycle", payload)
         if (self.incident_notification_allowed(payload) and payload["notifications_enabled"]
                 and self.config.mqtt.enabled and self.config.mqtt.incident_events_enabled):
@@ -1711,6 +1721,7 @@ class AppManager:
                 **worker.status(),
                 "startup": dict(startup_cameras.get(camera_id) or {}),
                 "expected_enabled": self.camera_controls.camera_enabled(camera_id),
+                "incident_notifications_enabled": camera_config[camera_id].incident_notifications_enabled if camera_id in camera_config else True,
                 "recording": recordings.get((camera_id, "main"), False),
                 "sub_recording": recordings.get((camera_id, "live"), False),
                 "recording_enabled": self.recording_enabled(camera_id),

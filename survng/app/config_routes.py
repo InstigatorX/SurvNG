@@ -53,6 +53,10 @@ class ApiTokenCreateRequest(BaseModel):
     scopes: list[ApiScope] = Field(default_factory=lambda: ["read"], min_length=1)
 
 
+class CameraNotificationRequest(BaseModel):
+    enabled: bool
+
+
 class ZoneNotificationRequest(BaseModel):
     zone: str = Field(min_length=1)
     enabled: bool
@@ -399,6 +403,27 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             "enabled": effective.api_auth.enabled,
             **result,
         }
+
+    @router.put("/api/incident-notifications")
+    def put_global_notifications(state: CameraNotificationRequest) -> dict:
+        with deps.lock:
+            next_config = deps.get_config().model_copy(deep=True)
+            next_config.integration_notifications.enabled = state.enabled
+            deps.save_config(next_config, assign_ids=False)
+            deps.publish_config(next_config)
+        return {"ok": True, "enabled": state.enabled}
+
+    @router.put("/api/cameras/{camera_id}/incident-notifications")
+    def put_camera_notifications(camera_id: str, state: CameraNotificationRequest) -> dict:
+        with deps.lock:
+            next_config = deps.get_config().model_copy(deep=True)
+            camera = camera_by_id(next_config, camera_id)
+            if camera is None:
+                raise HTTPException(status_code=404, detail="camera not found")
+            camera.incident_notifications_enabled = state.enabled
+            deps.save_config(next_config, assign_ids=False)
+            deps.publish_config(next_config)
+        return {"ok": True, "camera_id": camera_id, "incident_notifications_enabled": state.enabled}
 
     @router.put("/api/cameras/{camera_id}/zone-notifications")
     def put_zone_notifications(camera_id: str, state: ZoneNotificationRequest) -> dict:
