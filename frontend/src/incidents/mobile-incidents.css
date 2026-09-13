@@ -1,0 +1,40 @@
+.mobile-incidents .mobile-filter-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 6px 10px;
+}
+.mobile-filter-active {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.mobile-incidents .incident-filter-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.mobile-incidents .incident-filter-panel .incident-filter-selects {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+.mobile-incidents .incident-filter-selects label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.mobile-incidents .incident-filter-selects :is(select, input) {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  font-size: 16px;
+}
+.mobile-incidents .mobile-filter-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.mobile-incidents .mobile-filter-actions button { min-height: 44px; }

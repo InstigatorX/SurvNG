@@ -17,7 +17,7 @@ const server = createServer(async (req, res) => {
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
 try {
-  for (const width of [390, 1440]) {
+  for (const width of [360, 390, 1440]) {
     const page = await browser.newPage({ viewport: { width, height: 844 }, isMobile: width < 500, hasTouch: width < 500, ...(width < 500 ? { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1" } : {}) });
     page.setDefaultTimeout(10000);
     const errors = [];
@@ -27,12 +27,37 @@ try {
     await page.route("**/api/**", (route) => {
       const path = new URL(route.request().url()).pathname;
       if (path.endsWith("/auth/session")) return route.fulfill({ json: { enabled: false } });
+      if (path.endsWith("/cameras")) return route.fulfill({ json: [{ id: "front-door", name: "Front Door" }] });
+      if (path.endsWith("/config")) return route.fulfill({ json: {} });
+      if (path.endsWith("/faces/people")) return route.fulfill({ json: [] });
+      if (path.endsWith("/incidents/search")) return route.fulfill({ json: { items: [detail.incident], total: 1, facets: { camera_ids: ["front-door"], labels: ["person"], zones: ["Porch"] } } });
       if (path.includes("/incidents/notification/")) return route.fulfill({ status, json: detail });
       if (path.endsWith("/thumbnail.jpg")) return route.fulfill({ status: imageFailure ? 404 : 200, contentType: "image/svg+xml", body: imageFailure ? "" : '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800"><rect width="1280" height="800" fill="#30483d"/><text x="440" y="400" fill="white" font-size="48">Incident image</text></svg>' });
       if (path.endsWith("/event-clip/settings")) return route.fulfill({ json: { before_seconds: 5, after_seconds: 5 } });
       return route.fulfill({ status: 404, json: {} });
     });
+    if (width < 500) {
+      await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents`);
+      const filters = page.getByRole("button", { name: "Filters", exact: true });
+      await filters.waitFor();
+      assert.equal(await filters.getAttribute("aria-expanded"), "false");
+      assert.equal(await page.locator(".shown-bubble").count(), 0);
+      assert.equal(await page.locator("#mobile-incident-filters").count(), 0);
+      await filters.click();
+      await page.getByLabel("Incident camera", { exact: true }).selectOption("front-door");
+      await page.getByLabel("Incident type", { exact: true }).selectOption("motion");
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.getByRole("button", { name: "Done", exact: true }).click();
+      await page.locator(".mobile-filter-button").click();
+      assert.equal(await page.getByLabel("Incident type", { exact: true }).inputValue(), "motion");
+      await page.getByRole("button", { name: "Reset filters" }).click();
+      assert.equal(await page.getByLabel("Incident camera", { exact: true }).inputValue(), "all");
+      await page.getByRole("button", { name: "Done", exact: true }).click();
+      await page.locator(".incident-card-open").first().click();
+      await page.waitForURL("**/survng/incidents/incident-front-door-41");
+    } else {
     await page.goto(`http://127.0.0.1:${server.address().port}/survng/incidents/incident-front-door-41`);
+    }
     await page.getByRole("heading", { name: "Alex detected at Front Door." }).waitFor();
     assert.equal(await page.locator(".assistant-panel").count(), 0);
     assert.equal(await page.getByRole("link", { name: "Live view", exact: true }).getAttribute("href"), "/survng/?camera=front-door");
