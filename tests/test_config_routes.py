@@ -15,6 +15,7 @@ from survng.app.config import (
 )
 from survng.app.config_routes import (
     ApiTokenCreateRequest,
+    ZoneNotificationRequest,
     ConfigProbeRequest,
     ConfigRouteDependencies,
     SECRET_PLACEHOLDER,
@@ -68,6 +69,60 @@ class ConfigRoutesTest(unittest.TestCase):
             for route in self.router.routes
             if route.path == path and method in route.methods
         )
+
+    def test_notification_url_validates_public_base_and_preserves_proxy_path(self):
+        from pydantic import ValidationError
+        from survng.app.config import IntegrationNotificationConfig
+        for invalid in ("ha.example", "ftp://ha.example", "https://user:secret@ha.example",
+                        "https://ha.example?token=secret", "https://ha.example/#fragment",
+                        "https://ha.example:invalid", "https://ha example"):
+            with self.assertRaises(ValidationError):
+                IntegrationNotificationConfig(base_url=invalid)
+        settings = IntegrationNotificationConfig(base_url=" https://ha.loebees.com/survng/ ")
+        self.assertEqual(settings.base_url, "https://ha.loebees.com/survng")
+        self.assertEqual(IntegrationNotificationConfig(base_url="").base_url, "")
+
+    def test_motion_notification_filter_round_trips_and_is_hot_applied(self):
+        from survng.app.config_application import hot_config_changes
+        self.assertFalse(self.config.integration_notifications.exclude_motion)
+        edited = self.config.model_copy(deep=True)
+        edited.integration_notifications.exclude_motion = True
+        restored = AppConfig.model_validate(edited.model_dump())
+        self.assertTrue(restored.integration_notifications.exclude_motion)
+        self.assertEqual(hot_config_changes(self.config, restored), ["integration_notifications"])
+
+    def test_zone_notification_control_preserves_detection_and_persists(self):
+        zone = DetectionZone(name="Porch", exclude_from_ema=True)
+        self.assertTrue(zone.notifications_enabled)
+        self.config.cameras[0].zones = [zone]
+        expected = zone.model_dump() | {"notifications_enabled": False}
+        result = self.endpoint("/api/cameras/{camera_id}/zone-notifications", "PUT")(
+            "gate", ZoneNotificationRequest(zone="Porch", enabled=False))
+        self.assertFalse(result["notifications_enabled"])
+        self.assertEqual(self.config.cameras[0].zones[0].model_dump(), expected)
+        self.save.assert_called_once()
+        self.apply.assert_not_called()
+        self.assertFalse(self.manager.workers["gate"].mock_calls)
+        self.assertFalse(AppConfig.model_validate(self.config.model_dump()).cameras[0].zones[0].notifications_enabled)
+
+    def test_zone_notification_save_failure_preserves_current_config(self):
+        self.config.cameras[0].zones = [DetectionZone(name="Porch")]
+        self.save.side_effect = OSError("disk full")
+        with self.assertRaises(OSError):
+            self.endpoint("/api/cameras/{camera_id}/zone-notifications", "PUT")(
+                "gate", ZoneNotificationRequest(zone="Porch", enabled=False))
+        self.assertTrue(self.config.cameras[0].zones[0].notifications_enabled)
+        self.publish.assert_not_called()
+
+    def test_zone_notification_control_rejects_unknown_or_ambiguous_target(self):
+        endpoint = self.endpoint("/api/cameras/{camera_id}/zone-notifications", "PUT")
+        for camera, names, status in (("missing", ["Porch"], 404), ("gate", [], 404),
+                                      ("gate", ["Porch", "Porch"], 409)):
+            self.config.cameras[0].zones = [DetectionZone(name=name) for name in names]
+            with self.assertRaises(HTTPException) as raised:
+                endpoint(camera, ZoneNotificationRequest(zone="Porch", enabled=False))
+            self.assertEqual(raised.exception.status_code, status)
+        self.save.assert_not_called()
 
     def test_config_read_masks_every_secret(self) -> None:
         payload = self.endpoint("/api/config", "GET")()

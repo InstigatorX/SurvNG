@@ -98,6 +98,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
         return {
             "schema_version": 1,
             "base_path": config.base_path,
+            "incident_notifications": {"schema_version": 2, "transport": "sse", "mqtt_required": False},
             "mqtt": {
                 "enabled": config.mqtt.enabled,
                 "topic_prefix": config.mqtt.topic_prefix,
@@ -111,6 +112,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     {
                         "name": zone.name,
                         "object_classes": list(zone.object_classes),
+                        "notifications_enabled": zone.notifications_enabled,
                     }
                     for zone in camera.zones
                     if zone.enabled
@@ -126,6 +128,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
             try:
                 yield "retry: 3000\n\n"
                 query_params = getattr(request, "query_params", {})
+                incidents_only = query_params.get("incidents_only") == "1"
                 last_event_id = (
                     request.headers.get("last-event-id", "")
                     or query_params.get("last_event_id", "")
@@ -136,21 +139,38 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 if replay is None:
                     connection_cursor = active_manager.state_events.cursor
                     snapshot_sequence = active_manager.state_events.sequence(connection_cursor)
-                    yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
-                    yield _sse_message(
-                        "system_state",
-                        await asyncio.to_thread(deps.system_telemetry.system_status, active_manager),
-                    )
+                    if incidents_only:
+                        yield _sse_message("incident_notifications_state", {
+                            "schema_version": 2,
+                            "incidents": [active_manager.incident_notification_payload(item)
+                                          for item in await asyncio.to_thread(active_manager.incidents.snapshot)
+                                          if active_manager.incident_notification_allowed(item)],
+                        })
+                    else:
+                        yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
+                        yield _sse_message(
+                            "system_state",
+                            await asyncio.to_thread(deps.system_telemetry.system_status, active_manager),
+                        )
                 else:
                     for event in replay:
                         replayed_ids.add(event.id)
-                        yield _sse_message(event.type, event.data, event.id)
+                        if incidents_only and (
+                            event.type != "incident_lifecycle"
+                            or not active_manager.incident_notification_allowed(event.data)
+                        ):
+                            continue
+                        yield _sse_message(event.type, (
+                            active_manager.incident_notification_payload(event.data)
+                            if event.type == "incident_lifecycle" else event.data
+                        ), event.id)
                     connection_cursor = replay[-1].id if replay else last_event_id
                 yield _sse_message(
                     "connected",
                     {"instance": active_manager.state_events.instance_id},
                     connection_cursor,
                 )
+                last_sequence = active_manager.state_events.sequence(connection_cursor)
                 next_heartbeat = time.monotonic() + SSE_HEARTBEAT_SECONDS
                 while True:
                     if await request.is_disconnected():
@@ -179,7 +199,20 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                         and event_sequence <= snapshot_sequence
                     ):
                         continue
-                    yield _sse_message(event.type, event.data, event.id)
+                    if last_sequence is not None and event_sequence != last_sequence + 1:
+                        # A slow subscriber lost queued events. Reconnect/replay
+                        # from the last delivered cursor instead of skipping data.
+                        return
+                    last_sequence = event_sequence
+                    if incidents_only and (
+                        event.type != "incident_lifecycle"
+                        or not active_manager.incident_notification_allowed(event.data)
+                    ):
+                        continue
+                    yield _sse_message(event.type, (
+                        active_manager.incident_notification_payload(event.data)
+                        if event.type == "incident_lifecycle" else event.data
+                    ), event.id)
             finally:
                 active_manager.state_events.unsubscribe(subscriber)
 

@@ -273,3 +273,35 @@ class IncidentQueryRouterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NotificationIncidentTest(unittest.TestCase):
+    def test_historical_link_resolves_by_original_event_and_checks_camera(self):
+        service = IncidentQueryService()
+        service.resolve_event = Mock(return_value={"camera_id": "front-door", "id": "incident-front-door-41"})
+        manager = SimpleNamespace(incidents=SimpleNamespace(get=lambda _key: None),
+                                  config=SimpleNamespace(cameras=[SimpleNamespace(id="front-door", name="Front Door")]))
+        result = service.notification_detail(manager, "incident-front-door-41")
+        self.assertEqual(result["camera_name"], "Front Door")
+        self.assertIsNone(result["notification"])
+        service.resolve_event.assert_called_once_with(manager, 41)
+        for key in ("invalid", "incident-garage-41", "incident-front-door-0"):
+            with self.assertRaises(HTTPException) as error:
+                service.notification_detail(manager, key)
+            self.assertEqual(error.exception.status_code, 404)
+
+    def test_journal_membership_survives_partial_evidence_retention(self):
+        service = IncidentQueryService()
+        service.hydrate = Mock(side_effect=lambda _manager, items: items)
+        service.with_faces = Mock(side_effect=lambda _manager, items: items)
+        notification = {"incident_id": "incident-gate-41", "event_ids": [41, 42], "state": "complete"}
+        manager = SimpleNamespace(
+            incidents=SimpleNamespace(get=lambda _key: notification),
+            events=SimpleNamespace(get_many=lambda _ids: [{"id": 42, "camera_id": "gate",
+                "kind": "object", "objects_json": "[]", "created_at": "2026-09-13T01:00:00+00:00"}]),
+            config=SimpleNamespace(cameras=[]),
+        )
+        result = service.notification_detail(manager, "incident-gate-41")
+        self.assertEqual(result["incident_id"], "incident-gate-41")
+        self.assertEqual(result["incident"]["events"][0]["id"], 42)
+        self.assertEqual(result["notification"]["state"], "complete")
