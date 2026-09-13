@@ -111,3 +111,26 @@ def test_missing_image_is_explicit_and_close_cancels_timers():
     assert not lifecycle._timers
     lifecycle.track_incident(evidence(42), "Gate")
     assert len(lifecycle.snapshot()) == 1
+
+
+def test_provisional_person_does_not_alert_and_refined_mower_stays_motion():
+    published = []
+    lifecycle = IncidentLifecycle(published.append)
+    lifecycle.start()
+    try:
+        lifecycle.track_incident(evidence(objects=[{
+            "label": "person", "confidence": .7495, "incident_eligible": True,
+            "provisional_detection": True,
+        }]), "Gate")
+        assert published[-1]["classes"] == []
+        lifecycle.track_incident(evidence(objects=[{
+            "label": "robot_lawnmower", "confidence": .959, "incident_eligible": False,
+            "zone_admission_reason": "ignored_zone",
+        }]), "Gate", allow_new=False)
+        assert published[-1]["summary"] == "Motion detected at Gate."
+        lifecycle.track_incident(evidence(), "Gate", allow_new=False)
+        assert published[-1]["classes"] == ["person"]
+        lifecycle.track_incident(evidence(objects=[]), "Gate", allow_new=False)
+        assert published[-1]["classes"] == []
+    finally:
+        lifecycle.close()

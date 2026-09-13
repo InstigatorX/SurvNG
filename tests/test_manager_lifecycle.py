@@ -322,6 +322,14 @@ class ManagerLifecycleTest(unittest.TestCase):
         assert target.consider_route_detection_watch.call_count == 3
         assert manager._restored_detection_watches == []
 
+    def test_recorded_object_refinement_refreshes_notification_without_reopening(self):
+        manager = manager_with_mocks()
+        manager._refresh_incident_notification = Mock()
+        manager.events = Mock()
+        manager.events.get.return_value = None
+        manager.publish_event("object", {"camera_id": "gate", "event_id": 41, "objects": [], "incident_objects": []})
+        manager._refresh_incident_notification.assert_called_once_with("gate", 41, allow_new=False)
+
     def test_native_incident_publication_does_not_require_mqtt(self) -> None:
         manager = manager_with_mocks()
         manager.config.mqtt.enabled = False
