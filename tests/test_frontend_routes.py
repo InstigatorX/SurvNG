@@ -26,6 +26,13 @@ class FrontendRouteTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("text/html", response.media_type)
 
+    def test_notification_incident_path_serves_frontend(self) -> None:
+        from survng.app.main import _frontend_route_bundle
+        route = next(route for route in _frontend_route_bundle.router.routes if getattr(route, "path", "") == "/incidents/{incident_id}")
+        response = route.endpoint("incident-front-door-41")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.media_type)
+
     def test_smart_search_route_is_registered(self) -> None:
         paths = set(app.openapi()["paths"])
 

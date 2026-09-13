@@ -33,6 +33,7 @@ function lazyExport(importer, exportName) {
 }
 
 const LivePage = lazyExport(() => import("./live/LivePage.jsx"), "LivePage");
+const IncidentDetailPage = lazyExport(() => import("./incidents/IncidentDetailPage.jsx"), "IncidentDetailPage");
 const IncidentsPage = lazyExport(() => import("./incidents/IncidentsPage.jsx"), "IncidentsPage");
 const ExportCenterPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "ExportCenterPage");
 const RecordingsPage = lazyExport(() => import("./timeline/TimelinePages.jsx"), "RecordingsPage");
@@ -106,6 +107,10 @@ function App() {
   }
   if (session.enabled && !session.user) {
     return <LoginScreen session={session} onSignedIn={setSession} />;
+  }
+  const detailMatch = pathname.match(/^\/incidents\/(incident-[^/]+)\/?$/);
+  if (detailMatch) {
+    return <Suspense fallback={<WorkspaceFallback />}><IncidentDetailPage incidentId={detailMatch[1]} timeZone={timeZone} /></Suspense>;
   }
   const workspacePage = viewer && page === "admin" ? "live" : page;
   return (
