@@ -22,6 +22,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware, GZipResponder, IdentityResponder
 from fastapi.staticfiles import StaticFiles
 
+from .weather import create_weather_router
 from .config import (
     AppConfig,
     load_config,
@@ -986,6 +987,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
+app.include_router(create_weather_router(lambda: config.weather))
 
 
 def _publish_config_runtime(next_config: AppConfig) -> None:

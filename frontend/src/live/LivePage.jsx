@@ -1,3 +1,5 @@
+import { WeatherTile } from "./WeatherTile.jsx";
+import { liveItemsWithWeather } from "../weather.mjs";
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -78,6 +80,10 @@ function CameraTileStatus({ status }) {
       {status.state === "busy" ? <RefreshCcw className="spin" size={10} aria-hidden="true" /> : <span className="camera-tile-status-symbol" aria-hidden="true">{status.symbol}</span>}
     </span>
   );
+}
+
+function LiveTile(props) {
+  return props.camera.kind === "weather" ? <WeatherTile {...props} /> : <CameraTile {...props} />;
 }
 
 export function CameraTile({ camera, timeZone, refresh, onOpen, onPreviewOpen, onPreviewClose, onAspectChange, onMakePrimary, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false, mobileView = false, mobilePrimary = false, focusPrimary = false }) {
@@ -777,7 +783,7 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
   return (
     <header className="live-command-bar">
       <div className="live-command-context">
-        <span className="live-command-scope"><Grid2X2 size={15} /><strong>All cameras</strong><small>{cameraCount} of {totalCameraCount}</small></span>
+        <span className="live-command-scope"><Grid2X2 size={15} /><strong>{cameras.some((item) => item.kind === "weather") ? "All views" : "All cameras"}</strong><small>{cameraCount} of {totalCameraCount}</small></span>
         <strong className="live-command-mobile-title">Command Center</strong>
       </div>
       <MobileCameraSelect
@@ -804,6 +810,7 @@ export function LiveCommandBar({ cameras = [], focusedCameraId = "", onFocusedCa
 
 export function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
+  const liveItems = useMemo(() => liveItemsWithWeather(cameras, appConfig?.weather), [cameras, appConfig?.weather]);
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const thumbnailObjectFocus = appConfig?.incident_thumbnail_object_focus ?? "off";
   const thumbnailObjectFocusZoom = appConfig?.incident_thumbnail_object_focus_zoom ?? 1;
@@ -881,11 +888,11 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     } catch {
       order = [];
     }
-    const cameraById = new Map(cameras.map((camera) => [camera.id, camera]));
+    const cameraById = new Map(liveItems.map((camera) => [camera.id, camera]));
     const sorted = order.map((id) => cameraById.get(id)).filter(Boolean);
     const seen = new Set(sorted.map((camera) => camera.id));
-    return [...sorted, ...cameras.filter((camera) => !seen.has(camera.id))];
-  }, [cameras, cameraOrder]);
+    return [...sorted, ...liveItems.filter((camera) => !seen.has(camera.id))];
+  }, [liveItems, cameraOrder]);
   const normalizedLayoutMode = ["auto", "focus", "custom"].includes(liveLayoutMode) ? liveLayoutMode : "auto";
   const effectiveLayoutMode = customLayoutAvailable ? normalizedLayoutMode : "auto";
   const liveDensity = normalizedLiveDensity(liveDensityValue);
@@ -903,8 +910,8 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
   );
   const liveCameraStartIndex = useMemo(() => new Map(orderedCameras.map((camera, index) => [camera.id, index])), [orderedCameras]);
   const customLayout = useMemo(
-    () => readLiveCustomLayout(customLayoutValue, cameras, liveCameraAspects),
-    [cameras, customLayoutValue, liveCameraAspects],
+    () => readLiveCustomLayout(customLayoutValue, liveItems, liveCameraAspects),
+    [liveItems, customLayoutValue, liveCameraAspects],
   );
   const displayedCustomLayout = keyboardLayoutPreview || customLayout;
   const liveCameraLayout = useMemo(
@@ -1140,7 +1147,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     if (!active && !activation) return;
     event.preventDefault();
     event.stopPropagation();
-    const cameraName = cameras.find((camera) => camera.id === cameraId)?.name || cameraId;
+    const cameraName = liveItems.find((camera) => camera.id === cameraId)?.name || cameraId;
     if (!active) {
       setKeyboardLayoutPreview({ type: actionType, cameraId, order: [...customLayout.order], sizes: structuredClone(customLayout.sizes) });
       setLayoutAnnouncement(`${actionType === "move" ? "Move" : "Resize"} mode for ${cameraName}. Use arrow keys, Enter to save, or Escape to cancel.`);
@@ -1523,7 +1530,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
       <section className="bento-card camera-zone live-camera-zone">
         <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
           {orderedCameras.map((camera) => {
-            const connectivity = cameraCaptureConnectivity(camera);
+            const connectivity = camera.kind === "weather" ? "weather" : cameraCaptureConnectivity(camera);
             const online = connectivity === "healthy";
             const active = camera.id === mobileFocusedCameraId;
             return (
@@ -1536,7 +1543,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
               >
                 <Camera size={16} aria-hidden="true" />
                 <span>{camera.name || camera.id}</span>
-                <i className={online ? "online" : connectivity === "reconnecting" ? "reconnecting" : ""} aria-hidden="true" />
+                {camera.kind !== "weather" ? <i className={online ? "online" : connectivity === "reconnecting" ? "reconnecting" : ""} aria-hidden="true" /> : null}
               </button>
             );
           })}
@@ -1547,7 +1554,7 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
           style={effectiveLayoutMode === "custom" ? { "--custom-pack-row-height": `${customGridMetrics.packRowHeight}px` } : undefined}
         >
           {liveDefaultsReady ? renderedCameras.map((camera) => (
-            <CameraTile
+            <LiveTile
               key={`${camera.id}:${liveDefaultsInstance}`}
               camera={camera}
               timeZone={timeZone}

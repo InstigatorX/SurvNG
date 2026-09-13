@@ -996,7 +996,24 @@ class DetectorConfig(BaseModel):
         return self.coreml_model_path
 
 
+class WeatherConfig(BaseModel):
+    enabled: bool = False
+    name: str = Field(default="Local weather", min_length=1, max_length=80)
+    latitude: float | None = Field(default=None, ge=-85, le=85, allow_inf_nan=False)
+    longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    units: Literal["imperial", "metric"] = "imperial"
+    radar_zoom: int = Field(default=6, ge=2, le=7)
+    animate: bool = True
+
+    @model_validator(mode="after")
+    def require_location(self) -> "WeatherConfig":
+        if self.enabled and (self.latitude is None or self.longitude is None):
+            raise ValueError("Weather requires latitude and longitude when enabled")
+        return self
+
+
 class AppConfig(BaseModel):
+    weather: WeatherConfig = Field(default_factory=WeatherConfig)
     base_path: str = "/survng"
     storage_dir: str = "survng/storage"
     database_dir: str = ""
