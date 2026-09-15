@@ -91,13 +91,13 @@ def test_late_empty_result_survives_capture_history_eviction_and_reconnect():
     assert batch.frames[0].captured.source_session == "s"
 
 
-def test_late_exact_empty_replaces_earlier_positive_match():
+def test_late_exact_empty_is_used_instead_of_nearby_positive():
     obj = {"label": "person", "confidence": .9,
            "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 80}}
     current = [snapshot(99.9, objects=[obj])]
     timeline = _service(capture=SimpleNamespace(matched_snapshot=lambda *_a, **_k: current[0]))
     timeline.remember_capture(captured(100))
-    assert timeline.live_frames[0].detection.objects
+    assert timeline.live_frames[0].detection is None
     current[0] = snapshot(100, 2)
     timeline.remember_capture(captured(100.1, 2))
     assert timeline.live_frames[0].detection.objects == ()

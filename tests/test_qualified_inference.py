@@ -25,7 +25,8 @@ def camera():
     ("capture", "fast_frame_invalidated"), ("lifecycle", "fast_frame_invalidated"),
     ("session", "fast_frame_invalidated"), ("disconnect", "fast_frame_invalidated"),
 ])
-def test_initial_response_retains_pixels_and_rejects_expired_identity(monkeypatch, change, expected):
+@pytest.mark.parametrize("native_provider", [False, True])
+def test_initial_response_retains_pixels_and_rejects_expired_identity(monkeypatch, change, expected, native_provider):
     clock = [100.0]
     pixels = np.full((20, 20, 3), (10, 40, 90), dtype=np.uint8)
     evidence = TimestampedLiveFrame(pixels, 100.0, 50.0, 7, 4, 8, source_session="original")
@@ -51,7 +52,8 @@ def test_initial_response_retains_pixels_and_rejects_expired_identity(monkeypatc
     detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=.5, require_incident_zone=False),
                                detect=Mock(side_effect=AssertionError("wrong workload")), detect_initial=detect)
     backend = RecordedMotionObjectDetector(camera(), detector, Mock(), lambda: None,
-        timestamped_live_frame_provider=lambda: current[0], timestamped_evidence_frame_provider=lambda token: evidence)
+        timestamped_live_frame_provider=lambda: current[0], timestamped_evidence_frame_provider=lambda token: evidence,
+        live_detections_provider=(lambda _sample: None) if native_provider else None)
     monkeypatch.setattr("survng.app.motion_pipeline.object_detection.time.time", lambda: clock[0])
     result = backend.detect_initial(datetime.fromtimestamp(100, timezone.utc), {
         "evidence_frame_at_epoch": 100, "evidence_frame_sequence": 7,
@@ -82,8 +84,9 @@ def test_demand_live_tracking_uses_tracking_priority_with_exact_pixels():
     assert detector.detect_tracking.call_args.args[0] is pixels
 
 
-def test_demand_timeline_retains_uninferred_frames_without_polling_metadata():
+def test_demand_timeline_retains_uninferred_frames_when_metadata_is_missing():
     capture, recorder = Mock(), Mock()
+    capture.matched_snapshot.return_value = None
     recorder.recording_rows_between.return_value = []
     timeline = CameraFrameTimeline(camera=camera(), capture=capture, recorder=recorder,
         stop_event=threading.Event(), sample_fps=lambda: 5, requires_inference=True)
@@ -92,7 +95,9 @@ def test_demand_timeline_retains_uninferred_frames_without_polling_metadata():
     timeline.remember_capture(frame)
     assert timeline.live_frames[0].captured is frame
     assert timeline.live_frames[0].requires_inference
-    capture.matched_snapshot.assert_not_called()
+    capture.matched_snapshot.assert_called_once_with(
+        "live", source_pts=3, generation=1, source_session="test", exact=True,
+    )
     batch = timeline.read_recorded_frames(99.8, 100, 5, 640)
     assert len(batch.frames) == 1
     assert batch.frames[0].captured is frame

@@ -5,7 +5,42 @@ describes the implementation currently in the repository, not an aspirational
 design. Update it whenever ingest, recording, motion qualification, inference,
 incident generation, media storage, or browser playback behavior changes.
 
-Last reviewed: 2026-09-02
+Last reviewed: 2026-09-14
+
+## Native live object detection
+
+With the OpenVINO detector enabled, `detector.native_live_detection` defaults to
+`true`: the existing live/substream DL Streamer graph runs `gvadetect` at
+`detector.live_sample_fps`, with `inference-interval=1`. Hardware decode and VA
+surface preprocessing stay in that graph. The live pixel branch remains BGR
+for qualification evidence and fallback inference; qualification derives its
+grayscale images as before. Main-stream capture has no native detector.
+
+Previously production capture emitted only pixels, and initial live checks and
+tracking submitted those pixels to the demand-driven inference pool. Now both
+consumers first request a validated `DetectionSnapshot` for the identical source
+PTS in the current capture generation and session. Tracking attaches it to the
+`TrackingFrame`; a matching `objects=[]` is completed negative evidence. Matching
+snapshots bypass `detect_initial`/`detect_tracking`. Nearby display detections
+never qualify as completed inference for another frame.
+
+Missing, late, stale, invalid, or wrong-session/generation metadata leaves the
+current demand-driven inference path available on the selected color pixels.
+Timeline hydration can retain late exact results for catch-up without extending
+capture history. It does not wait for native results or change sampling cadence.
+The existing `live_detection_matching` status includes `exact_matches` and
+`nonexact` counts; invalid metadata counts remain in native pipeline status.
+
+SurvNG Hybrid retains track identity and association. This path adds no
+`gvatrack`, native tracking IDs, prediction, or detector interval skipping.
+Recorded main-stream refinement, ReID, zones, incidents, route-watch policy,
+and catch-up continuity retain their existing owners and behavior.
+
+Rollback: set `detector.native_live_detection=false` and apply configuration (or
+restart). This transactionally rebuilds capture with native detection off while
+keeping demand-driven object inference enabled. A disabled detector or CoreML
+backend also leaves native detection off. Reverting this change requires no
+database migration.
 
 ## Motion Pipeline Migration
 
@@ -96,7 +131,7 @@ Camera
   |                                                          v
   |                                                  OpenVINO detection
   |                                                          |
-  +-- live/substream --> DL Streamer live --> grayscale ring  |
+  +-- live/substream --> DL Streamer live --> BGR frame ring  |
   |                            |                    |          |
   |                            |             motion qualifier  |
   |                            |                    |          |

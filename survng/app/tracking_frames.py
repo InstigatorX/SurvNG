@@ -18,6 +18,7 @@ import numpy as np
 
 from .camera_capture import CameraCaptureService, CapturedFrame
 from .config import CameraConfig
+from .live_detections import DetectionSnapshot
 from .object_track.types import TrackingFrame, TrackingFrameBatch
 from .security import redact_secret_text
 from .recording_media import mp4_video_dimensions
@@ -261,21 +262,22 @@ class CameraFrameTimeline:
         self._hydrate_live_results()
 
     def _hydrate_live_results(self) -> None:
-        if self.requires_inference:
-            return
         # Never acquire capture's lock while holding the timeline lock.
         with self._lock:
             pending = tuple(item for item in self.live_frames if isinstance(item, TrackingFrame))
         resolved = {}
         for item in pending:
+            if item.detection is not None:
+                continue
             frame = item.captured
             snapshot = self.capture.matched_snapshot(
                 "live", source_pts=frame.source_pts, generation=frame.generation,
                 source_session=frame.source_session,
+                exact=True,
             )
-            if snapshot is not None and (
-                item.detection is None or snapshot.source_pts > item.detection.source_pts
-            ):
+            if (isinstance(snapshot, DetectionSnapshot)
+                    and snapshot.source_pts == frame.source_pts
+                    and snapshot.session == frame.source_session):
                 resolved[id(item)] = TrackingFrame(frame, snapshot)
         if resolved:
             with self._lock:

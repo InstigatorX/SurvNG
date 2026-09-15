@@ -332,8 +332,8 @@ class AppManager:
                 ),
                 model_path=detector.resolved_model_path(),
                 inference_device=detector.device,
-                # Qualification submits evidence to the priority-aware pool.
-                detect_enabled=False,
+                detect_enabled=(detector.enabled and detector.native_live_detection
+                                and detector.backend == "openvino"),
                 labels_path=detector.labels_path,
                 labels=tuple(detector.labels),
                 confidence_threshold=live_detection_threshold(config),
