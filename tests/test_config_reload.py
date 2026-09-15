@@ -793,6 +793,36 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["object_inference"])
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_native_pipeline_changes_reload_capture_processes(self) -> None:
+        for field, before, after in (
+            ("live_pipeline_inference_enabled", False, True),
+            ("live_pipeline_inference_enabled", True, False),
+            ("live_pipeline_inference_interval", 1, 3),
+            ("live_pipeline_tracking", "off", "short-term-imageless"),
+        ):
+            with self.subTest(field=field, before=before, after=after):
+                current = AppConfig()
+                setattr(current.detector, field, before)
+                active = Mock()
+                active.config = current
+                main.config = current
+                main.manager = active
+                incoming = current.model_copy(deep=True)
+                setattr(incoming.detector, field, after)
+
+                with (
+                    patch("survng.app.main.reload_manager", return_value=incoming) as reload,
+                    patch("survng.app.main.save_config"),
+                ):
+                    effective, result = main.apply_config_update(incoming)
+
+                reload.assert_called_once_with(incoming, assign_ids=False, persist=True)
+                active.reconfigure_inference.assert_not_called()
+                active.reconfigure_object_tracking.assert_not_called()
+                self.assertIs(effective, incoming)
+                self.assertEqual(result["apply_mode"], "manager_reload")
+                self.assertTrue(result["camera_workers_restarted"])
+
     def test_live_sample_rate_change_reloads_capture_processes(self) -> None:
         self._assert_capture_rate_change_reloads_manager(live=True)
 
