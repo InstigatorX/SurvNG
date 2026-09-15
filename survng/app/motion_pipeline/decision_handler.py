@@ -1043,6 +1043,13 @@ class MotionDecisionHandler:
             )
 
         detected_objects = [detected for detected in stored_objects if detected.get("label")]
+        if self.event_callback and existing_event_id is not None and not detected_objects:
+            self._publish("incident_update", {
+                "event_id": event_id,
+                "camera_id": self.camera_id,
+                "updated": True,
+                "reason": "evidence_refined",
+            })
         if self.event_callback and detected_objects and (
             existing_event_id is not None or event_created
         ):

@@ -21,7 +21,7 @@ class IncidentPayloadBuilder:
             return []
         detected: list[dict[str, Any]] = []
         for item in raw:
-            if not isinstance(item, dict) or not item.get("label") or item.get("incident_eligible") is False:
+            if not isinstance(item, dict) or not item.get("label") or item.get("incident_eligible") is False or item.get("provisional_detection") is True:
                 continue
             try:
                 confidence = float(item.get("confidence") or 0)

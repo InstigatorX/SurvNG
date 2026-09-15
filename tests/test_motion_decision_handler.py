@@ -302,6 +302,23 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         admitted.assert_called_once_with("upper-garage", "gate", 10)
         self.assertEqual([kind for kind, _payload in published], ["object"])
 
+    def test_empty_refinement_publishes_incident_correction(self) -> None:
+        events = Mock()
+        published = []
+        handler = MotionDecisionHandler(
+            camera_id="gate", events=events,
+            detection_provider=lambda _at: (np.zeros((100, 100, 3), dtype=np.uint8), [], "recording.mp4"),
+            snapshot_writer=lambda _frame, _at: "refined.webp",
+            object_serializer=json.dumps,
+            event_callback=lambda kind, payload: published.append((kind, payload)),
+        )
+        outcome = handler.refine("motion", "test", datetime(2026, 9, 13, tzinfo=timezone.utc), {}, existing_event_id=42)
+        self.assertFalse(outcome.object_detected)
+        events.refine_event_evidence.assert_called_once()
+        self.assertEqual(published, [("incident_update", {
+            "event_id": 42, "camera_id": "gate", "updated": True, "reason": "evidence_refined",
+        })])
+
     def test_failed_refinement_preserves_existing_provisional_evidence(self) -> None:
         events = Mock()
         snapshot_writer = Mock()
