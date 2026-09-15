@@ -542,6 +542,8 @@ class _SharedLiveProcess:
             return
         if message_type == TYPE_STATUS:
             decoded = decode_json_payload(inner)
+            if "invalid_detection_snapshots" in inbox.status:
+                decoded["invalid_detection_snapshots"] = inbox.status["invalid_detection_snapshots"]
             inbox.status = decoded
             if decoded.get("ok") is True and decoded.get("detect") is True:
                 if inbox.inference_started_at is None:
@@ -854,6 +856,8 @@ class DlStreamerCaptureHandle:
             return None
         if message_type == TYPE_STATUS:
             decoded = decode_json_payload(payload)
+            if "invalid_detection_snapshots" in self._status:
+                decoded["invalid_detection_snapshots"] = self._status["invalid_detection_snapshots"]
             self._status = decoded
             error = decoded.get("error")
             if decoded.get("ok") is False and error:

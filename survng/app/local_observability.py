@@ -217,9 +217,11 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             "implementation": _motion_identifier(tracking.get("implementation")),
             "last_fresh_age_seconds": _optional_number(tracking.get("last_fresh_age_seconds")),
             "effective_fresh_fps": _optional_number(tracking.get("effective_fresh_fps")),
+            "motion_states": _numeric_fields(tracking.get("motion_states"), ("moving", "stationary", "uncertain", "presence")),
             "counters": _numeric_fields(tracking.get("counters"), (
                 "fresh_frames", "prediction_frames", "unknown_frames", "stale_observations",
                 "missing_track_id", "track_capacity_drops", "events_created", "snapshot_frame_missing", "metadata_restarts",
+                "stationary_vehicle_observations", "uncertain_vehicle_observations", "moving_transitions", "stationary_transitions", "episode_track_capacity_drops",
             )),
         },
         "live_pipeline": _numeric_fields(raw.get("live_pipeline"), (

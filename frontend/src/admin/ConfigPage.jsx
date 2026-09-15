@@ -4397,7 +4397,11 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             <label>Confirmation frames<input type="number" min="1" max="5" value={config.detector?.event_confirmation_frames ?? 2} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))} /></label>
             <label>Presence timeout (seconds)<input type="number" min="1" max="60" step="0.5" value={config.detector?.native?.activity_timeout_seconds ?? 5} onChange={(event) => updateConfig(["detector", "native", "activity_timeout_seconds"], Number(event.target.value))} /><small>Time without fresh eligible presence before the episode ends.</small></label>
           </div>
-          <p>Native IDs last for one stream session. A stationary visible object remains present; reconnects start new identities.</p>
+          <div className="form-grid">
+            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.native?.stationary?.enabled ?? true} onChange={(event) => updateConfig(["detector", "native", "stationary", "enabled"], event.target.checked)} /><span>Suppress stationary vehicle incidents</span></label>
+            <label>Stationary after (seconds)<input type="number" min="1" max="120" step="1" value={config.detector?.native?.stationary?.stationary_seconds ?? 8} onChange={(event) => updateConfig(["detector", "native", "stationary", "stationary_seconds"], Number(event.target.value))} /><small>Vehicles must show movement to start an incident. Stable vehicles remain tracked as scene context.</small></label>
+          </div>
+          <p>People retain presence alerts, including while standing still. Native IDs last for one stream session; reconnects require new movement evidence for vehicles.</p>
         </section>
       ) : null}
 
@@ -4662,6 +4666,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <p>{native.health} · {Number(native.effective_fresh_fps || 0).toFixed(1)} fresh detections/sec</p>
       <p>Detector time: {pipeline.native_detector_average_ms ?? "—"} ms average · {pipeline.native_detector_p95_ms ?? "—"} ms p95</p>
       <p>Last fresh result: {native.last_fresh_age_seconds == null ? "waiting" : `${Number(native.last_fresh_age_seconds).toFixed(1)} seconds ago`}</p>
+      <p>{native.motion_states?.moving || 0} moving vehicles · {native.motion_states?.stationary || 0} stationary vehicles · {native.motion_states?.uncertain || 0} gathering evidence</p>
       <p>{native.active ? "Object presence active" : "No active presence episode"} · {native.counters?.events_created || 0} events · {native.counters?.metadata_restarts || 0} metadata recoveries</p>
     </section>;
   }

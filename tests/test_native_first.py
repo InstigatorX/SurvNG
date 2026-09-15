@@ -383,3 +383,20 @@ def test_reconnected_video_gets_metadata_grace_after_long_outage(monkeypatch, ne
     else:
         worker._restart_native_stream.assert_called_once_with(100.0)
     assert worker.activity.health != "healthy"
+
+
+def test_native_observation_clock_is_stable_across_arrival_bursts():
+    from types import SimpleNamespace
+    from survng.app.native_camera import NativeCameraWorker
+    worker = NativeCameraWorker.__new__(NativeCameraWorker)
+    worker._observation_clock = None
+    worker._last_observation_epoch = 0
+    first = replace(observation(1), source_pts=9)
+    frame = SimpleNamespace(source_session=first.session, source_pts=10, captured_at_epoch=100)
+    assert worker._observation_epoch(first, frame, 100, 100) == 99
+    # Decode catches up in a burst; the frame receipt offset changes by .9s.
+    frame.source_pts, frame.captured_at_epoch = 11, 100.1
+    second = replace(first, source_pts=9.2)
+    assert worker._observation_epoch(second, frame, 100.1, 100.1) == pytest.approx(99.2)
+    reconnected = replace(first, source_pts=0, session="new", received_monotonic=101)
+    assert worker._observation_epoch(reconnected, None, 101, 101) == 101

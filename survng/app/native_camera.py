@@ -45,6 +45,8 @@ class NativeCameraWorker:
         self._enabled_at = 0.0
         self._last_native_healthy_at = time.monotonic()
         self._native_frame_session = ""
+        self._observation_clock = None
+        self._last_observation_epoch = 0.0
         self._last_error = ""
         self.capture = CameraCaptureService(
             camera_id=camera.id, source_url=camera.source_url, backend=NativeCaptureBinding(
@@ -136,9 +138,7 @@ class NativeCameraWorker:
                                 lag = frame.source_pts - observation.source_pts
                                 if abs(lag) > self.config.native.maximum_observation_age_seconds:
                                     continue
-                                observed_epoch = min(epoch, frame.captured_at_epoch - lag)
-                            else:
-                                observed_epoch = epoch - (now - observation.received_monotonic)
+                            observed_epoch = self._observation_epoch(observation, frame, now, epoch)
                             self.activity.consume(observation, now=now, epoch=observed_epoch)
                         self.activity.tick(now=now)
                         if self.activity.health == "healthy":
@@ -160,6 +160,21 @@ class NativeCameraWorker:
                 self._last_error = redact_secret_text(error)
                 LOGGER.error("native activity shutdown failed for %s: %s", self.camera.id, self._last_error)
                 self.runtime_state.phase = CameraLifecyclePhase.FAILED
+
+    def _observation_epoch(self, observation, frame, now, epoch):
+        if self._observation_clock is None or self._observation_clock[0] != observation.session:
+            estimate = epoch - max(0, now - observation.received_monotonic)
+            if frame and frame.source_session == observation.session:
+                estimate = frame.captured_at_epoch - (frame.source_pts - observation.source_pts)
+            anchor = min(epoch, estimate)
+            self._observation_clock = (observation.session, observation.source_pts, anchor)
+            self._last_observation_epoch = anchor
+        _, pts, anchor = self._observation_clock
+        # Arrival jitter must not move an established stream's wall-time origin.
+        mapped = anchor + observation.source_pts - pts
+        result = max(self._last_observation_epoch, min(epoch, mapped))
+        self._last_observation_epoch = result
+        return result
 
     def _restart_native_stream(self, now):
         """Replace a stalled graph; never switch to another inference engine."""

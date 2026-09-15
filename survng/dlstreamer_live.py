@@ -1242,6 +1242,7 @@ def _pump_pipeline(
     inference_sequence = 0
     started = time.monotonic()
     first_frame_at: float | None = None
+    last_status_at: float | None = None
     sequence = 0
     try:
         if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
@@ -1320,6 +1321,8 @@ def _pump_pipeline(
                             jpeg_buffer.unmap(info)
             if first_frame_at is None:
                 first_frame_at = time.monotonic()
+            if last_status_at is None or time.monotonic() - last_status_at >= 1.0:
+                last_status_at = time.monotonic()
                 selected = sorted(decoder_elements)
                 _write(
                     stdout,

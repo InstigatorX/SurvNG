@@ -770,8 +770,25 @@ class ObjectTrackingConfig(BaseModel):
         return auxiliary_openvino_device(self.vehicle_reid_device)
 
 
+class NativeStationaryConfig(BaseModel):
+    enabled: bool = True
+    labels: list[str] = Field(default_factory=lambda: ["car", "truck", "bus", "van", "suv", "motorcycle"], max_length=64)
+    stationary_seconds: float = Field(default=8.0, ge=1.0, le=120.0)
+    window_seconds: float = Field(default=2.0, ge=0.5, le=10.0)
+    moving_threshold: float = Field(default=0.15, ge=0.01, le=2.0)
+    stationary_threshold: float = Field(default=0.05, ge=0.001, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self):
+        if self.stationary_threshold >= self.moving_threshold:
+            raise ValueError("stationary_threshold must be below moving_threshold")
+        self.labels = list(dict.fromkeys(label.strip().lower() for label in self.labels if label.strip()))
+        return self
+
+
 class NativeActivityConfig(BaseModel):
     """Native observation freshness and presence episode policy."""
+    stationary: NativeStationaryConfig = Field(default_factory=NativeStationaryConfig)
     activity_timeout_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
     maximum_observation_age_seconds: float = Field(default=2.0, ge=0.2, le=10.0)
     maximum_tracks: int = Field(default=128, ge=1, le=1024)

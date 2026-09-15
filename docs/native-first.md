@@ -60,12 +60,29 @@ There is no on-demand detection when metadata is missing.
   invalid metadata ends activity with a coverage-loss reason, not evidence that
   the scene was empty. Persistent metadata stalls rebuild the native stream after
   15 seconds; failed graph shutdown is reported rather than starting a second graph.
-- **A stationary visible object keeps its presence episode active.** This is an
-  object-presence experiment, not EMA motion qualification. Parked vehicles can
-  therefore produce long episodes. There is no stationary-scene suppression.
+- **Stationary vehicles remain tracked but do not create or extend incidents.**
+  New vehicles start uncertain and must demonstrate movement. After eight seconds
+  of stable evidence, moving vehicles become stationary; the normal five-second
+  activity timeout then completes the incident when no other object is active.
+  People and other unlisted classes retain presence-based admission.
+- Motion uses fresh native boxes and elapsed stream time, a bounded two-second
+  window, trimmed coordinate spread and accumulated drift relative to box size.
+  Movement requires 0.15 box-width/height displacement; the stability threshold
+  is 0.05. At least five observations spanning 0.4 seconds are required; at low FPS the
+  window retains five observations even when they span more than two seconds. This
+  hysteresis tolerates jitter; it is image-space motion, not calibrated speed.
+- Default vehicle labels: car, truck, bus, van, suv, motorcycle. Configure
+  `detector.native.stationary` with `enabled`, `labels`, `stationary_seconds`,
+  `window_seconds`, `moving_threshold`, and `stationary_threshold`. Disabling it
+  restores presence-based admission for every class. All detector/tracker work
+  continues; suppression saves incident work, not inference work.
+- Incident completion preserves live stationary context. Track disappearance,
+  long observation gaps, native ID changes, reconnects and resolution changes
+  require new evidence; there is no cross-ID appearance matching. A vehicle
+  already parked at startup does not alert merely because it received a new ID.
 - Track history is bounded to 150 observations per track and 128 tracks per
-  episode by default. Capacity drops are counted. This limit is especially
-  relevant when a stationary object holds an episode open for a long time.
+  live camera and 128 archived tracks per episode by default. Expired live tracks
+  are evicted independently of incident history. Capacity drops are counted.
 - Updates persist at most once per second after admission, plus completion.
   Each episode is one incident, even when another starts within the old gap window.
   Native completion explicitly settles incident notifications. Native track times
