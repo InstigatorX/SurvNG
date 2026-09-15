@@ -35,7 +35,7 @@ def captured(epoch, sequence=1, session="s"):
 
 def snapshot(epoch, sequence=1, objects=(), session="s"):
     return DetectionSnapshot.parse({
-        "schema_version": 1,
+        "schema_version": 1, "provenance": "native_fresh_detection",
         "source_pts": epoch, "inference_sequence": sequence,
         "width": 320, "height": 180, "objects": list(objects),
     }, session=session)
@@ -91,13 +91,14 @@ def test_late_empty_result_survives_capture_history_eviction_and_reconnect():
     assert batch.frames[0].captured.source_session == "s"
 
 
-def test_late_exact_empty_replaces_earlier_positive_match():
+def test_late_exact_empty_replaces_missing_result_while_earlier_positive_is_rejected():
     obj = {"label": "person", "confidence": .9,
            "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 80}}
     current = [snapshot(99.9, objects=[obj])]
     timeline = _service(capture=SimpleNamespace(matched_snapshot=lambda *_a, **_k: current[0]))
     timeline.remember_capture(captured(100))
-    assert timeline.live_frames[0].detection.objects
+    assert timeline.live_frames[0].detection is None
+    assert timeline.live_frames[0].requires_inference
     current[0] = snapshot(100, 2)
     timeline.remember_capture(captured(100.1, 2))
     assert timeline.live_frames[0].detection.objects == ()
@@ -130,7 +131,7 @@ def test_buffered_sidecars_keep_tracking_continuity_without_rgb_inference(monkey
     for index, result in enumerate((positive, positive, None,
                                     snapshot(seed + 2, 2), snapshot(seed + 2.5, 3), snapshot(seed + 3, 4)), 1):
         timeline.live_frames.append(TrackingFrame(captured(seed + index / 2, index), result))
-    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=.7), detect=Mock())
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=.7), detect=Mock(return_value=[]))
     updates = []
     session = ObjectTrackingSession(
         camera=timeline.camera, config=ObjectTrackingConfig(max_session_seconds=3),
@@ -152,8 +153,8 @@ def test_buffered_sidecars_keep_tracking_continuity_without_rgb_inference(monkey
     finally:
         session.stop()
     assert updates[-1]["completion_reason"] == "tracking_window_complete"
-    assert updates[-1]["frames_processed"] == 4  # duplicate/missing did not count
-    detector.detect.assert_not_called()
+    assert updates[-1]["frames_processed"] == 6  # stale/missing frames use real fallback inference
+    assert detector.detect.call_count == 2
     enrich.assert_not_called()
     assert appearances.call_count == covers.call_count == 1  # color seed only
 

@@ -96,17 +96,18 @@ def test_scale_boxes_without_mutating_cache_and_clip_to_evidence():
     assert snapshot.objects[0]["box"]["x1"] == 100
 
 
-def test_inbox_resets_identity_and_flushes_old_frames_on_backward_pts():
+@pytest.mark.parametrize("next_pts", [0.0, 10.0])
+def test_inbox_resets_identity_and_flushes_old_frames_on_reused_or_backward_pts(next_pts):
     inbox = _StreamInbox()
     old_session = inbox.session
     frame = np.zeros((2, 2), np.uint8)
     inbox.put_frame(frame, 1, 10)
     inbox.add_detection_snapshot(payload())
-    inbox.put_frame(frame, 2, 0)
+    inbox.put_frame(frame, 2, next_pts)
     assert inbox.session != old_session
     assert inbox.pop_detection_snapshots() == []
     received = inbox.get_frame(.01)
-    assert received[2] == 0 and received[3] == inbox.session
+    assert received[2] == next_pts and received[3] == inbox.session
     assert inbox.get_frame(.01) is None
 
 
@@ -235,12 +236,14 @@ def test_cropped_live_event_waits_for_main_tracking_seed():
     camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://fixture.invalid/main")
     frame = np.zeros((360, 640), np.uint8)
     sample = TimestampedLiveFrame(frame, time.time(), time.monotonic(), 1, 1, 1,
+                                  source_pts=10, source_session="s",
                                   spatial_alignment={"reliable": True, "offset_x": .2})
     detector = SimpleNamespace(config=DetectorConfig(require_incident_zone=False), detect=Mock())
     backend = RecordedMotionObjectDetector(
         camera, detector, SimpleNamespace(), lambda: None,
         timestamped_live_frame_provider=lambda: sample,
-        live_detections_provider=lambda _sample: DetectionSnapshot.parse(payload(objects=[car()]), session="s"),
+        live_detections_provider=lambda _sample: DetectionSnapshot.parse(
+            {**payload(objects=[car()]), "provenance": "native_fresh_detection"}, session="s"),
     )
     result = backend.detect_initial(datetime.now(timezone.utc))
     assert result.objects[0]["live_detection_session"] == "s"

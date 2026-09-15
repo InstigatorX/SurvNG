@@ -90,6 +90,15 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
         assert status.get("native_tracking_authoritative") is False, status
     else:
         assert snapshots == [], "frames-only capture must not run gvadetect"
+    fresh = [s for s in snapshots if s.provenance == "native_fresh_detection"]
+    predicted = [s for s in snapshots if s.provenance == "native_tracked_prediction"]
+    exact_matches = sum(any(s.matches_frame(pts, "native") for pts in frames) for s in fresh)
+    if source_role == "live" and detect:
+        assert fresh and exact_matches > 0, (fresh, frames, errors[-4000:])
+        assert len(fresh) + len(predicted) == len(snapshots), "unknown inference provenance"
+        assert all((s.inference_sequence - 1) % inference_interval == 0 for s in fresh)
+        assert bool(predicted) == (inference_interval > 1)
+        assert status.get("native_evidence_invalid") == 0, status
     assert all(b > a for a, b in zip(frames, frames[1:]))
     assert all(b.source_pts > a.source_pts for a, b in zip(snapshots, snapshots[1:]))
     assert all(bool(item.objects) == (threshold < 1) for item in snapshots)
@@ -97,7 +106,8 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
     if expected_objects is not None:
         assert all(len(item.objects) == expected_objects for item in snapshots), [len(item.objects) for item in snapshots]
     assert len(frames) > len(snapshots), "detector cadence must not throttle EMA"
-    return {"threshold": threshold, "source_role": source_role, "frames": len(frames), "snapshots": len(snapshots),
+    return {"fresh_snapshots": len(fresh), "prediction_snapshots": len(predicted),
+            "exact_fresh_frame_matches": exact_matches, "threshold": threshold, "source_role": source_role, "frames": len(frames), "snapshots": len(snapshots),
             "nms_threshold": nms_threshold, "objects_per_snapshot": expected_objects,
             "positive_snapshots": sum(bool(s.objects) for s in snapshots),
             "matched_at_receipt": matched,

@@ -45,6 +45,12 @@ class TrackingFrame:
     # Demand-driven pixels are distinct from missing native metadata.
     requires_inference: bool = False
 
+    @property
+    def native_fresh(self) -> bool:
+        return bool(self.captured.source == "live" and self.detection is not None
+                    and self.detection.provenance == "native_fresh_detection"
+                    and self.detection.matches_frame(self.captured.source_pts, self.captured.source_session))
+
     def __iter__(self) -> Iterator[object]:
         yield self.captured.captured_at_epoch
         yield self.captured.image

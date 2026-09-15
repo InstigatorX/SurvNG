@@ -7,13 +7,28 @@ allowing the live/substream GStreamer branch to run `gvadetect` and optionally
 The experiment is **off by default**. It does not replace Hybrid IDs, recorded
 main-stream refinement, ReID, incident persistence, or zone policy.
 
+## Exact-frame reuse
+
+Fresh native results, including completed empty results, are matched by capture
+generation, source session, and exact PTS before Hybrid consumes them. They
+replace duplicate live object inference. Missing or untrusted results use the
+existing demand-driven detector. Fresh ROIs are captured before `gvatrack` so
+propagated predictions cannot become detector confirmations.
+
+Prediction-only frames still run fallback inference. Their positions may assist
+Hybrid association for one update, without creating tracks or adding observations.
+
+See [the implementation and validation report](native-live-detection-reuse.md)
+for execution paths, provenance, counters, and the complete A/B configuration.
+
 ## Why test it
 
 Intel DL Streamer `short-term-imageless` tracking can extrapolate ROI positions
 on frames where object detection is skipped. That makes it possible to lower
 live detector cadence with `inference-interval` while keeping a denser stream
 of object boxes. `gvatrack` itself is CPU work; the expected trade is lower GPU
-inference load for some additional CPU tracking work.
+inference load for some additional CPU tracking work. This does not guarantee
+lower total inference load: fallback still runs on selected skipped frames.
 
 ## Configuration
 
@@ -23,8 +38,8 @@ Under `detector`, start with:
 {
   "enabled": true,
   "live_pipeline_inference_enabled": true,
-  "live_pipeline_inference_interval": 3,
-  "live_pipeline_tracking": "short-term-imageless"
+  "live_pipeline_inference_interval": 1,
+  "live_pipeline_tracking": "off"
 }
 ```
 

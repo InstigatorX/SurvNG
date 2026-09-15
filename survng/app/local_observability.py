@@ -177,6 +177,8 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
     alignment = raw.get("spatial_alignment")
     alignment = alignment if isinstance(alignment, dict) else {}
+    pipeline = raw.get("live_pipeline")
+    pipeline = pipeline if isinstance(pipeline, dict) else {}
     matching = raw.get("live_detection_matching")
     matching = matching if isinstance(matching, dict) else {}
     return {
@@ -193,11 +195,17 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "onvif_connected": bool(raw.get("onvif_connected")),
         "lifecycle_generation": _optional_number(lifecycle.get("generation")),
         "motion": _motion_snapshot(raw.get("motion_qualification"), tracking),
+        "live_pipeline": {
+            "detect": bool(pipeline.get("detect")),
+            **_numeric_fields(pipeline, ("detect_fps", "inference_interval",
+                                         "effective_inference_fps", "native_evidence_invalid")),
+        },
         "live_detection_matching": {
             "lag_seconds": _optional_number(matching.get("lag_seconds")),
             **{key: _number(matching.get(key)) for key in (
                 "history_size", "snapshots", "empty_snapshots", "matched", "unmatched",
                 "stale", "wrong_session", "invalid_pts", "out_of_order", "resets",
+                "native_detection_snapshots", "native_detection_stale", "native_tracker_predictions",
             )},
         },
         "spatial_alignment": {
@@ -213,6 +221,10 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             "last_attempt_seconds_ago": _optional_number(alignment.get("last_attempt_seconds_ago")),
         },
         "tracking": {
+            **_numeric_fields(tracking, (
+                "native_detection_hits", "native_detection_empty_hits",
+                "native_detection_misses", "fallback_detector_calls",
+            )),
             "active": bool(tracking.get("active")),
             "running": bool(tracking.get("running")),
             "capacity_requests": int(_number(tracking.get("capacity_requests"))),

@@ -18,6 +18,7 @@ import numpy as np
 
 from .camera_capture import CameraCaptureService, CapturedFrame
 from .config import CameraConfig
+from .live_detections import DetectionSnapshot
 from .object_track.types import TrackingFrame, TrackingFrameBatch
 from .security import redact_secret_text
 from .tracking_comparison import sampled_video_frames, video_frame_at_reference
@@ -75,6 +76,7 @@ class CameraFrameTimeline:
         self.recorder = recorder
         self.stop_event = stop_event
         self.sample_fps = sample_fps
+        # Retained for constructor compatibility; inference is decided per frame.
         self.requires_inference = requires_inference
         self._lock = threading.Lock()
         self._main_generation = 0
@@ -255,27 +257,35 @@ class CameraFrameTimeline:
             self._live_capture_session = frame.source_session
             interval = 1.0 / max(0.1, float(self.sample_fps()))
             if frame.captured_at_epoch - self._last_live_sample_epoch >= interval * 0.9:
-                self.live_frames.append(TrackingFrame(frame, requires_inference=self.requires_inference))
+                self.live_frames.append(TrackingFrame(frame, requires_inference=True))
                 self._last_live_sample_epoch = frame.captured_at_epoch
         self._hydrate_live_results()
 
+    def tracking_frame(self, frame: CapturedFrame) -> TrackingFrame:
+        snapshot = self.capture.matched_snapshot(
+            "live", source_pts=frame.source_pts, generation=frame.generation,
+            source_session=frame.source_session, exact=True,
+        )
+        if not isinstance(snapshot, DetectionSnapshot) or not snapshot.matches_frame(
+            frame.source_pts, frame.source_session,
+        ):
+            snapshot = None
+        return TrackingFrame(frame, snapshot, requires_inference=(
+            snapshot is None or snapshot.provenance != "native_fresh_detection"
+        ))
+
     def _hydrate_live_results(self) -> None:
-        if self.requires_inference:
-            return
         # Never acquire capture's lock while holding the timeline lock.
         with self._lock:
             pending = tuple(item for item in self.live_frames if isinstance(item, TrackingFrame))
         resolved = {}
         for item in pending:
             frame = item.captured
-            snapshot = self.capture.matched_snapshot(
-                "live", source_pts=frame.source_pts, generation=frame.generation,
-                source_session=frame.source_session,
-            )
-            if snapshot is not None and (
-                item.detection is None or snapshot.source_pts > item.detection.source_pts
-            ):
-                resolved[id(item)] = TrackingFrame(frame, snapshot)
+            if item.native_fresh:
+                continue
+            updated = self.tracking_frame(frame)
+            if updated.detection is not None:
+                resolved[id(item)] = updated
         if resolved:
             with self._lock:
                 self.live_frames = deque(
@@ -359,7 +369,6 @@ class CameraFrameTimeline:
                     (
                         sample for sample in self.live_frames
                         if live_bridge_start <= sample[0] <= end_epoch
-                        and (not isinstance(sample, TrackingFrame) or sample.requires_inference or sample.detection is not None)
                     ),
                     key=lambda sample: sample[0],
                 )

@@ -202,7 +202,11 @@ class _StreamInbox:
     def qualify_pts(self, kind: str, pts: float) -> str:
         with self._lock:
             previous = self._last_pts.get(kind)
-            if previous is not None and math.isfinite(pts) and pts < previous:
+            # A new video frame reusing PTS cannot inherit the previous frame's
+            # detection. Repeated metadata alone still does not reset liveness.
+            if previous is not None and math.isfinite(pts) and (
+                pts < previous or (kind == "frame" and pts == previous)
+            ):
                 self.session = uuid.uuid4().hex
                 self._last_pts.clear()
                 self._detection_snapshots.clear()

@@ -82,7 +82,7 @@ def test_demand_live_tracking_uses_tracking_priority_with_exact_pixels():
     assert detector.detect_tracking.call_args.args[0] is pixels
 
 
-def test_demand_timeline_retains_uninferred_frames_without_polling_metadata():
+def test_demand_timeline_retains_uninferred_frames_when_metadata_is_missing():
     capture, recorder = Mock(), Mock()
     recorder.recording_rows_between.return_value = []
     timeline = CameraFrameTimeline(camera=camera(), capture=capture, recorder=recorder,
@@ -92,7 +92,9 @@ def test_demand_timeline_retains_uninferred_frames_without_polling_metadata():
     timeline.remember_capture(frame)
     assert timeline.live_frames[0].captured is frame
     assert timeline.live_frames[0].requires_inference
-    capture.matched_snapshot.assert_not_called()
+    capture.matched_snapshot.assert_called_once_with(
+        "live", source_pts=3, generation=1, source_session="test", exact=True,
+    )
     batch = timeline.read_recorded_frames(99.8, 100, 5, 640)
     assert len(batch.frames) == 1
     assert batch.frames[0].captured is frame
