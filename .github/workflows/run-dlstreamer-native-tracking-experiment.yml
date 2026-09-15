@@ -19,20 +19,13 @@ jobs:
           ref: experiment/dlstreamer-native-tracking
           fetch-depth: 0
 
-      - name: Apply staged patch
-        shell: bash
-        run: |
-          python - <<'BOOT'
-          from pathlib import Path
-          from textwrap import dedent
+      - name: Apply experiment patch
+        run: python scripts/apply_native_tracking_experiment_patch.py
 
-          staged = Path('.github/workflows/apply-dlstreamer-native-tracking-experiment.yml')
-          text = staged.read_text(encoding='utf-8')
-          start = text.index("python - <<'PY'\n") + len("python - <<'PY'\n")
-          end = text.index("\n          PY\n", start)
-          script = dedent(text[start:end])
-          exec(compile(script, str(staged), 'exec'), {})
-          BOOT
+      - name: Remove staging helpers
+        run: |
+          rm -f scripts/apply_native_tracking_experiment_patch.py
+          rm -f .github/workflows/apply-dlstreamer-native-tracking-experiment.yml
           rm -f .github/workflows/run-dlstreamer-native-tracking-experiment.yml
 
       - name: Syntax check
