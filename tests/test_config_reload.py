@@ -676,15 +676,8 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_motion.assert_called_once_with(
-            effective,
-            restart_camera_ids=set(),
-            hot_camera_ids={"gate"},
-        )
-        self.assertEqual(result["apply_mode"], "hot")
-        self.assertIn("motion_policy", result["hot_updated"])
-        self.assertFalse(result["camera_workers_restarted"])
+        reload.assert_called_once()
+        active.reconfigure_motion.assert_not_called()
 
     def test_motion_analysis_capacity_hot_applies_without_worker_restart(self) -> None:
         active = Mock()
@@ -703,16 +696,8 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_motion.assert_called_once_with(
-            effective,
-            restart_camera_ids=set(),
-            hot_camera_ids={"gate"},
-        )
-        self.assertEqual(result["apply_mode"], "hot")
-        self.assertIn("motion_analysis_capacity", result["hot_updated"])
-        self.assertIn("motion_policy", result["hot_updated"])
-        self.assertFalse(result["camera_workers_restarted"])
+        reload.assert_called_once()
+        active.reconfigure_motion.assert_not_called()
 
     def test_camera_motion_structural_change_restarts_only_affected_camera(self) -> None:
         active = Mock()
@@ -732,14 +717,8 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_motion.assert_called_once_with(
-            effective,
-            restart_camera_ids={"gate"},
-            hot_camera_ids=set(),
-        )
-        self.assertEqual(result["subsystems_restarted"], ["camera:gate"])
-        self.assertTrue(result["camera_workers_restarted"])
+        reload.assert_called_once()
+        active.reconfigure_motion.assert_not_called()
 
     def test_global_motion_tuning_hot_applies_only_to_inheriting_camera(self) -> None:
         gate = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
@@ -759,12 +738,8 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, _result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_motion.assert_called_once_with(
-            effective,
-            restart_camera_ids=set(),
-            hot_camera_ids={"gate"},
-        )
+        reload.assert_called_once()
+        active.reconfigure_motion.assert_not_called()
 
     def test_detector_device_change_rebuilds_native_capture_graph(self) -> None:
         active = Mock()

@@ -110,230 +110,11 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.capture_backend.close.assert_called_once_with()
         self.assertLess(order.index("camera"), order.index("capture"))
 
-    def test_restart_reconstructs_unexpired_route_watch_from_incident_store(self) -> None:
-        now = datetime.now(timezone.utc)
-        manager = object.__new__(AppManager)
-        manager.config = AppConfig(
-            cameras=[
-                CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main"),
-                CameraConfig(
-                    id="back-left",
-                    name="Back Left",
-                    stream_url="rtsp://back-left/main",
-                ),
-            ],
-            detector={"tracking": {"camera_transition_routes": [{
-                "from_camera": "gate",
-                "to_camera": "back-left",
-                "max_seconds": 30,
-            }]}},
-        )
-        routes = manager.config.detector.tracking.camera_transition_routes
-        manager.detection_watch = RouteDetectionWatch(routes)
-        manager._restored_detection_watches = []
-        manager.events = Mock()
-        manager.events.route_watch_consumed.return_value = False
-        manager.events.between.return_value = [{
-            "id": 88,
-            "camera_id": "gate",
-            "created_at": (now - timedelta(seconds=5)).isoformat(),
-            "objects_json": json.dumps([{
-                "label": "car",
-                "incident_eligible": True,
-            }]),
-        }]
 
-        manager._restore_detection_watches()
 
-        assert manager.detection_watch.match("back-left", now.timestamp()) is not None
 
-    def test_restart_does_not_restore_consumed_route_watch(self) -> None:
-        now = datetime.now(timezone.utc)
-        manager = object.__new__(AppManager)
-        manager.config = AppConfig(
-            cameras=[
-                CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main"),
-                CameraConfig(
-                    id="back-left",
-                    name="Back Left",
-                    stream_url="rtsp://back-left/main",
-                ),
-            ],
-            detector={"tracking": {"camera_transition_routes": [{
-                "from_camera": "gate",
-                "to_camera": "back-left",
-                "max_seconds": 30,
-            }]}},
-        )
-        manager.detection_watch = RouteDetectionWatch(
-            manager.config.detector.tracking.camera_transition_routes
-        )
-        manager._restored_detection_watches = []
-        manager.events = Mock()
-        manager.events.route_watch_consumed.return_value = True
-        manager.events.between.return_value = [{
-            "id": 88,
-            "camera_id": "gate",
-            "created_at": (now - timedelta(seconds=5)).isoformat(),
-            "objects_json": json.dumps([{
-                "label": "car",
-                "incident_eligible": True,
-            }]),
-        }]
 
-        manager._restore_detection_watches()
 
-        assert manager.detection_watch.match("back-left", now.timestamp()) is None
-
-    def test_restart_does_not_replay_durably_admitted_origin_target(self) -> None:
-        now = datetime.now(timezone.utc)
-        manager = object.__new__(AppManager)
-        manager.config = AppConfig(
-            cameras=[
-                CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main"),
-                CameraConfig(
-                    id="back-left",
-                    name="Back Left",
-                    stream_url="rtsp://back-left/main",
-                ),
-            ],
-            detector={"tracking": {"camera_transition_routes": [{
-                "from_camera": "gate",
-                "to_camera": "back-left",
-                "max_seconds": 30,
-            }]}},
-        )
-        manager.detection_watch = RouteDetectionWatch(
-            manager.config.detector.tracking.camera_transition_routes
-        )
-        manager._restored_detection_watches = []
-        manager.events = Mock()
-        manager.events.route_target_admitted.return_value = True
-        manager.events.route_watch_consumed.return_value = False
-        manager.events.between.return_value = [{
-            "id": 88,
-            "camera_id": "gate",
-            "created_at": (now - timedelta(seconds=5)).isoformat(),
-            "objects_json": json.dumps([{
-                "label": "car",
-                "incident_eligible": True,
-            }]),
-        }]
-
-        manager._restore_detection_watches()
-
-        assert manager.detection_watch.match("back-left", now.timestamp()) is None
-        manager.events.route_target_admitted.assert_called_once_with(
-            "gate", 88, "back-left"
-        )
-
-    def test_restart_preserves_route_lineage_and_does_not_reopen_ancestor(self) -> None:
-        now = datetime.now(timezone.utc)
-        manager = object.__new__(AppManager)
-        manager.config = AppConfig(
-            cameras=[
-                CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main"),
-                CameraConfig(
-                    id="lower-garage",
-                    name="Lower Garage",
-                    stream_url="rtsp://lower/main",
-                ),
-                CameraConfig(
-                    id="upper-garage",
-                    name="Upper Garage",
-                    stream_url="rtsp://upper/main",
-                ),
-            ],
-            detector={"tracking": {"camera_transition_routes": [
-                {
-                    "from_camera": "gate",
-                    "to_camera": "lower-garage",
-                    "bidirectional": True,
-                },
-                {
-                    "from_camera": "lower-garage",
-                    "to_camera": "upper-garage",
-                    "bidirectional": True,
-                },
-                {
-                    "from_camera": "gate",
-                    "to_camera": "upper-garage",
-                    "bidirectional": True,
-                },
-            ]}},
-        )
-        manager.detection_watch = RouteDetectionWatch(
-            manager.config.detector.tracking.camera_transition_routes
-        )
-        manager._restored_detection_watches = []
-        manager.events = Mock()
-        manager.events.route_watch_consumed.return_value = False
-        manager.events.between.return_value = [{
-            "id": 90,
-            "camera_id": "upper-garage",
-            "created_at": (now - timedelta(seconds=5)).isoformat(),
-            "objects_json": json.dumps([{
-                "label": "car",
-                "incident_eligible": True,
-            }, {
-                "status": "motion_qualification",
-                "motion_qualification": {"features": {
-                    "route_detection_watch": {
-                        "route_path": ["gate", "lower-garage", "upper-garage"],
-                    },
-                }},
-            }]),
-        }]
-
-        manager._restore_detection_watches()
-
-        assert manager.detection_watch.status(now.timestamp())["active"] == 0
-
-    def test_startup_replays_restored_watch_into_target_worker(self) -> None:
-        manager = object.__new__(AppManager)
-        watch = SimpleNamespace(
-            target_camera_id="back-left",
-            source_event_id=88,
-        )
-        target = Mock()
-        target.consider_route_detection_watch.return_value = True
-        manager._restored_detection_watches = [watch]
-        manager.workers = {"back-left": target}
-
-        manager._replay_restored_detection_watches()
-
-        target.consider_route_detection_watch.assert_called_once_with(watch)
-        assert manager._restored_detection_watches == []
-
-    def test_startup_route_replay_retries_false_and_exception_until_success(self) -> None:
-        manager = object.__new__(AppManager)
-        watch = SimpleNamespace(
-            target_camera_id="back-left",
-            source_event_id=88,
-            expires_at=time.time() + 30.0,
-        )
-        target = Mock()
-        target.consider_route_detection_watch.side_effect = [
-            False,
-            RuntimeError("temporary candidate read failure"),
-            True,
-        ]
-        manager._restored_detection_watches = [watch]
-        manager._restored_watch_retry_lock = threading.Lock()
-        manager._restored_watch_retry_timer = None
-        manager._started = False
-        manager._stopping = False
-        manager._closed = False
-        manager.workers = {"back-left": target}
-
-        manager._replay_restored_detection_watches()
-        assert manager._restored_detection_watches == [watch]
-        manager._replay_restored_detection_watches()
-        assert manager._restored_detection_watches == [watch]
-        manager._replay_restored_detection_watches()
-
-        assert target.consider_route_detection_watch.call_count == 3
-        assert manager._restored_detection_watches == []
 
     def test_recorded_object_refinement_refreshes_notification_without_reopening(self):
         manager = manager_with_mocks()
@@ -439,7 +220,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             self.assertEqual(manager.state_events.publish.call_args.args[1]["notifications_enabled"], allowed)
             self.assertEqual(manager.mqtt.publish.called, allowed)
 
-    def test_confirmed_object_event_opens_route_detection_watch(self) -> None:
+    def test_native_object_event_does_not_schedule_extra_detection(self) -> None:
         manager = manager_with_mocks()
         manager.events = Mock()
         manager.events.get.return_value = None
@@ -453,12 +234,8 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.publish_event("object", payload)
 
-        manager.detection_watch.observe_incident.assert_called_once_with(
-            camera_id="gate",
-            event_id=42,
-            event_at=datetime.fromisoformat(payload["timestamp"]).timestamp(),
-            objects=payload["incident_objects"],
-        )
+        manager.detection_watch.observe_incident.assert_not_called()
+
 
     def test_ineligible_object_event_does_not_open_route_detection_watch(self) -> None:
         manager = manager_with_mocks()
@@ -521,10 +298,6 @@ class ManagerLifecycleTest(unittest.TestCase):
         self.assertFalse(ApplicationRuntimeMonitor.allocator_trim_safe([], {"pending_frames": 1}))
         self.assertFalse(ApplicationRuntimeMonitor.allocator_trim_safe([], {"active_inferences": 1}))
 
-    def test_tracking_burst_guard_fails_closed_during_manager_construction(self) -> None:
-        manager = object.__new__(AppManager)
-
-        self.assertFalse(manager._tracking_burst_available())
 
     def test_detector_status_includes_inference_lifecycle_health(self) -> None:
         manager = manager_with_mocks()
@@ -538,17 +311,9 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         self.assertTrue(status["enabled"])
         self.assertEqual(status["lifecycle"]["retired_cleanup_pending"], 1)
-        self.assertEqual(
-            status["recorded_decode"]["ffmpeg_attempts"],
-            {"hardware": 2, "cpu": 1},
-        )
-        recommendation = status["object_worker_recommendation"]
-        self.assertIn("recommended", recommendation)
-        self.assertIn("current", recommendation)
-        self.assertIn("reasons", recommendation)
-        self.assertIn("signals", recommendation)
-        self.assertGreaterEqual(recommendation["recommended"], 1)
-        self.assertLessEqual(recommendation["recommended"], 4)
+        self.assertNotIn("object_worker_recommendation", status)
+        self.assertNotIn("recorded_decode", status)
+
 
     def test_mqtt_server_health_accepts_loaded_isolated_detector(self) -> None:
         manager = manager_with_mocks()
@@ -941,7 +706,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             self.assertEqual(manager.events.db_path, Path(database) / "survng.sqlite3")
             self.assertEqual(manager.faces.db_path, Path(database) / "survng.sqlite3")
             self.assertEqual(manager.database_dir, Path(database))
-            self.assertEqual(manager.workers["gate"].onvif._cache_dir, Path(database) / "onvif")
+            self.assertFalse(hasattr(manager.workers["gate"], "onvif"))
             self.assertEqual(manager._capture_open_limiter.capacity, 2)
             self.assertEqual(manager.camera_fleet.startup.max_concurrency, 2)
             self.assertEqual(
@@ -1175,7 +940,7 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.inference.start_core.assert_called_once_with()
         manager.inference.start_auxiliary.assert_called_once_with()
-        manager.main_evidence.start.assert_called_once_with()
+        manager.main_evidence.start.assert_not_called()
         manager.evidence_projection.start.assert_called_once_with()
         manager.main_evidence.stop.assert_called_once_with()
         manager.evidence_projection.stop.assert_called_once_with()
@@ -1308,53 +1073,6 @@ class ManagerLifecycleTest(unittest.TestCase):
             ("gate", True),
         )
 
-    def test_motion_reconfiguration_publish_failure_retires_replacement(self) -> None:
-        manager = manager_with_mocks()
-        camera = manager.config.cameras[0]
-        previous = manager.workers["gate"]
-        previous.camera = camera
-        replacement = Mock()
-        replacement.camera = camera
-        replacement.close.side_effect = lambda: self.assertTrue(
-            replacement.stop.called
-        )
-        previous_evidence = object()
-        replacement_evidence = object()
-        manager.motion_evidence = {"gate": previous_evidence}
-
-        def create_replacement(_camera: CameraConfig):
-            manager.motion_evidence["gate"] = replacement_evidence
-            return replacement
-
-        manager._create_camera_worker = Mock(side_effect=create_replacement)
-        manager.camera_fleet.replace_worker = Mock(
-            side_effect=[RuntimeError("fleet publication failed"), None]
-        )
-        manager.camera_controls.replace_worker = Mock()
-        manager.inference.replace_worker = Mock()
-
-        with self.assertRaisesRegex(RuntimeError, "fleet publication failed"):
-            manager.reconfigure_motion(
-                manager.config,
-                restart_camera_ids={"gate"},
-                hot_camera_ids=set(),
-            )
-
-        replacement.start.assert_called_once_with()
-        replacement.stop.assert_called_once_with()
-        replacement.close.assert_called_once_with()
-        previous.start.assert_called_once_with()
-        self.assertIs(manager.workers["gate"], previous)
-        self.assertIs(manager.motion_evidence["gate"], previous_evidence)
-        self.assertEqual(manager.camera_fleet.replace_worker.call_count, 2)
-        manager.camera_controls.replace_worker.assert_called_once_with(
-            camera,
-            previous,
-        )
-        manager.inference.replace_worker.assert_called_once_with(
-            "gate",
-            previous,
-        )
 
 
 if __name__ == "__main__":

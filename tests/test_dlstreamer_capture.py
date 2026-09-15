@@ -827,3 +827,18 @@ def test_system_python_live_main_redacts_errors_without_pydantic(supervisor) -> 
     kind, payload = reader.pop()
     assert kind == (TYPE_FATAL if supervisor else TYPE_STATUS)
     assert decode_json_payload(payload)["ok"] is False
+
+
+def test_periodic_native_status_preserves_receiver_error_count():
+    from survng.app.dlstreamer_protocol import encode_stream_payload
+    import json
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    shared._inboxes["test"] = _StreamInbox()
+    shared._inboxes["test"].status["invalid_detection_snapshots"] = 3
+    payload = json.dumps({"ok": True, "detect": True}).encode()
+    shared._dispatch(TYPE_STATUS, encode_stream_payload("test", payload))
+    assert shared._inboxes["test"].status["invalid_detection_snapshots"] == 3
+    handle = DlStreamerCaptureHandle(read_timeout_ms=1000)
+    handle._status["invalid_detection_snapshots"] = 2
+    handle._apply_message(TYPE_STATUS, payload)
+    assert handle._status["invalid_detection_snapshots"] == 2

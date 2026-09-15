@@ -332,57 +332,6 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
     def stop_camera(camera_id: str) -> dict[str, bool]:
         return control(lambda active: active.stop_camera(camera_id))
 
-    @router.post("/api/cameras/{camera_id}/motion-test")
-    def motion_test(camera_id: str) -> dict[str, bool]:
-        def trigger(active_manager: AppManager) -> bool:
-            worker = active_manager.workers.get(camera_id)
-            if worker is None:
-                return False
-            worker.handle_motion_event("manual/test", "manual GUI trigger")
-            return True
-
-        return control(trigger)
-
-    @router.get("/api/cameras/{camera_id}/motion-debug")
-    def motion_debug_status(camera_id: str) -> dict[str, Any]:
-        def status(active_manager: AppManager) -> dict[str, Any]:
-            worker = active_manager.workers.get(camera_id)
-            if worker is None:
-                raise HTTPException(status_code=404, detail="camera not found")
-            return worker.motion_debug_status()
-
-        return with_manager(status)
-
-    @router.put("/api/cameras/{camera_id}/motion-debug")
-    def set_motion_debug(camera_id: str, state: CameraFeatureState) -> dict[str, Any]:
-        def update(active_manager: AppManager) -> dict[str, Any]:
-            worker = active_manager.workers.get(camera_id)
-            if worker is None:
-                raise HTTPException(status_code=404, detail="camera not found")
-            worker.set_motion_debug_enabled(state.enabled)
-            return worker.motion_debug_status()
-
-        return with_manager(update)
-
-    @router.get("/api/cameras/{camera_id}/motion-debug/{layer}.jpg")
-    def motion_debug_image(camera_id: str, layer: str) -> Response:
-        def response(active_manager: AppManager) -> Response:
-            worker = active_manager.workers.get(camera_id)
-            if worker is None:
-                raise HTTPException(status_code=404, detail="camera not found")
-            image = worker.motion_debug_image(layer)
-            if image is None:
-                raise HTTPException(
-                    status_code=404, detail="motion debug layer not available"
-                )
-            return Response(
-                content=image,
-                media_type="image/jpeg",
-                headers={"Cache-Control": "no-store"},
-            )
-
-        return with_manager(response)
-
     @router.post("/api/cameras/{camera_id}/recording/start")
     def start_recording(camera_id: str, source: str = "main") -> dict[str, Any]:
         del source

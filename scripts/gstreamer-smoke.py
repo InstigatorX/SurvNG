@@ -22,9 +22,10 @@ from survng.app.dlstreamer_protocol import MessageReader, TYPE_FRAME, TYPE_DETEC
 from survng.app.live_detections import DetectionHistory, DetectionSnapshot
 
 
-def consume(model: Path, proc: Path | None, threshold: float, source_role="live", *, nms_threshold=.45, expected_objects=None, detect=True) -> dict:
+def consume(model: Path, proc: Path | None, threshold: float, source_role="live", *, nms_threshold=.45, expected_objects=None, detect=True, inference_interval=1, native_tracking="off") -> dict:
     command = [sys.executable, "-m", "survng.dlstreamer_live", "--test-source",
                "--decoder", "auto", "--device", "CPU", "--fps", "5", "--detect-fps", "2.5",
+               "--inference-interval", str(inference_interval), "--native-tracking", native_tracking,
                "--model", str(model), "--threshold", str(threshold), "--nms-threshold", str(nms_threshold),
                "--jpeg-fps", "0", "--open-timeout", "15"]
     command.extend(["--source-role", source_role])
@@ -57,7 +58,7 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
                     if kind == TYPE_FRAME:
                         width, height, sequence, pts, pixels = decode_frame_payload(payload)
                         assert width == (320 if source_role == "live" else 640)
-                        assert len(pixels) == width * height * (1 if source_role == "live" and detect else 3)
+                        assert len(pixels) == width * height * 3
                         assert math.isfinite(pts)
                         frames.append(pts)
                         matched += history.match(pts=pts, session="native", detect_fps=2.5) is not None
@@ -84,20 +85,41 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
     assert len(frames) >= 10, (len(frames), len(snapshots), errors[-4000:])
     if source_role == "live" and detect:
         assert len(snapshots) >= 3 and matched > 0, (len(snapshots), matched, errors[-4000:])
+        assert status.get("inference_interval") == inference_interval, status
+        assert status.get("native_tracking") == native_tracking, status
+        assert status.get("native_tracking_authoritative") == (native_tracking != "off"), status
     else:
         assert snapshots == [], "frames-only capture must not run gvadetect"
+    fresh = [s for s in snapshots if s.provenance == "native_fresh_detection"]
+    predicted = [s for s in snapshots if s.provenance == "native_tracked_prediction"]
+    exact_matches = sum(any(s.matches_frame(pts, "native") for pts in frames) for s in fresh)
+    if source_role == "live" and detect:
+        assert fresh and exact_matches > 0, (fresh, frames, errors[-4000:])
+        assert len(fresh) + len(predicted) == len(snapshots), "unknown inference provenance"
+        assert all((s.inference_sequence - 1) % inference_interval == 0 for s in fresh)
+        assert bool(predicted) == (inference_interval > 1)
+        assert status.get("native_evidence_invalid") == 0, status
+    if native_tracking != "off" and threshold < 1:
+        assert any("native_track_id" in obj for item in fresh for obj in item.objects), "gvatrack IDs missing"
+        assert any(obj.get("detection_provenance") == "native_fresh_detection" for item in fresh for obj in item.objects), "fresh ROI identity lost"
     assert all(b > a for a, b in zip(frames, frames[1:]))
     assert all(b.source_pts > a.source_pts for a, b in zip(snapshots, snapshots[1:]))
     assert all(bool(item.objects) == (threshold < 1) for item in snapshots)
     assert all(obj["label"] == "car" for item in snapshots for obj in item.objects), "labels-file must override model-proc labels"
     if expected_objects is not None:
         assert all(len(item.objects) == expected_objects for item in snapshots), [len(item.objects) for item in snapshots]
-    assert len(frames) > len(snapshots), "detector cadence must not throttle EMA"
-    return {"threshold": threshold, "source_role": source_role, "frames": len(frames), "snapshots": len(snapshots),
+    assert len(frames) > len(snapshots), "detector cadence must not throttle preview"
+    return {"fresh_snapshots": len(fresh), "prediction_snapshots": len(predicted),
+            "exact_fresh_frame_matches": exact_matches, "threshold": threshold, "source_role": source_role, "frames": len(frames), "snapshots": len(snapshots),
             "nms_threshold": nms_threshold, "objects_per_snapshot": expected_objects,
             "positive_snapshots": sum(bool(s.objects) for s in snapshots),
             "matched_at_receipt": matched,
             "frame_fps": round((len(frames)-1)/(frames[-1]-frames[0]), 2),
+            "inference_interval": inference_interval,
+            "native_tracking": native_tracking,
+            "native_track_ids": sum(
+                "native_track_id" in obj for snapshot in snapshots for obj in snapshot.objects
+            ),
             "metadata_contract": status.get("metadata_contract")}
 
 
@@ -134,7 +156,7 @@ def shared_supervisor(model: Path, proc: Path, *, device: str = "CPU") -> dict:
                     if kind == TYPE_FRAME:
                         width, height, _seq, _pts, pixels = decode_frame_payload(body)
                         assert width == widths[stream_id]
-                        assert len(pixels) == width * height * (3 if roles[stream_id] == "main" else 1)
+                        assert len(pixels) == width * height * 3
                         entry["frames"] += 1
                     elif kind == TYPE_DETECTIONS:
                         snapshot = DetectionSnapshot.parse(decode_json_payload(body), session=stream_id)
@@ -215,6 +237,11 @@ def main() -> None:
         }))
         results = [sparse_metadata_preroll()]
         results.extend(consume(model_path, proc_path, threshold) for threshold in (0.1, 1.0))
+        results.append(consume(model_path, proc_path, .1, native_tracking="short-term-imageless"))
+        results.append(consume(
+            model_path, proc_path, .1, inference_interval=3,
+            native_tracking="short-term-imageless",
+        ))
         results.append(consume(model_path, proc_path, .1, source_role="main"))
         results.append(consume(model_path, proc_path, .1, detect=False))
         results.append(shared_supervisor(model_path, proc_path, device=args.shared_device))

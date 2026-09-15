@@ -36,7 +36,6 @@ import { formatDateTime, formatTimeOnly, formatDuration } from "../shared/format
 import { eventSnapshotDownloadUrl, eventClipUrl } from "../shared/mediaUrls.js";
 import { prefersNativeMobilePlayback, ShakaVideo } from "../shared/media.jsx";
 import {
-  DebugDetectionOverlay,
   IncidentObjectBadges,
   IncidentSourceDot,
   SnapshotImage,
@@ -155,7 +154,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
             }}
             onEnded={onEnded}
           />}
-          {analysisMode === "tracks" && storedTracks.length ? (
+          {analysisMode === "tracks" && storedTracks.length && trackingEvent.object_tracking?.recording_overlay_compatible !== false ? (
             <StoredTrackVideoOverlay
               videoRef={videoRef}
               tracks={storedTracks}
@@ -170,14 +169,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
               lostTimeoutSeconds={trackingEvent?.object_tracking?.lost_timeout_seconds}
             />
           ) : null}
-          <DebugDetectionOverlay
-            videoRef={videoRef}
-            active={analysisMode === "ai" || analysisMode === "depth"}
-            depth={analysisMode === "depth"}
-            depthLayer={depthLayer}
-            confidence={0.35}
-            onStats={onAnalysisStats}
-          />
+
           {clipLoading ? <div className="incident-video-status preparing">Preparing incident video...</div> : null}
         </>
       ) : (
@@ -1096,8 +1088,6 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
           <button type="button" className={analysisMode === "clean" ? "active" : ""} aria-pressed={analysisMode === "clean"} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
           <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
-          <button type="button" className={analysisMode === "ai" ? "active" : ""} aria-pressed={analysisMode === "ai"} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
-          <button type="button" className={analysisMode === "depth" ? "active" : ""} aria-pressed={analysisMode === "depth"} onClick={() => onAnalysisModeChange("depth")} disabled={!depthConfigured} title={depthConfigured ? "Run detection with monocular depth while replaying" : "Enable depth estimation in Intelligence settings"}><Layers size={14} /> Depth</button>
         </div>
         {analysisMode === "depth" ? (
           <div className="incident-depth-layers" role="group" aria-label="Depth overlay layers">

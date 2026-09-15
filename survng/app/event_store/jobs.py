@@ -524,23 +524,6 @@ class EventStoreJobsMixin:
                 ),
             )
             conn.execute(
-                """
-                create table if not exists tracking_comparisons (
-                    id integer primary key autoincrement,
-                    event_id integer not null unique,
-                    camera_id text not null,
-                    event_created_at text not null default '',
-                    result_json text not null,
-                    verdict text not null default '',
-                    reviewed_at text,
-                    created_at text not null
-                )
-                """
-            )
-            conn.execute(
-                "create index if not exists idx_tracking_comparisons_camera_created on tracking_comparisons(camera_id, created_at desc, id desc)"
-            )
-            conn.execute(
                 "update motion_ai_reviews set status = 'interrupted', error = 'SurvNG restarted before this review completed' where status in ('queued', 'running')"
             )
             conn.execute(

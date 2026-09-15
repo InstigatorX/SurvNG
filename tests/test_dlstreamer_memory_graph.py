@@ -39,6 +39,9 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
             links.append((self.name, other.name))
             return True
 
+        def get_static_pad(self, name):
+            return SimpleNamespace(add_probe=lambda *args: 1)
+
         def get_name(self):
             return self.name
 
@@ -56,6 +59,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     gst = SimpleNamespace(
         Pipeline=SimpleNamespace(new=lambda name: pipeline),
         Caps=SimpleNamespace(from_string=lambda text: text),
+        PadProbeType=SimpleNamespace(BUFFER=1),
         State=SimpleNamespace(PLAYING=1, NULL=0),
         StateChangeReturn=SimpleNamespace(FAILURE=-1),
     )
@@ -66,7 +70,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     monkeypatch.setattr(live, "_link_tee", lambda gst, tee, target: tee.link(target))
     stop = threading.Event()
     stop.set()  # Construct/link the real graph, but do not enter its native loop.
-    args = live._parser().parse_args(["--decoder", decoder])
+    args = live._parser().parse_args(["--decoder", decoder, "--native-tracking", "short-term-imageless"])
     live._pump_pipeline(
         gst, args, url="rtsp://fixture.invalid/video", stream_id="test",
         detect=detect, model_path=Path("fixture.xml"), instance_id="fixture",
@@ -107,10 +111,13 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert "detect" not in elements
     else:
         assert elements["detect"].properties["ie-config"] == (
-            "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1,COMPILATION_NUM_THREADS=1"
+            "PERFORMANCE_HINT=THROUGHPUT,NUM_STREAMS=2,ALLOW_AUTO_BATCHING=NO,COMPILATION_NUM_THREADS=1"
         )
         assert elements["meta-sink"].properties["async"] is False
-        assert elements["detect"].properties["nireq"] == 1
+        assert elements["detect"].properties["nireq"] == 4
+        assert ("detect", "native-track") in links
+        assert ("native-track", "detect-output-queue") in links
+        assert ("detect-output-queue", "detect-meta") in links
         assert elements["detect"].properties["scheduling-policy"] == "throughput"
 
 
@@ -176,6 +183,7 @@ def test_shared_context_uses_decoder_device_and_releases_probe(monkeypatch, disp
 
     gst = SimpleNamespace(
         ElementFactory=SimpleNamespace(make=make, find=lambda name: object() if name == decoder_factory else None),
+        PadProbeType=SimpleNamespace(BUFFER=1),
         State=SimpleNamespace(READY=1, NULL=0),
         StateChangeReturn=SimpleNamespace(FAILURE=-1),
         Context=SimpleNamespace(new=lambda name, persistent: context),
