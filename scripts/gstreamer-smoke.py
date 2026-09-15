@@ -22,9 +22,10 @@ from survng.app.dlstreamer_protocol import MessageReader, TYPE_FRAME, TYPE_DETEC
 from survng.app.live_detections import DetectionHistory, DetectionSnapshot
 
 
-def consume(model: Path, proc: Path | None, threshold: float, source_role="live", *, nms_threshold=.45, expected_objects=None, detect=True) -> dict:
+def consume(model: Path, proc: Path | None, threshold: float, source_role="live", *, nms_threshold=.45, expected_objects=None, detect=True, inference_interval=1, native_tracking="off") -> dict:
     command = [sys.executable, "-m", "survng.dlstreamer_live", "--test-source",
                "--decoder", "auto", "--device", "CPU", "--fps", "5", "--detect-fps", "2.5",
+               "--inference-interval", str(inference_interval), "--native-tracking", native_tracking,
                "--model", str(model), "--threshold", str(threshold), "--nms-threshold", str(nms_threshold),
                "--jpeg-fps", "0", "--open-timeout", "15"]
     command.extend(["--source-role", source_role])
@@ -84,6 +85,9 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
     assert len(frames) >= 10, (len(frames), len(snapshots), errors[-4000:])
     if source_role == "live" and detect:
         assert len(snapshots) >= 3 and matched > 0, (len(snapshots), matched, errors[-4000:])
+        assert status.get("inference_interval") == inference_interval, status
+        assert status.get("native_tracking") == native_tracking, status
+        assert status.get("native_tracking_authoritative") is False, status
     else:
         assert snapshots == [], "frames-only capture must not run gvadetect"
     assert all(b > a for a, b in zip(frames, frames[1:]))
@@ -98,6 +102,11 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
             "positive_snapshots": sum(bool(s.objects) for s in snapshots),
             "matched_at_receipt": matched,
             "frame_fps": round((len(frames)-1)/(frames[-1]-frames[0]), 2),
+            "inference_interval": inference_interval,
+            "native_tracking": native_tracking,
+            "native_track_ids": sum(
+                "native_track_id" in obj for snapshot in snapshots for obj in snapshot.objects
+            ),
             "metadata_contract": status.get("metadata_contract")}
 
 
@@ -215,6 +224,10 @@ def main() -> None:
         }))
         results = [sparse_metadata_preroll()]
         results.extend(consume(model_path, proc_path, threshold) for threshold in (0.1, 1.0))
+        results.append(consume(
+            model_path, proc_path, .1, inference_interval=3,
+            native_tracking="short-term-imageless",
+        ))
         results.append(consume(model_path, proc_path, .1, source_role="main"))
         results.append(consume(model_path, proc_path, .1, detect=False))
         results.append(shared_supervisor(model_path, proc_path, device=args.shared_device))

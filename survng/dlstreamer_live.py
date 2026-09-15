@@ -54,6 +54,18 @@ def _parser() -> argparse.ArgumentParser:
         default=5.0,
         help="maximum gvadetect input rate; independent from EMA qualification FPS",
     )
+    parser.add_argument(
+        "--inference-interval",
+        type=int,
+        default=1,
+        help="run gvadetect every Nth detect-branch frame (1-5)",
+    )
+    parser.add_argument(
+        "--native-tracking",
+        choices=("off", "short-term-imageless"),
+        default="off",
+        help="optional DL Streamer ROI tracking between detector frames",
+    )
     parser.add_argument("--open-timeout", type=float, default=3.0)
     parser.add_argument("--rtsp-transport", choices=("tcp", "udp"), default="tcp")
     parser.add_argument("--decoder", choices=("auto", "va"), default="va")
@@ -392,18 +404,26 @@ def _normalize_gva_objects(payload: dict[str, Any]) -> list[dict[str, Any]]:
             except (TypeError, ValueError):
                 continue
         try:
-            objects.append(
-                {
-                    "label": label or "object",
-                    "confidence": round(confidence, 4),
-                    "box": {
-                        "x1": int(x1),
-                        "y1": int(y1),
-                        "x2": int(x2),
-                        "y2": int(y2),
-                    },
-                }
-            )
+            normalized = {
+                "label": label or "object",
+                "confidence": round(confidence, 4),
+                "box": {
+                    "x1": int(x1),
+                    "y1": int(y1),
+                    "x2": int(x2),
+                    "y2": int(y2),
+                },
+            }
+            # gvatrack IDs are diagnostic input only. SurvNG Hybrid owns
+            # persisted/event track identity and ignores this field today.
+            native_track_id = item.get("object_id")
+            if native_track_id is None:
+                native_track_id = detection.get("object_id")
+            if native_track_id is not None:
+                native_track_id = int(native_track_id)
+                if native_track_id >= 0:
+                    normalized["native_track_id"] = native_track_id
+            objects.append(normalized)
         except (TypeError, ValueError):
             continue
     return objects
@@ -503,6 +523,8 @@ def _run(argv: list[str] | None, resources: ExitStack) -> int:
         _require_detection_plugin(Gst)
     if not math.isfinite(args.threshold) or not 0 <= args.threshold <= 1:
         raise ValueError("detection threshold must be between 0 and 1")
+    if not 1 <= args.inference_interval <= 5:
+        raise ValueError("inference interval must be between 1 and 5")
     instance_id = (
         model_instance_id(str(model_path or ""), args.device, args.model_instance_id)
         if detect
@@ -862,6 +884,7 @@ def _pump_pipeline(
     detect_rate_caps = None
     detector = None
     detect_output_queue = None
+    native_tracker = None
     meta_convert = None
     va_caps = None
     preprocess = ""
@@ -896,7 +919,7 @@ def _pump_pipeline(
         # auto-batch that can wait indefinitely for other cameras.
         detector.set_property("batch-size", 1)
         detector.set_property("nireq", 1)
-        detector.set_property("inference-interval", 1)
+        detector.set_property("inference-interval", args.inference_interval)
         detector.set_property("threshold", args.threshold)
         preprocess = "opencv"
         if args.decoder == "va" and not use_test_source:
@@ -922,7 +945,16 @@ def _pump_pipeline(
         detect_output_queue.set_property("max-size-bytes", 0)
         detect_output_queue.set_property("max-size-time", 0)
         detect_output_queue.set_property("leaky", 2)
+        if args.native_tracking != "off":
+            if not _factory_available(Gst, "gvatrack"):
+                raise InferencePipelineError(
+                    "native tracking requested but gvatrack is unavailable"
+                )
+            native_tracker = _element(Gst, "gvatrack", "native-track")
+            native_tracker.set_property("tracking-type", args.native_tracking)
         elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])
+        if native_tracker is not None:
+            elements.append(native_tracker)
         if preprocess.startswith("va"):
             va_caps = _element(Gst, "capsfilter", "detect-va-memory")
             va_caps.set_property(
@@ -1000,12 +1032,17 @@ def _pump_pipeline(
             raise RuntimeError("could not link detect queue")
         if detect_output_queue is None or not detector.link(detect_output_queue):
             raise RuntimeError("could not link gvadetect output queue")
+        metadata_source = detect_output_queue
+        if native_tracker is not None:
+            if not detect_output_queue.link(native_tracker):
+                raise RuntimeError("could not link gvatrack")
+            metadata_source = native_tracker
         if meta_convert is not None and meta_sink is not None:
-            if not detect_output_queue.link(meta_convert) or not meta_convert.link(meta_sink):
+            if not metadata_source.link(meta_convert) or not meta_convert.link(meta_sink):
                 raise RuntimeError("could not link detection metadata branch")
         else:
             fake = pipeline.get_by_name("detect-sink")
-            if fake is None or not detect_output_queue.link(fake):
+            if fake is None or not metadata_source.link(fake):
                 raise RuntimeError("could not link detection sink")
 
     linked = False
@@ -1082,7 +1119,10 @@ def _pump_pipeline(
                     error = str(parsed_error)
                     if debug:
                         error = f"{error}: {debug[-400:]}"
-                    if detector is not None and message.src == detector:
+                    if (
+                        (detector is not None and message.src == detector)
+                        or (native_tracker is not None and message.src == native_tracker)
+                    ):
                         raise InferencePipelineError(error)
                     raise RuntimeError(error)
                 break
@@ -1161,7 +1201,14 @@ def _pump_pipeline(
                             "requested_nms_threshold": args.nms_threshold if detect else None,
                             "qualifier_width": qualifier_width,
                             "detect_fps": float(detect_rate),
-                            "inference_interval": 1,
+                            "inference_interval": args.inference_interval if detect else None,
+                            "effective_inference_fps": (
+                                round(float(detect_rate) / args.inference_interval, 3)
+                                if detect else 0.0
+                            ),
+                            "native_tracking": args.native_tracking if detect else "off",
+                            "native_tracking_authoritative": False,
+                            "native_tracking_memory": _negotiated_memory(native_tracker),
                             "jpeg_preview": jpeg_sink is not None,
                             "model_instance_id": instance_id,
                             "shared_detect": bool(instance_id and stream_id),

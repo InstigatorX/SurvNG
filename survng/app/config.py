@@ -770,9 +770,12 @@ class ObjectTrackingConfig(BaseModel):
 
 class DetectorConfig(BaseModel):
     enabled: bool = False
-    # Retained for native continuous-inference integrations; production capture
-    # is frames-only and qualification schedules inference in the shared pool.
+    # Native live analytics is deliberately opt-in. SurvNG Hybrid remains the
+    # authoritative event tracker even when DL Streamer supplies short-term IDs.
     live_sample_fps: float = Field(default=5.0, ge=0.5, le=10.0)
+    live_pipeline_inference_enabled: bool = False
+    live_pipeline_inference_interval: int = Field(default=1, ge=1, le=5)
+    live_pipeline_tracking: Literal["off", "short-term-imageless"] = "off"
     backend: Literal["openvino", "coreml"] = "openvino"
     object_worker_count: int = Field(default=2, ge=1, le=4)
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
