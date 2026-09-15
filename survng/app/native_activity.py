@@ -187,7 +187,13 @@ class NativeActivity:
         if self.last_fresh and now - self.last_fresh > self.config.native.maximum_observation_age_seconds:
             self.health = "metadata_stale"
         if self.event_id is not None and now - self.last_activity >= self.config.native.activity_timeout_seconds:
-            self.finish("complete" if self.health == "healthy" and self.last_fresh >= self.last_activity + self.config.native.activity_timeout_seconds else "metadata_lost", now=now)
+            if self.health != "healthy":
+                self.finish("metadata_lost", now=now)
+            elif self.last_fresh >= self.last_activity + self.config.native.activity_timeout_seconds:
+                self.finish("complete", now=now)
+            # The timer can cross the deadline between healthy metadata frames.
+            # Wait for a fresh observation covering it, or for metadata to become
+            # stale above. A normal inter-frame gap is not loss of coverage.
 
     def finish(self, reason: str, *, now: float):
         self.persist(reason, now=now)

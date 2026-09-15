@@ -70,6 +70,34 @@ def test_empty_fresh_result_ends_presence(activity):
     assert activity.events.update_object_tracking.call_args.args[1]["state"] == "complete"
 
 
+
+def test_completion_timer_between_fresh_frames_waits_for_evidence(activity):
+    feed(activity, 1)
+    feed(activity, 2)
+    # Last presence at 100.4; empty frames are healthy up to 105.2.
+    for sequence in range(3, 27):
+        feed(activity, sequence, objects=[], received=100 + sequence / 5)
+    activity.tick(now=105.45)
+    assert activity.health == "healthy"
+    assert activity.event_id == 1
+    # The next fresh empty frame covers the inactivity deadline.
+    activity.consume(observation(27, objects=[], received=105.6), now=105.6, epoch=1005.6)
+    assert activity.event_id is None
+    assert activity.events.update_object_tracking.call_args.args[1]["state"] == "complete"
+
+
+def test_completion_wait_still_detects_metadata_loss(activity):
+    feed(activity, 1)
+    feed(activity, 2)
+    for sequence in range(3, 27):
+        feed(activity, sequence, objects=[], received=100 + sequence / 5)
+    activity.tick(now=105.45)
+    assert activity.event_id == 1
+    activity.tick(now=107.3)
+    assert activity.event_id is None
+    assert activity.health == "metadata_stale"
+    assert activity.events.update_object_tracking.call_args.args[1]["state"] == "metadata_lost"
+
 def test_reconnect_restarts_confirmation_and_qualifies_identity(activity):
     feed(activity, 1)
     feed(activity, 2)
