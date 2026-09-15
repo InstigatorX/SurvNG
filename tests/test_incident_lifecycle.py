@@ -64,7 +64,7 @@ def test_refinement_does_not_extend_settlement_or_open_unknown_incident():
         lifecycle.track_incident(evidence(), "Gate")
         key = lifecycle.snapshot()[0]["incident_id"]
         deadline = lifecycle._groups[key]["settle_at"]
-        lifecycle.track_incident(evidence(), "Gate", allow_new=False)
+        lifecycle.track_incident({**evidence(), "evidence_revision": 2}, "Gate", allow_new=False)
         assert lifecycle._groups[key]["settle_at"] == deadline
         lifecycle._settle(key)  # An obsolete timer may race with an extension.
         assert lifecycle.snapshot()[0]["state"] == "updated"

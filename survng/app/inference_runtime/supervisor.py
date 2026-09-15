@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from ..evidence_work import EvidenceWorkPreempted, check_evidence_cancellation, evidence_wait_timeout, evidence_work_active
 from ..config import DetectorConfig
 from ..perf_samples import RollingLatencySamples
 from .process import load_detector_labels, stop_multiprocessing_resource_tracker
@@ -143,6 +144,7 @@ class InferenceSupervisor:
         timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
     ) -> bool:
         """Cooperatively keep optional GPU work behind security inference."""
+        check_evidence_cancellation()
         started = time.monotonic()
         deadline = started + max(0.0, timeout)
         security = self._security_workload(workload)
@@ -161,6 +163,7 @@ class InferenceSupervisor:
                     # yield to waiting/active initials and are capped so a burst
                     # cannot monopolize device admission.
                     while True:
+                        check_evidence_cancellation()
                         if not self._device_accepting:
                             self._device_workload_stats[workload]["shed"] += 1
                             return False
@@ -182,7 +185,7 @@ class InferenceSupervisor:
                         if remaining <= 0:
                             self._device_workload_stats[workload]["timed_out"] += 1
                             return False
-                        self._device_condition.wait(remaining)
+                        self._device_condition.wait(evidence_wait_timeout(remaining))
                     self._security_active += 1
                     if initial:
                         self._initial_active += 1
@@ -192,6 +195,7 @@ class InferenceSupervisor:
                     self._security_waiting = max(0, self._security_waiting - 1)
                     if initial:
                         self._initial_waiting = max(0, self._initial_waiting - 1)
+                    self._device_condition.notify_all()
             else:
                 offline = workload is InferenceWorkload.OFFLINE
                 interactive = workload is InferenceWorkload.INTERACTIVE
@@ -209,6 +213,7 @@ class InferenceSupervisor:
                     or (offline and self._optional_active)
                     or (not offline and self._offline_active)
                 ):
+                    check_evidence_cancellation()
                     if not self._device_accepting:
                         self._device_workload_stats[workload]["shed"] += 1
                         return False
@@ -216,7 +221,7 @@ class InferenceSupervisor:
                     if remaining <= 0:
                         self._device_workload_stats[workload]["timed_out"] += 1
                         return False
-                    self._device_condition.wait(remaining)
+                    self._device_condition.wait(evidence_wait_timeout(remaining))
                 self._optional_active += 1
                 if interactive:
                     self._interactive_active += 1
@@ -812,6 +817,11 @@ class InferenceSupervisor:
         confidence_threshold: float | None,
         workload: InferenceWorkload,
     ) -> list[dict[str, Any]]:
+        recovering_cover = evidence_work_active()
+        if recovering_cover:
+            # Cover recovery shares the sampler, but must yield to security
+            # jobs from every camera at each inference admission boundary.
+            workload = InferenceWorkload.ENRICHMENT
         shed_optional = workload in {
             InferenceWorkload.INTERACTIVE,
             InferenceWorkload.TRACKING,
@@ -821,6 +831,8 @@ class InferenceSupervisor:
             workload,
             shed_optional=shed_optional,
         ):
+            if recovering_cover:
+                raise EvidenceWorkPreempted()
             # Optional consumers process timestamped samples. Once security
             # work is pending, retaining that old sample is worse than
             # dropping it and allowing the next fresh sample to recover.
@@ -842,6 +854,7 @@ class InferenceSupervisor:
                 and len(workers) > 1
             )
             for worker in workers:
+                check_evidence_cancellation()
                 try:
                     result = list(
                         worker.request(
@@ -875,6 +888,8 @@ class InferenceSupervisor:
                 except InferenceUnavailable as exc:
                     unavailable.append(str(exc))
                     continue
+                except EvidenceWorkPreempted:
+                    raise
                 except Exception as exc:
                     LOGGER.error(
                         "Isolated object detection unavailable (%s)",
@@ -921,6 +936,8 @@ class InferenceSupervisor:
                 )
                 or []
             )
+        except EvidenceWorkPreempted:
+            raise
         except Exception as exc:
             LOGGER.warning("Dedicated face detection unavailable: %s", exc)
             return []
@@ -974,7 +991,13 @@ class InferenceSupervisor:
         optional_slot = workload >= InferenceWorkload.INTERACTIVE
         if optional_slot and not self._depth_optional_slot.acquire(blocking=False):
             return list(objects), {"status": "depth_deferred"}
-        if not self._enter_device_workload(workload, shed_optional=True):
+        try:
+            entered = self._enter_device_workload(workload, shed_optional=True)
+        except BaseException:
+            if optional_slot:
+                self._depth_optional_slot.release()
+            raise
+        if not entered:
             if optional_slot:
                 self._depth_optional_slot.release()
             return list(objects), {"status": "depth_deferred"}
@@ -993,6 +1016,8 @@ class InferenceSupervisor:
             enriched = list(result.get("objects") or objects)
             metadata = dict(result.get("metadata") or {})
             return enriched, metadata
+        except EvidenceWorkPreempted:
+            raise
         except Exception as exc:
             LOGGER.warning(
                 "Depth estimation unavailable (%s)",

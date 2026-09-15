@@ -38,7 +38,11 @@ function connectAppEventSource() {
   const source = new EventSource(streamUrl());
   appEventSource = source;
   source.addEventListener("connected", (event) => {
-    if (source === appEventSource) rememberEventId(event);
+    if (source !== appEventSource) return;
+    rememberEventId(event);
+    // A restarted server or an expired replay cursor cannot replay all incident
+    // changes. Readers reconcile their current view after every connection.
+    appEventListeners.forEach((current) => current({ type: "resync", data: {}, id: event.lastEventId }));
   });
   APP_EVENT_TYPES.forEach((type) => {
     source.addEventListener(type, (event) => {

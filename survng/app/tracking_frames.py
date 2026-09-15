@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from .camera_capture import CameraCaptureService, CapturedFrame
+from .recording_media import mp4_video_dimensions
 from .config import CameraConfig
 from .object_track.types import TrackingFrameBatch
 from .security import redact_secret_text
@@ -520,7 +521,7 @@ class CameraFrameTimeline:
                     exact = video_frame_at_reference(
                         reference,
                         ffmpeg_path=self.recorder.ffmpeg_path,
-                        maximum_width=frame_width,
+                        maximum_width=(mp4_video_dimensions(path) or (frame_width, 0))[0],
                     )
                     return exact.frame if exact is not None else None
             return None
@@ -539,7 +540,7 @@ class CameraFrameTimeline:
                     sample_fps=1.0,
                     duration_seconds=0.1,
                     ffmpeg_path=self.recorder.ffmpeg_path,
-                    maximum_width=frame_width,
+                    maximum_width=(mp4_video_dimensions(path) or (frame_width, 0))[0],
                     start_offset_seconds=max(0.0, captured_at - row_start),
                     probe_path=path,
                 ))

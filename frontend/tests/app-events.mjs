@@ -69,6 +69,7 @@ assert.ok(documentListeners.has("visibilitychange"));
 
 const firstSource = FakeEventSource.instances[0];
 firstSource.emit("connected", { instance: "abc" }, "abc:7");
+assert.deepEqual(received.pop(), { type: "resync", data: {}, id: "abc:7" });
 document.visibilityState = "hidden";
 documentListeners.get("visibilitychange")();
 assert.equal(firstSource.closed, true);
@@ -82,6 +83,12 @@ assert.equal(
 );
 
 const resumedSource = FakeEventSource.instances[1];
+resumedSource.emit("connected", { instance: "abc" }, "abc:7");
+assert.deepEqual(received.pop(), { type: "resync", data: {}, id: "abc:7" });
+// Native EventSource reconnects reuse the source object. A new server instance
+// or a replay-history gap must still make incident readers refetch their view.
+resumedSource.emit("connected", { instance: "def" }, "def:2");
+assert.deepEqual(received.pop(), { type: "resync", data: {}, id: "def:2" });
 resumedSource.emit("camera_state", { id: "gate", running: true }, "abc:8");
 assert.deepEqual(received, [{
   type: "camera_state",

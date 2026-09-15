@@ -27,7 +27,7 @@ from survng.app.semantic_search import (
     SemanticSearchService,
     _semantic_model_identity,
     load_semantic_manifest,
-    semantic_event_objects,
+    semantic_event_searchable,
 )
 
 SQLITE_LOCK_RETRY_ATTEMPTS = 8
@@ -87,10 +87,14 @@ def _event_pages(database: Path, page_size: int) -> Iterator[list[dict[str, Any]
         with sqlite3.connect(uri, uri=True, timeout=30.0) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("pragma busy_timeout = 30000")
+            columns = {row["name"] for row in connection.execute("pragma table_info(events)")}
+            selected_columns = EventStore.COMPACT_COLUMNS
+            if "evidence_revision" not in columns:
+                selected_columns = selected_columns.replace("evidence_revision", "0 as evidence_revision")
             if before_created_at is None or before_id is None:
                 rows = connection.execute(
                     f"""
-                    select {EventStore.COMPACT_COLUMNS} from events
+                    select {selected_columns} from events
                     order by created_at desc, id desc limit ?
                     """,
                     (page_size,),
@@ -98,7 +102,7 @@ def _event_pages(database: Path, page_size: int) -> Iterator[list[dict[str, Any]
             else:
                 rows = connection.execute(
                     f"""
-                    select {EventStore.COMPACT_COLUMNS} from events
+                    select {selected_columns} from events
                     where created_at < ? or (created_at = ? and id < ?)
                     order by created_at desc, id desc limit ?
                     """,
@@ -191,7 +195,7 @@ def build(
     try:
         for page in _event_pages(database, page_size):
             for event in page:
-                if not semantic_event_objects(event):
+                if not semantic_event_searchable(event):
                     continue
                 if limit and attempted >= limit:
                     break

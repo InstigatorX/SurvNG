@@ -21,6 +21,7 @@ from .incident_utils import (
 
 def _event_row(row: dict) -> dict:
     event = dict(row)
+    event["evidence_revision"] = int(event.get("evidence_revision") or 0)
     event["snapshot_path"] = "available" if event.get("snapshot_path") else ""
     event["recording_path"] = "available" if event.get("recording_path") else ""
     try:
@@ -261,6 +262,7 @@ def _incident_list_payload(incident: dict) -> dict:
                     "incident_eligible",
                     "track_id",
                     "track_state",
+                    "snapshot_visible",
                 )
                 if key in item
             }
@@ -298,6 +300,8 @@ def _incident_list_payload(incident: dict) -> dict:
                 "camera_id",
                 "kind",
                 "created_at",
+                "evidence_revision",
+                "cover_requirement",
                 "has_objects",
                 "labels",
                 "zones",
@@ -326,6 +330,8 @@ def _recording_grid_incident_payload(incident: dict) -> dict:
             "representative_event_id",
             "camera_id",
             "snapshot_path",
+            "evidence_revision",
+            "cover_requirement",
             "start_epoch",
             "last_epoch",
             "has_objects",

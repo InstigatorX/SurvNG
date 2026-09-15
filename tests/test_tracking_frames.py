@@ -254,6 +254,23 @@ def test_recorded_cover_frame_bypasses_buffer_and_decodes_nominated_main_frame()
     assert decoder.call_args.kwargs["start_offset_seconds"] == 4.25
 
 
+def test_recorded_cover_resolution_is_independent_of_live_seed_coordinate_width() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "segment.mp4"
+        path.write_bytes(b"fixture")
+        recorder.recording_rows_between.return_value = [{
+            "path": str(path), "start_epoch": 100., "end_epoch": 110.}]
+        service = _service(recorder=recorder)
+        with patch("survng.app.tracking_frames.mp4_video_dimensions", return_value=(4512, 2512)), patch(
+            "survng.app.tracking_frames.sampled_video_frames",
+            return_value=iter([(104.25, np.zeros((2, 2, 3), dtype=np.uint8))]),
+        ) as decoder:
+            service.recorded_frame_at(104.25, 640)
+        assert decoder.call_args.kwargs["maximum_width"] == 4512
+
+
 def test_recorded_cover_frame_uses_exact_reference_before_timestamp_fallback() -> None:
     recorder = Mock()
     recorder.ffmpeg_path = "/usr/bin/ffmpeg"

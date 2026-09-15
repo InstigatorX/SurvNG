@@ -198,6 +198,11 @@ class IncidentPayloadBuilder:
                 if item.get("name")
             ],
             "representative_event_id": representative_id,
-            "snapshot_url": f"{base_path}/api/events/{representative_id}/snapshot.jpg",
+            "evidence_revision": int(representative.get("evidence_revision") or 0),
+            "cover_requirement": representative.get("cover_requirement"),
+            "snapshot_url": (
+                f"{base_path}/api/events/{representative_id}/snapshot.jpg"
+                f"?v={int(representative.get('evidence_revision') or 0)}"
+            ),
             "incidents_url": f"{base_path}/incidents",
         }

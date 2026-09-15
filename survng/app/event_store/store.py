@@ -16,17 +16,15 @@ from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
+from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
 from .motion_intelligence import EventStoreMotionIntelligenceMixin
 from .tracking import EventStoreTrackingMixin
 
 LOGGER = logging.getLogger(__name__)
 
 
-class EventSnapshotChangedError(RuntimeError):
-    """Detection results no longer describe the event's current snapshot."""
-
-
 class EventStore(
+    EventStoreEvidenceMixin,
     EventStoreJobsMixin,
     EventStoreCalibrationMixin,
     EventStoreTrackingMixin,
@@ -36,7 +34,7 @@ class EventStore(
     SNAPSHOT_REFERENCE_WRITE_BATCH = 50
     SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
     COMPACT_COLUMNS = (
-        "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at"
+        "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at, evidence_revision"
     )
     # Compact rows still carry objects_json, and callers read whole days across
     # every camera, so an uncapped window can materialize enough of the table to
@@ -74,6 +72,7 @@ class EventStore(
         self._jobs_maintenance_lock = threading.Lock()
         self._last_detection_job_prune_monotonic = 0.0
         self._init_db()
+        self._init_evidence_db()
         self._recover_snapshot_deletion_claims()
         self._init_jobs_db()
         self._migrate_legacy_jobs()
@@ -289,6 +288,7 @@ class EventStore(
         route_admission = bool(route_origin_camera and route_origin_event > 0)
         discarded_snapshot_path = ""
         duplicate_route_admission: dict[str, Any] | None = None
+        created = False
         canonical_detection_intent_id = str(detection_intent_id or "")
         with self._lock, self._connect() as conn:
             if snapshot_path:
@@ -311,6 +311,7 @@ class EventStore(
                     (route_origin_camera, route_origin_event, camera_id),
                 ).fetchone()
                 if admitted is not None:
+                    event_id = int(admitted["event_id"])
                     canonical_detection_intent_id = str(
                         admitted["detection_intent_id"] or ""
                     )
@@ -417,6 +418,12 @@ class EventStore(
                         canonical_detection_intent_id = str(
                             canonical["detection_intent_id"] or ""
                         ) if canonical is not None else ""
+            if created and duplicate_route_admission is None:
+                self._admit_event_evidence(conn, int(event_id))
+            revision_row = conn.execute("select evidence_revision from events where id=?", (event_id,)).fetchone()
+            evidence_revision = int(revision_row["evidence_revision"]) if revision_row else 0
+            if duplicate_route_admission is not None:
+                duplicate_route_admission["evidence_revision"] = evidence_revision
         if duplicate_route_admission is not None:
             self._delete_snapshot_if_unreferenced(snapshot_path)
             return duplicate_route_admission
@@ -437,6 +444,7 @@ class EventStore(
             "canonical_detection_intent_id": canonical_detection_intent_id,
             "created": created,
             "route_admission_created": route_admission_created,
+            "evidence_revision": evidence_revision,
         }
 
     def route_target_admitted(
@@ -649,7 +657,7 @@ class EventStore(
                 "select * from events order by id desc limit ?",
                 (bounded_limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return self._event_views(rows)
 
     def recent_compact(
         self,
@@ -678,7 +686,7 @@ class EventStore(
                     + ((camera_id,) if camera_id else ())
                     + (bounded_limit,),
                 ).fetchall()
-        return [dict(row) for row in rows]
+        return self._event_views(rows)
 
     def between_compact(
         self,
@@ -708,7 +716,7 @@ class EventStore(
                 f" for {camera_id}" if camera_id else "",
                 self.MAX_COMPACT_WINDOW_ROWS,
             )
-        return [dict(row) for row in rows]
+        return self._event_views(rows)
 
     def page_between(
         self,
@@ -752,7 +760,7 @@ class EventStore(
         """
         with self._connect() as conn:
             rows = conn.execute(query, parameters).fetchall()
-        return [dict(row) for row in rows]
+        return self._event_views(rows)
 
     def get_many(self, event_ids: list[int]) -> list[dict[str, Any]]:
         unique_ids = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
@@ -768,7 +776,7 @@ class EventStore(
                     chunk,
                 ).fetchall()
                 events.extend(dict(row) for row in rows)
-        return events
+        return self._event_views(events)
 
     def between(self, start_at: str, end_at: str, limit: int = 50000) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -781,7 +789,7 @@ class EventStore(
                 """,
                 (start_at, end_at, max(1, min(int(limit), 200000))),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return self._event_views(rows)
 
     def get(self, event_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -789,18 +797,17 @@ class EventStore(
                 "select * from events where id = ?",
                 (event_id,),
             ).fetchone()
-        return dict(row) if row is not None else None
+        return self._event_views([row])[0] if row is not None else None
 
-    def update_objects(self, event_id: int, objects_json: str) -> dict[str, Any] | None:
+    def update_objects(self, event_id: int, objects_json: str, *, expected_revision: int | None = None) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
-            conn.execute(
-                "update events set objects_json = ? where id = ?",
-                (objects_json, event_id),
-            )
-            row = conn.execute(
-                "select * from events where id = ?",
-                (event_id,),
-            ).fetchone()
+            conn.execute("begin immediate")
+            before = conn.execute("select * from events where id=?", (event_id,)).fetchone()
+            if before is None:
+                return None
+            self._check_evidence_revision(before, expected_revision)
+            conn.execute("update events set objects_json=? where id=?", (objects_json, event_id))
+            row = self._finish_evidence_commit(conn, event_id, before, reason="objects_updated")
         return dict(row) if row is not None else None
 
     def replace_detected_objects(
@@ -809,6 +816,7 @@ class EventStore(
         detected_objects_json: str,
         *,
         expected_snapshot_path: str,
+        expected_revision: int | None = None,
     ) -> dict[str, Any] | None:
         """Replace detections only while their source snapshot is still current."""
         try:
@@ -819,12 +827,14 @@ class EventStore(
             detected_objects = []
         detected_objects = [item for item in detected_objects if isinstance(item, dict)]
         with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
             row = conn.execute(
-                "select objects_json from events where id = ?",
+                "select * from events where id = ?",
                 (event_id,),
             ).fetchone()
             if row is None:
                 return None
+            self._check_evidence_revision(row, expected_revision)
             try:
                 existing = json.loads(str(row["objects_json"] or "[]"))
             except (TypeError, ValueError):
@@ -842,10 +852,7 @@ class EventStore(
             )
             if updated_count.rowcount == 0:
                 raise EventSnapshotChangedError("event snapshot changed during detection")
-            updated = conn.execute(
-                "select * from events where id = ?",
-                (event_id,),
-            ).fetchone()
+            updated = self._finish_evidence_commit(conn, event_id, row, reason="manual_detection")
         return dict(updated) if updated is not None else None
 
     def refine_event_evidence(
@@ -855,6 +862,7 @@ class EventStore(
         snapshot_path: str,
         recording_path: str,
         objects_json: str,
+        expected_revision: int | None = None,
     ) -> dict[str, Any] | None:
         """Atomically replace delayed evidence without losing tracking state."""
         try:
@@ -869,21 +877,28 @@ class EventStore(
         portable_recording = portable_media_path(self.storage_dir, recording_path)
         replaced_snapshot = ""
         with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
             if portable_snapshot:
-                conn.execute("begin immediate")
                 if snapshot_deletion_claimed(conn, self.storage_dir, portable_snapshot):
                     return None
             row = conn.execute(
-                "select objects_json, snapshot_path, snapshot_size_bytes, recording_path from events where id = ?",
+                "select * from events where id = ?",
                 (event_id,),
             ).fetchone()
             if row is None:
                 return None
+            self._check_evidence_revision(row, expected_revision)
             replaced_snapshot = str(row["snapshot_path"] or "")
             try:
                 existing = json.loads(str(row["objects_json"] or "[]"))
             except (TypeError, ValueError):
                 existing = []
+            if portable_snapshot and portable_snapshot != replaced_snapshot:
+                previous_area = self._cover_frame_area(existing if isinstance(existing, list) else [])
+                replacement_area = self._cover_frame_area(replacement)
+                if previous_area and replacement_area and replacement_area < previous_area:
+                    # Do not install smaller pixels over an already improved cover.
+                    return None
             preserved = [
                 item
                 for item in existing
@@ -904,10 +919,7 @@ class EventStore(
                     event_id,
                 ),
             )
-            updated = conn.execute(
-                "select * from events where id = ?",
-                (event_id,),
-            ).fetchone()
+            updated = self._finish_evidence_commit(conn, event_id, row, reason="evidence_refined", cover_satisfied=bool(portable_snapshot and any(item.get("label") and item.get("frame_source") == "recorded_main" and item.get("snapshot_visible") is not False and item.get("incident_eligible") is not False for item in replacement)))
         if replaced_snapshot and replaced_snapshot != portable_snapshot:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return dict(updated) if updated is not None else None
@@ -922,6 +934,7 @@ class EventStore(
         frame_height: int,
         tracked_objects: list[dict[str, Any]],
         cover_metrics: dict[str, Any],
+        expected_revision: int | None = None,
     ) -> dict[str, Any] | None:
         """Replace only presentation evidence with a better tracked frame.
 
@@ -939,6 +952,7 @@ class EventStore(
             if isinstance(item, dict)
             and item.get("track_id") is not None
             and isinstance(item.get("box"), dict)
+            and item.get("snapshot_visible") is not False
         }
         if not candidates:
             self._delete_snapshot_if_unreferenced(portable_snapshot)
@@ -951,15 +965,18 @@ class EventStore(
             if snapshot_deletion_claimed(conn, self.storage_dir, portable_snapshot):
                 return None
             row = conn.execute(
-                "select objects_json, snapshot_path from events where id = ?",
+                "select * from events where id = ?",
                 (event_id,),
             ).fetchone()
             if row is not None:
+                self._check_evidence_revision(row, expected_revision)
                 try:
                     objects = json.loads(str(row["objects_json"] or "[]"))
                 except (TypeError, ValueError):
                     objects = []
                 if not isinstance(objects, list):
+                    objects = []
+                if frame_width * frame_height < self._cover_frame_area(objects):
                     objects = []
                 for item in objects:
                     if not isinstance(item, dict) or not item.get("label"):
@@ -967,7 +984,11 @@ class EventStore(
                     candidate = candidates.get(str(item.get("track_id")))
                     if candidate is None:
                         item["snapshot_visible"] = False
+                        item.pop("mask_polygon", None)
                         continue
+                    item.pop("mask_polygon", None)
+                    if candidate.get("mask_polygon") is not None:
+                        item["mask_polygon"] = candidate["mask_polygon"]
                     item["box"] = dict(candidate["box"])
                     item["detection_frame_width"] = int(frame_width)
                     item["detection_frame_height"] = int(frame_height)
@@ -1000,10 +1021,7 @@ class EventStore(
                             event_id,
                         ),
                     )
-                    updated = conn.execute(
-                        "select * from events where id = ?",
-                        (event_id,),
-                    ).fetchone()
+                    updated = self._finish_evidence_commit(conn, event_id, row, reason="tracking_cover", cover_satisfied=bool(cover_metrics.get("recorded_cover_requirement_satisfied")))
         if updated is None:
             self._delete_snapshot_if_unreferenced(portable_snapshot)
             return None
@@ -1023,6 +1041,9 @@ class EventStore(
         cover_objects: list[dict[str, Any]],
         source: str,
         timestamp_exact: bool,
+        expected_revision: int | None = None,
+        diagnostics: dict[str, Any] | None = None,
+        requirement_lease_owner: str | None = None,
     ) -> dict[str, Any] | None:
         """Promote verified main evidence without changing admission facts.
 
@@ -1038,15 +1059,20 @@ class EventStore(
         identity proof. Ambiguous same-label scenes remain on the original
         cover and can later be promoted by tracked identity.
         """
+        def decline(reason: str):
+            if diagnostics is not None:
+                diagnostics["reason"] = reason
+            return None
+
         if (
             frame_width <= 0
             or frame_height <= 0
             or not math.isfinite(float(captured_at))
         ):
-            return None
+            return decline("invalid_frame_geometry_or_time")
         portable_snapshot = portable_media_path(self.storage_dir, snapshot_path)
         if not portable_snapshot:
-            return None
+            return decline("snapshot_unavailable")
         portable_recording = portable_media_path(self.storage_dir, recording_path)
 
         def valid_box(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
@@ -1078,26 +1104,28 @@ class EventStore(
             and valid_box(item) is not None
         ]
         if not candidates:
-            return None
+            return decline("no_confirmed_cover_candidate")
 
         replaced_snapshot = ""
         snapshot_size_bytes = self._snapshot_file_size(portable_snapshot)
         with self._lock, self._connect() as conn:
             conn.execute("begin immediate")
             if snapshot_deletion_claimed(conn, self.storage_dir, portable_snapshot):
-                return None
+                return decline("snapshot_deletion_claimed")
             row = conn.execute(
-                "select objects_json, snapshot_path, recording_path from events where id = ?",
+                "select * from events where id = ?",
                 (event_id,),
             ).fetchone()
             if row is None:
-                return None
+                return decline("event_unavailable")
+            self._check_evidence_revision(row, expected_revision)
+            self._check_cover_requirement_lease(conn, event_id, requirement_lease_owner)
             try:
                 objects = json.loads(str(row["objects_json"] or "[]"))
             except (TypeError, ValueError):
                 objects = []
             if not isinstance(objects, list):
-                return None
+                return decline("invalid_event_objects")
             provisional = [
                 item
                 for item in objects
@@ -1107,7 +1135,7 @@ class EventStore(
                 and item.get("provisional_detection") is True
             ]
             if len(provisional) != 1:
-                return None
+                return decline("ambiguous_or_missing_provisional_subject")
             existing = provisional[0]
             existing_label = str(existing.get("label") or "").strip().lower()
             compatible = [
@@ -1116,25 +1144,28 @@ class EventStore(
                 if str(item.get("label") or "").strip().lower() == existing_label
             ]
             if not existing_label or len(compatible) != 1:
-                return None
+                return decline("ambiguous_same_label_subjects" if len(compatible) > 1 else "no_same_label_subject")
             candidate = compatible[0]
+            # Preserve temporal ambiguity above; visibility only selects drawable geometry.
+            if candidate.get("snapshot_visible") is False:
+                return decline("off_frame_candidate")
             existing_box = valid_box(existing)
             candidate_box = valid_box(candidate)
             if existing_box is None or candidate_box is None:
-                return None
+                return decline("invalid_subject_geometry")
             try:
                 existing_width = int(existing.get("detection_frame_width") or 0)
                 existing_height = int(existing.get("detection_frame_height") or 0)
                 existing_captured_at = float(existing.get("frame_captured_at_epoch"))
             except (TypeError, ValueError, OverflowError):
-                return None
+                return decline("missing_source_geometry_or_time")
             if (
                 existing_width <= 0
                 or existing_height <= 0
                 or not math.isfinite(existing_captured_at)
                 or abs(float(captured_at) - existing_captured_at) > 15.0
             ):
-                return None
+                return decline("source_time_or_geometry_incompatible")
             existing_subject_pixels = (
                 (existing_box[2] - existing_box[0])
                 * (existing_box[3] - existing_box[1])
@@ -1154,14 +1185,18 @@ class EventStore(
                 or candidate_subject_pixels < max(64.0, existing_subject_pixels * 1.5)
                 or candidate_clearance < 0.005
             ):
-                return None
+                return decline("insufficient_resolution_or_subject_quality")
 
             for item in objects:
                 if not isinstance(item, dict) or not item.get("label"):
                     continue
                 if item is not existing:
                     item["snapshot_visible"] = False
+                    item.pop("mask_polygon", None)
                     continue
+                item.pop("mask_polygon", None)
+                if candidate.get("mask_polygon") is not None:
+                    item["mask_polygon"] = candidate["mask_polygon"]
                 item["box"] = dict(candidate["box"])
                 item["detection_frame_width"] = int(frame_width)
                 item["detection_frame_height"] = int(frame_height)
@@ -1176,6 +1211,12 @@ class EventStore(
                 )
                 item["snapshot_presentation_only"] = True
                 item["snapshot_timestamp_exact"] = bool(timestamp_exact)
+                item.pop("snapshot_frame_reference", None)
+                item.pop("snapshot_timestamp_uncertainty_seconds", None)
+                if isinstance(candidate.get("frame_reference"), dict):
+                    item["snapshot_frame_reference"] = dict(candidate["frame_reference"])
+                if candidate.get("frame_timestamp_uncertainty_seconds") is not None:
+                    item["snapshot_timestamp_uncertainty_seconds"] = candidate["frame_timestamp_uncertainty_seconds"]
                 for key in (
                     "snapshot_quality_score",
                     "snapshot_sharpness_score",
@@ -1205,6 +1246,8 @@ class EventStore(
                         timezone.utc,
                     ).isoformat(),
                     "timestamp_exact": bool(timestamp_exact),
+                    "frame_reference": candidate.get("frame_reference"),
+                    "timestamp_uncertainty_seconds": candidate.get("frame_timestamp_uncertainty_seconds"),
                     "reason": "compatible_recorded_refinement",
                     "admission_preserved": True,
                 },
@@ -1224,12 +1267,11 @@ class EventStore(
                     event_id,
                 ),
             )
-            updated = conn.execute(
-                "select * from events where id = ?",
-                (event_id,),
-            ).fetchone()
+            updated = self._finish_evidence_commit(conn, event_id, row, reason="recorded_cover", cover_satisfied=(source == "recorded_main"))
         if replaced_snapshot and replaced_snapshot != portable_snapshot:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
+        if diagnostics is not None:
+            diagnostics["reason"] = "compatible_recorded_refinement"
         return dict(updated) if updated is not None else None
 
     def _snapshot_file_size(self, raw_path: str) -> int:
@@ -1437,17 +1479,18 @@ class EventStore(
             raise PermissionError("snapshot is outside configured snapshot storage")
         return resolved
 
-    @staticmethod
     def _clear_snapshot_references(
+        self,
         conn: sqlite3.Connection,
         paths: list[str],
     ) -> None:
         if not paths:
             return
-        conn.executemany(
-            "update events set snapshot_path = '', snapshot_size_bytes = 0 where snapshot_path = ?",
-            ((path,) for path in paths),
-        )
+        for path in paths:
+            before_rows = conn.execute("select * from events where snapshot_path=?", (path,)).fetchall()
+            conn.execute("update events set snapshot_path='',snapshot_size_bytes=0 where snapshot_path=?", (path,))
+            for before in before_rows:
+                self._finish_evidence_commit(conn, int(before["id"]), before, reason="snapshot_expired")
         conn.executemany(
             "update motion_audits set snapshot_path = '' where snapshot_path = ?",
             ((path,) for path in paths),
@@ -1520,6 +1563,8 @@ class EventStore(
                 + f"""
                 select snapshot_path, snapshot_size_bytes from ranked
                 where snapshot_rank = 1 and created_at < ? {face_clause}
+                  and not exists(select 1 from event_cover_requirements r where r.state='pending'
+                      and r.deadline_epoch>unixepoch() and json_extract(r.payload_json, '$.snapshot_path')=ranked.snapshot_path)
                 order by created_at asc limit ?
                 """,
                 (cutoff, bounded_limit),
@@ -1586,8 +1631,10 @@ class EventStore(
                 """
                 select exists(select 1 from events where snapshot_path = ?)
                     or exists(select 1 from motion_audits where snapshot_path = ?)
+                    or exists(select 1 from event_cover_requirements where state='pending'
+                        and deadline_epoch > unixepoch() and json_extract(payload_json, '$.snapshot_path') = ?)
                 """,
-                (portable, portable),
+                (portable, portable, portable),
             ).fetchone()[0])
             if not referenced:
                 has_faces = conn.execute(
@@ -1624,8 +1671,9 @@ class EventStore(
     ) -> dict[str, Any] | None:
         """Atomically replace tracking metadata without losing concurrent event data."""
         with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
             row = conn.execute(
-                "select objects_json from events where id = ?",
+                "select * from events where id = ?",
                 (event_id,),
             ).fetchone()
             if row is None:
@@ -1671,10 +1719,7 @@ class EventStore(
                 "update events set objects_json = ? where id = ?",
                 (objects_json, event_id),
             )
-            updated = conn.execute(
-                "select * from events where id = ?",
-                (event_id,),
-            ).fetchone()
+            updated = self._finish_evidence_commit(conn, event_id, row, reason="tracking_updated")
         return dict(updated) if updated is not None else None
 
     def for_camera_range(
@@ -1697,7 +1742,7 @@ class EventStore(
                 """,
                 (camera_id, start_at, end_at, bounded_limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return self._event_views(rows)
 
     def recent_for_camera_range(
         self,
@@ -1720,4 +1765,4 @@ class EventStore(
                 """,
                 (camera_id, start_at, end_at, bounded_limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return self._event_views(rows)
