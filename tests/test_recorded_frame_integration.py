@@ -6,7 +6,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from survng.app.tracking_comparison import sampled_video_frames, video_frame_at_reference
+from survng.app.recorded_video import sampled_video_frames, video_frame_at_reference
 
 
 @pytest.fixture(scope="module")

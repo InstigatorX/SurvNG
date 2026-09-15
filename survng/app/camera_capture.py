@@ -865,7 +865,7 @@ class CameraCaptureService:
         return {**history.status(), "lag_seconds": lag}
 
     def matched_snapshot(
-        self, source: str, *, source_pts: float, generation: int, source_session: str
+        self, source: str, *, source_pts: float, generation: int, source_session: str, exact: bool = False
     ) -> DetectionSnapshot | None:
         """Match only current-session evidence; missing is distinct from empty."""
         source = self._normalize_source(source)
@@ -874,8 +874,14 @@ class CameraCaptureService:
                 return None
             self._harvest_detection_snapshots_locked(source)
             return self._detection_history[source].match(
-                pts=source_pts, session=source_session, detect_fps=self._detect_fps(source)
+                pts=source_pts, session=source_session, detect_fps=self._detect_fps(source), exact=exact
             )
+
+    def native_observations(self) -> tuple[DetectionSnapshot, ...]:
+        """Bounded metadata stream; independent of pixel frame delivery."""
+        with self._lock:
+            self._harvest_detection_snapshots_locked("live")
+            return tuple(self._detection_history["live"].snapshots)
 
     def latest_jpeg(self, source: str = "live") -> bytes | None:
         source = self._normalize_source(source)

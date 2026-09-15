@@ -114,6 +114,10 @@ class DlStreamerCaptureOptions:
     model_proc_path: str = ""
     inference_device: str = "GPU"
     detect_enabled: bool = False
+    inference_interval: int = 1
+    inference_requests: int = 4
+    inference_streams: int = 2
+    native_tracking: str = "off"
     frame_width: int = 320
     jpeg_fps: float = 1.0
     confidence_threshold: float = 0.1
@@ -230,7 +234,11 @@ class _StreamInbox:
     def qualify_pts(self, kind: str, pts: float) -> str:
         with self._lock:
             previous = self._last_pts.get(kind)
-            if previous is not None and math.isfinite(pts) and pts < previous:
+            # A new video frame reusing PTS cannot inherit the previous frame's
+            # detection. Repeated metadata alone still does not reset liveness.
+            if previous is not None and math.isfinite(pts) and (
+                pts < previous or (kind == "frame" and pts == previous)
+            ):
                 self.session = uuid.uuid4().hex
                 self._last_pts.clear()
                 self._detection_snapshots.clear()
@@ -331,11 +339,11 @@ class _SharedLiveProcess:
         self._stderr_thread.start()
         self._reader_thread.start()
 
-    def add_stream(self, stream_id: str, source_url: str, *, source_role: str = "live", frame_width: int | None = None) -> _StreamInbox:
+    def add_stream(self, stream_id: str, source_url: str, *, source_role: str = "live", frame_width: int | None = None, detection_enabled: bool = True) -> _StreamInbox:
         inbox = _StreamInbox()
         with self._lock:
             self._inboxes[stream_id] = inbox
-        command = {"op": "add", "stream_id": stream_id, "url": source_url, "source_role": source_role}
+        command = {"op": "add", "stream_id": stream_id, "url": source_url, "source_role": source_role, "detection_enabled": detection_enabled}
         if frame_width is not None:
             command["frame_width"] = frame_width
         self._send(command)
@@ -868,6 +876,10 @@ class DlStreamerCaptureBackend:
             raise ValueError("rtsp_transport must be tcp or udp")
         if self.options.decoder not in {"auto", "va"}:
             raise ValueError("decoder must be auto or va")
+        if not 1 <= int(self.options.inference_interval) <= 5:
+            raise ValueError("inference_interval must be between 1 and 5")
+        if self.options.native_tracking not in {"off", "short-term-imageless"}:
+            raise ValueError("native_tracking must be off or short-term-imageless")
         self._credential_warning_lock = threading.Lock()
         self._credential_warning_hosts: set[str] = set()
         self._shared: _SharedLiveProcess | None = None
@@ -954,6 +966,7 @@ class DlStreamerCaptureBackend:
         stream_id = uuid.uuid4().hex
         handle.attach(shared, stream_id, shared.add_stream(
             stream_id, source_url, source_role=handle.source_role, frame_width=handle.frame_width,
+            detection_enabled=getattr(handle, "detection_enabled", True),
         ))
         if cancelled():
             handle.close()
@@ -1009,6 +1022,10 @@ class DlStreamerCaptureBackend:
         model_path = self.options.model_path.strip()
         if self.options.detect_enabled and model_path:
             command.extend(["--model", model_path])
+            command.extend(["--inference-interval", str(int(self.options.inference_interval))])
+            command.extend(["--inference-requests", str(self.options.inference_requests)])
+            command.extend(["--inference-streams", str(self.options.inference_streams)])
+            command.extend(["--native-tracking", self.options.native_tracking])
             command.extend(
                 [
                     "--model-instance-id",

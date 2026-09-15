@@ -2537,7 +2537,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
               {selectedCamera ? <div id="camera-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`} onKeyDown={(event) => moveTabFocus(event, CAMERA_ADMIN_SECTIONS, cameraSection, (next) => selectAdminSubsection(next, setCameraSection, "cameras"))}>
                 <button id="camera-tab-settings" data-tab-id="settings" tabIndex={cameraSection === "settings" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => selectAdminSubsection("settings", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
-                <button id="camera-tab-motion" data-tab-id="motion" tabIndex={cameraSection === "motion" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "motion" ? "active" : ""} onClick={() => selectAdminSubsection("motion", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "motion"}><Activity size={15} />Motion/Object</button>
                 <button id="camera-tab-zones" data-tab-id="zones" tabIndex={cameraSection === "zones" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "zones" ? "active" : ""} onClick={() => selectAdminSubsection("zones", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "zones"}><Crop size={15} />Zones</button>
                 <button id="camera-tab-info" data-tab-id="info" tabIndex={cameraSection === "info" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "info" ? "active" : ""} onClick={() => selectAdminSubsection("info", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "info"}><Gauge size={15} />Info</button>
               </div> : null}
@@ -2551,18 +2550,13 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                       </div>
                     </> : null}
 
-                    {cameraSection === "motion" ? <div className="field-row camera-object-policy-fields">
+                    {cameraSection === "zones" ? <div className="field-row camera-object-policy-fields">
                       <label>Incident eligibility<select value={selectedCamera.require_incident_zone == null ? "" : String(selectedCamera.require_incident_zone)} onChange={(event) => updateCamera(selectedCamera.id, ["require_incident_zone"], event.target.value === "" ? null : event.target.value === "true")}>
                         <option value="">Use global ({(config.detector?.require_incident_zone ?? true) ? "Zones" : "Zones + Full Frame"})</option>
                         <option value="true">Zones</option>
                         <option value="false">Zones + Full Frame</option>
                       </select><small>Ignore zones always suppress their matching object classes.</small></label>
-                      <label>Repeated scene context<select value={selectedCamera.object_activity_attribution || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["object_activity_attribution"], event.target.value)}>
-                        <option value="inherit">Use global ({config.detector?.object_activity_attribution === "shadow" ? "Observe" : config.detector?.object_activity_attribution === "off" ? "Off" : "Prevent labels"})</option>
-                        <option value="enforce">Prevent false incident labels</option>
-                        <option value="shadow">Observe only</option>
-                        <option value="off">Off</option>
-                      </select><small>Controls whether stable objects repeatedly seen in one location can remain evidence without labeling the incident.</small></label>
+
                     </div> : null}
 
                     {cameraSection === "info" ? <div className="field-row camera-info-fields">
@@ -2591,8 +2585,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                             </div>
                           </div>
                         </section>
-                        <CameraOnvifEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
                       </div>
+                      <label className="check-field"><input type="checkbox" checked={selectedCamera.native_same_field_of_view || false} onChange={(event) => updateCamera(selectedCamera.id, ["native_same_field_of_view"], event.target.checked)} /> Main and live streams show the same field of view</label>
+                      <small>Enables native track replay over main recordings. Leave off if either stream is cropped or has a different view.</small>
+                      <label className="check-field"><input type="checkbox" checked={selectedCamera.incident_notifications_enabled !== false} onChange={(event) => updateCamera(selectedCamera.id, ["incident_notifications_enabled"], event.target.checked)} /> Send incident notifications</label>
                       <LiveViewFramingEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
                       <details className="camera-retention-details">
                         <summary>Camera recording retention</summary>
@@ -2602,111 +2598,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                         </div>
                       </details>
                     </> : null}
-
-                    <div className="config-panels">
-                      {cameraSection === "motion" ? <section className="sub-panel">
-                        <h3>Incident snapshots</h3>
-                        <label className="check-field"><input
-                          type="checkbox"
-                          role="switch"
-                          checked={selectedCamera.main_evidence_enabled ?? Boolean(config.main_evidence?.enabled && config.main_evidence?.camera_ids?.includes(selectedCamera.id))}
-                          onChange={(event) => updateCamera(selectedCamera.id, ["main_evidence_enabled"], event.target.checked)}
-                        /> Buffer main stream for faster snapshots</label>
-                        <small>Get high-resolution incident images without waiting for a recording segment to finish. Uses extra memory and a camera connection. Recording and detection must be on.</small>
-                        <small>Save changes to apply immediately without a server restart. The buffer needs a few seconds to fill.</small>
-                      </section> : null}
-                      {cameraSection === "motion" ? <section className="sub-panel">
-                        <h3 className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>HA/MQTT Options</h3>
-                        <label className="check-field"><input type="checkbox" role="switch" checked={selectedCamera.incident_notifications_enabled !== false} onChange={(event) => updateCamera(selectedCamera.id, ["incident_notifications_enabled"], event.target.checked)} /> Send incident notifications</label>
-                        <small>Publish this camera's incident messages to Home Assistant and MQTT. Recording and detection continue when disabled.</small>
-                      </section> : null}
-
-                      {cameraSection === "motion" ? <div className="sub-panel">
-                        <h3>Motion Triggers &amp; Filtering</h3>
-                        <MotionDecisionEditor
-                          cameraName={selectedCamera.name}
-                          fusion={selectedCamera.motion_qualification?.pipeline?.fusion}
-                          mode={selectedCamera.motion_qualification?.mode || "inherit"}
-                          globalMode={config.motion_qualification?.mode || "camera_rescue"}
-                          inherited={selectedCamera.motion_qualification?.pipeline?.fusion == null}
-                          inheritedFusion={config.motion_qualification?.pipeline?.fusion}
-                          onModeChange={(mode) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], mode)}
-                          onSetInherited={(shouldInherit) => {
-                            const pipeline = { ...(selectedCamera.motion_qualification?.pipeline || {}) };
-                            pipeline.fusion = shouldInherit
-                              ? null
-                              : buildMotionDecisionFusion(
-                                readMotionDecisionFusion(config.motion_qualification?.pipeline?.fusion).settings,
-                              );
-                            updateCamera(selectedCamera.id, ["motion_qualification", "pipeline"], pipeline);
-                          }}
-                          onChange={(fusion) => updateCamera(
-                            selectedCamera.id,
-                            ["motion_qualification", "pipeline"],
-                            { ...(selectedCamera.motion_qualification?.pipeline || {}), fusion },
-                          )}
-                          onRestoreDefaults={() => updateCamera(
-                            selectedCamera.id,
-                            ["motion_qualification"],
-                            defaultCameraMotionQualification(),
-                          )}
-                          configurationInherited={cameraMotionQualificationInherited(selectedCamera.motion_qualification)}
-                        />
-                        <MotionAnalysisPresetEditor
-                          qualification={selectedCamera.motion_qualification?.pipeline?.qualification}
-                          inherited={selectedCamera.motion_qualification?.pipeline?.qualification == null}
-                          catalog={motionCatalog}
-                          onSetInherited={() => updateCamera(
-                            selectedCamera.id,
-                            ["motion_qualification", "pipeline"],
-                            { ...(selectedCamera.motion_qualification?.pipeline || {}), qualification: null },
-                          )}
-                          onChange={(qualification) => updateCamera(
-                            selectedCamera.id,
-                            ["motion_qualification", "pipeline"],
-                            { ...(selectedCamera.motion_qualification?.pipeline || {}), qualification },
-                          )}
-                        />
-                        <details className="motion-tuning-details">
-                          <summary>Advanced camera tuning</summary>
-                          <div className="motion-camera-tuning">
-                            <label>Sensitivity<select value={selectedCamera.motion_qualification?.sensitivity || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "sensitivity"], event.target.value)}>
-                              <option value="inherit">Use global setting</option>
-                              <option value="high">High</option>
-                              <option value="balanced">Balanced</option>
-                              <option value="low">Low</option>
-                            </select></label>
-                            <label>Stationary object policy<select value={selectedCamera.motion_qualification?.stationary_object_tolerance || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "stationary_object_tolerance"], event.target.value)}>
-                              <option value="inherit">Use global setting</option>
-                              <option value="low">Light</option>
-                              <option value="balanced">Standard</option>
-                              <option value="high">Strong</option>
-                            </select><small>Controls how aggressively EMA rejects confined outline shimmer and reflections before object detection. Strong may ignore unusually slow or distant movement.</small></label>
-                            <label>Light and shadow filtering<select value={selectedCamera.motion_qualification?.illumination_filter_enabled == null ? "" : String(selectedCamera.motion_qualification.illumination_filter_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "illumination_filter_enabled"], event.target.value === "" ? null : event.target.value === "true")}><option value="">Use global setting</option><option value="true">Enabled</option><option value="false">Disabled</option></select><small>Ignores clear moving illumination while uncertain motion continues to object detection.</small></label>
-                            <label>Analysis size<select value={selectedCamera.motion_qualification?.frame_width ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "frame_width"], event.target.value ? Number(event.target.value) : null)}>
-                              <option value="">Use global setting</option>
-                              <option value="320">320 px</option>
-                              <option value="480">480 px</option>
-                              <option value="640">640 px</option>
-                              <option value="720">720 px</option>
-                              <option value="800">800 px</option>
-                            </select></label>
-                            <label>Visual confidence<input type="number" min="0" max="1" step="0.01" placeholder={`Global: ${config.motion_qualification?.visual_backup_min_score ?? 0.7}`} value={selectedCamera.motion_qualification?.visual_backup_min_score ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_min_score"], event.target.value === "" ? null : Number(event.target.value))} /><small>Leave blank to inherit. Higher values require stronger visual motion before camera-notification rescue runs detection.</small></label>
-                            <label>Strong samples<input type="number" min="2" max="10" step="1" placeholder={`Global: ${config.motion_qualification?.visual_backup_min_consecutive ?? 3}`} value={selectedCamera.motion_qualification?.visual_backup_min_consecutive ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_min_consecutive"], event.target.value === "" ? null : Number(event.target.value))} /><small>Consecutive qualifying samples required before rescue.</small></label>
-                            <label>Visual grace<input type="number" min="0" max="5" step="0.1" placeholder={`Global: ${config.motion_qualification?.visual_backup_grace_seconds ?? 1.5}s`} value={selectedCamera.motion_qualification?.visual_backup_grace_seconds ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_grace_seconds"], event.target.value === "" ? null : Number(event.target.value))} /><small>How long strong motion must persist. Leave blank to inherit.</small></label>
-                            <label>Rescue cooldown<input type="number" min="5" max="300" step="5" placeholder={`Global: ${config.motion_qualification?.visual_backup_cooldown_seconds ?? 20}s`} value={selectedCamera.motion_qualification?.visual_backup_cooldown_seconds ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_cooldown_seconds"], event.target.value === "" ? null : Number(event.target.value))} /><small>Minimum seconds between visual rescue attempts.</small></label>
-                            <label>Rescues per 5 minutes<input type="number" min="1" max="30" step="1" placeholder={`Global: ${config.motion_qualification?.visual_backup_max_triggers_5m ?? 3}`} value={selectedCamera.motion_qualification?.visual_backup_max_triggers_5m ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_max_triggers_5m"], event.target.value === "" ? null : Number(event.target.value))} /><small>Per-camera ceiling for visual rescue detection attempts.</small></label>
-                            <label>Borderline Rescue<select value={selectedCamera.motion_qualification?.borderline_rescue_enabled == null ? "" : String(selectedCamera.motion_qualification.borderline_rescue_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_rescue_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
-                              <option value="">Use global setting</option>
-                              <option value="true">Enabled</option>
-                              <option value="false">Disabled</option>
-                            </select></label>
-                            <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" placeholder="Global" value={selectedCamera.motion_qualification?.borderline_margin ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_margin"], event.target.value === "" ? null : Number(event.target.value))} /></label>
-                            <label>Double-check filtered motion<select value={selectedCamera.motion_qualification?.suppression_verification_rate == null ? "" : String(selectedCamera.motion_qualification.suppression_verification_rate)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "suppression_verification_rate"], event.target.value === "" ? null : Number(event.target.value))}><option value="">Use global setting</option><option value="0">Off</option><option value="0.01">About 1 in 100</option><option value="0.05">About 1 in 20</option><option value="0.1">About 1 in 10</option></select><small>Runs object detection on a small sample that visual motion would filter. A configured object safely restores the incident.</small></label>
-                          </div>
-                        </details>
-                      </div> : null}
-                    </div>
 
                     {cameraSection === "zones" ? <ZoneEditor
                       camera={selectedCamera}
@@ -4493,305 +4384,21 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       ) : null}
 
       {section === "detection" ? (
-        <div className="detection-settings subsection-workspace">
-          <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
-          </nav>
-          <div className="detection-settings-content">
-          {detectionSection === "object" ? <section className="detection-settings-card primary">
-            <header className="detection-settings-card-head">
-              <div className="detection-settings-card-icon"><ScanFace size={18} /></div>
-              <div><h3>Detection</h3><p>Choose the model, accelerator, and rules that turn motion into object incidents.</p></div>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.enabled || false} onChange={(event) => updateConfig(["detector", "enabled"], event.target.checked)} /><span>Detector enabled</span></label>
-            </header>
-            <div className="detection-field-grid">
-              <label>Backend<select value={detectorBackend} onChange={(event) => updateConfig(["detector", "backend"], event.target.value)}>
-                <option value="openvino">OpenVINO / ONNX</option>
-                <option value="coreml">Core ML (Mac)</option>
-              </select></label>
-              <label>OpenVINO Device<select value={config.detector?.device || "CPU"} onChange={(event) => updateConfig(["detector", "device"], event.target.value)}>
-                {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select></label>
-              <label>Parallel detectors<select value={String(config.detector?.object_worker_count ?? 2)} onChange={(event) => updateConfig(["detector", "object_worker_count"], Number(event.target.value))} disabled={detectorBackend !== "openvino"}>
-                <option value="1" disabled={config.detector?.tracking?.enabled !== false}>1 detector</option>
-                <option value="2">2 detectors</option>
-                <option value="3">3 detectors</option>
-                <option value="4">4 detectors</option>
-              </select><small>Independent OpenVINO workers process simultaneous camera events. Tracking keeps at least 2 so a live incident check is not stuck behind overlay work. More workers use more accelerator and memory.</small></label>
-              <label>Recorded decode processes<input type="number" min="1" max="16" step="1" value={config.detector?.recorded_decode_max_processes ?? 2} onChange={(event) => updateConfig(["detector", "recorded_decode_max_processes"], Number(event.target.value))} /><small>The shared decoded-frame budget is calculated from this count, the active refinement window, and each recording’s video dimensions.</small></label>
-              <label>Incident confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /><small>A single detection must meet this confidence. Repeated candidates can still qualify through confirmation.</small></label>
-              <label>Candidate confidence<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.event_candidate_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "event_candidate_confidence_threshold"], Number(event.target.value))} /><small>Retains weaker detections only as temporal evidence; they require at least three consistent frames.</small></label>
-              <label>Object confirmation<select value={String(config.detector?.event_confirmation_frames ?? 2)} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))}><option value="1">Immediate (1 frame)</option><option value="2">Confirmed (2 frames)</option><option value="3">Strong (3 frames)</option><option value="4">Very strict (4 frames)</option><option value="5">Maximum (5 frames)</option></select><small>Requires the same label across this many recorded samples. Refinement stops early once confirmation is met, so lower counts also spend less detector time.</small></label>
-              <label>Refinement window<select value={refinementStagePreset} onChange={(event) => {
-                const preset = refinementStagePresets[event.target.value];
-                if (preset) updateConfig(["detector", "event_refinement_stages"], preset);
-              }}>
-                <option value="full">Full (−1…+4.5s bridge, then +8/+12s)</option>
-                <option value="compact">Compact (−0.5…+0.5s, then +4/+8s)</option>
-                <option value="tight">Tight (−0.5…+0.5s only)</option>
-                {refinementStagePreset === "custom" ? <option value="custom">Custom stages</option> : null}
-              </select><small>Smaller windows free the detector sooner after each event. Full remains the default evidence profile.</small></label>
-              <label>Refinement retry budget<input type="number" min="0" max="120" step="1" value={config.detector?.event_refinement_retry_seconds ?? 24} onChange={(event) => updateConfig(["detector", "event_refinement_retry_seconds"], Number(event.target.value))} /><small>Seconds spent waiting for finalized recordings and delayed discovery stages.</small></label>
-              <label>Incident eligibility<select value={String(config.detector?.require_incident_zone ?? true)} onChange={(event) => updateConfig(["detector", "require_incident_zone"], event.target.value === "true")}>
-                <option value="true">Zones</option>
-                <option value="false">Zones + Full Frame</option>
-              </select><small>Default for cameras using the global rule.</small></label>
-              <label className="wide-field">Model<select value={activeModel?.path || ""} onChange={(event) => selectOpenvinoModel(event.target.value)}>
-                <option value="">Custom path</option>
-                {detectorModels.map((model) => {
-                  const directory = String(model.path || "").split("/").slice(0, -1).pop();
-                  return <option key={model.path} value={model.path} disabled={!model.valid}>{directory ? `${directory} / ` : ""}{model.name} ({model.task || "detect"}, {model.valid ? "ready" : "incomplete"})</option>;
-                })}
-              </select></label>
-            </div>
-            <details className="detection-compact-details">
-              <summary>Model paths and startup options</summary>
-              <p className="settings-help">{detectorStatus?.model_settings ? `Loaded model: ${(detectorStatus.input_shape || []).join(" × ")} · ${detectorStatus.model_settings.input_precision} input · ${detectorStatus.model_settings.input_layout} · ${detectorStatus.output_format || "unknown"} · NMS: ${detectorStatus.model_settings.nms}. Graph floating-point constants: ${(detectorStatus.model_settings.constant_precisions || []).join(", ") || "unknown"}.` : "Model settings appear after the detector loads."}</p>
-              {detectorStatus?.model_settings?.error ? <p className="settings-help" role="alert">{detectorStatus.model_settings.error}</p> : null}
-              {(detectorStatus?.model_settings?.warnings || []).map((warning) => <p className="settings-help" key={warning}>{warning}</p>)}
-              <div className="detection-field-grid">
-                <label className="wide-field">OpenVINO / ONNX path<input value={activeModelPath} onChange={(event) => selectOpenvinoModel(event.target.value)} placeholder="openvino_model/best.xml or best.onnx" /></label>
-                <label>Output format<select value={config.detector?.model_output_format || "auto"} onChange={(event) => updateConfig(["detector", "model_output_format"], event.target.value)}>
-                  <option value="auto">Automatic</option><option value="yolo">Raw YOLO (apply NMS)</option><option value="yolo-e2e">Final detections (embedded NMS / end-to-end)</option><option value="yolo-seg">Raw YOLO segmentation</option><option value="yolo-seg-e2e">Final YOLO segmentation</option><option value="ssd">SSD</option>
-                </select><small>Leave on Automatic unless the model's output is ambiguous. The NMS threshold applies only to raw outputs.</small></label>
-                <label>OpenVINO input layout<select value={config.detector?.model_input_layout || "auto"} onChange={(event) => updateConfig(["detector", "model_input_layout"], event.target.value)} disabled={detectorBackend !== "openvino"}>
-                  <option value="auto">Automatic</option><option value="NCHW">NCHW</option><option value="NHWC">NHWC</option>
-                </select><small>FP16 / FP32 input precision is read from the model.</small></label>
-                <label>Labels path<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} placeholder="Automatic from metadata" /></label>
-                <label>Compiled model cache<input value={config.detector?.cache_dir || ".cache/openvino"} onChange={(event) => updateConfig(["detector", "cache_dir"], event.target.value)} disabled={config.detector?.cache_enabled === false} /></label>
-                <label className="compact-toggle"><input type="checkbox" checked={config.detector?.cache_enabled ?? true} onChange={(event) => updateConfig(["detector", "cache_enabled"], event.target.checked)} /><span>Cache compiled model</span></label>
-                <label className="compact-toggle"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /><span>Warm up at startup</span></label>
-              </div>
-            </details>
-            <details className="detection-compact-details">
-              <summary>Per-object confirmation and confidence</summary>
-              <p className="settings-help">Tune how often and how confidently each object must be recognized. Higher confirmation reduces one-frame mistakes; higher confidence rejects weaker matches. Leaving either setting on global uses the values above.</p>
-              {eventConfirmationClasses.length ? <div className="per-object-detection-grid">
-                {eventConfirmationClasses.map((label) => <div className="per-object-detection-row" key={label}>
-                  <strong>{label.replaceAll("_", " ")}</strong>
-                  <label>Confirmation<select value={eventClassConfirmations[label] == null ? "" : String(eventClassConfirmations[label])} onChange={(event) => setEventClassConfirmation(label, event.target.value)}><option value="">Global ({config.detector?.event_confirmation_frames ?? 2} frames)</option><option value="1">1 frame</option><option value="2">2 frames</option><option value="3">3 frames</option><option value="4">4 frames</option><option value="5">5 frames</option></select></label>
-                  <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder={`Global (${config.detector?.confidence_threshold ?? 0.45})`} value={eventClassConfidences[label] == null ? "" : String(eventClassConfidences[label])} onChange={(event) => setEventClassConfidence(label, event.target.value)} /></label>
-                </div>)}
-              </div> : <span className="settings-help">Select a model with class metadata to configure per-object overrides.</span>}
-            </details>
-          </section> : null}
-
-
-          {detectionSection === "object" ? <section className="detection-settings-card detection-feature-card wide-card">
-            <header className="detection-settings-card-head">
-              <div className="detection-settings-card-icon"><Activity size={18} /></div>
-              <div><h3>Stationary objects &amp; scene context</h3><p>Separate visual-motion filtering from object-level incident attribution.</p></div>
-            </header>
-            <div className="detection-field-grid">
-              <label>Stationary object policy<select value={config.motion_qualification?.stationary_object_tolerance || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "stationary_object_tolerance"], event.target.value)}><option value="low">Light</option><option value="balanced">Standard</option><option value="high">Strong</option></select><small>Coordinates EMA background learning, stationary-motion scoring, and parked-object scene memory. Strong may ignore unusually slow or distant travel.</small></label>
-              <label>Repeated scene context<select value={config.detector?.object_activity_attribution || "enforce"} onChange={(event) => updateConfig(["detector", "object_activity_attribution"], event.target.value)}>
-                <option value="enforce">Prevent false incident labels</option>
-                <option value="shadow">Observe without changing incidents</option>
-                <option value="off">Off</option>
-              </select><small>Runs after object detection. Repeated stable objects remain stored as evidence without being treated as the cause; moving or uncertain objects remain eligible.</small></label>
-              <div className="detection-settings-subhead"><strong>Fixed areas remain explicit</strong><small>Object Ignore zones suppress only their matching classes. “Exclude from EMA” independently removes all visual motion in that polygon.</small></div>
-            </div>
-          </section> : null}
-
-          {detectionSection === "tracking" ? <section className="detection-settings-card wide-card">
-            <header className="detection-settings-card-head">
-              <div className="detection-settings-card-icon"><Activity size={18} /></div>
-              <div><h3>Continuous tracking</h3><p>Identification and path overlays after an incident is confirmed. Tracking does not decide whether an incident is kept.</p></div>
-            </header>
-            <div className="detection-field-grid">
-              <label>Tracking detail<select value={String(config.detector?.tracking?.sample_fps ?? 2)} onChange={(event) => updateConfig(["detector", "tracking", "sample_fps"], Number(event.target.value))}><option value="1">Lower CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Smoother (3 frames/sec)</option><option value="5">Maximum detail (5 frames/sec)</option></select><small>OpenVINO runs once for every analyzed tracking frame.</small></label>
-              <div className="zone-class-field tracking-class-field">
-                <span>Do not track</span>
-                <details className="zone-class-dropdown">
-                  <summary>{trackingExcludedLabels.length ? trackingExcludedLabels.join(", ") : "Track all classes"}</summary>
-                  <div className="zone-class-menu">
-                    <label><input type="checkbox" checked={!trackingExcludedLabels.length} onChange={() => updateConfig(["detector", "tracking", "excluded_labels"], [])} /> Track all classes</label>
-                    {trackingClassOptions.map((label) => {
-                      const checked = trackingExcludedLabels.includes(label);
-                      return <label key={label}><input type="checkbox" checked={checked} onChange={() => updateConfig(["detector", "tracking", "excluded_labels"], checked ? trackingExcludedLabels.filter((item) => item !== label) : [...trackingExcludedLabels, label])} /> {label}</label>;
-                    })}
-                  </div>
-                </details>
-                <small>Select classes to exclude. Face detection and recognition continue normally; excluded classes simply do not receive track IDs.</small>
-              </div>
-              <label>Maximum duration<input type="number" min="3" max="120" step="1" value={config.detector?.tracking?.max_session_seconds ?? 15} onChange={(event) => updateConfig(["detector", "tracking", "max_session_seconds"], Number(event.target.value))} /><small>Seconds after initial detection.</small></label>
-              <label>Lost-object grace<input type="number" min="0.5" max="15" step="0.5" value={config.detector?.tracking?.lost_timeout_seconds ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "lost_timeout_seconds"], Number(event.target.value))} /><small>Seconds to retain an obstructed object.</small></label>
-              <label>Baseline camera limit<input type="number" min="1" max="16" step="1" value={config.detector?.tracking?.max_active_cameras ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "max_active_cameras"], Number(event.target.value))} /><small>Normal simultaneous tracking sessions.</small></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.adaptive_burst_enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "adaptive_burst_enabled"], event.target.checked)} /><span>Allow an extra tracker when healthy</span><small>Temporarily uses the burst limit only while inference has no backlog and system memory is healthy.</small></label>
-              <label>Burst camera limit<input type="number" min={config.detector?.tracking?.max_active_cameras ?? 2} max="16" step="1" value={config.detector?.tracking?.burst_max_active_cameras ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "burst_max_active_cameras"], Number(event.target.value))} /><small>Maximum only during a healthy short burst.</small></label>
-              <label>Wait for tracking capacity<input type="number" min="0" max="30" step="0.5" value={config.detector?.tracking?.capacity_wait_seconds ?? 5} onChange={(event) => updateConfig(["detector", "tracking", "capacity_wait_seconds"], Number(event.target.value))} /><small>Wait briefly for a busy tracking slot, then recover the gap from recordings. Zero skips immediately.</small></label>
-            </div>
-            <details className="detection-compact-details">
-              <summary>Association tuning</summary>
-              <div className="detection-field-grid advanced-tracking-grid">
-                <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "enabled"], event.target.checked)} /><span>Enable core tracking</span><small>Runs after recorded confirmation. Use it for cover selection and review overlays, not to catch more incidents. Disable if this hardware cannot sustain the extra detector work.</small></label>
-                <div className="detection-settings-subhead"><strong>SurvNG Hybrid tracking</strong><small>Production tracking uses SurvNG’s timestamp-aware geometry and selective appearance recovery. Hybrid candidate, TrackTrack and BoT-SORT are available only through the incident Compare tool.</small></div>
-                <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Incident-starting objects have already passed the event-frame confirmation above.</small></label>
-                <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
-                <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>
-                <label>Movement match distance<input type="number" min="0.1" max="2" step="0.05" value={config.detector?.tracking?.match_center_distance_ratio ?? 0.65} onChange={(event) => updateConfig(["detector", "tracking", "match_center_distance_ratio"], Number(event.target.value))} /><small>Reconnects nearby boxes when overlap changes because someone moves quickly or approaches the camera.</small></label>
-                <label>Maximum tracks per incident<input type="number" min="1" max="1000" step="10" value={config.detector?.tracking?.max_tracks_per_session ?? 100} onChange={(event) => updateConfig(["detector", "tracking", "max_tracks_per_session"], Number(event.target.value))} /><small>Safety limit for unusually noisy detector output.</small></label>
-              </div>
-            </details>
-            <details className="detection-compact-details">
-              <summary>Appearance matching (ReID)</summary>
-              <div className="detection-field-grid advanced-tracking-grid">
-                <div className="detection-settings-subhead"><strong>Person appearance matching</strong><small>Reconnect a person after geometry briefly loses them.</small></div>
-                <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "reid_enabled"], event.target.checked)} /><span>Person ReID enabled</span></label>
-                <label>Person ReID model<input value={config.detector?.tracking?.reid_model_path ?? ""} onChange={(event) => updateConfig(["detector", "tracking", "reid_model_path"], event.target.value)} placeholder="person-reidentification-retail-0286.xml" /><small>OpenVINO whole-person embedding model. Intel's 0286 model is the recommended accuracy-focused option; face-recognition models are not compatible.</small></label>
-                <label>ReID device<input value={config.detector?.tracking?.reid_device ?? "CPU"} onChange={(event) => updateConfig(["detector", "tracking", "reid_device"], event.target.value)} /><small>CPU by default so live gvadetect keeps the Intel GPU. AUTO is treated as CPU. Explicit GPU remains available.</small></label>
-                <label>Appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.reid_match_threshold ?? 0.7} onChange={(event) => updateConfig(["detector", "tracking", "reid_match_threshold"], Number(event.target.value))} /><small>0.70 is the conservative default. Higher values reduce accidental joins but make lost identities harder to recover.</small></label>
-                <label>Remember lost appearance<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.reid_max_age_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_age_seconds"], Number(event.target.value))} /><small>Seconds a lost person can recover the same track ID.</small></label>
-                <div className="detection-settings-subhead"><strong>Vehicle appearance matching</strong><small>Use vehicle appearance to recover car, truck, bus, and motorcycle identities.</small></div>
-                <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.vehicle_reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_enabled"], event.target.checked)} /><span>Vehicle ReID enabled</span></label>
-                <label>Vehicle ReID model<input value={config.detector?.tracking?.vehicle_reid_model_path ?? ""} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_model_path"], event.target.value)} placeholder="vehicle-reid-0001.xml" /><small>OpenVINO whole-vehicle embedding model. This is separate from the person model.</small></label>
-                <label>Vehicle labels<input value={(config.detector?.tracking?.vehicle_reid_labels || ["car", "truck", "bus", "motorcycle"]).join(", ")} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_labels"], event.target.value.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))} /><small>Comma-separated detector labels that use vehicle appearance matching.</small></label>
-                <label>Vehicle ReID device<input value={config.detector?.tracking?.vehicle_reid_device ?? "CPU"} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_device"], event.target.value)} /><small>Shares the isolated appearance worker. CPU by default so live gvadetect keeps the Intel GPU. AUTO is treated as CPU.</small></label>
-                <label>Vehicle appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.vehicle_reid_match_threshold ?? 0.8} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_match_threshold"], Number(event.target.value))} /><small>Higher values reduce accidental merging of similar-looking vehicles.</small></label>
-                <label>Maximum appearance checks<input type="number" min="1" max="64" step="1" value={config.detector?.tracking?.reid_max_embeddings_per_frame ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_embeddings_per_frame"], Number(event.target.value))} /><small>Bounds combined person and vehicle ReID work in a crowded frame.</small></label>
-                <label>Refresh appearance every<input type="number" min="1" max="120" step="1" value={config.detector?.tracking?.reid_refresh_interval_frames ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_refresh_interval_frames"], Number(event.target.value))} /><small>Matched samples between appearance refreshes. Geometry handles the intervening frames; lower values use more CPU.</small></label>
-                <div className="detection-settings-subhead"><strong>Missed-session recovery</strong><small>Recover durable appearance evidence from the saved incident image after full tracking finishes or is skipped.</small></div>
-                <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.deferred_reid_enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "deferred_reid_enabled"], event.target.checked)} /><span>Recover missed appearance evidence</span></label>
-                <label>Recovery delay<input type="number" min="0" max="300" step="1" value={config.detector?.tracking?.deferred_reid_delay_seconds ?? 20} onChange={(event) => updateConfig(["detector", "tracking", "deferred_reid_delay_seconds"], Number(event.target.value))} /><small>Waits for stronger multi-frame tracking evidence before using a single saved snapshot.</small></label>
-                <label>Nearby-camera window<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.related_sequence_window_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "related_sequence_window_seconds"], Number(event.target.value))} /><small>Seconds on either side used to show clearly labeled sequence candidates. Time alone never claims identity.</small></label>
-                <div className="detection-settings-subhead camera-route-heading"><div><strong>Expected camera routes</strong><small>Describe physically plausible camera-to-camera movement. Direction follows event time; routes strengthen ordering but never establish identity by themselves.</small></div><button type="button" onClick={addCameraRoute} disabled={routeCameras.length < 2}>Add route</button></div>
-                <div className="camera-route-list">
-                  {cameraTransitionRoutes.length ? cameraTransitionRoutes.map((route, index) => <div className="camera-route-row" key={`${route.from_camera}-${route.to_camera}-${index}`}>
-                    <label>From<select value={route.from_camera} onChange={(event) => updateCameraRoute(index, "from_camera", event.target.value)}>{routeCameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}</select></label>
-                    <span className="camera-route-arrow">→</span>
-                    <label>To<select value={route.to_camera} onChange={(event) => updateCameraRoute(index, "to_camera", event.target.value)}>{routeCameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}</select></label>
-                    <label>Earliest<input type="number" min="0" max="299" step="1" value={route.min_seconds ?? 0} onChange={(event) => updateCameraRoute(index, "min_seconds", Number(event.target.value))} /><small>seconds</small></label>
-                    <label>Latest<input type="number" min="1" max="300" step="1" value={route.max_seconds ?? 30} onChange={(event) => updateCameraRoute(index, "max_seconds", Number(event.target.value))} /><small>seconds</small></label>
-                    <label className="compact-toggle"><input type="checkbox" checked={route.bidirectional ?? false} onChange={(event) => updateCameraRoute(index, "bidirectional", event.target.checked)} /><span>Both directions</span></label>
-                    <label className="compact-toggle"><input type="checkbox" checked={route.enabled ?? true} onChange={(event) => updateCameraRoute(index, "enabled", event.target.checked)} /><span>Enabled</span></label>
-                    <button type="button" className="danger" onClick={() => updateConfig(["detector", "tracking", "camera_transition_routes"], cameraTransitionRoutes.filter((_item, routeIndex) => routeIndex !== index))}>Remove</button>
-                  </div>) : <p className="settings-help">No expected routes yet. Nearby incidents still appear as general sequence candidates.</p>}
-                </div>
-              </div>
-              {config.detector?.tracking?.reid_enabled ? (
-                reidStatus?.enabled ? (
-                  <div className={`probe-result ${(reidStatus.person?.ready ?? reidStatus.ready) ? "ok" : "bad"}`}>
-                    <strong>{(reidStatus.person?.ready ?? reidStatus.ready) ? "Person appearance matching is ready" : "Person appearance matching is unavailable"}</strong>
-                    <span>{(reidStatus.person?.ready ?? reidStatus.ready) ? `${reidStatus.person?.device || reidStatus.device || "AUTO"} · ${reidStatus.person?.embedding_size || reidStatus.embedding_size || 0}-value appearance signature` : reidStatus.person?.error || reidStatus.error || "The isolated ReID worker did not start."}</span>
-                    {(reidStatus.person?.ready ?? reidStatus.ready) && (reidStatus.person?.model_load_ms ?? reidStatus.model_load_ms) != null ? <span>Model loaded in {Math.round(reidStatus.person?.model_load_ms ?? reidStatus.model_load_ms)} ms</span> : null}
-                  </div>
-                ) : <div className="probe-result"><strong>Person appearance matching is not active yet</strong><span>Save the configuration and restart SurvNG to start its isolated model worker.</span></div>
-              ) : null}
-              {config.detector?.tracking?.vehicle_reid_enabled ? (
-                reidStatus?.enabled ? (
-                  <div className={`probe-result ${reidStatus.vehicle?.ready ? "ok" : "bad"}`}>
-                    <strong>{reidStatus.vehicle?.ready ? "Vehicle appearance matching is ready" : "Vehicle appearance matching is unavailable"}</strong>
-                    <span>{reidStatus.vehicle?.ready ? `${reidStatus.vehicle.device || "AUTO"} · ${reidStatus.vehicle.embedding_size || 0}-value vehicle signature · ${(reidStatus.vehicle.labels || []).join(", ")}` : reidStatus.vehicle?.error || "The vehicle ReID model did not start."}</span>
-                    {reidStatus.vehicle?.ready && reidStatus.vehicle.model_load_ms != null ? <span>Model loaded in {Math.round(reidStatus.vehicle.model_load_ms)} ms</span> : null}
-                  </div>
-                ) : <div className="probe-result"><strong>Vehicle appearance matching is not active yet</strong><span>Save the configuration and restart SurvNG to start the model.</span></div>
-              ) : null}
-            </details>
-          </section> : null}
-
-          {detectionSection === "search" ? <details className="detection-settings-card detection-feature-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><Search size={18} /></span><span><strong>Smart Search</strong><small>Find indexed incidents by describing visible details in plain language.</small></span></summary>
-            <div className="detection-feature-body detection-field-grid">
-              <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.enabled ?? false} onChange={(event) => updateConfig(["semantic_search", "enabled"], event.target.checked)} /><span>Smart Search enabled</span></label>
-              <label>Model package<input value={config.semantic_search?.model_dir ?? ""} onChange={(event) => updateConfig(["semantic_search", "model_dir"], event.target.value)} placeholder="/path/to/SurvNG/models/mobileclip2-b-openvino-fp16" /><small>Use the host path for systemd or the mounted container path for Docker. The package contains semantic_model.json, both encoders, and tokenizer assets.</small></label>
-              <label>Inference device<input value={config.semantic_search?.device ?? "GPU"} onChange={(event) => updateConfig(["semantic_search", "device"], event.target.value)} /><small>GPU is recommended on Intel systems. This does not share the object detector queue.</small></label>
-              <label>Historical batch size<input type="number" min="1" max="250" step="1" value={config.semantic_search?.backfill_batch_size ?? 25} onChange={(event) => updateConfig(["semantic_search", "backfill_batch_size"], Number(event.target.value))} /><small>How many older incidents are scheduled at a time. Existing indexed generations are skipped.</small></label>
-              <label>Historical pacing<input type="number" min="0.01" max="5" step="0.05" value={config.semantic_search?.backfill_pause_seconds ?? 0.25} onChange={(event) => updateConfig(["semantic_search", "backfill_pause_seconds"], Number(event.target.value))} /><small>Pause between older incidents so object detection and new Smart Search evidence retain priority.</small></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.index_full_frame ?? true} onChange={(event) => updateConfig(["semantic_search", "index_full_frame"], event.target.checked)} /><span>Index whole incident image</span></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.index_object_crops ?? true} onChange={(event) => updateConfig(["semantic_search", "index_object_crops"], event.target.checked)} /><span>Index detected object crops</span></label>
-              <label>Object crops per incident<input type="number" min="1" max="100" step="1" value={config.semantic_search?.max_object_crops_per_event ?? 24} onChange={(event) => updateConfig(["semantic_search", "max_object_crops_per_event"], Number(event.target.value))} /><small>Caps crop inference and memory for unusually busy incidents; highest-confidence detections are indexed first.</small></label>
-            </div>
-          </details> : null}
-
-          {detectionSection === "motion" ? <details className="detection-settings-card detection-feature-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><Gauge size={18} /></span><span><strong>Motion validation</strong><small>How camera and visual motion decide when object detection runs.</small></span></summary>
-            <div className="detection-feature-body">
-              <MotionAnalysisPresetEditor
-                qualification={config.motion_qualification?.pipeline?.qualification || []}
-                catalog={motionCatalog}
-                onChange={(qualification) => updateConfig(
-                  ["motion_qualification", "pipeline"],
-                  { ...(config.motion_qualification?.pipeline || {}), qualification },
-                )}
-              />
-              <details className="motion-tuning-details">
-                <summary>Advanced motion tuning</summary>
-                <div className="field-row">
-                  <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
-                  <label>Light and shadow filtering<select value={String(config.motion_qualification?.illumination_filter_enabled ?? false)} onChange={(event) => updateConfig(["motion_qualification", "illumination_filter_enabled"], event.target.value === "true")}><option value="false">Disabled</option><option value="true">Enabled</option></select><small>Ignores clear moving illumination while uncertain motion continues to object detection. Disabled still records evidence for evaluation.</small></label>
-                  <label>Analysis size<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select><small>Maximum image edge used by EMA; portrait cameras no longer expand beyond this size.</small></label>
-                  <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /><small>EMA samples per second on cameras that run continuous analysis.</small></label>
-                  <label>Simultaneous EMA cameras<input type="number" min="1" max="16" step="1" value={config.motion_qualification?.max_concurrent_analysis ?? 2} onChange={(event) => updateConfig(["motion_qualification", "max_concurrent_analysis"], Number(event.target.value))} /><small>How many cameras may run visual analysis at once. Raise this on a larger NVR if EMA backup coverage is falling behind. Capture and recording are not limited by this.</small></label>
-                  <label>ONVIF background upkeep<select value={String(config.motion_qualification?.camera_mode_background_fps ?? 2)} onChange={(event) => updateConfig(["motion_qualification", "camera_mode_background_fps"], Number(event.target.value))}><option value="1">Low CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Faster adaptation (3 frames/sec)</option><option value="5">Maximum adaptation (5 frames/sec)</option></select><small>When camera alerts trigger motion, SurvNG maintains the visual background at this lower rate. Trigger validation still analyzes the full buffered window.</small></label>
-                  {config.motion_qualification?.mode === "camera_rescue" ? <>
-                    <div className="detection-settings-subhead"><strong>Visual backup safeguards</strong><small>These conservative limits control when SurvNG may compensate for a missing camera notice.</small></div>
-                    <label>Scene learning time<input type="number" min="0" max="120" step="1" value={config.motion_qualification?.visual_backup_warmup_seconds ?? 10} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_warmup_seconds"], Number(event.target.value))} /><small>After this unchanged startup period, EMA also waits for a quiet scene baseline. Camera alerts continue normally throughout.</small></label>
-                    <label>Wait for camera notice<input type="number" min="0" max="5" step="0.25" value={config.motion_qualification?.visual_backup_grace_seconds ?? 1.5} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_grace_seconds"], Number(event.target.value))} /><small>Seconds strong visual motion must persist while SurvNG waits for ONVIF.</small></label>
-                    <label>Minimum visual confidence<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.visual_backup_min_score ?? 0.7} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_min_score"], Number(event.target.value))} /><small>Absolute adaptive score required before visual backup is considered.</small></label>
-                    <label>Confidence above normal<input type="number" min="0" max="0.5" step="0.01" value={config.motion_qualification?.visual_backup_score_margin ?? 0.15} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_score_margin"], Number(event.target.value))} /><small>Additional margin above the camera&apos;s adaptive threshold.</small></label>
-                    <label>Consecutive strong samples<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.visual_backup_min_consecutive ?? 3} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_min_consecutive"], Number(event.target.value))} /><small>Prevents a single noisy frame from invoking object detection.</small></label>
-                    <label>Backup cooldown<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.visual_backup_cooldown_seconds ?? 20} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_cooldown_seconds"], Number(event.target.value))} /><small>Minimum seconds between visual backup attempts and after a camera notice.</small></label>
-                    <label>Maximum backups per 5 minutes<input type="number" min="1" max="30" step="1" value={config.motion_qualification?.visual_backup_max_triggers_5m ?? 3} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_max_triggers_5m"], Number(event.target.value))} /><small>Hard per-camera safety limit for object-detector work.</small></label>
-                  </> : null}
-                  <label>Window Seconds<input type="number" min="0.8" max="4" step="0.1" value={config.motion_qualification?.window_seconds ?? 1.6} onChange={(event) => updateConfig(["motion_qualification", "window_seconds"], Number(event.target.value))} /></label>
-                  <label>Post-trigger Seconds<input type="number" min="0.5" max="6" step="0.1" value={config.motion_qualification?.post_trigger_seconds ?? 2.5} onChange={(event) => updateConfig(["motion_qualification", "post_trigger_seconds"], Number(event.target.value))} /></label>
-                  <label>Burst Quiet Seconds<input type="number" min="0.1" max="2" step="0.1" value={config.motion_qualification?.burst_quiet_seconds ?? 0.5} onChange={(event) => updateConfig(["motion_qualification", "burst_quiet_seconds"], Number(event.target.value))} /></label>
-                  <label>Save rejected motion images<select value={String(config.motion_qualification?.rejected_sample_rate ?? 1)} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))}><option value="1">Every rejection (Recommended)</option><option value="0.5">About half</option><option value="0.1">About 1 in 10</option><option value="0.05">About 1 in 20</option><option value="0">Never</option></select><small>Used by Motion Audit and the AI Advisor. SurvNG keeps the latest 100 per camera.</small></label>
-                  <label>Double-check filtered motion<select value={String(config.motion_qualification?.suppression_verification_rate ?? 0.05)} onChange={(event) => updateConfig(["motion_qualification", "suppression_verification_rate"], Number(event.target.value))}><option value="0">Off</option><option value="0.01">About 1 in 100</option><option value="0.05">About 1 in 20 (Recommended)</option><option value="0.1">About 1 in 10</option></select><small>Runs object detection on a sample of visual rejections. If a configured object is found, SurvNG restores the incident; otherwise only Motion Audit records the check.</small></label>
-                  <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.borderline_rescue_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "borderline_rescue_enabled"], event.target.checked)} /> Borderline object rescue</label>
-                  <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" value={config.motion_qualification?.borderline_margin ?? 0.03} onChange={(event) => updateConfig(["motion_qualification", "borderline_margin"], Number(event.target.value))} /></label>
-                </div>
-              </details>
-              <MotionDecisionEditor
-                fusion={config.motion_qualification?.pipeline?.fusion}
-                mode={config.motion_qualification?.mode || "camera_rescue"}
-                onModeChange={(mode) => updateConfig(["motion_qualification", "mode"], mode)}
-                onChange={(fusion) => updateConfig(
-                  ["motion_qualification", "pipeline"],
-                  { ...(config.motion_qualification?.pipeline || {}), fusion },
-                )}
-              />
-            </div>
-          </details> : null}
-
-          {detectionSection === "depth" ? <details className="detection-settings-card detection-feature-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><Layers size={18} /></span><span><strong>Monocular depth</strong><small>Estimate per-object distance on representative incident frames.</small></span></summary>
-            <div className="detection-feature-body detection-field-grid">
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.depth?.enabled ?? false} onChange={(event) => updateConfig(["detector", "depth", "enabled"], event.target.checked)} /><span>Depth enrichment enabled</span></label>
-              <label>Depth Model<input value={config.detector?.depth?.model_path || ""} onChange={(event) => updateConfig(["detector", "depth", "model_path"], event.target.value)} placeholder="yolo26n-depth_openvino_model/yolo26n-depth.xml" /></label>
-              <label>Depth Device<select value={config.detector?.depth?.device || "CPU"} onChange={(event) => updateConfig(["detector", "depth", "device"], event.target.value)}>
-                {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select><small>CPU by default. Live gvadetect owns the Intel GPU; AUTO is treated as CPU.</small></label>
-              <label>Input Size<input type="number" min="320" max="1280" step="32" value={config.detector?.depth?.input_size ?? 768} onChange={(event) => updateConfig(["detector", "depth", "input_size"], Number(event.target.value))} /></label>
-              <label>Minimum Distance (m)<input type="number" min="0.01" max="500" step="0.01" value={config.detector?.depth?.min_distance_m ?? 0.05} onChange={(event) => updateConfig(["detector", "depth", "min_distance_m"], Number(event.target.value))} /></label>
-              <label>Maximum Distance (m)<input type="number" min="1" max="500" step="0.1" value={config.detector?.depth?.max_distance_m ?? 150} onChange={(event) => updateConfig(["detector", "depth", "max_distance_m"], Number(event.target.value))} /></label>
-              <label>Ignore Incidents Beyond (m)<input type="number" min="0.5" max="500" step="0.1" value={config.detector?.depth?.max_incident_distance_m ?? ""} onChange={(event) => updateConfig(["detector", "depth", "max_incident_distance_m"], event.target.value === "" ? null : Number(event.target.value))} placeholder="optional" /></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.depth?.store_heatmap ?? false} onChange={(event) => updateConfig(["detector", "depth", "store_heatmap"], event.target.checked)} /><span>Store representative depth heatmap</span></label>
-            </div>
-          </details> : null}
-
-          {detectionSection === "faces" ? <details className="detection-settings-card detection-feature-card wide-card" open>
-            <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Face recognition</strong><small>Identify detected faces using a separate embedding model.</small></span></summary>
-            <div className="detection-feature-body detection-field-grid">
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Recognition enabled</span></label>
-              <label>Embedding Model<input value={config.detector?.face_embedding_model_path || ""} onChange={(event) => updateConfig(["detector", "face_embedding_model_path"], event.target.value)} placeholder="face_model/model.xml" /></label>
-              <label>Landmark Model<input value={config.detector?.face_landmark_model_path || ""} onChange={(event) => updateConfig(["detector", "face_landmark_model_path"], event.target.value)} placeholder="face_model/landmarks.xml" /></label>
-              <label>Face Detector Model<input value={config.detector?.face_detection_model_path || ""} onChange={(event) => updateConfig(["detector", "face_detection_model_path"], event.target.value)} placeholder="face_detector/model.xml" /></label>
-              <label>Recognition Device<select value={config.detector?.face_recognition_device || "CPU"} onChange={(event) => updateConfig(["detector", "face_recognition_device"], event.target.value)}>
-                {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select><small>CPU by default. Live gvadetect owns the Intel GPU; AUTO is treated as CPU.</small></label>
-              <label>Face Detection Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.face_detection_threshold ?? 0.6} onChange={(event) => updateConfig(["detector", "face_detection_threshold"], Number(event.target.value))} /></label>
-              <label>Suggestion Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_match_threshold ?? 0.4} onChange={(event) => updateConfig(["detector", "face_match_threshold"], Number(event.target.value))} /></label>
-              <label>Minimum Face Size<input type="number" min="16" max="1024" step="8" value={config.detector?.face_min_size ?? 48} onChange={(event) => updateConfig(["detector", "face_min_size"], Number(event.target.value))} /></label>
-              <label>References Per Person<input type="number" min="1" max="200" step="1" value={config.detector?.face_max_references ?? 20} onChange={(event) => updateConfig(["detector", "face_max_references"], Number(event.target.value))} /><small>SurvNG chooses the clearest, most varied confirmed faces; pinned references are always retained.</small></label>
-              <label>Saved face limit<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /><small>Oldest observations are removed first.</small></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_auto_identify_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_auto_identify_enabled"], event.target.checked)} /><span>Automatically identify very strong matches</span></label>
-              <label>Automatic Match Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_threshold ?? 0.55} onChange={(event) => updateConfig(["detector", "face_auto_identify_threshold"], Number(event.target.value))} /></label>
-              <label>Minimum Lead Over Next Person<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_margin ?? 0.12} onChange={(event) => updateConfig(["detector", "face_auto_identify_margin"], Number(event.target.value))} /></label>
-            </div>
-          </details> : null}
+        <section className="sub-panel detection-settings-card">
+          <h3>Native detection and tracking</h3>
+          <p>Each live stream runs gvadetect and gvatrack continuously. Fresh object presence in eligible zones creates incidents.</p>
+          <div className="form-grid">
+            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.enabled || false} onChange={(event) => updateConfig(["detector", "enabled"], event.target.checked)} /><span>Detection enabled</span></label>
+            <label>OpenVINO model<input value={config.detector?.model_path || config.detector?.model_xml || ""} onChange={(event) => updateConfig(["detector", "model_path"], event.target.value)} /></label>
+            <label>Device<input value={config.detector?.device || "GPU"} onChange={(event) => updateConfig(["detector", "device"], event.target.value)} /></label>
+            <label>Labels file<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} /></label>
+            <label>Frames per second<input type="number" min="0.5" max="10" step="0.5" value={config.detector?.live_sample_fps ?? 5} onChange={(event) => updateConfig(["detector", "live_sample_fps"], Number(event.target.value))} /><small>Every sampled frame runs detection and tracking.</small></label>
+            <label>Confidence<input type="number" min="0.01" max="1" step="0.01" value={config.detector?.confidence_threshold ?? 0.35} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /></label>
+            <label>Confirmation frames<input type="number" min="1" max="5" value={config.detector?.event_confirmation_frames ?? 2} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))} /></label>
+            <label>Presence timeout (seconds)<input type="number" min="1" max="60" step="0.5" value={config.detector?.native?.activity_timeout_seconds ?? 5} onChange={(event) => updateConfig(["detector", "native", "activity_timeout_seconds"], Number(event.target.value))} /><small>Time without fresh eligible presence before the episode ends.</small></label>
           </div>
-        </div>
+          <p>Native IDs last for one stream session. A stationary visible object remains present; reconnects start new identities.</p>
+        </section>
       ) : null}
 
       {section === "motion-review" ? (
@@ -5047,6 +4654,17 @@ export function DepthShadowPerformance({ cameraId = "", mode = "", label = "Dept
 }
 
 export function RuntimeStatus({ status, timeZone, motionCatalog }) {
+  if (status.native_activity) {
+    const native = status.native_activity;
+    const pipeline = status.live_pipeline || {};
+    return <section className="sub-panel">
+      <h3>Native pipeline</h3>
+      <p>{native.health} · {Number(native.effective_fresh_fps || 0).toFixed(1)} fresh detections/sec</p>
+      <p>Detector time: {pipeline.native_detector_average_ms ?? "—"} ms average · {pipeline.native_detector_p95_ms ?? "—"} ms p95</p>
+      <p>Last fresh result: {native.last_fresh_age_seconds == null ? "waiting" : `${Number(native.last_fresh_age_seconds).toFixed(1)} seconds ago`}</p>
+      <p>{native.active ? "Object presence active" : "No active presence episode"} · {native.counters?.events_created || 0} events · {native.counters?.metadata_restarts || 0} metadata recoveries</p>
+    </section>;
+  }
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
   }

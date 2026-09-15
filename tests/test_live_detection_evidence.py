@@ -220,14 +220,15 @@ def test_capture_status_clears_stale_boxes_and_old_session_admission():
     assert capture.status()["live_detections"] == []
 
 
-def test_capture_graph_rebuilds_when_tracking_rate_or_low_candidate_floor_changes():
+def test_native_capture_uses_live_cadence_and_ignores_legacy_tracking_floor():
     config = AppConfig()
     changed = config.model_copy(deep=True)
-    changed.detector.tracking.sample_fps += 1
+    changed.detector.live_sample_fps += 1
     assert manager_owned_config(config) != manager_owned_config(changed)
     changed = config.model_copy(deep=True)
     changed.detector.tracking.low_confidence_threshold = .01
-    assert live_detection_threshold(changed) == .01
+    assert live_detection_threshold(changed) == live_detection_threshold(config)
+    changed.detector.native.inference_requests += 1
     assert manager_owned_config(config) != manager_owned_config(changed)
 
 

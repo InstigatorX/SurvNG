@@ -18,7 +18,7 @@ HOT_CONFIG_FIELDS = frozenset({"main_evidence", "weather", "base_path", "event_c
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
 DETECTOR_HOT_POLICY_FIELDS = frozenset({"confidence_threshold", "event_candidate_confidence_threshold", "event_confirmation_frames", "event_class_confirmation_frames", "event_class_confidence_thresholds", "event_refinement_stages", "event_route_refinement_stages", "event_refinement_retry_seconds", "event_refinement_settle_seconds", "event_refinement_retry_interval_seconds", "event_representative_refinement_timeout_seconds", "object_activity_attribution", "require_incident_zone", "max_concurrent_refinements", "recorded_adaptive_sampling", "recorded_decode_max_processes", "face_max_observations", "face_detection_threshold", "face_enrich_max_people", "face_match_threshold", "face_unknown_cluster_threshold", "face_auto_identify_enabled", "face_auto_identify_threshold", "face_auto_identify_margin", "face_min_size", "face_max_references"})
 TRACKING_SESSION_FIELDS = frozenset({"enabled", "implementation", "excluded_labels", "sample_fps", "adaptive_sampling_enabled", "stable_sample_fps", "adaptive_stable_frames", "max_catchup_frames_per_tick", "persist_interval_seconds", "max_session_seconds", "lost_timeout_seconds", "min_confirmations", "low_confidence_threshold", "match_iou_threshold", "match_center_distance_ratio", "max_active_cameras", "adaptive_burst_enabled", "burst_max_active_cameras", "capacity_wait_seconds", "deferred_reid_enabled", "deferred_reid_delay_seconds", "deferred_reid_min_crop_pixels", "deferred_reid_rate_per_minute", "related_sequence_window_seconds", "camera_transition_routes", "max_tracks_per_session", "reid_max_age_seconds", "reid_max_embeddings_per_frame", "reid_refresh_interval_frames", "reid_match_threshold", "vehicle_reid_match_threshold", "vehicle_reid_labels"})
-DETECTOR_CAPTURE_FIELDS = frozenset({"live_sample_fps"})
+DETECTOR_CAPTURE_FIELDS = frozenset({"live_sample_fps", "native"})
 CAPTURE_TRACKING_FIELDS = frozenset({"sample_fps"})
 DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({"enabled", "backend", "object_worker_count", "model_path", "model_xml", "model_output_format", "model_input_layout", "coreml_model_path", "labels_path", "device", "nms_threshold", "warmup_enabled", "labels"})
 DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({"enabled", "backend", "model_path", "model_xml", "model_output_format", "model_input_layout", "coreml_model_path", "labels_path", "nms_threshold", "labels"})
@@ -68,11 +68,11 @@ def manager_owned_config(config: AppConfig) -> dict:
         "detector": {name: getattr(config.detector, name) for name in (
             "enabled", "backend", "model_path", "model_xml", "labels_path", "labels", "device", "nms_threshold",
         )},
-        "sample_fps": config.motion_qualification.sample_fps,
-        "frame_width": config.motion_qualification.frame_width,
+        "sample_fps": config.detector.live_sample_fps,
+        "frame_width": 640,
         "detection_fps": config.detector.live_sample_fps,
-        "tracking_enabled": config.detector.tracking.enabled,
-        "tracking_fps": config.detector.tracking.sample_fps,
+        "tracking_enabled": config.detector.enabled,
+        "tracking_fps": config.detector.live_sample_fps,
         "threshold": live_detection_threshold(config),
     }
     for field in HOT_CONFIG_FIELDS | RECORDER_CONFIG_FIELDS:
@@ -83,8 +83,8 @@ def manager_owned_config(config: AppConfig) -> dict:
         camera.pop("retention", None)
         camera.pop("live_view", None)
         camera.pop("object_activity_attribution", None)
-        camera.pop("motion_qualification", None)
-    payload.pop("motion_qualification", None)
+        # Native workers do not hot-apply motion pipeline settings.
+    # A structural reload absorbs retired motion settings without running EMA.
     payload["detector"] = _without_fields(payload.get("detector", {}), DETECTOR_HOT_POLICY_FIELDS | DETECTOR_OBJECT_ENGINE_FIELDS | DETECTOR_FACE_ENGINE_FIELDS | DETECTOR_SHARED_ENGINE_FIELDS)
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
@@ -100,11 +100,10 @@ def manager_owned_config(config: AppConfig) -> dict:
 
 
 def live_detection_threshold(config: AppConfig) -> float:
-    """Do not discard candidates needed by class/zone policy or ByteTrack."""
+    """Retain candidates required by native class/zone admission policy."""
     return min(
         config.detector.confidence_threshold,
         config.detector.event_candidate_confidence_threshold,
-        config.detector.tracking.low_confidence_threshold,
         *config.detector.event_class_confidence_thresholds.values(),
         *(zone.confidence_threshold for camera in config.cameras for zone in camera.zones
           if zone.enabled and zone.confidence_threshold is not None),

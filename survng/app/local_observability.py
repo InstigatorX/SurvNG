@@ -212,6 +212,20 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             "failed_samples": int(_number(alignment.get("failed_samples"))),
             "last_attempt_seconds_ago": _optional_number(alignment.get("last_attempt_seconds_ago")),
         },
+        "native": {
+            "health": _motion_identifier(tracking.get("health")),
+            "implementation": _motion_identifier(tracking.get("implementation")),
+            "last_fresh_age_seconds": _optional_number(tracking.get("last_fresh_age_seconds")),
+            "effective_fresh_fps": _optional_number(tracking.get("effective_fresh_fps")),
+            "counters": _numeric_fields(tracking.get("counters"), (
+                "fresh_frames", "prediction_frames", "unknown_frames", "stale_observations",
+                "missing_track_id", "track_capacity_drops", "events_created", "snapshot_frame_missing", "metadata_restarts",
+            )),
+        },
+        "live_pipeline": _numeric_fields(raw.get("live_pipeline"), (
+            "detect_fps", "effective_inference_fps", "inference_interval", "native_evidence_invalid",
+            "native_detector_average_ms", "native_detector_p95_ms", "native_detector_timing_samples",
+        )),
         "tracking": {
             "active": bool(tracking.get("active")),
             "running": bool(tracking.get("running")),
@@ -290,7 +304,12 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
             ready_value = bool(ready_value and isolation.get("worker_alive"))
     return {
         "enabled": bool(config.detector.enabled),
-        "backend": str(config.detector.backend),
+        "backend": "dlstreamer" if raw.get("native") else str(config.detector.backend),
+        "native": bool(raw.get("native")),
+        "active_cameras": _optional_number(raw.get("active_cameras")),
+        "healthy_cameras": _optional_number(raw.get("healthy_cameras")),
+        "native_inference_requests": config.detector.native.inference_requests if raw.get("native") else None,
+        "native_inference_streams": config.detector.native.inference_streams if raw.get("native") else None,
         "device": str(raw.get("configured_device") or config.detector.device),
         "loaded_devices": loaded_devices,
         "fallback_active": bool(isolation.get("fallback_active")),
@@ -514,27 +533,24 @@ def build_runtime_status(
         },
         "tracking": {
             "settings": {
-                "enabled": bool(tracking_config.enabled),
-                "max_active_cameras": int(tracking_config.max_active_cameras),
-                "adaptive_burst_enabled": bool(tracking_config.adaptive_burst_enabled),
-                "burst_max_active_cameras": int(
-                    tracking_config.burst_max_active_cameras
-                ),
-                "capacity_wait_seconds": float(tracking_config.capacity_wait_seconds),
-                "deferred_reid_enabled": bool(tracking_config.deferred_reid_enabled),
+                "enabled": bool(config.detector.enabled) if raw_detector.get("native") else bool(tracking_config.enabled),
+                "implementation": "gvatrack" if raw_detector.get("native") else tracking_config.implementation,
+                "max_active_cameras": len(cameras) if raw_detector.get("native") else int(tracking_config.max_active_cameras),
+                "adaptive_burst_enabled": False if raw_detector.get("native") else bool(tracking_config.adaptive_burst_enabled),
+                "burst_max_active_cameras": len(cameras) if raw_detector.get("native") else int(tracking_config.burst_max_active_cameras),
+                "capacity_wait_seconds": 0.0 if raw_detector.get("native") else float(tracking_config.capacity_wait_seconds),
+                "deferred_reid_enabled": False if raw_detector.get("native") else bool(tracking_config.deferred_reid_enabled),
             },
             "capacity": {
                 "active": int(_number(limiter.get("active"))),
-                "baseline": int(
-                    _number(limiter.get("baseline"), tracking_config.max_active_cameras)
-                ),
-                "burst_limit": int(
+                "baseline": len(cameras) if raw_detector.get("native") else int(_number(limiter.get("baseline"), tracking_config.max_active_cameras)),
+                "burst_limit": len(cameras) if raw_detector.get("native") else int(
                     _number(
                         limiter.get("burst_limit"),
                         tracking_config.burst_max_active_cameras,
                     )
                 ),
-                "burst_enabled": bool(
+                "burst_enabled": False if raw_detector.get("native") else bool(
                     limiter.get("burst_enabled", tracking_config.adaptive_burst_enabled)
                 ),
                 "burst_admissions": int(_number(limiter.get("burst_admissions"))),

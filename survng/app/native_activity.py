@@ -1,0 +1,206 @@
+"""Native observations own admission and activity; no pixels or model calls.
+
+A native track ID is scoped to a capture session. Only fresh, zone-eligible
+observations confirm presence. Predictions may move overlays but cannot create
+an event, increment evidence counts, or extend the activity deadline.
+"""
+from __future__ import annotations
+
+from collections import Counter, deque
+from copy import deepcopy
+from datetime import datetime, timezone
+import json
+import time
+from typing import Callable
+
+from .live_detections import DetectionSnapshot
+from .zones import apply_detection_zones
+
+
+def iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+class NativeActivity:
+    def __init__(self, camera, config, events, publish: Callable, snapshot: Callable):
+        self.camera, self.config = camera, config
+        self.events, self.publish, self.snapshot = events, publish, snapshot
+        self.session = ""
+        self.identity_epoch = 0
+        self.sequence = 0
+        self.last_pts = -1.0
+        self.last_received = 0.0
+        self.last_fresh = 0.0
+        self.last_activity = 0.0
+        self.last_persist = 0.0
+        self.event_id = None
+        self.tracks = {}
+        self.counts = Counter()
+        self.last_motion_at = ""
+        self.health = "waiting_for_metadata"
+        self.dimensions = (0, 0)
+        self._next_track_id = 1
+        self._fresh_times = deque(maxlen=100)
+
+    def consume(self, observation: DetectionSnapshot, *, now: float, epoch: float):
+        if not observation.session:
+            self.counts["invalid_session"] += 1
+            return
+        if observation.session != self.session:
+            self.finish("stream_reset", now=now)
+            self.session = observation.session
+            self.identity_epoch = 0
+            self.dimensions = (0, 0)
+            self.sequence = 0
+            self.last_pts = -1.0
+        if observation.inference_sequence <= self.sequence or observation.source_pts <= self.last_pts:
+            return
+        self.sequence = observation.inference_sequence
+        self.last_pts = observation.source_pts
+        if now - observation.received_monotonic > self.config.native.maximum_observation_age_seconds:
+            self.counts["stale_observations"] += 1
+            return
+        self.last_received = now
+        if observation.provenance != "native_fresh_detection":
+            self.counts["prediction_frames" if observation.provenance == "native_tracked_prediction" else "unknown_frames"] += 1
+            return
+        dimensions = (observation.width, observation.height)
+        if self.dimensions != (0, 0) and self.dimensions != dimensions:
+            self.finish("geometry_changed", now=now)
+            self.identity_epoch += 1
+            self.counts["geometry_resets"] += 1
+        self.last_fresh = now
+        self.dimensions = dimensions
+        self.health = "healthy"
+        self.counts["fresh_frames"] += 1
+        self._fresh_times.append(now)
+        objects = apply_detection_zones(
+            self.camera, observation.scaled_objects(observation.width, observation.height),
+            observation.width, observation.height, self.config.confidence_threshold,
+            self.config.require_incident_zone, self.config.event_class_confidence_thresholds,
+        )
+        eligible = [obj for obj in objects
+                    if obj.get("detection_provenance") == "native_fresh_detection"
+                    and obj.get("incident_eligible")]
+        seen = set()
+        for obj in eligible:
+            native_id = obj.get("native_track_id")
+            if type(native_id) is not int or native_id < 0:
+                self.counts["missing_track_id"] += 1
+                continue
+            key = (native_id, obj["label"])
+            if key in seen:
+                self.counts["duplicate_track_id"] += 1
+                continue
+            seen.add(key)
+            track = self.tracks.get(key)
+            if track is None:
+                if len(self.tracks) >= self.config.native.maximum_tracks:
+                    self.counts["track_capacity_drops"] += 1
+                    continue
+                track = {"track_id": self._next_track_id,
+                         "native_track_id": native_id,
+                         "native_identity": f"{self.camera.id}/{self.session}/{self.identity_epoch}/{native_id}",
+                         "label": obj["label"], "first_seen": iso(epoch),
+                         "observations": 0, "consecutive": 0, "last_monotonic": now,
+                         "box_history": [], "trajectory": []}
+                self.tracks[key] = track
+                self._next_track_id += 1
+            if now - track["last_monotonic"] > self.config.native.maximum_observation_age_seconds:
+                track["consecutive"] = 0
+            track.update(last_monotonic=now, last_seen=iso(epoch),
+                         box=deepcopy(obj["box"]), confidence=obj["confidence"],
+                         zones=obj.get("zones", []), incident_eligible=True)
+            track["observations"] += 1
+            track["consecutive"] += 1
+            required = self.config.event_class_confirmation_frames.get(obj["label"], self.config.event_confirmation_frames)
+            track["state"] = "confirmed" if track["consecutive"] >= required else "tentative"
+            box = obj["box"]
+            track["box_history"].append([epoch, box["x1"], box["y1"], box["x2"], box["y2"]])
+            track["trajectory"].append([epoch, (box["x1"] + box["x2"]) / 2, (box["y1"] + box["y2"]) / 2])
+            track["max_confidence"] = max(track.get("max_confidence", 0), obj["confidence"])
+            track["confirmed"] = track.get("confirmed", False) or track["state"] == "confirmed"
+            del track["box_history"][:-150]
+            del track["trajectory"][:-150]
+        for key, track in list(self.tracks.items()):
+            if key not in seen:
+                track["consecutive"] = 0
+            if now - track["last_monotonic"] >= self.config.native.activity_timeout_seconds:
+                if self.event_id is None:
+                    del self.tracks[key]
+                else:
+                    track["state"] = "lost"
+        if eligible and not seen:
+            self.health = "tracking_unavailable"
+        confirmed = [track for key, track in self.tracks.items() if key in seen and track["state"] == "confirmed"]
+        if confirmed:
+            self.last_activity = now
+            self.last_motion_at = iso(epoch)
+            if self.event_id is None:
+                stored = self._objects(confirmed)
+                path = self.snapshot(observation, epoch)
+                event = self.events.add_event(
+                    camera_id=self.camera.id, kind="motion", topic="native/object-presence",
+                    message="Confirmed native object presence", created_at=iso(epoch),
+                    snapshot_path=path, objects_json=json.dumps(stored),
+                    detection_intent_id=f"native:{self.camera.id}:{self.session}:{self.sequence}",
+                )
+                self.event_id = int(event["id"])
+                self.counts["events_created"] += 1
+                self.publish("incident", {"camera_id": self.camera.id, "event_id": self.event_id, "timestamp": iso(epoch), "kind": "motion"})
+                self.publish("object", {"camera_id": self.camera.id, "event_id": self.event_id,
+                             "timestamp": iso(epoch), "objects": stored, "source": "native",
+                             "snapshot_path": path})
+                self.persist("active", now=now)
+            elif now - self.last_persist >= 1.0:
+                self.persist("active", now=now)
+        self.tick(now=now)
+
+    @staticmethod
+    def _objects(tracks):
+        return [{**{k: deepcopy(v) for k, v in track.items()
+                   if k not in {"last_monotonic", "consecutive", "box_history", "trajectory"}},
+                 "track_state": track["state"], "track_observations": track["observations"],
+                 "detection_provenance": "native_fresh_detection"} for track in tracks]
+
+    def persist(self, state: str, *, now: float):
+        if self.event_id is None:
+            return
+        tracks = [{k: deepcopy(v) for k, v in track.items()
+                   if k not in {"last_monotonic", "consecutive"}} for track in self.tracks.values() if track.get("confirmed")]
+        for track in tracks:
+            track["duration_seconds"] = max(0, datetime.fromisoformat(track["last_seen"]).timestamp() - datetime.fromisoformat(track["first_seen"]).timestamp())
+        payload = {"implementation": "gvatrack", "state": state,
+                   "sample_fps": self.config.live_sample_fps,
+                   "tracks": tracks, "updated_at": self.last_motion_at,
+                   "frame_width": self.dimensions[0], "frame_height": self.dimensions[1],
+                   "source": "live", "native_session": self.session,
+                   "recording_overlay_compatible": self.camera.native_same_field_of_view or self.camera.live_url() == self.camera.stream_url}
+        self.events.update_object_tracking(self.event_id, payload, self._objects(self.tracks.values()))
+        self.publish("object_tracking", {"camera_id": self.camera.id, "event_id": self.event_id, **payload})
+        if state == "active":
+            self.publish("incident", {"camera_id": self.camera.id, "event_id": self.event_id,
+                                      "timestamp": self.last_motion_at, "updated": True})
+        self.last_persist = now
+
+    def tick(self, *, now: float):
+        if self.last_fresh and now - self.last_fresh > self.config.native.maximum_observation_age_seconds:
+            self.health = "metadata_stale"
+        if self.event_id is not None and now - self.last_activity >= self.config.native.activity_timeout_seconds:
+            self.finish("complete" if self.health == "healthy" and self.last_fresh >= self.last_activity + self.config.native.activity_timeout_seconds else "metadata_lost", now=now)
+
+    def finish(self, reason: str, *, now: float):
+        self.persist(reason, now=now)
+        self.event_id = None
+        self.tracks.clear()
+        self._next_track_id = 1
+        self.last_activity = 0.0
+
+    def status(self):
+        elapsed = self._fresh_times[-1] - self._fresh_times[0] if len(self._fresh_times) > 1 else 0
+        return {"implementation": "gvatrack", "enabled": self.config.enabled,
+                "active": self.event_id is not None, "event_id": self.event_id,
+                "health": self.health, "native_session": self.session,
+                "effective_fresh_fps": (len(self._fresh_times) - 1) / elapsed if elapsed > 0 else 0,
+                "last_fresh_age_seconds": max(0, time.monotonic() - self.last_fresh) if self.last_fresh else None,
+                "tracks": self._objects(self.tracks.values()), "counters": dict(self.counts)}

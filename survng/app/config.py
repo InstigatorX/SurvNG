@@ -541,6 +541,7 @@ class CameraLiveViewConfig(BaseModel):
 
 
 class CameraConfig(BaseModel):
+    native_same_field_of_view: bool = False
     main_evidence_enabled: bool | None = None
     incident_notifications_enabled: bool = True
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -769,10 +770,20 @@ class ObjectTrackingConfig(BaseModel):
         return auxiliary_openvino_device(self.vehicle_reid_device)
 
 
+class NativeActivityConfig(BaseModel):
+    """Native observation freshness and presence episode policy."""
+    activity_timeout_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
+    maximum_observation_age_seconds: float = Field(default=2.0, ge=0.2, le=10.0)
+    maximum_tracks: int = Field(default=128, ge=1, le=1024)
+    metadata_restart_seconds: float = Field(default=15.0, ge=5.0, le=120.0)
+    inference_requests: int = Field(default=4, ge=1, le=16)
+    inference_streams: int = Field(default=2, ge=1, le=8)
+
+
 class DetectorConfig(BaseModel):
+    native: NativeActivityConfig = Field(default_factory=NativeActivityConfig)
     enabled: bool = False
-    # Retained for native continuous-inference integrations; production capture
-    # is frames-only and qualification schedules inference in the shared pool.
+    # Native gvadetect cadence; every sampled frame is inferred and tracked.
     live_sample_fps: float = Field(default=5.0, ge=0.5, le=10.0)
     backend: Literal["openvino", "coreml"] = "openvino"
     object_worker_count: int = Field(default=2, ge=1, le=4)

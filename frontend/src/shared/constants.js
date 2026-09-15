@@ -6,7 +6,7 @@ export const MEDIA_STORAGE_ROLES = [
   ["clips", "Clips"],
   ["exports", "Exports"],
 ];
-export const CAMERA_ADMIN_SECTIONS = ["settings", "motion", "zones", "info"];
+export const CAMERA_ADMIN_SECTIONS = ["settings", "zones", "info"];
 export const TELEMETRY_ADMIN_SECTIONS = ["health", "occupancy", "diagnostics"];
 export const HEALTH_TELEMETRY_SECTIONS = ["health", "occupancy"];
 export const GENERAL_ADMIN_SECTIONS = ["general", "storage", "mqtt", "access", "detection", "motion-review"];

@@ -46,6 +46,7 @@ def _event_row(row: dict) -> dict:
         or "camera"
     ).lower()
     event["trigger_source"] = (
+        "native" if raw_trigger_source == "native/object-presence" else
         "ema"
         if raw_trigger_source in {"adaptive", "visual_backup", "adaptive/visual_backup"}
         else "camera"

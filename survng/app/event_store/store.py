@@ -18,7 +18,6 @@ from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
 from .motion_intelligence import EventStoreMotionIntelligenceMixin
-from .tracking import EventStoreTrackingMixin
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +26,6 @@ class EventStore(
     EventStoreEvidenceMixin,
     EventStoreJobsMixin,
     EventStoreCalibrationMixin,
-    EventStoreTrackingMixin,
     EventStoreMotionIntelligenceMixin,
 ):
     SNAPSHOT_SIZE_WRITE_BATCH = 50
@@ -40,17 +38,6 @@ class EventStore(
     # every camera, so an uncapped window can materialize enough of the table to
     # exhaust the recorder it shares a process with.
     MAX_COMPACT_WINDOW_ROWS = 50_000
-    TRACKING_COMPARISON_HISTORY_PER_CAMERA = 100
-    TRACKING_COMPARISON_VERDICTS = {
-        "survng_hybrid_candidate",
-        "ultralytics_tracktrack",
-        "survng_hybrid",
-        "ultralytics_botsort",
-        "ultralytics_deepocsort",
-        "ultralytics_fasttrack",
-        "inconclusive",
-    }
-
     def __init__(
         self,
         storage_dir: Path,
