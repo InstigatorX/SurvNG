@@ -102,6 +102,42 @@ class _PullMessagesResponseCapture:
             self._response = ""
 
 
+class _SubscriptionManagerAddressing:
+    """Supply WSA omitted by the bundled WS-Notification manager WSDL."""
+
+    _actions = frozenset(
+        "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/" + action
+        for action in ("RenewRequest", "UnsubscribeRequest")
+    )
+
+    def egress(self, envelope, http_headers, operation, binding_options):
+        if (
+            operation.soapaction not in self._actions
+            or operation.abstract.wsa_action
+        ):
+            # Zeep already applies WSA for annotated operations, including
+            # CreatePullPointSubscription and PullMessages.
+            return envelope, http_headers
+        from zeep.wsa import WsAddressingPlugin
+        from zeep.wsdl.utils import get_or_create_header
+
+        header = get_or_create_header(envelope)
+        existing_tags = {element.tag for element in header}
+        previous = set(header)
+        envelope, http_headers = WsAddressingPlugin().egress(
+            envelope, http_headers, operation, binding_options,
+        )
+        # Preserve explicitly supplied headers without creating duplicates.
+        for element in list(header):
+            if element not in previous and element.tag in existing_tags:
+                header.remove(element)
+        return envelope, http_headers
+
+    @staticmethod
+    def ingress(envelope, http_headers, operation):
+        return envelope, http_headers
+
+
 class OnvifEventListener:
     def __init__(
         self,
@@ -573,6 +609,7 @@ class OnvifEventListener:
         camera.xaddrs[PULLPOINT_NAMESPACE] = address
         self._record_subscription_times(subscription)
         try:
+            events_service.zeep_client.plugins.append(_SubscriptionManagerAddressing())
             manager = events_service.zeep_client.create_service(
                 SUBSCRIPTION_MANAGER_BINDING,
                 address,
