@@ -233,6 +233,13 @@ class CameraWorker:
             live_frame_provider=lambda: self._get_latest_frame(),
             timestamped_live_frame_provider=self._get_latest_detection_frame,
             timestamped_evidence_frame_provider=self._get_evidence_detection_frame,
+            live_detections_provider=(
+                lambda sample: self.capture.matched_snapshot(
+                    "live", source_pts=sample.source_pts, generation=sample.capture_generation,
+                    source_session=sample.source_session, exact=True,
+                )
+            ) if (isinstance(effective_capture_backend, DlStreamerCaptureBackend)
+                  and effective_capture_backend.options.detect_enabled) else None,
             stop_requested=lambda: (
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
@@ -782,7 +789,7 @@ class CameraWorker:
         live = self.tracking_frames.captured("live")
         if live is None:
             return None
-        return TrackingFrame(live, requires_inference=True)
+        return self.tracking_frames.tracking_frame(live)
 
     def _live_tracking_geometry_trusted(self) -> bool:
         alignment = self._effective_spatial_alignment

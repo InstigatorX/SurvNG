@@ -22,9 +22,10 @@ from survng.app.live_detections import DetectionSnapshot
 def sidecar_provider(objects):
     def provide(sample):
         return DetectionSnapshot.parse({
-            "schema_version": 1, "source_pts": 0.0, "inference_sequence": 1,
+            "schema_version": 1, "source_pts": sample.source_pts, "inference_sequence": 1,
+            "provenance": "native_fresh_detection",
             "width": sample.frame.shape[1], "height": sample.frame.shape[0], "objects": objects,
-        }, session="test")
+        }, session=sample.source_session)
     return provide
 from survng.app.motion_pipeline.decision_handler import MotionDecisionHandler
 from survng.app.motion_pipeline.object_detection import (
@@ -1667,6 +1668,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             SimpleNamespace(),
             lambda: None,
             timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                source_pts=0.0, source_session="test",
                 frame=frame,
                 captured_at_epoch=event_epoch + 0.2,
                 captured_at_monotonic=1.0,
@@ -1727,6 +1729,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             SimpleNamespace(),
             lambda: None,
             timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                source_pts=0.0, source_session="test",
                 frame=frame,
                 captured_at_epoch=event_epoch + 0.2,
                 captured_at_monotonic=1.0,
@@ -1778,6 +1781,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             SimpleNamespace(),
             lambda: None,
             timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                source_pts=0.0, source_session="test",
                 frame=latest,
                 captured_at_epoch=event_epoch + 1.0,
                 captured_at_monotonic=1.0,
@@ -1786,6 +1790,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 capture_generation=8,
             ),
             timestamped_evidence_frame_provider=lambda token: TimestampedLiveFrame(
+                source_pts=0.0, source_session="test",
                 frame=evidence,
                 captured_at_epoch=float(token["evidence_frame_at_epoch"]),
                 captured_at_monotonic=0.5,
@@ -1856,6 +1861,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             SimpleNamespace(),
             lambda: None,
             timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                source_pts=0.0, source_session="test",
                 frame=np.zeros((20, 20, 3), dtype=np.uint8),
                 captured_at_epoch=time.time(),
                 captured_at_monotonic=time.monotonic(),

@@ -5,6 +5,7 @@ from typing import Any
 from ..config import ObjectTrackingConfig
 from .assignment import maximum_weight_assignment
 from .bytetrack import ByteTrackObjectTracker
+from .geometry import _box
 from .types import Box
 
 DetectionBatch = list[tuple[int, dict[str, Any], Box]]
@@ -29,6 +30,30 @@ class HybridObjectTracker(ByteTrackObjectTracker):
     def __init__(self, config: ObjectTrackingConfig, high_confidence_threshold: float) -> None:
         super().__init__(config, high_confidence_threshold)
         self._pending_high: DetectionBatch | None = None
+        self._native_positions: dict[int, Box] = {}
+
+    def assist_predictions(self, predictions: list[dict[str, Any]], captured_at: float) -> None:
+        """Suggest positions only for unambiguous existing Hybrid tracks.
+
+        No hits, confidence, last_seen, history, appearance, or identity changes.
+        Hints expire after the following update, which still requires detections.
+        """
+        self._native_positions.clear()
+        candidates: dict[int, list[Box]] = {}
+        for prediction in predictions:
+            if prediction.get("detection_provenance") != "native_tracked_prediction":
+                continue
+            box = _box(prediction.get("box"))
+            if box is None:
+                continue
+            matches = [track for track in self._tracks.values()
+                       if track.label == prediction.get("label")
+                       and captured_at - track.last_seen <= self._association_stale_limit(track)
+                       and self._geometry_score(track.predicted_box(captured_at), box,
+                                                allow_scale_jump=False) is not None]
+            if len(matches) == 1:
+                candidates.setdefault(matches[0].track_id, []).append(box)
+        self._native_positions = {key: boxes[0] for key, boxes in candidates.items() if len(boxes) == 1}
 
     def update(
         self,
@@ -42,6 +67,7 @@ class HybridObjectTracker(ByteTrackObjectTracker):
             tracked = super().update(detections, captured_at, confirm_new=confirm_new)
         finally:
             self._pending_high = None
+            self._native_positions.clear()
 
         # Predict center translation using the existing smoothed velocity, but
         # retain the last measured dimensions. Detector size jitter must not
@@ -109,7 +135,7 @@ class HybridObjectTracker(ByteTrackObjectTracker):
                 if track.label != str(detection.get("label")):
                     continue
                 score = self._geometry_score(
-                    track.predicted_box(captured_at),
+                    self._native_positions.get(track_id, track.predicted_box(captured_at)),
                     box,
                     allow_scale_jump=track.seeded,
                 )

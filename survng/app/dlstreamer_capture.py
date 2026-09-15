@@ -84,6 +84,8 @@ class DlStreamerCaptureOptions:
     model_proc_path: str = ""
     inference_device: str = "GPU"
     detect_enabled: bool = False
+    inference_interval: int = 1
+    native_tracking: str = "off"
     frame_width: int = 320
     jpeg_fps: float = 1.0
     confidence_threshold: float = 0.1
@@ -200,7 +202,11 @@ class _StreamInbox:
     def qualify_pts(self, kind: str, pts: float) -> str:
         with self._lock:
             previous = self._last_pts.get(kind)
-            if previous is not None and math.isfinite(pts) and pts < previous:
+            # A new video frame reusing PTS cannot inherit the previous frame's
+            # detection. Repeated metadata alone still does not reset liveness.
+            if previous is not None and math.isfinite(pts) and (
+                pts < previous or (kind == "frame" and pts == previous)
+            ):
                 self.session = uuid.uuid4().hex
                 self._last_pts.clear()
                 self._detection_snapshots.clear()
@@ -806,6 +812,10 @@ class DlStreamerCaptureBackend:
             raise ValueError("rtsp_transport must be tcp or udp")
         if self.options.decoder not in {"auto", "va"}:
             raise ValueError("decoder must be auto or va")
+        if not 1 <= int(self.options.inference_interval) <= 5:
+            raise ValueError("inference_interval must be between 1 and 5")
+        if self.options.native_tracking not in {"off", "short-term-imageless"}:
+            raise ValueError("native_tracking must be off or short-term-imageless")
         self._credential_warning_lock = threading.Lock()
         self._credential_warning_hosts: set[str] = set()
         self._shared: _SharedLiveProcess | None = None
@@ -947,6 +957,8 @@ class DlStreamerCaptureBackend:
         model_path = self.options.model_path.strip()
         if self.options.detect_enabled and model_path:
             command.extend(["--model", model_path])
+            command.extend(["--inference-interval", str(int(self.options.inference_interval))])
+            command.extend(["--native-tracking", self.options.native_tracking])
             command.extend(
                 [
                     "--model-instance-id",

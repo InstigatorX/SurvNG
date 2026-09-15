@@ -1,0 +1,23 @@
+name: PR206 integration validation
+on:
+  push:
+    branches: [experiment/dlstreamer-native-tracking]
+    paths: [.github/workflows/pr206-validation.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: fc7c8f514927e281fa9c126278ea849000f1d71c
+          persist-credentials: false
+      - name: Export tracked source for isolated regression testing
+        run: git archive --format=tar.gz HEAD > /tmp/pr206-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr206-source
+          path: /tmp/pr206-source.tar.gz
+          retention-days: 1

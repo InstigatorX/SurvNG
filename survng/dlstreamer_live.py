@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 from contextlib import ExitStack
 import json
 import math
@@ -53,6 +54,18 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="maximum gvadetect input rate; independent from EMA qualification FPS",
+    )
+    parser.add_argument(
+        "--inference-interval",
+        type=int,
+        default=1,
+        help="run gvadetect every Nth detect-branch frame (1-5)",
+    )
+    parser.add_argument(
+        "--native-tracking",
+        choices=("off", "short-term-imageless"),
+        default="off",
+        help="optional DL Streamer ROI tracking between detector frames",
     )
     parser.add_argument("--open-timeout", type=float, default=3.0)
     parser.add_argument("--rtsp-transport", choices=("tcp", "udp"), default="tcp")
@@ -392,18 +405,26 @@ def _normalize_gva_objects(payload: dict[str, Any]) -> list[dict[str, Any]]:
             except (TypeError, ValueError):
                 continue
         try:
-            objects.append(
-                {
-                    "label": label or "object",
-                    "confidence": round(confidence, 4),
-                    "box": {
-                        "x1": int(x1),
-                        "y1": int(y1),
-                        "x2": int(x2),
-                        "y2": int(y2),
-                    },
-                }
-            )
+            normalized = {
+                "label": label or "object",
+                "confidence": round(confidence, 4),
+                "box": {
+                    "x1": int(x1),
+                    "y1": int(y1),
+                    "x2": int(x2),
+                    "y2": int(y2),
+                },
+            }
+            # gvatrack IDs are diagnostic input only. SurvNG Hybrid owns
+            # persisted/event track identity and ignores this field today.
+            native_track_id = item.get("object_id")
+            if native_track_id is None:
+                native_track_id = detection.get("object_id")
+            if native_track_id is not None:
+                native_track_id = int(native_track_id)
+                if native_track_id >= 0:
+                    normalized["native_track_id"] = native_track_id
+            objects.append(normalized)
         except (TypeError, ValueError):
             continue
     return objects
@@ -421,7 +442,70 @@ def _packed_gray(pixels: bytes, width: int, height: int) -> bytes:
     return b"".join(pixels[row * stride : row * stride + width] for row in range(height))
 
 
-def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gst_second: int, clock_time_none: int):
+class _NativeInferenceEvidence:
+    """Bounded pre-tracker evidence, before the leaky output queue.
+
+    gvadetect's full-frame, no-block=false contract runs the first buffer and
+    every inference-interval buffer thereafter, emitting buffers in order.
+    Count here, never at appsink (which drops buffers). Capture ROIs here too:
+    gvatrack can append predictions even on frames with fresh detections.
+    See DL Streamer inference_impl.cpp::TransformFrameIp and tracker.cpp::track.
+    """
+
+    def __init__(self, interval: int, *, tracking: bool = False) -> None:
+        self.interval = interval
+        self.tracking = tracking
+        self.sequence = 0
+        self.results = OrderedDict()
+        self.lock = threading.Lock()
+        self.invalid = 0
+        self.last_pts = None
+        self.identity_valid = True
+
+    def observe(self, buffer, caps, video_frame_type) -> None:
+        self.sequence += 1
+        fresh = (self.sequence - 1) % self.interval == 0
+        objects = []
+        if self.last_pts is not None and buffer.pts <= self.last_pts:
+            # PTS reuse can collide with metadata still queued after this probe.
+            # Fail closed until pipeline recreation establishes a new identity.
+            self.identity_valid = False
+            self.invalid += 1
+            with self.lock:
+                self.results.clear()
+        self.last_pts = buffer.pts
+        try:
+            if not self.identity_valid:
+                result = ("unknown", [])
+            elif fresh:
+                for region in video_frame_type(buffer, caps=caps).regions():
+                    rect = region.rect()
+                    objects.append({
+                        "label": region.label(), "confidence": region.confidence(),
+                        "box": {"x1": rect.x, "y1": rect.y,
+                                "x2": rect.x + rect.w, "y2": rect.y + rect.h},
+                    })
+            if self.identity_valid:
+                result = ("native_fresh_detection" if fresh else (
+                    "native_tracked_prediction" if self.tracking else "unknown"
+                ), objects)
+        except Exception:
+            # Do not turn an adapter failure into authoritative empty evidence.
+            # Report the bounded counter in status; this frame uses fallback.
+            self.invalid += 1
+            result = ("unknown", [])
+        with self.lock:
+            self.results[buffer.pts] = result
+            while len(self.results) > 128:
+                self.results.popitem(last=False)
+
+    def pop(self, pts):
+        with self.lock:
+            return self.results.pop(pts, ("unknown", []))
+
+
+def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gst_second: int,
+                        clock_time_none: int, native_result=None):
     """Read GstGVAJSONMeta; mapping a video buffer yields pixels, not JSON."""
     from survng.app.live_detections import DetectionSnapshot
     buffer = sample.get_buffer()
@@ -441,8 +525,12 @@ def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gs
     normalized = _normalize_gva_objects(payload)
     if len(normalized) != len(objects):
         raise ValueError("incomplete inference metadata")
+    provenance, fresh_objects = native_result or ("unknown", [])
+    if provenance == "native_fresh_detection":
+        normalized = fresh_objects
     snapshot = {
         "schema_version": 1,
+        "provenance": provenance,
         "source_pts": float(buffer.pts) / gst_second,
         "inference_sequence": inference_sequence,
         "width": int(structure.get_value("width") or 0),
@@ -503,6 +591,8 @@ def _run(argv: list[str] | None, resources: ExitStack) -> int:
         _require_detection_plugin(Gst)
     if not math.isfinite(args.threshold) or not 0 <= args.threshold <= 1:
         raise ValueError("detection threshold must be between 0 and 1")
+    if not 1 <= args.inference_interval <= 5:
+        raise ValueError("inference interval must be between 1 and 5")
     instance_id = (
         model_instance_id(str(model_path or ""), args.device, args.model_instance_id)
         if detect
@@ -862,6 +952,7 @@ def _pump_pipeline(
     detect_rate_caps = None
     detector = None
     detect_output_queue = None
+    native_tracker = None
     meta_convert = None
     va_caps = None
     preprocess = ""
@@ -896,7 +987,20 @@ def _pump_pipeline(
         # auto-batch that can wait indefinitely for other cameras.
         detector.set_property("batch-size", 1)
         detector.set_property("nireq", 1)
-        detector.set_property("inference-interval", 1)
+        detector.set_property("inference-interval", args.inference_interval)
+        detector.set_property("no-block", False)
+        detector.set_property("inference-region", 0)  # full-frame
+        native_evidence = _NativeInferenceEvidence(
+            args.inference_interval, tracking=args.native_tracking != "off",
+        )
+
+        def capture_native_evidence(pad, info):
+            buffer = info.get_buffer()
+            if buffer is not None:
+                native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)
+            return Gst.PadProbeReturn.OK
+
+        detector.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, capture_native_evidence)
         detector.set_property("threshold", args.threshold)
         preprocess = "opencv"
         if args.decoder == "va" and not use_test_source:
@@ -922,7 +1026,16 @@ def _pump_pipeline(
         detect_output_queue.set_property("max-size-bytes", 0)
         detect_output_queue.set_property("max-size-time", 0)
         detect_output_queue.set_property("leaky", 2)
+        if args.native_tracking != "off":
+            if not _factory_available(Gst, "gvatrack"):
+                raise InferencePipelineError(
+                    "native tracking requested but gvatrack is unavailable"
+                )
+            native_tracker = _element(Gst, "gvatrack", "native-track")
+            native_tracker.set_property("tracking-type", args.native_tracking)
         elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])
+        if native_tracker is not None:
+            elements.append(native_tracker)
         if preprocess.startswith("va"):
             va_caps = _element(Gst, "capsfilter", "detect-va-memory")
             va_caps.set_property(
@@ -1000,12 +1113,17 @@ def _pump_pipeline(
             raise RuntimeError("could not link detect queue")
         if detect_output_queue is None or not detector.link(detect_output_queue):
             raise RuntimeError("could not link gvadetect output queue")
+        metadata_source = detect_output_queue
+        if native_tracker is not None:
+            if not detect_output_queue.link(native_tracker):
+                raise RuntimeError("could not link gvatrack")
+            metadata_source = native_tracker
         if meta_convert is not None and meta_sink is not None:
-            if not detect_output_queue.link(meta_convert) or not meta_convert.link(meta_sink):
+            if not metadata_source.link(meta_convert) or not meta_convert.link(meta_sink):
                 raise RuntimeError("could not link detection metadata branch")
         else:
             fake = pipeline.get_by_name("detect-sink")
-            if fake is None or not detect_output_queue.link(fake):
+            if fake is None or not metadata_source.link(fake):
                 raise RuntimeError("could not link detection sink")
 
     linked = False
@@ -1082,7 +1200,10 @@ def _pump_pipeline(
                     error = str(parsed_error)
                     if debug:
                         error = f"{error}: {debug[-400:]}"
-                    if detector is not None and message.src == detector:
+                    if (
+                        (detector is not None and message.src == detector)
+                        or (native_tracker is not None and message.src == native_tracker)
+                    ):
                         raise InferencePipelineError(error)
                     raise RuntimeError(error)
                 break
@@ -1092,11 +1213,18 @@ def _pump_pipeline(
                     if meta_sample is None:
                         break
                     inference_sequence += 1
-                    payload = _detection_metadata(
-                        meta_sample, video_frame_type,
-                        inference_sequence=inference_sequence,
-                        gst_second=Gst.SECOND, clock_time_none=Gst.CLOCK_TIME_NONE,
-                    )
+                    try:
+                        payload = _detection_metadata(
+                            meta_sample, video_frame_type,
+                            inference_sequence=inference_sequence,
+                            gst_second=Gst.SECOND, clock_time_none=Gst.CLOCK_TIME_NONE,
+                            native_result=native_evidence.pop(meta_sample.get_buffer().pts),
+                        )
+                    except Exception:
+                        # Malformed metadata must leave video available for
+                        # demand-driven fallback. Surface failures via status.
+                        native_evidence.invalid += 1
+                        continue
                     _write(stdout, encode_json(TYPE_DETECTIONS, payload, stream_id=stream_id), lock=stdout_lock)
             sample = sink.emit("try-pull-sample", 200 * Gst.MSECOND)
             if sample is None:
@@ -1161,7 +1289,15 @@ def _pump_pipeline(
                             "requested_nms_threshold": args.nms_threshold if detect else None,
                             "qualifier_width": qualifier_width,
                             "detect_fps": float(detect_rate),
-                            "inference_interval": 1,
+                            "native_evidence_invalid": native_evidence.invalid if detect else 0,
+                            "inference_interval": args.inference_interval if detect else None,
+                            "effective_inference_fps": (
+                                round(float(detect_rate) / args.inference_interval, 3)
+                                if detect else 0.0
+                            ),
+                            "native_tracking": args.native_tracking if detect else "off",
+                            "native_tracking_authoritative": False,
+                            "native_tracking_memory": _negotiated_memory(native_tracker),
                             "jpeg_preview": jpeg_sink is not None,
                             "model_instance_id": instance_id,
                             "shared_detect": bool(instance_id and stream_id),

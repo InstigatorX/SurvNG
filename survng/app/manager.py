@@ -332,8 +332,13 @@ class AppManager:
                 ),
                 model_path=detector.resolved_model_path(),
                 inference_device=detector.device,
-                # Qualification submits evidence to the priority-aware pool.
-                detect_enabled=False,
+                # Optional native live analytics experiment. DL Streamer may
+                # fill skipped-frame ROIs, but SurvNG Hybrid remains authoritative.
+                detect_enabled=(
+                    detector.enabled and detector.live_pipeline_inference_enabled
+                ),
+                inference_interval=detector.live_pipeline_inference_interval,
+                native_tracking=detector.live_pipeline_tracking,
                 labels_path=detector.labels_path,
                 labels=tuple(detector.labels),
                 confidence_threshold=live_detection_threshold(config),

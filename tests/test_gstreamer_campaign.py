@@ -1,5 +1,6 @@
 """Integration regressions for GStreamer evidence and lifecycle boundaries."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import threading
 from types import SimpleNamespace
@@ -61,7 +62,7 @@ def test_tracking_seed_respects_live_provenance_and_consumes_inference_once(monk
     timeline = _service(capture=SimpleNamespace(matched_snapshot=lambda *_a, **_k: None))
     for index in range(1, 7):
         result = snapshot(epoch if index == 1 else epoch + index / 2, index, [obj])
-        timeline.live_frames.append(TrackingFrame(captured(epoch + index / 2, index), result))
+        timeline.live_frames.append(TrackingFrame(replace(captured(epoch + index / 2, index), source_pts=result.source_pts), result))
     updates = []
     detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=.7), detect=Mock())
     session = ObjectTrackingSession(

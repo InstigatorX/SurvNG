@@ -163,6 +163,10 @@ class ObjectTrackingSession:
         self.cover_promoter = cover_promoter
         self.cover_revision_provider = cover_revision_provider
         self.live_detections_provider = live_detections_provider
+        self._native_counts = dict.fromkeys((
+            "native_detection_hits", "native_detection_empty_hits",
+            "native_detection_misses", "fallback_detector_calls",
+        ), 0)
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -280,13 +284,23 @@ class ObjectTrackingSession:
         evidence: TrackingFrame | None = None,
     ) -> list[dict[str, Any]]:
         """Infer demand-driven pixels or consume explicit native evidence."""
-        if evidence is not None and evidence.captured.source == "live" and not evidence.requires_inference:
-            return evidence.detection.scaled_objects(frame.shape[1], frame.shape[0]) if evidence.detection else []
-        return _detect_tracking_objects(
-            self.detector,
-            frame,
-            self.config.low_confidence_threshold,
+        live = evidence is not None and evidence.captured.source == "live"
+        if evidence is not None and evidence.native_fresh:
+            with self._lock:
+                self._native_counts["native_detection_hits"] += 1
+                self._native_counts["native_detection_empty_hits"] += not evidence.detection.objects
+            return evidence.detection.scaled_objects(frame.shape[1], frame.shape[0])
+        if live:
+            with self._lock:
+                self._native_counts["native_detection_misses"] += 1
+                self._native_counts["fallback_detector_calls"] += 1
+        objects = _detect_tracking_objects(
+            self.detector, frame, self.config.low_confidence_threshold,
         )
+        for obj in objects:
+            if obj.get("label"):
+                obj["detection_provenance"] = "fallback_live_inference" if live else "recorded_refinement"
+        return objects
 
     def start(
         self,
@@ -423,6 +437,7 @@ class ObjectTrackingSession:
             )
             return {
                 **self._status,
+                **self._native_counts,
                 "accepting": self._accepting,
                 "worker_running": bool(self._thread is not None and self._thread.is_alive()),
                 # Distinct from active event_id: handoff returned True but the
@@ -984,7 +999,7 @@ class ObjectTrackingSession:
                 nonlocal last_persisted_at, latest_tracked_objects
                 nonlocal stable_frames, track_states
                 nonlocal last_sidecar_identity
-                if evidence is not None and evidence.captured.source == "live" and not evidence.requires_inference:
+                if evidence is not None and evidence.native_fresh:
                     snapshot = evidence.detection
                     if snapshot is None:
                         return False
@@ -1037,6 +1052,13 @@ class ObjectTrackingSession:
                     self._frame_width,
                     self._frame_height,
                 )
+                assist = getattr(tracker, "assist_predictions", None)
+                if (callable(assist) and evidence is not None and evidence.captured.source == "live"
+                        and evidence.detection is not None
+                        and evidence.detection.provenance == "native_tracked_prediction"
+                        and evidence.detection.matches_frame(
+                            evidence.captured.source_pts, evidence.captured.source_session)):
+                    assist(evidence.detection.scaled_objects(self._frame_width, self._frame_height), sample_epoch)
                 tracked = tracker.update(objects, sample_epoch)
                 latest_tracked_objects = tracked
                 summaries = tracker.summaries(sample_epoch)
@@ -1160,8 +1182,8 @@ class ObjectTrackingSession:
                             frame_reference=getattr(sample, "reference", None),
                             evidence=sample if isinstance(sample, TrackingFrame) else None,
                         ):
-                            if isinstance(sample, TrackingFrame) and sample.captured.source == "live" and not sample.requires_inference:
-                                # Missing/repeated metadata is not negative
+                            if isinstance(sample, TrackingFrame) and sample.native_fresh:
+                                # Repeated fresh metadata is not negative
                                 # evidence or a deferred OpenVINO request.
                                 continue
                             # Retry this sample, not a later frame. A deferred
@@ -1318,8 +1340,8 @@ class ObjectTrackingSession:
                             stalled_since = None
                             stop.wait(interval())
                             continue
-                        if evidence is not None and evidence.captured.source == "live" and not evidence.requires_inference:
-                            # Missing/already-consumed sidecars are not deferred
+                        if evidence is not None and evidence.native_fresh:
+                            # Already-consumed sidecars are not deferred
                             # inference. Fetch a newer matched frame next tick;
                             # retrying this immutable sample would pin it forever.
                             pending_live = None

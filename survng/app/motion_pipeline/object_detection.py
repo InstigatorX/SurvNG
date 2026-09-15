@@ -1504,12 +1504,13 @@ class RecordedMotionObjectDetector:
             )
         sidecar_objects: list[dict[str, Any]] | None = None
         snapshot = None
-        if self.live_detections_provider is not None:
-            sidecar_objects = []
         if self.live_detections_provider is not None and isinstance(sample, TimestampedLiveFrame):
             snapshot = self.live_detections_provider(sample)
-            if snapshot is not None:
+            if (snapshot is not None and snapshot.provenance == "native_fresh_detection"
+                    and snapshot.matches_frame(sample.source_pts, sample.source_session)):
                 sidecar_objects = snapshot.scaled_objects(frame.shape[1], frame.shape[0])
+            else:
+                snapshot = None
         inference_started = time.monotonic()
         objects = self._detect_objects(
             frame,
@@ -1519,7 +1520,7 @@ class RecordedMotionObjectDetector:
             precomputed=sidecar_objects,
             spatial_alignment=sample.spatial_alignment if isinstance(sample, TimestampedLiveFrame) else None,
         )
-        if self.live_detections_provider is None:
+        if sidecar_objects is None:
             # Never attach a slow or previous-session response to newer pixels.
             frame_age = max(
                 time.time() - float(captured_at),
@@ -2329,6 +2330,7 @@ class RecordedMotionObjectDetector:
         if objects:
             for detected in objects:
                 detected["frame_source"] = "live_fallback"
+                detected["detection_provenance"] = "fallback_live_inference"
                 detected["frame_pixel_format"] = fallback_sample.pixel_format
                 detected["recording_status"] = "no_recorded_frame"
             return self._result(
@@ -2522,6 +2524,12 @@ class RecordedMotionObjectDetector:
         if timing is not None:
             timing["detector_request_ms"] += detector_ms
         frame_height, frame_width = frame.shape[:2]
+        if precomputed is None:
+            for detected in objects:
+                if detected.get("label"):
+                    detected["detection_provenance"] = (
+                        "fallback_live_inference" if workload == "initial" else "recorded_refinement"
+                    )
         detect_faces = getattr(self.detector, "detect_faces", None)
         if enrich_faces and callable(detect_faces):
             dedicated_faces = self._detect_faces_in_people(

@@ -39,6 +39,9 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
             links.append((self.name, other.name))
             return True
 
+        def get_static_pad(self, name):
+            return SimpleNamespace(add_probe=lambda *args: None)
+
         def get_name(self):
             return self.name
 
@@ -57,6 +60,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         Pipeline=SimpleNamespace(new=lambda name: pipeline),
         Caps=SimpleNamespace(from_string=lambda text: text),
         State=SimpleNamespace(PLAYING=1, NULL=0),
+        PadProbeType=SimpleNamespace(BUFFER=1),
         StateChangeReturn=SimpleNamespace(FAILURE=-1),
     )
     monkeypatch.setitem(sys.modules, "gstgva", SimpleNamespace(VideoFrame=object))

@@ -681,10 +681,11 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         frame = np.zeros((32, 32, 3), dtype=np.uint8)
 
         evidence = TrackingFrame(
-            CapturedFrame("live", frame, 1, 1, "", 32, 32, 1, source_session="test"),
+            CapturedFrame("live", frame, 1, 1, "", 32, 32, 1, source_pts=1, source_session="test"),
             DetectionSnapshot.parse({
                 "schema_version": 1, "source_pts": 1.0, "inference_sequence": 1,
                 "width": 32, "height": 32, "objects": sidecar,
+                "provenance": "native_fresh_detection",
             }, session="test"),
         )
         live = session._tracking_detections_for_frame(frame, catchup=False, evidence=evidence)
@@ -732,8 +733,9 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             np.zeros((32, 32, 3), dtype=np.uint8),
             catchup=False,
             evidence=TrackingFrame(
-                CapturedFrame("live", np.zeros((32, 32), dtype=np.uint8), 1, 1, "", 32, 32, 1),
-                DetectionSnapshot(1.0, 1, 32, 32, (), "test"),
+                CapturedFrame("live", np.zeros((32, 32), dtype=np.uint8), 1, 1, "", 32, 32, 1,
+                              source_pts=1, source_session="test"),
+                DetectionSnapshot(1.0, 1, 32, 32, (), "test", "native_fresh_detection"),
             ),
         )
 
@@ -1541,8 +1543,8 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         updates = []
         image = np.zeros((100, 100), np.uint8)
         positive = DetectionSnapshot(10, 1, 100, 100,
-                                     (detection("person", .9, (12, 10, 42, 80)),), "s")
-        empty = DetectionSnapshot(10.4, 2, 100, 100, (), "s")
+                                     (detection("person", .9, (12, 10, 42, 80)),), "s", "native_fresh_detection")
+        empty = DetectionSnapshot(10.4, 2, 100, 100, (), "s", "native_fresh_detection")
         snapshots = [positive, positive, None, empty, empty]
         calls = 0
 
@@ -1554,15 +1556,18 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 return None
             return TrackingFrame(
                 CapturedFrame("live", image, time.time(), time.monotonic(), "", 100, 100, calls,
-                              source_pts=10 + calls * .1, source_session="s"),
+                              source_pts=[10, 10, 10.2, 10.4, 10.4][calls - 1], source_session="s"),
                 snapshots[calls - 1],
             )
 
         class Detector:
             config = SimpleNamespace(confidence_threshold=.7)
 
+            calls = 0
+
             def detect(self, *_args, **_kwargs):
-                raise AssertionError("matched live evidence must not run duplicate inference")
+                self.calls += 1
+                return []
 
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://fixture.invalid/main"),
@@ -1578,7 +1583,8 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             self.assertTrue(served.wait(2.0))
         finally:
             session.stop()
-        self.assertEqual(updates[-1]["frames_processed"], 2)
+        self.assertEqual(updates[-1]["frames_processed"], 3)
+        self.assertEqual(session.detector.calls, 1)
 
     def test_catchup_processing_is_capped_per_tick(self) -> None:
         catchup_ready = threading.Event()
