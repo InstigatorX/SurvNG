@@ -328,7 +328,8 @@ def test_supervisor_fatal_error_reaches_all_streams_without_credentials(caplog, 
         TYPE_FATAL, {"ok": False, "error": "libopencv missing; rtsp://admin:secret@camera/live"
                     + "x" * 500 + "; native root cause beyond source prefix"},
     )))
-    shared._read_stdout()
+    shared._output = shared._process.stdout
+    shared._read_protocol()
     for inbox in shared._inboxes.values():
         assert not inbox.alive
         assert "libopencv missing" in inbox.error
@@ -381,7 +382,8 @@ def test_stream_error_is_local_but_native_inference_error_fails_shared_reader(mo
     assert shared._inboxes["downstairs"].alive
     shared._process = SimpleNamespace(stdout=io.BytesIO(encode_json(
         TYPE_STATUS, {"ok": False, "error": "VA surface failed", "failure_scope": "inference"}, stream_id="downstairs")))
-    shared._read_stdout()
+    shared._output = shared._process.stdout
+    shared._read_protocol()
     assert shared._failed
     assert all(not inbox.alive for inbox in shared._inboxes.values())
 
@@ -446,7 +448,8 @@ def test_truncated_native_stderr_does_not_log_partial_credentials(monkeypatch, c
     assert len(shared._stderr) == 8192
     monkeypatch.setattr("survng.app.dlstreamer_capture.select.select", lambda *args: ([True], [], []))
     shared._process = SimpleNamespace(stdout=io.BytesIO(encode_json(TYPE_FATAL, {"error": "native failure"})))
-    shared._read_stdout()
+    shared._output = shared._process.stdout
+    shared._read_protocol()
     assert "private-secret" not in caplog.text
     assert "useful native error" in caplog.text
 
@@ -802,7 +805,7 @@ def test_system_python_live_main_redacts_errors_without_pydantic(supervisor) -> 
             "-c",
             (
                 "from survng import dlstreamer_live\n"
-                "def boom(argv=None):\n"
+                "def boom(argv=None, **kwargs):\n"
                 "    raise RuntimeError('rtsp://admin:secret@camera/live failed')\n"
                 "dlstreamer_live.run = boom\n"
                 f"raise SystemExit(dlstreamer_live.main({['--supervisor'] if supervisor else []!r}))\n"

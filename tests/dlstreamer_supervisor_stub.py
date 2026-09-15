@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
 from survng.app.dlstreamer_protocol import (
+    open_protocol_output,
     TYPE_DETECTIONS,
     TYPE_STATUS,
     encode_frame,
@@ -15,9 +17,14 @@ from survng.app.dlstreamer_protocol import (
 )
 
 
+OUTPUT = open_protocol_output()
+os.write(1, b"native stdout diagnostic\n")
+os.write(2, b"native stderr diagnostic\n")
+
+
 def _emit(stream_id: str) -> None:
     pixels = bytes((20, 40, 200)) * 4
-    stdout = sys.stdout.buffer
+    stdout = OUTPUT
     stdout.write(
         encode_json(
             TYPE_STATUS,

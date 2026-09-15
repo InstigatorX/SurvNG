@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
+import sys
+import threading
 from typing import Any, BinaryIO, Iterable
 
 
+PROTOCOL_FD_ENV = "SURVNG_DLSTREAMER_PROTOCOL_FD"
 MAGIC = b"NGDS"
 MESSAGE_HEADER = struct.Struct("!4sBI")
 FRAME_HEADER = struct.Struct("!IIId")
@@ -172,7 +176,7 @@ def decode_json_payload(payload: bytes) -> dict[str, Any]:
 
 
 class MessageReader:
-    """Buffer stdout from the live-capture child into complete messages."""
+    """Buffer the live-capture data stream into complete messages."""
 
     def __init__(self) -> None:
         self._buffer = bytearray()
@@ -189,7 +193,9 @@ class MessageReader:
             return None
         magic, message_type, length = MESSAGE_HEADER.unpack_from(self._buffer)
         if magic != MAGIC:
-            raise ProtocolError("live-capture child emitted invalid framing")
+            raise ProtocolError(
+                f"live-capture child emitted invalid framing (buffered_bytes={len(self._buffer)})"
+            )
         if message_type not in _MESSAGE_TYPES:
             raise ProtocolError(f"unsupported live-capture message type {message_type}")
         if length > MAX_MESSAGE_BYTES:
@@ -206,3 +212,41 @@ def write_messages(stream: BinaryIO, messages: Iterable[bytes]) -> None:
     for message in messages:
         stream.write(message)
     stream.flush()
+
+
+class ProtocolWriter:
+    """Serialize complete messages; a damaged connection is never reused."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self.stream = stream
+        self._lock = threading.Lock()
+        self._failed = False
+
+    def send(self, message: bytes) -> None:
+        with self._lock:
+            if self._failed:
+                raise BrokenPipeError("live-capture protocol writer failed")
+            try:
+                remaining = memoryview(message)
+                while remaining:
+                    written = self.stream.write(remaining)
+                    if written is None or written <= 0:
+                        raise BrokenPipeError("live-capture protocol write made no progress")
+                    remaining = remaining[written:]
+                self.stream.flush()
+            except BaseException:
+                self._failed = True
+                raise
+
+
+def open_protocol_output() -> BinaryIO:
+    """Use an inherited data pipe; retain stdout for standalone CLI consumers."""
+    descriptor = os.environ.get(PROTOCOL_FD_ENV)
+    if descriptor is None:
+        return sys.stdout.buffer
+    fd = int(descriptor)
+    if fd < 3:
+        raise ValueError("live-capture protocol descriptor must be separate from stdio")
+    # Called after the native-library-path re-exec. Do not leak into later execs.
+    os.set_inheritable(fd, False)
+    return os.fdopen(fd, "wb", buffering=0)

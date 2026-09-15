@@ -826,3 +826,45 @@ def test_latest_frame_store_is_bounded_to_one_frame_per_source() -> None:
     latest = service.latest("live")
     assert latest is not None
     assert int(latest.image[0, 0, 0]) == 19
+
+
+def test_stream_failure_logs_bounded_cause_and_keeps_retry_status_short(caplog):
+    prefix = "gst-stream-error-quark: Internal data stream error. "
+    detail = (
+        prefix + "pipeline context " * 500
+        + " rtsp://admin:" + "credential" * 600 + "@camera/live?token=private-token"
+        + " streaming stopped, reason not-negotiated (-4)"
+    )
+
+    class DiagnosticBackend(FakeBackend):
+        def open(self, handle, source_url, cancelled, *, open_timeout_ms=None):
+            raise RuntimeError(detail)
+
+    service = CameraCaptureService(
+        camera_id="gate", source_url=lambda _: "rtsp://fixture.invalid/live",
+        backend=DiagnosticBackend(), retry_initial_seconds=0.1,
+        retry_max_seconds=0.1,
+    )
+    with caplog.at_level(logging.INFO):
+        try:
+            assert service.start()
+            _wait_until(lambda: any("retry_delay=" in r.getMessage() for r in caplog.records))
+            status = service.status()["last_error"]
+        finally:
+            service.request_stop()
+            service.wait_stopped(1.0)
+
+    warnings = [r.getMessage() for r in caplog.records
+                if "camera stream failed for gate/live:" in r.getMessage()]
+    assert warnings
+    for warning in warnings:
+        assert prefix in warning
+        assert "diagnostic truncated" in warning
+        assert "streaming stopped, reason not-negotiated (-4)" in warning
+        assert len(warning) <= len("camera stream failed for gate/live: stream error: ") + 4096
+    retries = [r.getMessage() for r in caplog.records if "retry_delay=" in r.getMessage()]
+    assert retries
+    assert all("not-negotiated" not in retry for retry in retries)
+    assert len(status) <= len("stream error: ") + 160
+    assert "credential" not in caplog.text
+    assert "private-token" not in caplog.text

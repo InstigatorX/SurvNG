@@ -15,6 +15,7 @@ import numpy as np
 import cv2
 
 from .security import redact_secret_text
+from .redact import redact_diagnostic_text
 from .live_detections import DetectionHistory, DetectionSnapshot
 
 
@@ -753,13 +754,14 @@ class CameraCaptureService:
                 except Exception as exc:
                     if not session_received_frame:
                         consecutive_open_failures += 1
-                    failure_reason = f"stream error: {redact_secret_text(exc)[:160]}"
+                    diagnostic = redact_diagnostic_text(exc)
+                    failure_reason = f"stream error: {diagnostic[:160]}"
                     self._set_error(source, failure_reason)
                     LOGGER.warning(
                         "camera stream failed for %s/%s: %s",
                         self.camera_id,
                         source,
-                        failure_reason,
+                        f"stream error: {diagnostic}",
                     )
                 finally:
                     with self._lock:

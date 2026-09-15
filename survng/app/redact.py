@@ -40,3 +40,15 @@ def redact_secret_text(value: object) -> str:
     redacted = _AUTHORIZATION_RE.sub(lambda match: f"{match.group(1)}***", redacted)
     redacted = _COOKIE_RE.sub(lambda match: f"{match.group(1)}***", redacted)
     return _SECRET_FIELD_RE.sub(lambda match: f"{match.group(1)}***", redacted)
+
+
+def redact_diagnostic_text(value: object) -> str:
+    """Bound a diagnostic after redaction, preserving its summary and cause."""
+    text = redact_secret_text(value)
+    limit = 4096
+    if len(text) <= limit:
+        return text
+    marker = "\n... [diagnostic truncated] ...\n"
+    head = (limit - len(marker)) // 2
+    tail = limit - len(marker) - head
+    return text[:head] + marker + text[-tail:]

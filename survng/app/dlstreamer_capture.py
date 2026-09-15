@@ -17,7 +17,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import BinaryIO, Callable
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -31,6 +31,7 @@ from .camera_capture import (
     CaptureOpenLimiter,
 )
 from .dlstreamer_protocol import (
+    PROTOCOL_FD_ENV,
     TYPE_DETECTIONS,
     TYPE_FATAL,
     TYPE_FRAME,
@@ -42,7 +43,7 @@ from .dlstreamer_protocol import (
     decode_json_payload,
     decode_stream_payload,
 )
-from survng.dlstreamer_live import model_instance_id
+from survng.dlstreamer_live import STREAM_STOP_TIMEOUT_SECONDS, model_instance_id
 from .live_detections import DetectionSnapshot
 from .redact import redact_secret_text
 
@@ -51,6 +52,35 @@ LOGGER = logging.getLogger(__name__)
 # does not compile a model. Keep parent and child budgets in agreement.
 DLSTREAMER_STARTUP_TIMEOUT_MS = 30000
 DLSTREAMER_INFERENCE_STALL_SECONDS = 5.0
+
+
+def _diagnostic_tail(stderr: bytearray, stdout: bytearray, limit: int = 400) -> str:
+    # Sanitize channels independently: native writes can split credentials
+    # across chunks and must never be spliced together with another channel.
+    return "\n".join(part for part in (
+        _safe_stderr_tail(stderr, limit), _safe_stderr_tail(stdout, limit),
+    ) if part)
+
+
+def _start_child(
+    command: list[str], env: dict[str, str], cwd: str,
+) -> tuple[subprocess.Popen[bytes], BinaryIO]:
+    """Own the data pipe separately from both native diagnostic streams."""
+    read_fd, write_fd = os.pipe()
+    try:
+        child_env = dict(env)
+        child_env[PROTOCOL_FD_ENV] = str(write_fd)
+        process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=child_env, pass_fds=(write_fd,),
+            start_new_session=True, cwd=cwd,
+        )
+    except BaseException:
+        os.close(read_fd)
+        raise
+    finally:
+        os.close(write_fd)
+    return process, os.fdopen(read_fd, "rb")
 
 
 def adjacent_model_proc(model_path: str) -> str:
@@ -251,13 +281,18 @@ class _SharedLiveProcess:
         del read_timeout_ms
         self._command = command
         self._lock = threading.Lock()
+        self._command_lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
+        self._output: BinaryIO | None = None
+        self._stdout_thread: threading.Thread | None = None
         self._reader = MessageReader()
         self._inboxes: dict[str, _StreamInbox] = {}
         self._stderr = bytearray()
+        self._native_stdout = bytearray()
         self._stderr_thread: threading.Thread | None = None
         self._reader_thread: threading.Thread | None = None
         self._failed = False
+        self._generation = uuid.uuid4().hex
 
     def is_running(self) -> bool:
         return (
@@ -266,7 +301,7 @@ class _SharedLiveProcess:
         )
 
     def stderr_text(self) -> str:
-        return _safe_stderr_tail(self._stderr)
+        return _diagnostic_tail(self._stderr, self._native_stdout)
 
     def start(self) -> None:
         if self.is_running():
@@ -277,25 +312,22 @@ class _SharedLiveProcess:
         env["PYTHONPATH"] = os.pathsep.join(
             part for part in (repo_root, existing) if part
         )
-        self._process = subprocess.Popen(
-            self._command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            start_new_session=True,
-            cwd=repo_root,
-        )
+        self._process, self._output = _start_child(self._command, env, repo_root)
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr,
             name="dlstreamer-supervisor-stderr",
             daemon=True,
         )
         self._reader_thread = threading.Thread(
-            target=self._read_stdout,
-            name="dlstreamer-supervisor-stdout",
+            target=self._read_protocol,
+            name="dlstreamer-supervisor-protocol",
             daemon=True,
         )
+        self._stdout_thread = threading.Thread(
+            target=self._drain_stderr, args=(self._process.stdout, self._native_stdout),
+            name="dlstreamer-native-stdout", daemon=True,
+        )
+        self._stdout_thread.start()
         self._stderr_thread.start()
         self._reader_thread.start()
 
@@ -330,56 +362,76 @@ class _SharedLiveProcess:
         if process is None:
             return
         if process.poll() is None:
-            if process.stdin is not None:
+            # EOF lets the supervisor leave its blocking command read. Avoid
+            # waiting on a writer if a wedged child has filled the input pipe.
+            if self._command_lock.acquire(blocking=False):
                 try:
-                    process.stdin.close()
-                except Exception:
-                    pass
+                    if process.stdin is not None:
+                        try:
+                            process.stdin.close()
+                        except (OSError, ValueError):
+                            pass
+                finally:
+                    self._command_lock.release()
             process.terminate()
             try:
-                process.wait(timeout=1.0)
+                process.wait(timeout=STREAM_STOP_TIMEOUT_SECONDS + 1.0)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=1.0)
-        for thread in (self._stderr_thread, self._reader_thread):
+        # Reap before closing buffered stdin: an in-flight command write can
+        # own its lock while the native child has stopped reading commands.
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+        for thread in (self._stderr_thread, self._stdout_thread, self._reader_thread):
             if thread is not None:
                 thread.join(timeout=1.0)
         self._stderr_thread = None
+        self._stdout_thread = None
         self._reader_thread = None
-        for stream in (process.stdout, process.stderr):
+        for stream in (self._output, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
+        self._output = None
 
     def _send(self, command: dict[str, object]) -> None:
         process = self._process
         if process is None or process.stdin is None:
             raise RuntimeError("DL Streamer supervisor is not running")
-        process.stdin.write((json.dumps(command) + "\n").encode("utf-8"))
-        process.stdin.flush()
+        with self._command_lock:
+            process.stdin.write((json.dumps(command) + "\n").encode("utf-8"))
+            process.stdin.flush()
 
-    def _drain_stderr(self) -> None:
+    def _drain_stderr(self, stream=None, buffer=None) -> None:
         process = self._process
-        if process is None or process.stderr is None:
+        if stream is None:
+            stream = process.stderr if process is not None else None
+        if stream is None:
             return
+        if buffer is None:
+            buffer = self._stderr
         while True:
-            chunk = process.stderr.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            chunk = stream.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return
-            self._stderr.extend(chunk)
-            if len(self._stderr) > 8192:
-                del self._stderr[:-8192]
+            buffer.extend(chunk)
+            if len(buffer) > 8192:
+                del buffer[:-8192]
 
-    def _read_stdout(self) -> None:
+    def _read_protocol(self) -> None:
         process = self._process
-        if process is None or process.stdout is None:
+        if process is None or self._output is None:
             return
         failure = "DL Streamer supervisor output ended"
         try:
             while True:
                 self._check_inference_progress(time.monotonic())
-                if not select.select([process.stdout], [], [], 0.5)[0]:
+                if not select.select([self._output], [], [], 0.5)[0]:
                     continue
-                chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
+                chunk = self._output.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
                 if not chunk:
                     break
                 self._reader.feed(chunk)
@@ -394,9 +446,11 @@ class _SharedLiveProcess:
             # One bounded diagnostic per supervisor failure. Keep the native
             # cause beyond the source-file prefix; camera retries stay concise.
             LOGGER.warning(
-                "DL Streamer supervisor failed (%s): %s; native stderr: %s",
+                "DL Streamer supervisor failed (%s): %s; native diagnostics: %s; "
+                "generation=%s affected_streams=%d",
                 type(error).__name__, redact_secret_text(str(error))[-4000:],
-                _safe_stderr_tail(self._stderr, 4000),
+                _diagnostic_tail(self._stderr, self._native_stdout, 2000),
+                self._generation, len(self._inboxes),
             )
         finally:
             self._failed = True
@@ -494,11 +548,13 @@ class _SharedLiveProcess:
 
 
 class DlStreamerCaptureHandle:
-    """One isolated live pipeline whose stdout carries gray frames and JPEG."""
+    """One isolated live pipeline with a dedicated frame and metadata pipe."""
 
     def __init__(self, *, read_timeout_ms: int) -> None:
         self._read_timeout_seconds = max(0.001, read_timeout_ms / 1000.0)
         self._process: subprocess.Popen[bytes] | None = None
+        self._output: BinaryIO | None = None
+        self._stdout_thread: threading.Thread | None = None
         self._reader = MessageReader()
         self._prefetched: np.ndarray | None = None
         self._prefetched_identity: tuple[int, float, str] | None = None
@@ -508,6 +564,7 @@ class DlStreamerCaptureHandle:
         self.source_role = "live"
         self.frame_width: int | None = None
         self._stderr = bytearray()
+        self._native_stdout = bytearray()
         self._stderr_thread: threading.Thread | None = None
         self._status: dict[str, object] = {}
         self._detections: list[dict[str, object]] = []
@@ -547,15 +604,7 @@ class DlStreamerCaptureHandle:
         env["PYTHONPATH"] = os.pathsep.join(
             part for part in (repo_root, existing) if part
         )
-        self._process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            start_new_session=True,
-            cwd=repo_root,
-        )
+        self._process, self._output = _start_child(command, env, repo_root)
         assert self._process.stdin is not None
         self._process.stdin.write(f"{source_url}\n".encode("utf-8"))
         self._process.stdin.close()
@@ -564,6 +613,11 @@ class DlStreamerCaptureHandle:
             name="dlstreamer-live-stderr",
             daemon=True,
         )
+        self._stdout_thread = threading.Thread(
+            target=self._drain_stderr, args=(self._process.stdout, self._native_stdout),
+            name="dlstreamer-native-stdout", daemon=True,
+        )
+        self._stdout_thread.start()
         self._stderr_thread.start()
 
     def attach(
@@ -656,10 +710,14 @@ class DlStreamerCaptureHandle:
                 process.wait(timeout=1.0)
         stderr_thread, self._stderr_thread = self._stderr_thread, None
         if stderr_thread is not None:
-            stderr_thread.join()
-        for stream in (process.stdout, process.stderr):
+            stderr_thread.join(timeout=1.0)
+        stdout_thread, self._stdout_thread = self._stdout_thread, None
+        if stdout_thread is not None:
+            stdout_thread.join(timeout=1.0)
+        for stream in (self._output, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
+        self._output = None
 
     def error_detail(self) -> str:
         inbox = self._inbox
@@ -673,7 +731,7 @@ class DlStreamerCaptureHandle:
             process = self._process
             return_code = process.poll() if process is not None else None
             status_error = str(self._status.get("error") or "").strip()
-            detail = _safe_stderr_tail(self._stderr)
+            detail = _diagnostic_tail(self._stderr, self._native_stdout)
         parts = [part for part in (status_error, detail) if part]
         combined = ": ".join(parts)
         if return_code is None:
@@ -685,17 +743,21 @@ class DlStreamerCaptureHandle:
         )
         return f"{outcome}: {combined}" if combined else outcome
 
-    def _drain_stderr(self) -> None:
+    def _drain_stderr(self, stream=None, buffer=None) -> None:
         process = self._process
-        if process is None or process.stderr is None:
+        if stream is None:
+            stream = process.stderr if process is not None else None
+        if stream is None:
             return
+        if buffer is None:
+            buffer = self._stderr
         while True:
-            chunk = process.stderr.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            chunk = stream.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return
-            self._stderr.extend(chunk)
-            if len(self._stderr) > 8192:
-                del self._stderr[:-8192]
+            buffer.extend(chunk)
+            if len(buffer) > 8192:
+                del buffer[:-8192]
 
     def _next_frame(
         self,
@@ -707,7 +769,7 @@ class DlStreamerCaptureHandle:
         if inbox is not None:
             return inbox.get_frame(timeout_seconds, cancelled=cancelled)
         process = self._process
-        if process is None or process.stdout is None:
+        if process is None or self._output is None:
             return None
         deadline = time.monotonic() + timeout_seconds
         while True:
@@ -724,14 +786,14 @@ class DlStreamerCaptureHandle:
             if remaining <= 0:
                 return None
             readable, _, _ = select.select(
-                [process.stdout],
+                [self._output],
                 [],
                 [],
                 min(remaining, CAPTURE_OPEN_LOCK_POLL_SECONDS),
             )
             if not readable:
                 continue
-            chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            chunk = self._output.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return None
             self._reader.feed(chunk)
@@ -740,17 +802,17 @@ class DlStreamerCaptureHandle:
         if self._inbox is not None:
             return
         process = self._process
-        if process is None or process.stdout is None:
+        if process is None or self._output is None:
             return
         while True:
             popped = self._reader.pop()
             if popped is not None:
                 self._apply_message(*popped)
                 continue
-            readable, _, _ = select.select([process.stdout], [], [], 0)
+            readable, _, _ = select.select([self._output], [], [], 0)
             if not readable:
                 return
-            chunk = process.stdout.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
+            chunk = self._output.read1(CAPTURE_PIPE_READ_CHUNK_BYTES)
             if not chunk:
                 return
             self._reader.feed(chunk)

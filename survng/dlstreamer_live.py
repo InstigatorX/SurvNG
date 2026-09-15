@@ -459,6 +459,11 @@ def _write(
     *,
     lock: threading.Lock | None = None,
 ) -> None:
+    from survng.app.dlstreamer_protocol import ProtocolWriter
+
+    if isinstance(stdout, ProtocolWriter):
+        stdout.send(message)
+        return
     if lock is None:
         stdout.write(message)
         stdout.flush()
@@ -468,12 +473,12 @@ def _write(
         stdout.flush()
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(argv: list[str] | None = None, *, output=None) -> int:
     with ExitStack() as resources:
-        return _run(argv, resources)
+        return _run(argv, resources, output=output)
 
 
-def _run(argv: list[str] | None, resources: ExitStack) -> int:
+def _run(argv: list[str] | None, resources: ExitStack, *, output=None) -> int:
     from survng.app.dlstreamer_protocol import (
         TYPE_DETECTIONS,
         TYPE_STATUS,
@@ -491,7 +496,7 @@ def _run(argv: list[str] | None, resources: ExitStack) -> int:
     qualifier_width = _qualifier_width(args.frame_width)
     jpeg_rate = _frame_rate(args.jpeg_fps) if args.jpeg_fps > 0 else None
     open_timeout = _positive_seconds(args.open_timeout, "open timeout")
-    stdout = sys.stdout.buffer
+    stdout = output if output is not None else sys.stdout.buffer
     Gst = _load_gstreamer()
     _prefer_decoder(Gst, args.decoder)
 
@@ -593,10 +598,10 @@ def _run_supervisor(
     )
 
     def request_stop(_signum=None, _frame=None) -> None:
+        # Signals execute on the command thread, possibly while it owns
+        # workers_lock. Cleanup owns worker signalling; never reacquire that
+        # non-reentrant lock from a signal handler.
         stop_all.set()
-        with workers_lock:
-            for event, _thread in workers.values():
-                event.set()
 
     previous_handlers = {
         signum: signal.signal(signum, request_stop)
@@ -712,8 +717,9 @@ def _run_supervisor(
         with workers_lock:
             remaining = list(workers.items())
         deadline = time.monotonic() + STREAM_STOP_TIMEOUT_SECONDS
-        for _stream_id, (event, thread) in remaining:
+        for _stream_id, (event, _thread) in remaining:
             event.set()
+        for _stream_id, (_event, thread) in remaining:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
@@ -1081,7 +1087,9 @@ def _pump_pipeline(
                     parsed_error, debug = message.parse_error()
                     error = str(parsed_error)
                     if debug:
-                        error = f"{error}: {debug[-400:]}"
+                        error = f"{error}: {debug}"
+                    from survng.app.redact import redact_diagnostic_text
+                    error = redact_diagnostic_text(error)
                     if detector is not None and message.src == detector:
                         raise InferencePipelineError(error)
                     raise RuntimeError(error)
@@ -1212,21 +1220,31 @@ def _pump_pipeline(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from survng.app.dlstreamer_protocol import TYPE_FATAL, TYPE_STATUS, encode_json
+    from survng.app.dlstreamer_protocol import (
+        TYPE_FATAL, TYPE_STATUS, ProtocolWriter, encode_json, open_protocol_output,
+    )
     from survng.app.redact import redact_secret_text
 
+    output = open_protocol_output()
+    writer = ProtocolWriter(output)
     try:
-        return run(argv)
+        return run(argv, output=writer)
     except Exception as exc:
-        sys.stdout.buffer.write(
-            encode_json(
-                TYPE_FATAL if "--supervisor" in (sys.argv[1:] if argv is None else argv) else TYPE_STATUS,
-                {"ok": False, "error": redact_secret_text(exc)},
-            )
-        )
-        sys.stdout.buffer.flush()
-        print(redact_secret_text(exc), file=sys.stderr)
+        print(redact_secret_text(exc), file=sys.stderr, flush=True)
+        # A surviving worker may own a blocked write. Parent termination is
+        # authoritative; never wait indefinitely to report a fatal shutdown.
+        if not isinstance(exc, StreamShutdownError):
+            try:
+                writer.send(encode_json(
+                    TYPE_FATAL if "--supervisor" in (sys.argv[1:] if argv is None else argv) else TYPE_STATUS,
+                    {"ok": False, "error": redact_secret_text(exc)},
+                ))
+            except (OSError, ValueError):
+                pass  # The parent has closed the connection; stderr holds the cause.
         return 1
+    finally:
+        if output is not sys.stdout.buffer:
+            output.close()
 
 
 if __name__ == "__main__":
