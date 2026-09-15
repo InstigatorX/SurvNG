@@ -10,6 +10,7 @@ from typing import Any, Callable, Protocol
 
 from ..detector import detection_failure
 from ..domain_events import IncidentCreated, ObjectDetected
+from ..evidence_work import check_evidence_cancellation
 from ..face_candidates import FaceCandidate
 from ..object_activity import AttributionMode, ObjectActivityAttributor
 from ..object_motion import (
@@ -636,11 +637,19 @@ class MotionDecisionHandler:
     ) -> MotionDecisionOutcome:
         detection_started = time.monotonic()
         detection_started_epoch = time.time()
+        cover_only = bool(qualification.get("cover_only")) and existing_event_id is not None
+        revision_kwargs: dict[str, Any] = {}
+        get_event = getattr(self.events, "get", None)
+        if existing_event_id is not None and callable(get_event):
+            current_event = get_event(int(existing_event_id))
+            if isinstance(current_event, dict) and "evidence_revision" in current_event:
+                revision_kwargs["expected_revision"] = int(current_event["evidence_revision"])
         provider_result = (
             evidence_provider(event_at, qualification)
             if evidence_provider is not None
             else self._invoke_detection_provider(provider, event_at, qualification)
         )
+        check_evidence_cancellation()
         frame, objects, recording_path = provider_result
         frame_captured_at_epoch = getattr(
             provider_result,
@@ -837,6 +846,7 @@ class MotionDecisionHandler:
             qualification["effective_accepted"] = bool(eligible_objects)
             qualification["would_suppress"] = not bool(eligible_objects)
 
+        check_evidence_cancellation()
         snapshot_path = ""
         if frame is not None:
             snapshot_at = (
@@ -846,7 +856,7 @@ class MotionDecisionHandler:
             )
             snapshot_path = self.snapshot_writer(frame, snapshot_at)
 
-        if require_eligible_object and not eligible_objects:
+        if cover_only or (require_eligible_object and not eligible_objects):
             rejection_reason = (
                 "object_not_motion_correlated"
                 if require_motion_correlation and uncorrelated_eligible_objects > 0
@@ -855,7 +865,7 @@ class MotionDecisionHandler:
             cover_promoted = False
             cover_promotion_reason = ""
             if (
-                rejection_reason == "object_not_motion_correlated"
+                (cover_only or rejection_reason == "object_not_motion_correlated")
                 and existing_event_id is not None
                 and snapshot_path
                 and frame is not None
@@ -864,6 +874,13 @@ class MotionDecisionHandler:
             ):
                 frame_height, frame_width = frame.shape[:2]
                 try:
+                    promotion_kwargs = dict(revision_kwargs)
+                    diagnostics: dict[str, Any] = {}
+                    parameters = inspect.signature(self.refinement_cover_promoter).parameters
+                    if "diagnostics" in parameters:
+                        promotion_kwargs["diagnostics"] = diagnostics
+                    if cover_only and qualification.get("cover_requirement_lease_owner"):
+                        promotion_kwargs["requirement_lease_owner"] = qualification["cover_requirement_lease_owner"]
                     promoted = self.refinement_cover_promoter(
                         int(existing_event_id),
                         snapshot_path=snapshot_path,
@@ -882,12 +899,13 @@ class MotionDecisionHandler:
                         ],
                         source=frame_source,
                         timestamp_exact=frame_timestamp_exact,
+                        **promotion_kwargs,
                     )
                     cover_promoted = promoted is not None
                     cover_promotion_reason = (
                         "compatible_recorded_refinement"
                         if cover_promoted
-                        else "refinement_cover_not_eligible"
+                        else str(diagnostics.get("reason") or "refinement_cover_not_eligible")
                     )
                 except Exception:
                     # Presentation enrichment is never allowed to make a
@@ -906,6 +924,30 @@ class MotionDecisionHandler:
                         "updated": True,
                         "reason": "cover_promoted",
                     })
+            record_attempt = getattr(self.events, "record_evidence_attempt", None)
+            if existing_event_id is not None and callable(record_attempt):
+                diagnostic_fields = {
+                    "label", "confidence", "box", "incident_eligible", "snapshot_visible",
+                    "confidence_eligible", "zone_eligible", "temporal_eligible",
+                    "temporal_consensus", "temporal_track_id", "temporal_track_observations",
+                    "temporal_first_observation_offset_seconds", "temporal_last_observation_offset_seconds",
+                    "motion_correlation", "detection_frame_width", "detection_frame_height",
+                    "frame_source", "frame_captured_at_epoch", "frame_timestamp_exact",
+                    "frame_reference", "frame_timestamp_uncertainty_seconds",
+                }
+                record_attempt(int(existing_event_id), {
+                    "source": frame_source,
+                    "frame_reference": getattr(provider_result, "frame_reference", None),
+                    "captured_at_epoch": frame_captured_at_epoch,
+                    "snapshot_path": snapshot_path,
+                    "objects": [{key: value for key, value in item.items() if key in diagnostic_fields}
+                                for item in objects if item.get("label")][:64],
+                    "candidate_count": sum(bool(item.get("label")) for item in objects),
+                    "motion_correlation": correlation,
+                    "security_rejection": rejection_reason,
+                    "cover_reason": cover_promotion_reason or "no_compatible_main_evidence",
+                    "processing_timing": processing_timing,
+                })
             return MotionDecisionOutcome(
                 event_id=existing_event_id,
                 snapshot_path=snapshot_path,
@@ -979,6 +1021,7 @@ class MotionDecisionHandler:
                 snapshot_path=snapshot_path,
                 recording_path=recording_path,
                 objects_json=self.object_serializer(stored_objects),
+                **revision_kwargs,
             )
             if refined_event is None:
                 qualification["refinement_evidence_preserved"] = True

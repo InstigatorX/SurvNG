@@ -35,6 +35,7 @@ class IncidentLifecycle(IncidentPayloadBuilder):
         self._lock = threading.RLock()
         self._groups: OrderedDict[str, dict] = OrderedDict()
         self._timers: dict[str, threading.Timer] = {}
+        self._delivered_revisions: dict[str, int] = {}
         self._running = False
         if path is not None and path.exists():
             data = json.loads(path.read_text())
@@ -131,8 +132,10 @@ class IncidentLifecycle(IncidentPayloadBuilder):
         completed = [item for item, value in self._groups.items() if value["payload"]["state"] == "complete"]
         for old in completed[:-256]:
             self._groups.pop(old)
+            self._delivered_revisions.pop(old, None)
         self._save()
         self._publish(deepcopy(payload))
+        self._delivered_revisions[key] = revision
 
     def track_incident(self, event: dict, camera_name: str, base_path: str = "", allow_new: bool = True) -> None:
         camera_id = str(event.get("camera_id") or "")
@@ -160,6 +163,11 @@ class IncidentLifecycle(IncidentPayloadBuilder):
                 state = "new"
             else:
                 key, group = match
+                if (group["events"].get(event_id) == event
+                        and group.get("camera_name") == (camera_name or camera_id)
+                        and group.get("base_path") == base_path
+                        and self._delivered_revisions.get(key) == group["payload"].get("revision")):
+                    return
                 state = "complete" if group["payload"]["state"] == "complete" else "updated"
             group["events"][event_id] = deepcopy(event)
             group["camera_name"] = camera_name or camera_id

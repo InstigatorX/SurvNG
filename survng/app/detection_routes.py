@@ -191,6 +191,8 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
                 event_id,
                 objects_to_json(objects),
                 expected_snapshot_path=str(event.get("snapshot_path") or ""),
+                **({"expected_revision": int(event["evidence_revision"])}
+                   if "evidence_revision" in event else {}),
             )
         except EventSnapshotChangedError:
             raise HTTPException(

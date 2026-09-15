@@ -421,6 +421,17 @@ class InferenceSupervisorTest(unittest.TestCase):
         )
         self.assertNotIn("/private", metadata["error"])
 
+    def test_cover_recovery_yields_to_other_camera_security_work(self) -> None:
+        from survng.app.evidence_work import EvidenceWorkPreempted, cancellable_evidence_work
+        self.assertTrue(self.supervisor._enter_device_workload(InferenceWorkload.INCIDENT_REFINEMENT))
+        try:
+            with cancellable_evidence_work(lambda: False):
+                with self.assertRaises(EvidenceWorkPreempted):
+                    self.supervisor.detect_refinement(np.zeros((12, 12, 3), dtype=np.uint8))
+        finally:
+            self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_REFINEMENT)
+        self.assertEqual(self.supervisor.workload_status()["optional_active"], 0)
+
     def test_offline_lease_is_exclusive_with_optional_device_work(self) -> None:
         self.assertTrue(
             self.supervisor._enter_device_workload(InferenceWorkload.TRACKING)

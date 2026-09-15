@@ -10,6 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from ..evidence_work import check_evidence_cancellation, evidence_wait_timeout
 from ..config import DetectorConfig
 from ..perf_samples import RollingLatencySamples
 from .process import _inference_worker_main
@@ -534,6 +535,7 @@ class _InferenceWorker:
                 heapq.heappush(self._admission_waiters, waiter)
                 self._workload_stats[workload]["queued"] += 1
                 while True:
+                    check_evidence_cancellation()
                     if not self._admission_open:
                         self._admission_waiters.remove(waiter)
                         heapq.heapify(self._admission_waiters)
@@ -563,13 +565,14 @@ class _InferenceWorker:
                         stats["wait_max_ms"] = max(float(stats["wait_max_ms"]), wait_ms)
                         self._admission_wait_samples[workload].add(wait_ms)
                         break
-                    self._admission.wait(remaining)
+                    self._admission.wait(evidence_wait_timeout(remaining))
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not self._lock.acquire(timeout=remaining):
                 raise InferenceUnavailable(
                     f"{self.role} {operation} timed out waiting for the inference worker"
                 )
             try:
+                check_evidence_cancellation()
                 remaining = deadline - time.monotonic()
                 if not self._ensure_worker_locked(startup_timeout=max(0.0, remaining)):
                     raise InferenceUnavailable(
