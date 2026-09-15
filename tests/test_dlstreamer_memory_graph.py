@@ -111,7 +111,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert "detect" not in elements
     else:
         assert elements["detect"].properties["ie-config"] == (
-            "PERFORMANCE_HINT=THROUGHPUT,NUM_STREAMS=2,COMPILATION_NUM_THREADS=1"
+            "PERFORMANCE_HINT=THROUGHPUT,NUM_STREAMS=2,ALLOW_AUTO_BATCHING=NO,COMPILATION_NUM_THREADS=1"
         )
         assert elements["meta-sink"].properties["async"] is False
         assert elements["detect"].properties["nireq"] == 4

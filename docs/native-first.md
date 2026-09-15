@@ -30,7 +30,11 @@ Main stream → existing continuous recorder → incident video/playback
 
 The compiled model is shared across camera graphs. The initial throughput
 profile uses four inference requests and two CPU/GPU inference streams. GPU
-compilation remains serialized to avoid the known driver compiler issue. Queues
+compilation remains serialized to avoid the known driver compiler issue.
+GPU automatic batching is explicitly disabled: the throughput hint can otherwise
+activate an OpenVINO batching wrapper despite `gvadetect` batch size 1, which
+failed to initialize VA surface inputs with the deployed model. Four requests
+and two inference streams remain enabled. Queues
 shed old frames rather than accumulating an unbounded backlog. Tracking runs
 before the leaky metadata queue so delivery drops do not skip tracker updates.
 OpenVINO remains the inference engine inside `gvadetect`.

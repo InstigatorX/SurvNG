@@ -1024,6 +1024,11 @@ def _pump_pipeline(
         if target in {"CPU", "GPU"}:
             compile_options += f",NUM_STREAMS={args.inference_streams}"
         if target == "GPU":
+            # THROUGHPUT may enable OpenVINO automatic batching even though
+            # gvadetect batch-size is 1. Its request wrapper cannot bind this
+            # model's VA surface inputs ("Input tensor with index 0 is not
+            # found"). Keep parallel requests/streams, but disable auto batching.
+            compile_options += ",ALLOW_AUTO_BATCHING=NO"
             compile_options += f",COMPILATION_NUM_THREADS={GPU_COMPILATION_NUM_THREADS}"
         detector.set_property("ie-config", compile_options)
         # Parallel requests share one compiled model; never wait for a batch
