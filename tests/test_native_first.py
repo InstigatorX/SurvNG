@@ -352,3 +352,34 @@ def test_resolution_change_restarts_identity_and_confirmation(activity):
     activity.consume(replace(observation(4), width=200), now=100.8, epoch=1000.8)
     assert activity.event_id == 2
     assert activity.tracks[(7, "person")]["native_identity"] != original
+
+
+@pytest.mark.parametrize("new_session", [True, False])
+def test_reconnected_video_gets_metadata_grace_after_long_outage(monkeypatch, new_session):
+    import threading
+    from types import SimpleNamespace
+    from survng.app.native_camera import NativeCameraWorker
+    monkeypatch.setattr("survng.app.native_camera.time.monotonic", lambda: 100.0)
+    worker = NativeCameraWorker.__new__(NativeCameraWorker)
+    worker._stop = Mock()
+    worker._stop.wait.side_effect = [False, True]
+    worker._stop.is_set.return_value = False
+    worker._lock = threading.RLock()
+    worker._enabled_at = 1.0
+    worker._last_native_healthy_at = 1.0
+    worker._native_frame_session = "old-session"
+    worker.runtime_state = SimpleNamespace(detection_enabled=True)
+    worker.config = DetectorConfig(enabled=True)
+    worker.capture = Mock()
+    worker.capture.native_observations.return_value = []
+    worker.capture.latest.return_value = SimpleNamespace(
+        source_session="reconnected-session" if new_session else "old-session", captured_at_monotonic=100.0)
+    worker.activity = Mock(health="metadata_stale")
+    worker._restart_native_stream = Mock()
+    worker._run()
+    if new_session:
+        worker._restart_native_stream.assert_not_called()
+        assert worker._last_native_healthy_at == 100.0
+    else:
+        worker._restart_native_stream.assert_called_once_with(100.0)
+    assert worker.activity.health != "healthy"

@@ -44,6 +44,7 @@ class NativeCameraWorker:
         self._thread = None
         self._enabled_at = 0.0
         self._last_native_healthy_at = time.monotonic()
+        self._native_frame_session = ""
         self._last_error = ""
         self.capture = CameraCaptureService(
             camera_id=camera.id, source_url=camera.source_url, backend=NativeCaptureBinding(
@@ -120,6 +121,14 @@ class NativeCameraWorker:
                     if self._stop.is_set():
                         break
                     if self.runtime_state.detection_enabled and self.config.enabled:
+                        if (frame and frame.source_session
+                                and frame.source_session != self._native_frame_session
+                                and now - frame.captured_at_monotonic < 2):
+                            # Reconnect/admission waiting is not inference time.
+                            # The first resumed frame can precede its metadata;
+                            # allow this new session the normal watchdog budget.
+                            self._native_frame_session = frame.source_session
+                            self._last_native_healthy_at = now
                         for observation in observations:
                             if observation.received_monotonic < self._enabled_at:
                                 continue
