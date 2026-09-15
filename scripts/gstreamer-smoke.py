@@ -57,7 +57,7 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
                     if kind == TYPE_FRAME:
                         width, height, sequence, pts, pixels = decode_frame_payload(payload)
                         assert width == (320 if source_role == "live" else 640)
-                        assert len(pixels) == width * height * (1 if source_role == "live" and detect else 3)
+                        assert len(pixels) == width * height * 3
                         assert math.isfinite(pts)
                         frames.append(pts)
                         matched += history.match(pts=pts, session="native", detect_fps=2.5) is not None
@@ -82,8 +82,12 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
         errors = stderr.read().decode(errors="replace")
     assert status.get("ok") and status.get("detect") == (source_role == "live" and detect), (status, errors[-4000:])
     assert len(frames) >= 10, (len(frames), len(snapshots), errors[-4000:])
+    exact_matches = sum(snapshot.source_pts in frames for snapshot in snapshots)
     if source_role == "live" and detect:
         assert len(snapshots) >= 3 and matched > 0, (len(snapshots), matched, errors[-4000:])
+        # Results arrive asynchronously, but must identify actual emitted
+        # pixels, not merely a nearby timestamp on the other tee branch.
+        assert exact_matches > 0, (frames, [item.source_pts for item in snapshots])
     else:
         assert snapshots == [], "frames-only capture must not run gvadetect"
     assert all(b > a for a, b in zip(frames, frames[1:]))
@@ -94,6 +98,7 @@ def consume(model: Path, proc: Path | None, threshold: float, source_role="live"
         assert all(len(item.objects) == expected_objects for item in snapshots), [len(item.objects) for item in snapshots]
     assert len(frames) > len(snapshots), "detector cadence must not throttle EMA"
     return {"threshold": threshold, "source_role": source_role, "frames": len(frames), "snapshots": len(snapshots),
+            "exact_matches": exact_matches,
             "nms_threshold": nms_threshold, "objects_per_snapshot": expected_objects,
             "positive_snapshots": sum(bool(s.objects) for s in snapshots),
             "matched_at_receipt": matched,
@@ -134,7 +139,7 @@ def shared_supervisor(model: Path, proc: Path, *, device: str = "CPU") -> dict:
                     if kind == TYPE_FRAME:
                         width, height, _seq, _pts, pixels = decode_frame_payload(body)
                         assert width == widths[stream_id]
-                        assert len(pixels) == width * height * (3 if roles[stream_id] == "main" else 1)
+                        assert len(pixels) == width * height * 3
                         entry["frames"] += 1
                     elif kind == TYPE_DETECTIONS:
                         snapshot = DetectionSnapshot.parse(decode_json_payload(body), session=stream_id)

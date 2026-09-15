@@ -102,6 +102,7 @@
   },
   "detector": {
     "enabled": false,
+    "native_live_detection": true,
     "live_sample_fps": 5.0,
     "object_worker_count": 2,
     "recorded_decode_max_processes": 2,

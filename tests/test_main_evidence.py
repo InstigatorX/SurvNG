@@ -255,9 +255,15 @@ with tempfile.TemporaryDirectory() as directory:
 def test_native_gstreamer_b_frame_decode_selects_original_access_units(codec):
     if not Path("/usr/bin/python3").exists():
         pytest.skip("system GI runtime unavailable")
-    probe = subprocess.run(["/usr/bin/python3", "-c", "import gi"], capture_output=True)
+    # PyGObject can be installed without the GStreamer typelib (as on the
+    # general CI runner). Probe the namespace used by the native fixture too.
+    probe = subprocess.run([
+        "/usr/bin/python3", "-c",
+        "import gi; gi.require_version('Gst', '1.0'); "
+        "from gi.repository import Gst; Gst.init(None)",
+    ], capture_output=True, timeout=5)
     if probe.returncode:
-        pytest.skip("system GI runtime unavailable")
+        pytest.skip("system GStreamer GI runtime unavailable")
     result = subprocess.run(["/usr/bin/python3", "-c", NATIVE_FIXTURE],
                             capture_output=True, text=True, timeout=20,
                             env={**os.environ, "SURVNG_TEST_CODEC": codec})

@@ -1400,9 +1400,8 @@ class RecordedMotionObjectDetector:
         unavailable live frame therefore produces a provisional no-frame result
         rather than cancelling the authoritative recorded refinement.
 
-        Qualification submits selected color evidence to the initial inference
-        workload. An explicit native metadata provider remains authoritative
-        for integrations using continuous inference.
+        Reuse exact native evidence when available, otherwise submit selected
+        color pixels to the initial inference workload.
         """
         workflow_started = time.monotonic()
         timing = {
@@ -1504,8 +1503,6 @@ class RecordedMotionObjectDetector:
             )
         sidecar_objects: list[dict[str, Any]] | None = None
         snapshot = None
-        if self.live_detections_provider is not None:
-            sidecar_objects = []
         if self.live_detections_provider is not None and isinstance(sample, TimestampedLiveFrame):
             snapshot = self.live_detections_provider(sample)
             if snapshot is not None:
@@ -1519,7 +1516,7 @@ class RecordedMotionObjectDetector:
             precomputed=sidecar_objects,
             spatial_alignment=sample.spatial_alignment if isinstance(sample, TimestampedLiveFrame) else None,
         )
-        if self.live_detections_provider is None:
+        if snapshot is None:
             # Never attach a slow or previous-session response to newer pixels.
             frame_age = max(
                 time.time() - float(captured_at),

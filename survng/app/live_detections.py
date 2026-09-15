@@ -94,7 +94,8 @@ class DetectionHistory:
         self.counts["snapshots"] += 1
         self.counts["empty_snapshots"] += not snapshot.objects
 
-    def match(self, *, pts: float, session: str, detect_fps: float) -> DetectionSnapshot | None:
+    def match(self, *, pts: float, session: str, detect_fps: float,
+              exact: bool = False) -> DetectionSnapshot | None:
         if not session or session != self.session:
             self.counts["wrong_session"] += 1
             return None
@@ -110,6 +111,13 @@ class DetectionHistory:
         if pts - snapshot.source_pts > tolerance:
             self.counts["stale"] += 1
             return None
+        # Display can reuse nearby boxes; completed inference belongs only to
+        # the identical source buffer. Both wire paths encode PTS in seconds.
+        if exact and snapshot.source_pts != pts:
+            self.counts["nonexact"] += 1
+            return None
+        if exact:
+            self.counts["exact_matches"] += 1
         self.counts["matched"] += 1
         return snapshot
 

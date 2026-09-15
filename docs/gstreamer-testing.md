@@ -18,7 +18,7 @@ docker compose -f compose.gstreamer-test.yaml run --rm smoke
 This uses the digest-pinned Intel 2026.2.0 image, a read-only source mount, a
 temporary synthetic OpenVINO model, no network, 2 CPUs and 2 GiB RAM. Expect:
 
-- 5 FPS, 320-wide grayscale qualification, with approximately half as many
+- 5 FPS, 320-wide BGR evidence (qualification derives grayscale), with approximately half as many
   inference snapshots at 2.5 FPS.
 - Positive snapshots labeled `car`, then a separate all-empty run.
 - 640-wide BGR main frames with no live detection snapshots.
@@ -114,12 +114,13 @@ check pipeline status for `decoded_memory=memory:VAMemory`,
 `detection_memory=memory:VAMemory`, `qualifier_memory=memory:SystemMemory`,
 and `preprocess_backend=va` on a VA-enabled live inference stream. Detection
 keeps VA surfaces; the rate-limited EMA branch uses `vapostproc` to resize and
-download square-pixel NV12, then converts the small host frame to GRAY8.
+download square-pixel NV12, then converts the small host frame to BGR for
+evidence/fallback; qualification derives GRAY8 from it.
 The rate-limited JPEG branch also has an explicit VA download boundary.
 Do not substitute direct VA-to-GRAY8 conversion based on advertised caps alone:
 the test host's driver negotiates it but produces no frames.
 
-Require actual grayscale frames, JPEG previews and timestamp/session-matched
+Require actual BGR frames, JPEG previews and exact-PTS/session-matched
 inference snapshots, not just successful negotiation or EOS. Main evidence
 must remain aspect-correct BGR with no live inference snapshots. Repeat with
 two live streams sharing the model, then close/reopen a stream and verify a

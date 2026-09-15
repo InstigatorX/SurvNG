@@ -86,7 +86,8 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     assert elements["drop-only-rate"].properties["drop-only"]
     assert elements["jpeg-rate"].properties["drop-only"]
     assert elements["frame-queue"].properties["max-size-buffers"] == 1
-    assert elements["frame-caps"].properties["caps"].startswith("video/x-raw,format=")
+    # Native misses must still have color pixels for demand-driven inference.
+    assert elements["frame-caps"].properties["caps"].startswith("video/x-raw,format=BGR,")
     assert elements["jpeg-caps"].properties["caps"] == "video/x-raw,format=I420,framerate=1/1"
     if va:
         assert elements["qualifier-download"].factory == "vapostproc"
@@ -106,6 +107,8 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert "format=BGR," in elements["frame-caps"].properties["caps"]
         assert "detect" not in elements
     else:
+        assert elements["detect"].properties["inference-interval"] == 1
+        assert not any(element.factory == "gvatrack" for element in elements.values())
         assert elements["detect"].properties["ie-config"] == (
             "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1,COMPILATION_NUM_THREADS=1"
         )
