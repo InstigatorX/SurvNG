@@ -409,3 +409,48 @@ def test_semantic_contention_retry_survives_full_queue_and_yields_to_live_events
         service._run()
     assert order == [1, 2, 1]
     assert service._queue.qsize() == 0
+
+
+@pytest.mark.parametrize('boundary', ['device', 'worker'])
+def test_optional_evidence_yields_queued_inference_without_stopping_worker(boundary):
+    from survng.app.evidence_work import EvidenceWorkPreempted, cancellable_evidence_work
+    supervisor = supervisor_with_devices()
+    cancelled, waiting = threading.Event(), threading.Event()
+    worker = supervisor._object_workers[0]
+    condition = supervisor._device_condition if boundary == 'device' else worker._admission
+    if boundary == 'device':
+        assert supervisor._enter_device_workload(W.INCIDENT_INITIAL)
+    else:
+        worker._admission_active = True
+    original_wait = condition.wait
+    outcomes = []
+
+    def wait(timeout):
+        waiting.set()
+        return original_wait(timeout)
+
+    def attempt():
+        try:
+            with cancellable_evidence_work(cancelled.is_set):
+                if boundary == 'device':
+                    supervisor._enter_device_workload(W.INCIDENT_REFINEMENT)
+                else:
+                    worker.request('detect', workload=W.INCIDENT_REFINEMENT)
+        except EvidenceWorkPreempted:
+            outcomes.append('preempted')
+
+    with patch.object(condition, 'wait', side_effect=wait):
+        thread = threading.Thread(target=attempt)
+        thread.start()
+        assert waiting.wait(2)
+        cancelled.set()
+        thread.join(2)
+    assert not thread.is_alive() and outcomes == ['preempted']
+    assert supervisor._security_waiting == 0
+    assert worker._pending_requests == 0
+    assert worker._admission_waiters == []
+    worker._process.terminate.assert_not_called()
+    if boundary == 'device':
+        supervisor._leave_device_workload(W.INCIDENT_INITIAL)
+    else:
+        worker._admission_active = False

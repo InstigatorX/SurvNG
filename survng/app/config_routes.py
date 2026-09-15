@@ -14,7 +14,7 @@ from urllib.parse import unquote_plus, urlsplit, urlunsplit
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .config import ApiScope, ApiTokenConfig, AppConfig, CameraConfig, DetectionZone, camera_by_id, slugify_camera_id
+from .config import ApiScope, ApiTokenConfig, AppConfig, CameraConfig, DetectionZone, camera_by_id, remove_camera, slugify_camera_id
 from .security import hash_api_token, redact_secret_text
 
 SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__"
@@ -532,11 +532,10 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
     @router.delete("/api/config/cameras/{camera_id}")
     def delete_camera(camera_id: str) -> dict:
         with deps.lock:
-            next_config = deps.get_config().model_copy(deep=True)
-            remaining = [camera for camera in next_config.cameras if camera.id != camera_id]
-            if len(remaining) == len(next_config.cameras):
-                raise HTTPException(status_code=404, detail="camera not found")
-            next_config.cameras = remaining
+            try:
+                next_config = remove_camera(deps.get_config(), camera_id)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="camera not found") from None
             deps.reload_manager(next_config)
         return {"ok": True, "camera_id": camera_id}
 

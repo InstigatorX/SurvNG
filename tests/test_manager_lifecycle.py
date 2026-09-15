@@ -50,6 +50,9 @@ def manager_with_mocks() -> AppManager:
     manager.inference.status.return_value = {}
     manager._motion_analysis_limiter = Mock()
     manager.motion_object_detector_factory = Mock()
+    manager.main_evidence = Mock()
+    manager.main_evidence.status.return_value = {}
+    manager.evidence_projection = Mock()
     manager.motion_object_detector_factory.decode_budget.status.return_value = {}
     manager.recorder = Mock()
     manager.recorder.ffmpeg_path = manager.config.ffmpeg_path
@@ -1172,6 +1175,10 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.inference.start_core.assert_called_once_with()
         manager.inference.start_auxiliary.assert_called_once_with()
+        manager.main_evidence.start.assert_called_once_with()
+        manager.evidence_projection.start.assert_called_once_with()
+        manager.main_evidence.stop.assert_called_once_with()
+        manager.evidence_projection.stop.assert_called_once_with()
         manager.workers["gate"].start.assert_called_once_with()
         manager.workers["gate"].request_stop.assert_called_once_with()
         manager.inference.close.assert_called_once_with()

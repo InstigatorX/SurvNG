@@ -11,11 +11,10 @@ from ..motion_trigger_authority import merge_trigger_authority
 
 DETECTION_JOB_MAXIMUM_AGE_SECONDS = 20.0
 # A probe that has not admitted an incident becomes irrelevant quickly. Once a
-# live fast-path has persisted an event, however, recorded refinement is the
-# only path to its main-stream cover and remains useful while the recording is
-# durable. Give those event-bound jobs enough time to survive one busy 4K
-# decode ahead of them.
-DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS = 60.0
+# live fast-path has persisted an event, recorded refinement remains useful
+# during its five-minute evidence deadline. Cover recovery has a separate
+# obligation and does not depend on this security job remaining runnable.
+DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS = 300.0
 # Inference freshness no longer matters once its result is checkpointed.
 # Bound unfinished bookkeeping independently, including recovery after restart.
 DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS = 24 * 60 * 60.0
@@ -656,6 +655,17 @@ class EventStoreJobsMixin:
                 )
             return "coalesced"
 
+    def has_due_detection_job(self, camera_id: str) -> bool:
+        """Read-only priority check for optional work yielding to durable retries."""
+        now = time.time()
+        with self._connect_jobs() as conn:
+            return conn.execute(
+                "select 1 from detection_jobs where camera_id=? and "
+                "((state='queued' and available_at<=?) or "
+                "(state='running' and lease_expires_at<=?)) limit 1",
+                (camera_id, now, now),
+            ).fetchone() is not None
+
     def claim_detection_job(
         self,
         camera_id: str,
@@ -814,15 +824,16 @@ class EventStoreJobsMixin:
         event_id: int | None,
         *,
         lease_owner: str = "",
-    ) -> None:
+    ) -> bool:
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._jobs_lock, self._connect_jobs() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "update detection_jobs set state = 'completed', event_id = ?, "
                 "lease_expires_at = null, lease_owner = '', last_error = '', updated_at = ? "
-                "where id = ? and (lease_owner = ? or ? = '')",
+                "where id = ? and state = 'running' and (lease_owner = ? or ? = '')",
                 (event_id, now_iso, job_id, lease_owner, lease_owner),
             )
+            return cursor.rowcount > 0
 
     def checkpoint_detection_job(
         self,

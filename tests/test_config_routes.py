@@ -291,6 +291,13 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertEqual(result["camera"]["id"], "gate")
         self.assertEqual(self.apply.call_args.args[0].cameras[0].id, "gate")
 
+    def test_camera_save_preserves_main_evidence_switch(self) -> None:
+        camera = self.config.cameras[0].model_copy(update={"main_evidence_enabled": True})
+        result = self.endpoint("/api/config/cameras/{camera_id}", "PUT")("gate", camera)
+        self.assertTrue(result["camera"]["main_evidence_enabled"])
+        incoming = self.apply.call_args.args[0]
+        self.assertTrue(incoming.main_evidence.enabled_for(incoming.cameras[0]))
+
     def test_full_config_save_preserves_existing_camera_ids(self) -> None:
         edited = self.config.model_copy(deep=True)
         edited.cameras[0].name = "Front Gate"
@@ -391,3 +398,45 @@ class ConfigRoutesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_camera_removal_preserves_valid_config_and_unrelated_references(tmp_path):
+    from survng.app.config import CameraTransitionRoute, MainEvidenceConfig, remove_camera, save_config, load_config
+    config = AppConfig(cameras=[CameraConfig(id=name, name=name, stream_url=f'rtsp://{name}/main')
+                                for name in ('gate', 'yard', 'door')],
+                       main_evidence=MainEvidenceConfig(enabled=True, camera_ids=['gate', 'yard']))
+    config.detector.tracking.camera_transition_routes = [
+        CameraTransitionRoute(from_camera="gate", to_camera="yard"),
+        CameraTransitionRoute(from_camera="yard", to_camera="door"),
+    ]
+    replacement = remove_camera(config, 'gate')
+    assert config.main_evidence.camera_ids == ['gate', 'yard']
+    assert replacement.main_evidence.camera_ids == ['yard']
+    assert [(route.from_camera, route.to_camera) for route in replacement.detector.tracking.camera_transition_routes] == [('yard', 'door')]
+    assert [camera.id for camera in replacement.cameras] == ['yard', 'door']
+    path = tmp_path / 'config.json'
+    save_config(replacement, path, assign_ids=False)
+    assert load_config(path) == replacement
+
+
+def test_camera_id_assignment_remaps_buffer_references():
+    from survng.app.config import MainEvidenceConfig, normalize_config
+    config = AppConfig(cameras=[CameraConfig(id='old', name='Front Door', stream_url='rtsp://example/main')],
+                       main_evidence=MainEvidenceConfig(enabled=True, camera_ids=['old']))
+    normalized = normalize_config(config, assign_ids=True)
+    assert normalized.main_evidence.camera_ids == [normalized.cameras[0].id]
+    assert normalized.cameras[0].id != 'old'
+
+
+def test_invalid_mutated_config_cannot_replace_saved_configuration(tmp_path):
+    from pydantic import ValidationError
+    from survng.app.config import MainEvidenceConfig, save_config
+    config = AppConfig(cameras=[CameraConfig(id='gate', name='Gate', stream_url='rtsp://example/main')],
+                       main_evidence=MainEvidenceConfig(enabled=True, camera_ids=['gate']))
+    path = tmp_path / 'config.json'
+    save_config(config, path, assign_ids=False)
+    original = path.read_bytes()
+    config.cameras = []
+    with unittest.TestCase().assertRaises(ValidationError):
+        save_config(config, path, assign_ids=False)
+    assert path.read_bytes() == original

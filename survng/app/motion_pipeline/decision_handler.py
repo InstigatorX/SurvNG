@@ -10,6 +10,7 @@ from typing import Any, Callable, Protocol
 
 from ..detector import detection_failure
 from ..domain_events import IncidentCreated, ObjectDetected
+from ..evidence_work import check_evidence_cancellation
 from ..face_candidates import FaceCandidate
 from ..object_activity import AttributionMode, ObjectActivityAttributor
 from ..object_motion import (
@@ -636,11 +637,19 @@ class MotionDecisionHandler:
     ) -> MotionDecisionOutcome:
         detection_started = time.monotonic()
         detection_started_epoch = time.time()
+        cover_only = bool(qualification.get("cover_only")) and existing_event_id is not None
+        revision_kwargs: dict[str, Any] = {}
+        get_event = getattr(self.events, "get", None)
+        if existing_event_id is not None and callable(get_event):
+            current_event = get_event(int(existing_event_id))
+            if isinstance(current_event, dict) and "evidence_revision" in current_event:
+                revision_kwargs["expected_revision"] = int(current_event["evidence_revision"])
         provider_result = (
             evidence_provider(event_at, qualification)
             if evidence_provider is not None
             else self._invoke_detection_provider(provider, event_at, qualification)
         )
+        check_evidence_cancellation()
         frame, objects, recording_path = provider_result
         frame_captured_at_epoch = getattr(
             provider_result,
@@ -670,6 +679,12 @@ class MotionDecisionHandler:
                 if frame_source:
                     detected.setdefault("frame_source", frame_source)
                 detected.setdefault("frame_timestamp_exact", frame_timestamp_exact)
+                reference = getattr(provider_result, "frame_reference", None)
+                if isinstance(reference, dict):
+                    detected.setdefault("frame_reference", dict(reference))
+                uncertainty = getattr(provider_result, "frame_timestamp_uncertainty_seconds", None)
+                if isinstance(uncertainty, (int, float)) and math.isfinite(uncertainty):
+                    detected.setdefault("frame_timestamp_uncertainty_seconds", uncertainty)
         processed_at = datetime.now(timezone.utc)
         normalized_event_at = (
             event_at.replace(tzinfo=timezone.utc)
@@ -677,7 +692,8 @@ class MotionDecisionHandler:
             else event_at.astimezone(timezone.utc)
         )
         workflow_ms = round(
-            (time.monotonic() - detection_started) * 1000,
+            (time.monotonic() - detection_started) * 1000
+            + float(qualification.get("association_prior_workflow_ms") or 0),
             3,
         )
         qualification["object_detection_workflow_ms"] = workflow_ms
@@ -841,6 +857,33 @@ class MotionDecisionHandler:
             qualification["effective_accepted"] = bool(eligible_objects)
             qualification["would_suppress"] = not bool(eligible_objects)
 
+        # An early confidence success can still lack the temporal span needed
+        # for association. Ask for one bounded continuation without changing
+        # security thresholds; cover recovery has its own later attempts.
+        if (existing_event_id is not None and not cover_only
+                and require_motion_correlation and uncorrelated_eligible_objects
+                and not eligible_objects and not qualification.get("association_continuation")):
+            offsets = [item.get("temporal_last_observation_offset_seconds") for item in objects]
+            offsets = [float(value) for value in offsets if isinstance(value, (int, float)) and math.isfinite(value)]
+            remaining = 24.0 - (time.monotonic() - detection_started)
+            if offsets and max(offsets) < 4.0 and remaining > 1.0:
+                qualification["association_continuation"] = True
+                qualification["association_prior_workflow_ms"] = (
+                    time.monotonic() - detection_started
+                ) * 1000.0
+                qualification["evidence_sampling"] = {
+                    "minimum_last_offset_seconds": 4.0,
+                    "timeout_seconds": remaining,
+                }
+                return self._handle_with_provider(
+                    provider, topic, message, event_at, qualification,
+                    existing_event_id=existing_event_id,
+                    require_eligible_object=require_eligible_object,
+                    require_motion_correlation=require_motion_correlation,
+                    evidence_provider=evidence_provider,
+                )
+
+        check_evidence_cancellation()
         snapshot_path = ""
         if frame is not None:
             snapshot_at = (
@@ -850,7 +893,7 @@ class MotionDecisionHandler:
             )
             snapshot_path = self.snapshot_writer(frame, snapshot_at)
 
-        if require_eligible_object and not eligible_objects:
+        if cover_only or (require_eligible_object and not eligible_objects):
             rejection_reason = (
                 "object_not_motion_correlated"
                 if require_motion_correlation and uncorrelated_eligible_objects > 0
@@ -859,15 +902,22 @@ class MotionDecisionHandler:
             cover_promoted = False
             cover_promotion_reason = ""
             if (
-                rejection_reason == "object_not_motion_correlated"
+                (cover_only or rejection_reason == "object_not_motion_correlated")
                 and existing_event_id is not None
                 and snapshot_path
                 and frame is not None
-                and frame_source == "recorded_main"
+                and frame_source in {"recorded_main", "buffered_main"}
                 and self.refinement_cover_promoter is not None
             ):
                 frame_height, frame_width = frame.shape[:2]
                 try:
+                    promotion_kwargs = dict(revision_kwargs)
+                    diagnostics: dict[str, Any] = {}
+                    parameters = inspect.signature(self.refinement_cover_promoter).parameters
+                    if "diagnostics" in parameters:
+                        promotion_kwargs["diagnostics"] = diagnostics
+                    if cover_only and qualification.get("cover_requirement_lease_owner"):
+                        promotion_kwargs["requirement_lease_owner"] = qualification["cover_requirement_lease_owner"]
                     promoted = self.refinement_cover_promoter(
                         int(existing_event_id),
                         snapshot_path=snapshot_path,
@@ -886,12 +936,13 @@ class MotionDecisionHandler:
                         ],
                         source=frame_source,
                         timestamp_exact=frame_timestamp_exact,
+                        **promotion_kwargs,
                     )
                     cover_promoted = promoted is not None
                     cover_promotion_reason = (
                         "compatible_recorded_refinement"
                         if cover_promoted
-                        else "refinement_cover_not_eligible"
+                        else str(diagnostics.get("reason") or "refinement_cover_not_eligible")
                     )
                 except Exception:
                     # Presentation enrichment is never allowed to make a
@@ -910,6 +961,39 @@ class MotionDecisionHandler:
                         "updated": True,
                         "reason": "cover_promoted",
                     })
+            record_attempt = getattr(self.events, "record_evidence_attempt", None)
+            if existing_event_id is not None and callable(record_attempt):
+                diagnostic_fields = {
+                    "label", "confidence", "box", "incident_eligible", "snapshot_visible",
+                    "confidence_eligible", "zone_eligible", "temporal_eligible",
+                    "temporal_consensus", "temporal_track_id", "temporal_track_observations",
+                    "temporal_first_observation_offset_seconds", "temporal_last_observation_offset_seconds",
+                    "motion_correlation", "detection_frame_width", "detection_frame_height",
+                    "frame_source", "frame_captured_at_epoch", "frame_timestamp_exact",
+                    "frame_reference", "frame_timestamp_uncertainty_seconds",
+                }
+                record_attempt(int(existing_event_id), {
+                    "source": frame_source,
+                    "frame_reference": getattr(provider_result, "frame_reference", None),
+                    "captured_at_epoch": frame_captured_at_epoch,
+                    "snapshot_path": snapshot_path,
+                    "objects": [{key: value for key, value in item.items() if key in diagnostic_fields}
+                                for item in objects if item.get("label")][:64],
+                    "candidate_count": sum(bool(item.get("label")) for item in objects),
+                    "motion_correlation": correlation,
+                    "security_rejection": rejection_reason,
+                    "cover_reason": cover_promotion_reason or "no_compatible_main_evidence",
+                    "processing_timing": processing_timing,
+                })
+            if existing_event_id is not None:
+                face_state = self._persist_face_candidates(
+                    int(existing_event_id), event_at,
+                    tuple(getattr(provider_result, "face_candidates", ()) or ()),
+                )
+                settle_faces = getattr(self.events, "settle_face_evidence", None)
+                if callable(settle_faces):
+                    settle_faces(int(existing_event_id), state=face_state,
+                                 reason="refinement_candidates_processed")
             return MotionDecisionOutcome(
                 event_id=existing_event_id,
                 snapshot_path=snapshot_path,
@@ -931,7 +1015,9 @@ class MotionDecisionHandler:
             *objects,
             {"status": "motion_qualification", "motion_qualification": qualification},
         ]
-        if bool(getattr(provider_result, "refinement_pending", False)):
+        if (bool(getattr(provider_result, "refinement_pending", False))
+                or self.face_candidate_sink is not None
+                or existing_event_id is not None):
             stored_objects.append({"status": "face_evidence_pending"})
         route_origin = _route_origin(qualification)
         route_admission_duplicate = False
@@ -983,6 +1069,7 @@ class MotionDecisionHandler:
                 snapshot_path=snapshot_path,
                 recording_path=recording_path,
                 objects_json=self.object_serializer(stored_objects),
+                **revision_kwargs,
             )
             if refined_event is None:
                 qualification["refinement_evidence_preserved"] = True
@@ -1031,11 +1118,15 @@ class MotionDecisionHandler:
                 ),
                 refinement_event_id=(event_id if route_admission_replay else None),
             )
-        self._persist_face_candidates(
+        face_state = self._persist_face_candidates(
             event_id,
             event_at,
             tuple(getattr(provider_result, "face_candidates", ()) or ()),
         )
+        if not bool(getattr(provider_result, "refinement_pending", False)):
+            settle_faces = getattr(self.events, "settle_face_evidence", None)
+            if callable(settle_faces):
+                settle_faces(event_id, state=face_state, reason="refinement_candidates_processed")
         if self.event_callback and event_created:
             self._publish(
                 "incident",
@@ -1096,9 +1187,9 @@ class MotionDecisionHandler:
         event_id: int,
         event_at: datetime,
         candidates: tuple[FaceCandidate, ...],
-    ) -> None:
+    ) -> str:
         if self.face_candidate_sink is None or not candidates:
-            return
+            return "not_applicable" if self.face_candidate_sink is None else "complete"
         persisted: list[dict[str, Any]] = []
         for candidate in candidates:
             box = candidate.box
@@ -1140,6 +1231,8 @@ class MotionDecisionHandler:
                     self.camera_id,
                     event_id,
                 )
+                return "unavailable"
+        return "complete" if len(persisted) == len(candidates) else "unavailable"
 
     def record_audit(
         self,

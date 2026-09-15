@@ -68,6 +68,8 @@ from .motion_pipeline import (
     resolve_motion_pipeline_graphs,
 )
 from .motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
+from .main_evidence_lifecycle import MainEvidenceFleet
+from .evidence_projection import EvidenceProjection
 from .motion_analysis import FairMotionAnalysisLimiter
 from .recording_lifecycle import RecordingLifecycle
 from .state_events import StateEventBroker
@@ -131,12 +133,12 @@ def _route_provenance_from_event(
 
 
 class ManagerShutdownIncompleteError(RuntimeError):
-    """Camera-owned work remains active, so shared services must stay alive."""
+    """Owned work remains active, so shared services must stay alive."""
 
-    def __init__(self, error: CameraFleetOperationError) -> None:
-        self.fleet_error = error
-        residuals = ", ".join(error.residual_camera_ids) or "unknown cameras"
-        super().__init__(f"camera shutdown remains active: {residuals}")
+    def __init__(self, error: CameraFleetOperationError | str) -> None:
+        self.fleet_error = error if isinstance(error, CameraFleetOperationError) else None
+        residuals = (", ".join(error.residual_camera_ids) or "unknown cameras") if self.fleet_error else error
+        super().__init__(f"shutdown remains active: {residuals}")
 
 
 class MotionReconfigurationIncompleteError(RuntimeError):
@@ -389,6 +391,16 @@ class AppManager:
             detector=self.detector,
             recorder=self.recorder,
             decode_budget=RecordedDecodeBudget.from_detector_config(config.detector),
+            main_evidence_provider=lambda camera: self.main_evidence.providers.get(camera.id),
+        )
+        self.main_evidence = MainEvidenceFleet(
+            config.main_evidence, self._unique_cameras(),
+            self.motion_object_detector_factory.decode_budget,
+            self._main_evidence_enabled,
+        )
+        self.evidence_projection = EvidenceProjection(
+            self.events, lambda: self.semantic_search, self.state_events,
+            self._refresh_incident_notification,
         )
         try:
             self.mqtt = MqttLifecycle(config.mqtt, self._build_mqtt_service)
@@ -781,6 +793,19 @@ class AppManager:
     def recording_enabled(self, camera_id: str) -> bool:
         return self.camera_controls.recording_enabled(camera_id)
 
+    def _main_evidence_enabled(self, camera_id: str) -> bool:
+        worker = self.workers.get(camera_id)
+        return bool(worker is not None and worker.runtime_state.phase == "running"
+                    and self.detection_enabled(camera_id) and self.recording_enabled(camera_id))
+
+    def reconfigure_main_evidence(self, config: AppConfig) -> None:
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            self.main_evidence.reconfigure(config.main_evidence, config.cameras)
+            if self._started:
+                self.main_evidence.start()
+
     def detection_enabled(self, camera_id: str) -> bool:
         return self.camera_controls.detection_enabled(camera_id)
 
@@ -851,6 +876,8 @@ class AppManager:
                     3,
                 )
                 self._started = True
+                self.main_evidence.start()
+                self.evidence_projection.start()
                 self.camera_fleet.start_admission(
                     startup_tasks,
                     on_complete=self._camera_startup_completed,
@@ -970,6 +997,16 @@ class AppManager:
                 for failure in error.failures
             )
         attempt("runtime monitor", self.runtime_monitor.stop)
+        if getattr(self, "main_evidence", None) is not None:
+            try:
+                self.main_evidence.stop()
+            except Exception as error:
+                raise ManagerShutdownIncompleteError("main evidence collectors") from error
+        if getattr(self, "evidence_projection", None) is not None:
+            try:
+                self.evidence_projection.stop()
+            except Exception as error:
+                raise ManagerShutdownIncompleteError("evidence projections") from error
         LOGGER.info("SurvNG shutdown: stopping MQTT command intake")
         attempt("MQTT", self.mqtt.stop)
         LOGGER.info("SurvNG shutdown: stopping camera and ONVIF workers")
@@ -1538,7 +1575,8 @@ class AppManager:
             if not incident_id:
                 result["event_url"] = f"{base_url}/incidents?event_ids={int(event_id)}" if event_id else result["incidents_url"]
             if event_id:
-                result["snapshot_url"] = f"{base_url}/api/events/{int(event_id)}/snapshot.jpg"
+                revision_query = f"?v={int(result['evidence_revision'])}" if result.get("evidence_revision") is not None else ""
+                result["snapshot_url"] = f"{base_url}/api/events/{int(event_id)}/snapshot.jpg{revision_query}"
         return result
 
     def _publish_incident_notification(self, payload: dict) -> None:
@@ -1762,6 +1800,7 @@ class AppManager:
             **self.detector.status(),
             "lifecycle": self.inference.status(),
             "recorded_decode": recorded_decode,
+            "main_evidence": self.main_evidence.status() if getattr(self, "main_evidence", None) else {},
         }
         status["object_worker_recommendation"] = (
             object_worker_recommendation_from_status(

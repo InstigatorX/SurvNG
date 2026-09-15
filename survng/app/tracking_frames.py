@@ -20,6 +20,7 @@ from .camera_capture import CameraCaptureService, CapturedFrame
 from .config import CameraConfig
 from .object_track.types import TrackingFrame, TrackingFrameBatch
 from .security import redact_secret_text
+from .recording_media import mp4_video_dimensions
 from .tracking_comparison import sampled_video_frames, video_frame_at_reference
 from .video_frames import DecodedVideoFrame, VideoFrameReference
 
@@ -581,7 +582,7 @@ class CameraFrameTimeline:
                     exact = video_frame_at_reference(
                         reference,
                         ffmpeg_path=self.recorder.ffmpeg_path,
-                        maximum_width=frame_width,
+                        maximum_width=(mp4_video_dimensions(path) or (frame_width, 0))[0],
                     )
                     return exact.frame if exact is not None else None
             return None
@@ -600,7 +601,7 @@ class CameraFrameTimeline:
                     sample_fps=1.0,
                     duration_seconds=0.1,
                     ffmpeg_path=self.recorder.ffmpeg_path,
-                    maximum_width=frame_width,
+                    maximum_width=(mp4_video_dimensions(path) or (frame_width, 0))[0],
                     start_offset_seconds=max(0.0, captured_at - row_start),
                     probe_path=path,
                 ))

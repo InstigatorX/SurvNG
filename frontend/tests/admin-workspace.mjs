@@ -53,6 +53,13 @@ assert.equal(dirtyCameraCount({
   one: { settings: true, zones: false },
   two: { settings: false, zones: false },
 }), 1);
+assert.deepEqual(perCameraDirtyState(
+  [{ id: "gate", main_evidence_enabled: true }, { id: "porch" }],
+  [{ id: "gate", main_evidence_enabled: null }, { id: "porch" }],
+), {
+  gate: { settings: true, zones: false },
+  porch: { settings: false, zones: false },
+});
 assert.deepEqual(cameraConfigDirtyState([{ id: "new", name: "New", zones: [] }], []), { settings: true, zones: false });
 assert.equal(nextTabId(["one", "two", "three"], "two", "ArrowRight"), "three");
 assert.equal(nextTabId(["one", "two", "three"], "one", "ArrowLeft"), "three");

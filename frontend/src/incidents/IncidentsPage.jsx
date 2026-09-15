@@ -58,6 +58,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const semanticIncidentRequestRef = useRef(null);
   const incidentLoadedQueryRef = useRef("");
   const incidentEventRefreshTimer = useRef(null);
+  const incidentEvidenceRefreshSequence = useRef(0);
   const {
     incidentDetailCacheRef,
     incidentDetails,
@@ -299,9 +300,32 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
 
   function refresh() {
     refreshBase();
+    refreshIncidentEvidence();
+  }
+
+  function refreshIncidentEvidence() {
+    const sequence = ++incidentEvidenceRefreshSequence.current;
     incidentDetailCacheRef.current.clear();
     setIncidentDetails({});
     setIncidentRefreshToken((value) => value + 1);
+    // Overlays and linked/related previews retain their own detail objects.
+    // Reconcile those too, while a request failure keeps existing evidence visible.
+    const selections = [
+      [selectedEvent, setSelectedEvent],
+      [linkedIncidentDetail, setLinkedIncidentDetail],
+      [relatedPreviewIncident, setRelatedPreviewIncident],
+    ];
+    for (const [selection, setSelection] of selections) {
+      const query = incidentDetailQuery(selection);
+      if (!query) continue;
+      incidentDetailCacheRef.current.load(query).then((detail) => {
+        if (sequence !== incidentEvidenceRefreshSequence.current) return;
+        setIncidentDetails((current) => ({ ...current, [query]: detail }));
+        setSelection((current) => incidentDetailQuery(current) === query ? detail : current);
+      }).catch(() => {
+        // SSE reconnect or the fallback poll retries without hiding the selection.
+      });
+    }
   }
 
   async function runSemanticIncidentSearch(event, requestedQuery = semanticIncidentQuery) {
@@ -397,32 +421,35 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     runSemanticIncidentSearch(null, semanticIncidentActiveQuery);
   }, [incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter]);
 
-  useAppEvents(({ type }) => {
-    if (type !== "incident" || incidentDay !== today || incidentPage !== 0 || document.hidden) return;
+  useAppEvents(({ type, data }) => {
+    if (document.hidden || (type !== "incident" && type !== "resync")) return;
+    const affectedId = Number(data?.event_id);
+    const visible = [focusedIncident, selectedEvent, linkedIncidentDetail, relatedPreviewIncident, ...incidents];
+    const affectsVisibleEvidence = visible.some((incident) => (
+      Number(incident?.representative_event_id) === affectedId
+      || Number(incident?.id) === affectedId
+      || incident?.events?.some((event) => Number(event.id) === affectedId)
+    ));
+    if (type !== "resync" && !affectsVisibleEvidence && (incidentDay !== today || incidentPage !== 0)) return;
     if (incidentEventRefreshTimer.current) return;
     incidentEventRefreshTimer.current = window.setTimeout(
       () => {
         incidentEventRefreshTimer.current = null;
-        if (focusedDetailQuery) {
-          incidentDetailCacheRef.current.invalidate(focusedDetailQuery);
-          incidentDetailCacheRef.current.load(focusedDetailQuery).then((detail) => {
-            setIncidentDetails((current) => ({ ...current, [focusedDetailQuery]: detail }));
-          }).catch(() => {
-            // Keep the existing detail visible; the next event or fallback poll retries.
-          });
-        }
-        setIncidentRefreshToken((value) => value + 1);
+        refreshIncidentEvidence();
       },
       1000,
     );
   });
 
-  useEffect(() => () => window.clearTimeout(incidentEventRefreshTimer.current), []);
+  useEffect(() => () => {
+    window.clearTimeout(incidentEventRefreshTimer.current);
+    incidentEvidenceRefreshSequence.current += 1;
+  }, []);
 
   useVisiblePolling(
-    () => setIncidentRefreshToken((value) => value + 1),
+    refreshIncidentEvidence,
     INCIDENT_REFRESH_FALLBACK_MS,
-    incidentDay === today && incidentPage === 0,
+    true,
     { immediate: false },
   );
 

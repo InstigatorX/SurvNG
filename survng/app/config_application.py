@@ -12,7 +12,7 @@ from .motion_pipeline.configuration import resolve_motion_pipeline_graphs
 
 LOGGER = logging.getLogger(__name__)
 
-HOT_CONFIG_FIELDS = frozenset({"weather", "base_path", "event_clip_before_seconds", "event_clip_after_seconds", "incident_thumbnail_annotations", "incident_thumbnail_object_focus", "incident_thumbnail_object_focus_zoom", "image_storage", "recording_cache_max_gb", "recording_cache_max_days", "recording_cache_prewarm", "api_auth", "web_auth", "tls", "proxy", "audit_ai", "integration_notifications", "mqtt", "retention", "semantic_search"})
+HOT_CONFIG_FIELDS = frozenset({"main_evidence", "weather", "base_path", "event_clip_before_seconds", "event_clip_after_seconds", "incident_thumbnail_annotations", "incident_thumbnail_object_focus", "incident_thumbnail_object_focus_zoom", "image_storage", "recording_cache_max_gb", "recording_cache_max_days", "recording_cache_prewarm", "api_auth", "web_auth", "tls", "proxy", "audit_ai", "integration_notifications", "mqtt", "retention", "semantic_search"})
 # The configured FFmpeg binary also owns live capture and reloads the manager.
 # Acceleration remains recorder/refinement-only and can be applied in place.
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
@@ -31,6 +31,7 @@ TRACKING_REID_ENGINE_FIELDS = frozenset({"reid_enabled", "reid_model_path", "rei
 
 class ConfigurableRuntime(Protocol):
     config: AppConfig
+    def reconfigure_main_evidence(self, config: AppConfig) -> None: ...
     def reconfigure_recorders(self, config: AppConfig) -> None: ...
     def reconfigure_mqtt(self, config: Any) -> None: ...
     def reconfigure_recording_retention(self, config: AppConfig) -> None: ...
@@ -77,6 +78,7 @@ def manager_owned_config(config: AppConfig) -> dict:
     for field in HOT_CONFIG_FIELDS | RECORDER_CONFIG_FIELDS:
         payload.pop(field, None)
     for camera in payload.get("cameras", []):
+        camera.pop("main_evidence_enabled", None)
         camera.pop("incident_notifications_enabled", None)
         camera.pop("retention", None)
         camera.pop("live_view", None)
@@ -199,6 +201,10 @@ def motion_config_changes(
 
 def hot_config_changes(current: AppConfig, incoming: AppConfig) -> list[str]:
     changed = [field for field in sorted(HOT_CONFIG_FIELDS) if getattr(current, field) != getattr(incoming, field)]
+    if ({c.id: c.main_evidence_enabled for c in current.cameras}
+            != {c.id: c.main_evidence_enabled for c in incoming.cameras}
+            and "main_evidence" not in changed):
+        changed.append("main_evidence")
     if {c.id: c.retention for c in current.cameras} != {c.id: c.retention for c in incoming.cameras} and "retention" not in changed:
         changed.append("retention")
     return changed
@@ -271,6 +277,7 @@ class TargetedConfigApplication:
             applied: list[str] = []
             try:
                 steps = [
+                    ("main_evidence" in changes, "main_evidence", lambda c: runtime.reconfigure_main_evidence(c), lambda c: runtime.reconfigure_main_evidence(c)),
                     (bool(recorder_changes), "recorders", lambda c: runtime.reconfigure_recorders(c), lambda c: runtime.reconfigure_recorders(c)),
                     (mqtt_changed, "mqtt", lambda c: runtime.reconfigure_mqtt(c.mqtt), lambda c: runtime.reconfigure_mqtt(c.mqtt)),
                     (retention_changed, "retention", runtime.reconfigure_recording_retention, runtime.reconfigure_recording_retention),

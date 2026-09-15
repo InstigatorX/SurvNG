@@ -2605,6 +2605,17 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
                     <div className="config-panels">
                       {cameraSection === "motion" ? <section className="sub-panel">
+                        <h3>Incident snapshots</h3>
+                        <label className="check-field"><input
+                          type="checkbox"
+                          role="switch"
+                          checked={selectedCamera.main_evidence_enabled ?? Boolean(config.main_evidence?.enabled && config.main_evidence?.camera_ids?.includes(selectedCamera.id))}
+                          onChange={(event) => updateCamera(selectedCamera.id, ["main_evidence_enabled"], event.target.checked)}
+                        /> Buffer main stream for faster snapshots</label>
+                        <small>Get high-resolution incident images without waiting for a recording segment to finish. Uses extra memory and a camera connection. Recording and detection must be on.</small>
+                        <small>Save changes to apply immediately without a server restart. The buffer needs a few seconds to fill.</small>
+                      </section> : null}
+                      {cameraSection === "motion" ? <section className="sub-panel">
                         <h3 className="section-heading-with-icon"><span className="section-heading-icon"><Radio size={16} /></span>HA/MQTT Options</h3>
                         <label className="check-field"><input type="checkbox" role="switch" checked={selectedCamera.incident_notifications_enabled !== false} onChange={(event) => updateCamera(selectedCamera.id, ["incident_notifications_enabled"], event.target.checked)} /> Send incident notifications</label>
                         <small>Publish this camera's incident messages to Home Assistant and MQTT. Recording and detection continue when disabled.</small>

@@ -125,13 +125,10 @@ def test_manual_correction_invalidates_search_and_updates_clients(manual_detecti
     manager.mqtt.publish.assert_not_called()
     manager.mqtt.track_incident.assert_not_called()
     manager._refresh_incident_notification.assert_called_once_with("gate", event["id"])
-    if objects:
-        queued = search._queue.get_nowait()[2]
-        revision = queued.pop("_semantic_revision")
-        assert revision.valid
-        assert queued == persisted
-    else:
-        assert search._queue.empty()
+    assert search._queue.empty()
+    # Replaying the correction cannot recreate deleted semantic evidence.
+    assert search.index_event(persisted) == 0
+    assert index.search([1, 0, 0], identity) == []
 
 
 def test_manual_positive_detection_keeps_object_notification(manual_detection):

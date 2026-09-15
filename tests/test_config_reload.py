@@ -565,6 +565,22 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_camera_main_evidence_switch_applies_without_runtime_restart(self) -> None:
+        current = AppConfig(cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate/main")])
+        active = Mock(config=current)
+        main.config, main.manager = current, active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].main_evidence_enabled = True
+        with patch("survng.app.main.reload_manager") as reload, patch("survng.app.main.save_config"):
+            effective, result = main.apply_config_update(incoming)
+        reload.assert_not_called()
+        active.reconfigure_main_evidence.assert_called_once_with(effective)
+        active.reconfigure_recorders.assert_not_called()
+        active.reconfigure_motion.assert_not_called()
+        self.assertEqual(result["apply_mode"], "hot")
+        self.assertEqual(result["hot_updated"], ["main_evidence"])
+        self.assertFalse(result["camera_workers_restarted"])
+
     def test_live_view_framing_saves_without_restarting_cameras(self) -> None:
         active = Mock()
         current = AppConfig(cameras=[CameraConfig(
@@ -834,6 +850,7 @@ class ConfigReloadTest(unittest.TestCase):
         main.manager = active
         incoming = current.model_copy(deep=True)
         incoming.detector.tracking.max_active_cameras = 4
+        incoming.detector.tracking.burst_max_active_cameras = 4
 
         with (
             patch("survng.app.main.reload_manager") as reload,

@@ -261,6 +261,8 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
     recorded_decode = raw.get("recorded_decode")
     recorded_decode = recorded_decode if isinstance(recorded_decode, dict) else {}
+    main_evidence = raw.get("main_evidence")
+    main_evidence = main_evidence if isinstance(main_evidence, dict) else {}
     instances = isolation.get("instances")
     instances = instances if isinstance(instances, list) else []
     worker_instances = [
@@ -323,6 +325,24 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
         "auxiliary_workers": {
             role: _worker_snapshot(workers[role])
             for role in ("face", "reid", "depth") if isinstance(workers.get(role), dict)
+        },
+        "main_evidence": {
+            camera_id: {
+                "running": _optional_bool(item.get("running")),
+                "state": _motion_identifier(item.get("state")),
+                "failure": _motion_identifier(item.get("failure")),
+                "timestamp_mapping": _motion_identifier(item.get("timestamp_mapping")),
+                **_numeric_fields(item, (
+                    "quota_bytes", "bytes", "export_bytes", "access_units", "gops",
+                    "gaps", "evictions", "generation", "width", "height",
+                    "covered_start", "covered_end", "timestamp_uncertainty_seconds",
+                )),
+                "outcomes": _numeric_fields(item.get("outcomes"), (
+                    "ready", "miss", "pending", "capacity_denied", "unsupported", "provider_error",
+                )),
+            }
+            for camera_id, item in main_evidence.items()
+            if _motion_identifier(camera_id) and isinstance(item, dict)
         },
         "recorded_decode": {
             "configured_processes": int(

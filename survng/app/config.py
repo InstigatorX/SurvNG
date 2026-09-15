@@ -541,6 +541,7 @@ class CameraLiveViewConfig(BaseModel):
 
 
 class CameraConfig(BaseModel):
+    main_evidence_enabled: bool | None = None
     incident_notifications_enabled: bool = True
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
@@ -1041,7 +1042,24 @@ class WeatherConfig(BaseModel):
         return self
 
 
+class MainEvidenceConfig(BaseModel):
+    """Opt-in encoded main-stream history; archive remains the fallback."""
+
+    enabled: bool = False
+    camera_ids: list[str] = Field(default_factory=list)
+    history_seconds: float = Field(default=20.0, ge=2.0, le=120.0)
+    camera_max_bytes: int = Field(default=64 * 1024**2, ge=2 * 1024**2, le=1024**3)
+    total_max_bytes: int = Field(default=512 * 1024**2, ge=2 * 1024**2, le=4 * 1024**3)
+    max_timestamp_uncertainty_seconds: float = Field(default=1.0, gt=0.0, le=5.0)
+    decoder: Literal["auto", "va", "cpu"] = "auto"
+
+    def enabled_for(self, camera: CameraConfig) -> bool:
+        override = getattr(camera, "main_evidence_enabled", None)
+        return bool(override if override is not None else self.enabled and camera.id in self.camera_ids)
+
+
 class AppConfig(BaseModel):
+    main_evidence: MainEvidenceConfig = Field(default_factory=MainEvidenceConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     base_path: str = "/survng"
     storage_dir: str = "survng/storage"
@@ -1114,6 +1132,12 @@ class AppConfig(BaseModel):
         if len(camera_ids) != len(set(camera_ids)):
             raise ValueError("camera ids must be unique")
         known_camera_ids = set(camera_ids)
+        if set(self.main_evidence.camera_ids) - known_camera_ids:
+            raise ValueError("main_evidence.camera_ids must refer to configured cameras")
+        selected_evidence_cameras = sum(self.main_evidence.enabled_for(camera) for camera in self.cameras)
+        if (selected_evidence_cameras
+                and self.main_evidence.total_max_bytes // selected_evidence_cameras < 2 * 1024**2):
+            raise ValueError("main_evidence total quota must allow at least 2 MiB per selected camera")
         route_edges: set[tuple[str, str]] = set()
         for route in self.detector.tracking.camera_transition_routes:
             unknown = {route.from_camera, route.to_camera} - known_camera_ids
@@ -1171,8 +1195,34 @@ def apply_stream_url_defaults(camera: CameraConfig) -> None:
     camera.video_backend = "url"
 
 
+def remap_camera_references(config: AppConfig, identities: dict[str, str | None]) -> None:
+    """Keep references attached to camera identity during removal or ID assignment."""
+    config.main_evidence.camera_ids = list(dict.fromkeys(
+        replacement for camera_id in config.main_evidence.camera_ids
+        if (replacement := identities.get(camera_id, camera_id)) is not None
+    ))
+    routes = []
+    for route in config.detector.tracking.camera_transition_routes:
+        source = identities.get(route.from_camera, route.from_camera)
+        target = identities.get(route.to_camera, route.to_camera)
+        if source is not None and target is not None:
+            routes.append(route.model_copy(update={"from_camera": source, "to_camera": target}))
+    config.detector.tracking.camera_transition_routes = routes
+
+
+def remove_camera(config: AppConfig, camera_id: str) -> AppConfig:
+    """Produce a validated replacement configuration without dangling references."""
+    replacement = config.model_copy(deep=True)
+    replacement.cameras = [camera for camera in replacement.cameras if camera.id != camera_id]
+    if len(replacement.cameras) == len(config.cameras):
+        raise KeyError(camera_id)
+    remap_camera_references(replacement, {camera_id: None})
+    return AppConfig.model_validate(replacement.model_dump(mode="python"))
+
+
 def normalize_config(config: AppConfig, assign_ids: bool = False) -> AppConfig:
     used: set[str] = set()
+    identities: dict[str, str | None] = {}
     for camera in config.cameras:
         if assign_ids:
             base = slugify_camera_id(camera.name or camera.id)
@@ -1182,10 +1232,12 @@ def normalize_config(config: AppConfig, assign_ids: bool = False) -> AppConfig:
                 suffix = f"-{index}"
                 candidate = f"{base[:128 - len(suffix)]}{suffix}"
                 index += 1
+            identities[camera.id] = candidate
             camera.id = candidate
             used.add(candidate)
         apply_stream_url_defaults(camera)
-    return config
+    remap_camera_references(config, identities)
+    return AppConfig.model_validate(config.model_dump(mode="python"))
 
 
 def _config_path(path: str | Path | None = None) -> Path:

@@ -215,8 +215,10 @@ class SemanticIndexTest(unittest.TestCase):
             "objects_json": '[{"status":"motion_qualification","motion_qualification":{"accepted":true}}]',
         }
 
-        self.assertFalse(service.queue_event(motion_only))
-        service._index_event(motion_only)
+        # Negative evidence settles synchronously, without an encoder task
+        # that could race the outbox's authoritative deletion.
+        self.assertTrue(service.queue_event(motion_only))
+        self.assertTrue(service._queue.empty())
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 0, "event_count": 0})
 
     def test_service_indexes_full_frame_and_object_crop(self) -> None:
