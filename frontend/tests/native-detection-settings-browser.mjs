@@ -40,6 +40,7 @@ try {
   const verification = page.getByLabel("Verify objects in main-recording crops before creating incidents");
   assert.equal(await verification.isChecked(), true);
   await verification.uncheck();
+  assert.match(await page.locator("body").textContent(), /usable aligned main-recording images are still promoted/);
   assert.equal(JSON.parse(await page.locator("#config").textContent()).native.verification_enabled, false);
   await verification.check();
   await page.getByLabel("OpenVINO model").fill("new.xml");

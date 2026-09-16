@@ -337,7 +337,9 @@ class NativeEvidenceService:
                          and tracking.get("native_session")
                          and not tracking.get("recording_alignment", {}).get("verified")
                          and tracking.get("frame_width") and tracking.get("frame_height"))
+        require_verification = self.config.detector.native.verification_enabled
         timing_observations = []
+        calibration_unavailable = False
         for candidate in candidates[:12]:
             if self._closed:
                 break
@@ -347,26 +349,43 @@ class NativeEvidenceService:
                 continue
             objects = self.match_main(candidate, main)
             self.verifier.config = self.config.detector
-            detections = self.verifier.detect(main) if objects or calibrate else []
-            if calibrate:
+            detections = []
+            if (require_verification and objects) or (calibrate and not calibration_unavailable):
+                try:
+                    detections = self.verifier.detect(main)
+                except Exception as exc:
+                    if require_verification:
+                        raise
+                    # Optional replay calibration must not prevent image promotion
+                    # when incident validation belongs to the substream.
+                    calibration_unavailable = True
+                    self.counts["calibration_unavailable"] += 1
+                    LOGGER.warning("Native replay calibration unavailable for event %s (%s)", event_id, type(exc).__name__)
+            if calibrate and not calibration_unavailable:
                 timing_observations.append({"epoch": candidate.epoch, "objects": resize_objects(
                     detections, (main.shape[1], main.shape[0]), (tracking["frame_width"], tracking["frame_height"]))})
-            verified = []
-            for obj in objects:
-                expected = obj["box"]
-                matching = []
-                for detected in detections:
-                    threshold = self.config.detector.event_class_confidence_thresholds.get(obj["label"], self.config.detector.confidence_threshold)
-                    if detected.get("label") != obj["label"] or detected.get("confidence", 0) < threshold:
-                        continue
-                    actual = detected.get("box") or {}
-                    if all(k in actual for k in ("x1", "y1", "x2", "y2")) and matches_object_extent(expected, actual):
-                        matching.append(detected)
-                if matching:
-                    actual = max(matching,key=lambda x:x.get("confidence",0))
-                    obj.update(box=actual["box"], confidence=actual["confidence"], native_cover_verified=True)
-                    verified.append(obj)
-            objects = verified
+            if require_verification:
+                verified = []
+                for obj in objects:
+                    expected = obj["box"]
+                    matching = []
+                    for detected in detections:
+                        threshold = self.config.detector.event_class_confidence_thresholds.get(obj["label"], self.config.detector.confidence_threshold)
+                        if detected.get("label") != obj["label"] or detected.get("confidence", 0) < threshold:
+                            continue
+                        actual = detected.get("box") or {}
+                        if all(k in actual for k in ("x1", "y1", "x2", "y2")) and matches_object_extent(expected, actual):
+                            matching.append(detected)
+                    if matching:
+                        actual = max(matching,key=lambda x:x.get("confidence",0))
+                        obj.update(box=actual["box"], confidence=actual["confidence"], native_cover_verified=True,
+                                   box_provenance="detected_in_main", verification={"status": "confirmed", "source": "main"})
+                        verified.append(obj)
+                objects = verified
+            else:
+                for obj in objects:
+                    obj.update(native_cover_verified=False, box_provenance="projected_from_substream",
+                               verification={"status": "confirmed", "source": "substream"})
             score = candidate_score(main, objects)
             if score is None:
                 self.counts["main_rejected"] += 1
@@ -404,7 +423,7 @@ class NativeEvidenceService:
                     self.publish("incident_update", {"camera_id": event["camera_id"], "event_id": event_id,
                                                     "evidence_revision": aligned["evidence_revision"]})
         if not best:
-            return {"event_id":event_id,"status":"recording_pending" if pending else "no_verified_candidate"}
+            return {"event_id":event_id,"status":"recording_pending" if pending else "no_verified_candidate" if require_verification else "no_usable_candidate"}
         score, path, objects, width, height = best
         result = self.events.promote_native_evidence(event_id, path, objects, assets, score)
         if result:

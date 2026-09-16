@@ -1659,7 +1659,7 @@ class EventStore(
             return
 
     def promote_native_evidence(self, event_id, snapshot_path, objects, assets, score):
-        """Commit a verified image and its own boxes without touching live tracks."""
+        """Commit a selected image and aligned boxes without touching live tracks."""
         portable = portable_media_path(self.storage_dir, snapshot_path)
         stale = []
         updated = None
@@ -1668,7 +1668,7 @@ class EventStore(
             row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
             if row is not None and not snapshot_deletion_claimed(conn, self.storage_dir, portable):
                 existing = json.loads(row["objects_json"] or "[]")
-                previous_score = max((float(x.get("native_cover_score", -1)) for x in existing if x.get("native_cover_verified")), default=-1)
+                previous_score = max((float(x.get("native_cover_score", -1)) for x in existing if x.get("native_cover_score") is not None and x.get("snapshot_visible") is not False), default=-1)
                 if score > previous_score + 0.05:
                     old_assets = conn.execute("select distinct snapshot_path from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,)).fetchall()
                     stale = [str(x["snapshot_path"]) for x in old_assets if x["snapshot_path"]]

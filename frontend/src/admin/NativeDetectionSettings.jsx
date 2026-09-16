@@ -38,7 +38,8 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
     <section className="sub-panel">
       <h3>High-resolution incident confirmation</h3>
       <label className="check-field"><input type="checkbox" checked={detector.native?.verification_enabled ?? true} onChange={event => update("native.verification_enabled", event.target.checked)} /> Verify objects in main-recording crops before creating incidents</label>
-      <p>A clear matching detection confirms an object; three clear misses reject it. Missing or unclear evidence remains unverified and does not send an alert. Verification waits for recorded frames, so alerts arrive later. Live detection and tracking continue while it waits.</p>
+      <p>When disabled, substream detections validate incidents and usable aligned main-recording images are still promoted, without requiring object confirmation. Projected boxes are not marked as main-stream verified.</p>
+      <p>When enabled, a clear matching detection confirms an object; three clear misses reject it. Missing or unclear evidence remains unverified and does not send an alert. Verification waits for recorded frames, so alerts arrive later. Live detection and tracking continue while it waits.</p>
     </section>
     <NativeBudgetSettings values={detector.native?.budget || {}} onChange={(key, value) => update(`native.budget.${key}`, value)} />
     <details className="tracking-class-picker">

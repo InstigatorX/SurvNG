@@ -163,3 +163,48 @@ def test_completion_upgrades_existing_preview_shortlist(tmp_path):
     assert service._pending[event["id"]]["candidates"]
     service.enqueue(event["id"])
     assert service._pending[event["id"]]["recorded_history"]
+
+
+def test_disabled_validation_promotes_aligned_main_without_detector_and_keeps_better_cover(tmp_path):
+    service, events, event, image, obj, tracking = fixture(tmp_path)
+    service.config.detector.native.verification_enabled = False
+    service.read_frame = Mock(return_value=cv2.resize(image, (1280, 720)))
+    service.verifier.detect = Mock(side_effect=AssertionError('image promotion does not require detection'))
+    result = service.process(event['id'], [Candidate(100, image, [obj], 5)])
+    assert result['status'] == 'promoted'
+    service.verifier.detect.assert_not_called()
+    updated = events.get(event['id'])
+    stored = json.loads(updated['objects_json'])
+    cover = next(o for o in stored if o.get('label'))
+    assert cover['native_cover_verified'] is False
+    assert cover['box_provenance'] == 'projected_from_substream'
+    assert cover['verification']['source'] == 'substream'
+    assert cover['detection_frame_width'] == 1280
+    assert abs(cover['box']['x1']-200) < 5
+    assert next(o['object_tracking'] for o in stored if o.get('status') == 'object_tracking') == tracking
+    assert service.process(event['id'], [Candidate(100, image, [obj], 5)])['status'] == 'kept_better_cover'
+    assert events.get(event['id'])['snapshot_path'] == updated['snapshot_path']
+
+
+def test_disabled_validation_retains_substream_for_unusable_or_unaligned_main(tmp_path):
+    service, events, event, image, obj, _ = fixture(tmp_path)
+    service.config.detector.native.verification_enabled = False
+    for main in (None, np.full((720,1280,3),128,np.uint8), np.random.default_rng(19).integers(0,256,(720,1280,3),dtype=np.uint8)):
+        service.read_frame = Mock(return_value=main)
+        result = service.process(event['id'], [Candidate(100, image, [obj], 5)])
+        assert result['status'] in {'recording_pending', 'no_usable_candidate'}
+        assert events.get(event['id'])['snapshot_path'] == event['snapshot_path']
+
+
+def test_optional_calibration_failure_does_not_block_disabled_mode_promotion(tmp_path):
+    from survng.app.config import CameraConfig
+    service, events, event, image, obj, tracking = fixture(tmp_path)
+    service.config.detector.native.verification_enabled = False
+    service.config.cameras = [CameraConfig(id='test', name='Test', stream_url='rtsp://unused.invalid', native_same_field_of_view=True)]
+    tracking.update(state='complete', native_session='test-session')
+    events.update_object_tracking(event['id'], tracking)
+    service.read_frame = Mock(return_value=cv2.resize(image,(1280,720)))
+    service.verifier.detect = Mock(side_effect=RuntimeError('unavailable'))
+    assert service.process(event['id'], [Candidate(100,image,[obj],5), Candidate(101,image,[obj],5)])['status'] == 'promoted'
+    service.verifier.detect.assert_called_once()
+    assert service.counts['calibration_unavailable'] == 1

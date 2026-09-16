@@ -464,3 +464,23 @@ maps a distinct surface, not the decoder surface still used by `gvadetect`. With
 this separation, live testing produced VA rendering failures. The GPU `--va` spatial
 check now maps native-size BGR evidence concurrently with VA-surface-sharing inference
 and verifies twelve results on both branches.
+
+
+### Cover promotion when main-stream validation is disabled
+
+The incident-confirmation switch also selects the background cover rule:
+
+- Disabled: existing substream confidence/class/zone/temporal checks validate the
+  incident. Promote an available, usable, aligned higher-resolution main image
+  without requiring main-stream object confirmation. Boxes retain their substream
+  classification and confidence, are projected into the main image, and carry
+  `native_cover_verified=false`, `box_provenance=projected_from_substream`, and
+  verification source `substream`.
+- Enabled: main-stream confirmation remains required; detector-confirmed promoted
+  boxes carry verification source `main` and `box_provenance=detected_in_main`.
+
+Missing recordings, failed alignment or unusable images retain the existing cover.
+Optional recorded-track timing calibration remains available in disabled mode, but
+its detector failure cannot block image promotion. Cover ranking includes projected
+covers as well as detector-verified covers, preventing equal/worse repeat replacement.
+Changing cover pixels and projected boxes does not rewrite live tracking history.
