@@ -89,3 +89,21 @@ recording segments, delayed and failed detail refresh, SSE reconnect, selection
 changes during queued refresh, uninterrupted playback through completion, and
 repeated Clean/Tracks replay commands. This replaces the earlier assumption
 that successful isolated-player tests established full-page reliability.
+
+
+## Follow-up: Downstairs track lag
+
+Compared the stored trajectory with independent native CPU person detections on
+52 exact-seek main-recording frames. The accepted fit used 43 frames with
+confident person detections: track lookup **+1.0 seconds**, average one-to-one
+IoU **0.7301** versus **0.2349** without correction. An 11-frame subset selected
++0.9 seconds, supporting an approximately one-second recording/track clock skew.
+The initial decimated-frame measurement was +1.1 seconds; exact seeks remove the
+sampling-rounding ambiguity. No universal camera offset was inferred.
+
+Added conservative episode-specific timing estimation to bounded recorded cover
+verification and source-specific overlay lookup. The media reviewer found a
+fragmented-stationary false positive; duration/motion gates and one-to-one
+matching fix it, with regressions for stationary fragments and ambiguous paths.
+Persistence is atomic, completed-episode/session guarded, and emits metadata
+invalidation without changing snapshot evidence revisions.

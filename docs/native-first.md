@@ -211,3 +211,21 @@ selection is already running. Late track history refreshes the requested replay
 window in both incident views; the selected tracking event contributes its full
 bounds even when the incident summary contains no tracks. Paused replay initializes
 its overlay immediately.
+
+
+## Recorded-track timing alignment
+
+Completed native incidents on cameras with confirmed matching fields of view can
+receive an episode-specific main-recording timing correction. The existing
+bounded cover worker reuses its native CPU detections (at most 12 candidate
+frames) and compares moving trajectories across offsets within ±3 seconds.
+It requires at least five detected frames over three seconds, meaningful
+within-track motion, a distinct score peak, and agreement between frame votes.
+Stationary fragments, sparse evidence, and competing offsets remain uncorrected.
+
+Verified `object_tracking.recording_alignment` metadata changes only the saved
+track lookup clock for the matching replay source; it never seeks or speeds up
+the video. Original track coordinates/timestamps and cover imagery are retained.
+It is not a camera-wide offset or a claim of shared hardware timestamps between
+the independent capture and recording paths. Existing incidents require recorded
+verification to gain a correction; they do not inherit another incident's result.

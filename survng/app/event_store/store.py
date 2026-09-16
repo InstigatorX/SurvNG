@@ -1686,6 +1686,31 @@ class EventStore(
             self._delete_snapshot_if_unreferenced(path, preserve_archive=True)
         return dict(updated) if updated is not None else None
 
+    def update_native_replay_alignment(self, event_id, session, alignment):
+        """Attach verified timing to a completed native episode without replacing tracks."""
+        offset = alignment.get("offset_seconds")
+        if (not session or alignment.get("source") != "main" or alignment.get("verified") is not True
+                or not isinstance(offset, (int, float)) or not -3 < offset < 3):
+            raise ValueError("invalid native replay alignment")
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
+            if row is None:
+                return None
+            objects = json.loads(row["objects_json"] or "[]")
+            tracking = next((item.get("object_tracking") for item in reversed(objects)
+                             if item.get("status") == "object_tracking"), None)
+            if (not tracking or tracking.get("implementation") != "gvatrack"
+                    or tracking.get("state") != "complete" or tracking.get("native_session") != session):
+                return None
+            previous = tracking.get("recording_alignment") or {}
+            if previous.get("mean_iou", -1) >= alignment.get("mean_iou", 0):
+                return None
+            tracking["recording_alignment"] = alignment
+            conn.execute("update events set objects_json=? where id=?", (json.dumps(objects), event_id))
+            updated = self._finish_evidence_commit(conn, event_id, row, reason="native_replay_aligned")
+        return dict(updated) if updated is not None else None
+
     def update_object_tracking(
         self,
         event_id: int,

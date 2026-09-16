@@ -22,6 +22,7 @@ import numpy as np
 
 from .stream_alignment import estimate_stream_alignment
 from .native_evidence_verifier import NativeEvidenceVerifier
+from .native_replay_alignment import estimate_replay_alignment
 
 LOGGER = logging.getLogger(__name__)
 
@@ -316,6 +317,12 @@ class NativeEvidenceService:
         if not candidates:
             candidates, pending = self.recorded_candidates(event, tracking)
         best = None
+        camera = next((camera for camera in self.config.cameras if camera.id == event["camera_id"]), None)
+        calibrate = bool(camera and camera.native_same_field_of_view and tracking.get("state") == "complete"
+                         and tracking.get("native_session")
+                         and not tracking.get("recording_alignment", {}).get("verified")
+                         and tracking.get("frame_width") and tracking.get("frame_height"))
+        timing_observations = []
         for candidate in candidates[:12]:
             if self._closed:
                 break
@@ -325,7 +332,10 @@ class NativeEvidenceService:
                 continue
             objects = self.match_main(candidate, main)
             self.verifier.config = self.config.detector
-            detections = self.verifier.detect(main) if objects else []
+            detections = self.verifier.detect(main) if objects or calibrate else []
+            if calibrate:
+                timing_observations.append({"epoch": candidate.epoch, "objects": resize_objects(
+                    detections, (main.shape[1], main.shape[0]), (tracking["frame_width"], tracking["frame_height"]))})
             verified = []
             for obj in objects:
                 expected = obj["box"]
@@ -372,6 +382,14 @@ class NativeEvidenceService:
                 Path(lowest[0]).unlink(missing_ok=True)
             if best is None or score > best[0]:
                 best = (score, str(path), objects, main.shape[1], main.shape[0])
+        if calibrate:
+            alignment = estimate_replay_alignment(tracking, timing_observations)
+            if alignment:
+                aligned = self.events.update_native_replay_alignment(event_id, tracking.get("native_session"), alignment)
+                if aligned:
+                    self.counts["replay_aligned"] += 1
+                    self.publish("incident_update", {"camera_id": event["camera_id"], "event_id": event_id,
+                                                    "evidence_revision": aligned["evidence_revision"]})
         if not best:
             return {"event_id":event_id,"status":"recording_pending" if pending else "no_verified_candidate"}
         score, path, objects, width, height = best

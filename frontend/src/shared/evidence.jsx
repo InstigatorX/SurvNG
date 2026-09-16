@@ -26,7 +26,7 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { trackReplaySource, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
+import { trackReplayOffset, trackReplaySource, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
 import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
@@ -470,7 +470,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   );
 }
 
-export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps, lostTimeoutSeconds }) {
+export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps, lostTimeoutSeconds, trackingOffsetSeconds = 0 }) {
   const layerRef = useRef(null);
   const [playbackEpoch, setPlaybackEpoch] = useState(null);
   const [layerSize, setLayerSize] = useState(null);
@@ -496,7 +496,7 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
 
     function update() {
       const epoch = playbackEpochAt(windowStartEpoch, video.currentTime, mediaStartTime);
-      if (epoch !== null) setPlaybackEpoch(epoch);
+      if (epoch !== null) setPlaybackEpoch(epoch + trackingOffsetSeconds);
     }
 
     function schedule() {
@@ -526,7 +526,7 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("timeupdate", update);
     };
-  }, [videoRef, windowStartEpoch, mediaStartTime, mediaKey]);
+  }, [videoRef, windowStartEpoch, mediaStartTime, mediaKey, trackingOffsetSeconds]);
 
   const visibleTracks = useMemo(() => {
     if (!Number.isFinite(playbackEpoch)) return [];
@@ -1063,6 +1063,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
                 <StoredTrackVideoOverlay
                   videoRef={clipVideoRef}
                   tracks={storedTracks}
+                  trackingOffsetSeconds={trackReplayOffset(trackingEvent.object_tracking, replaySource)}
                   coordinateSize={{
                     width: Number(trackingEvent.object_tracking?.frame_width) || mediaSize?.width,
                     height: Number(trackingEvent.object_tracking?.frame_height) || mediaSize?.height,

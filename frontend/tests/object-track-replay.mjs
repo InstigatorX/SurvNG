@@ -130,3 +130,11 @@ assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: 
 assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: true}}), "main");
 assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: false}}, false), "main");
 assert.equal(trackReplaySource({}), "main");
+
+const { trackReplayOffset } = await import("../src/objectTrackReplay.mjs");
+const aligned = { recording_alignment: { verified: true, source: "main", offset_seconds: 1.1 } };
+assert.equal(trackReplayOffset(aligned, "main"), 1.1);
+assert.equal(trackReplayOffset(aligned, "live"), 0);
+assert.equal(trackReplayOffset({}, "main"), 0);
+assert.equal(trackReplayOffset({recording_alignment:{source:"main",offset_seconds:1}}, "main"), 0);
+assert.equal(trackReplayOffset({recording_alignment:{verified:true,source:"main",offset_seconds:NaN}}, "main"), 0);

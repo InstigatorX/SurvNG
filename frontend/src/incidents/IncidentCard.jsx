@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
 import { cameraReportsForIncident } from "../cameraSemantics.mjs";
-import { incidentTrackingSource, trackingCoverageLabel, storedObjectTracks, trackReplaySource } from "../objectTrackReplay.mjs";
+import { incidentTrackingSource, trackingCoverageLabel, storedObjectTracks, trackReplaySource, trackReplayOffset } from "../objectTrackReplay.mjs";
 import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
 import {
@@ -165,6 +165,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
             <StoredTrackVideoOverlay
               videoRef={videoRef}
               tracks={storedTracks}
+              trackingOffsetSeconds={trackReplayOffset(trackEvent.object_tracking, replaySource)}
               coordinateSize={{
                 width: Number(trackEvent?.object_tracking?.frame_width),
                 height: Number(trackEvent?.object_tracking?.frame_height),

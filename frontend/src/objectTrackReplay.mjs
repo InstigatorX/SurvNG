@@ -209,3 +209,11 @@ export function trackingCoverageLabel(tracking) {
 export function trackReplaySource(event, showTracks = true) {
   return showTracks && event?.object_tracking?.recording_overlay_compatible === false ? "live" : "main";
 }
+
+// Calibrations belong to one episode and recording source; never shift video.
+export function trackReplayOffset(tracking, source) {
+  const alignment = tracking?.recording_alignment;
+  const offset = finiteNumber(alignment?.offset_seconds);
+  return alignment?.verified === true && alignment.source === source
+    && offset !== null && Math.abs(offset) < 3 ? offset : 0;
+}
