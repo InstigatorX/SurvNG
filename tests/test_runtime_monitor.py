@@ -277,3 +277,22 @@ class ApplicationRuntimeMonitorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_native_collector_records_real_metadata_metrics_and_gaps():
+    from datetime import datetime, timezone
+    from survng.app.runtime_monitor import OperationalTelemetryCollector
+    collector = OperationalTelemetryCollector()
+    status = {"id": "gate", "connected": True, "detection_enabled": True,
+              "native_activity": {"health": "healthy", "effective_fresh_fps": 4.5},
+              "live_pipeline": {"native_detector_average_ms": 125, "native_detector_p95_ms": 180}}
+    def collect():
+        return collector.collect([status], sampled_at=datetime.now(timezone.utc), process_memory={},
+                                 worker_memory={}, system_runtime={}, detector_runtime={})[1][0]
+    camera = collect()
+    assert camera.detection_fps == 4.5
+    assert camera.detector_latency_ms == 125
+    status["native_activity"]["health"] = "metadata_stale"
+    camera = collect()
+    assert camera.detection_fps == 0
+    assert camera.detector_latency_ms is None

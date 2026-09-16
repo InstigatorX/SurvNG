@@ -39,7 +39,7 @@ assert.match(evidence, /export function SnapshotImage\(/);
 assert.match(evidence, /export function EventOverlay\(/);
 assert.doesNotMatch(evidence, /export function IncidentCard\(/);
 assert.doesNotMatch(evidence, /export function IncidentInspector\(/);
-assert.match(evidence, /loadIncidentClipInfo\(viewerEvent, \(\) => cancelled, prefersNativeMobilePlayback\(\)\)/);
+assert.match(evidence, /loadIncidentClipInfo\(viewerEvent, \(\) => cancelled, prefersNativeMobilePlayback\(\), replaySource\)/);
 assert.match(evidence, /playback\.mimeType === "video\/mp4" \? <video/);
 
 assert.match(incidentsPage, /import \{ IncidentCard, IncidentInspector \} from "\.\/IncidentCard\.jsx"/);

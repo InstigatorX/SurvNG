@@ -42,6 +42,9 @@ class CameraTelemetryBucket:
     available: float = 0.0
     live_fps: float = 0.0
     main_fps: float = 0.0
+    detection_fps: float | None = None
+    detector_latency_ms: float | None = None
+    detector_p95_ms: float | None = None
     capture_interruptions: int = 0
     ema_frames_sampled: int = 0
     ema_frames_superseded: int = 0
@@ -69,7 +72,7 @@ CAMERA_COLUMNS = tuple(
 class TelemetryStore:
     """Own the telemetry database; it never shares EventStore's writer lock."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(
         self,
@@ -98,6 +101,7 @@ class TelemetryStore:
             for name in SYSTEM_COLUMNS
         )
         camera_fields = ",\n".join(
+            f"{name} real" if name in {"detection_fps", "detector_latency_ms", "detector_p95_ms"} else
             f"{name} {'integer' if name not in {'expected', 'available', 'live_fps', 'main_fps'} else 'real'} not null default 0"
             for name in CAMERA_COLUMNS
         )
@@ -310,7 +314,7 @@ class TelemetryStore:
             "worker_rss_bytes",
             "inference_ms",
         }
-        camera_gauges = {"expected", "available", "live_fps", "main_fps"}
+        camera_gauges = {"expected", "available", "live_fps", "main_fps", "detection_fps", "detector_latency_ms", "detector_p95_ms"}
         with self._lock, self._connect() as conn:
             conn.execute("delete from system_metric_buckets where resolution_minutes in (15,60)")
             conn.execute("delete from camera_metric_buckets where resolution_minutes in (15,60)")
@@ -408,7 +412,7 @@ class TelemetryStore:
     def _refresh_camera_rollup(
         self, *, start: datetime, end: datetime, resolution: int
     ) -> None:
-        gauge_columns = ("expected", "available", "live_fps", "main_fps")
+        gauge_columns = ("expected", "available", "live_fps", "main_fps", "detection_fps", "detector_latency_ms", "detector_p95_ms")
         counter_columns = tuple(name for name in CAMERA_COLUMNS if name not in gauge_columns)
         expressions = [f"avg({name}) as {name}" for name in gauge_columns]
         expressions.extend(f"sum({name}) as {name}" for name in counter_columns)
@@ -520,9 +524,15 @@ class TelemetryStore:
             expected_rows = [row for row in selected if float(row.get("expected") or 0.0) > 0]
             expected_weight = sum(float(row.get("expected") or 0.0) for row in expected_rows)
             available_weight = sum(float(row.get("available") or 0.0) for row in expected_rows)
+            native_rates = [float(row["detection_fps"]) for row in selected if row.get("detection_fps") is not None]
+            native_latencies = [float(row["detector_latency_ms"]) for row in selected if row.get("detector_latency_ms") is not None]
+            native_p95 = [float(row["detector_p95_ms"]) for row in selected if row.get("detector_p95_ms") is not None]
             result.append(
                 {
                     "sampled_at": sampled_at,
+                    "detection_fps": sum(native_rates) if native_rates else None,
+                    "detector_latency_ms": sum(native_latencies) / len(native_latencies) if native_latencies else None,
+                    "detector_p95_ms": max(native_p95) if native_p95 else None,
                     "live_fps": round(sum(live) / len(live), 2) if live else 0.0,
                     "main_fps": round(sum(main) / len(main), 2) if main else 0.0,
                     "capture_interruptions": sum(int(row.get("capture_interruptions") or 0) for row in selected),

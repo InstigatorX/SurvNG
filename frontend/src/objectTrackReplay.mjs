@@ -204,3 +204,8 @@ export function trackingCoverageLabel(tracking) {
   if (reason === "session_stopped") return "Tracking incomplete — session stopped";
   return "Tracking incomplete";
 }
+
+// Never project live-stream boxes onto an unverified main-stream field of view.
+export function trackReplaySource(event, showTracks = true) {
+  return showTracks && event?.object_tracking?.recording_overlay_compatible === false ? "live" : "main";
+}

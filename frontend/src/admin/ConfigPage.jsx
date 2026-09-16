@@ -593,6 +593,17 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
           </dl>
         </details> : null}
 
+        <section className="telemetry-section">
+          <h3>Native detection throughput and latency{selected ? ` · ${selected.name}` : " · all cameras"}</h3>
+          <p>{selected ? "Fresh detection results per second for this camera." : "FPS is the sum of camera detection rates. Latency is the mean of reporting cameras; the p95 line is the highest camera p95."} Native detector latency includes scheduling; it is not end-to-end video delay. History starts when native metrics are first collected.</p>
+          <div className="telemetry-trend-grid two-column">
+            <TelemetryTrend title="Detection FPS · 2 hours" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "detection_fps", label: "Fresh results", className: "rate" }]} />
+            <TelemetryTrend title="Detector latency · 2 hours" history={runtimeShort} timeZone={timeZone} valueFormatter={formatMilliseconds} series={[{ key: "detector_latency_ms", label: "Average", className: "inference" }, { key: "detector_p95_ms", label: selected ? "p95" : "Highest camera p95", className: "warning" }]} />
+            <TelemetryTrend title="Detection FPS · 7 days" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "detection_fps", label: "Fresh results", className: "rate" }]} />
+            <TelemetryTrend title="Detector latency · 7 days" history={runtimeLong} timeZone={timeZone} valueFormatter={formatMilliseconds} series={[{ key: "detector_latency_ms", label: "Average", className: "inference" }]} />
+          </div>
+        </section>
+
         <section className="telemetry-section"><h3>Native camera activity</h3>{shownCameras.map((camera) => <div key={camera.id}><h4>{camera.name || camera.id}</h4><RuntimeStatus status={camera} /></div>)}</section>
 
         <section className="telemetry-section">

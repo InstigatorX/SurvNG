@@ -58,7 +58,12 @@ export function recordingHealth({ cameras, appConfig, system, camerasUpdatedAt, 
   const systemReasons = [];
   if (systemFresh) {
     if (system?.lifecycle && system.lifecycle !== "running") systemReasons.push(`System is ${String(system.lifecycle).replaceAll("_", " ")}.`);
-    if (system?.detector && system.detector.enabled !== false && !system.detector.loaded_backend) systemReasons.push("Detection is enabled but its backend is not loaded.");
+    const detector = system?.detector;
+    if (detector && detector.enabled !== false) {
+      if (detector.native || detector.implementation === "dlstreamer") {
+        if (Number(detector.active_cameras) > Number(detector.healthy_cameras || 0)) systemReasons.push(`${detector.healthy_cameras || 0} of ${detector.active_cameras} native detection pipelines are healthy.`);
+      } else if (!detector.loaded_backend) systemReasons.push("Detection is enabled but its backend is not loaded.");
+    }
     if (finite(system?.cameras?.enabled) && finite(system?.cameras?.online) && system.cameras.enabled > system.cameras.online) systemReasons.push(`${system.cameras.online} of ${system.cameras.enabled} enabled cameras are online.`);
   }
   const issues = Number(cameraIssue) + Number(!systemFresh || storageIssue) + Number(systemReasons.length > 0);

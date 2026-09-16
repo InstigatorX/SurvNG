@@ -377,3 +377,31 @@ def test_operational_budget_prunes_fine_grained_history_first(tmp_path) -> None:
         store.camera_history(since=start, resolution_minutes=1)
     )
     assert remaining <= 3
+
+
+def test_native_history_aggregates_camera_rates_and_latency_and_preserves_gaps(tmp_path):
+    store = TelemetryStore(tmp_path)
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    store.write_buckets(SystemTelemetryBucket(sampled_at=now), [
+        CameraTelemetryBucket(sampled_at=now, camera_id="a", detection_fps=5, detector_latency_ms=100, detector_p95_ms=150),
+        CameraTelemetryBucket(sampled_at=now, camera_id="b", detection_fps=3, detector_latency_ms=200, detector_p95_ms=250),
+    ])
+    combined = store.operational_history(hours=2, bucket_minutes=1, now=now)[-1]
+    assert combined["detection_fps"] == 8
+    assert combined["detector_latency_ms"] == 150
+    assert combined["detector_p95_ms"] == 250
+    camera = store.operational_history(hours=2, bucket_minutes=1, camera_id="a", now=now)[-1]
+    assert camera["detection_fps"] == 5
+    assert camera["detector_latency_ms"] == 100
+    store.rebuild_rollups()
+    rolled = store.operational_history(hours=2, bucket_minutes=15, now=now)[-1]
+    assert rolled["detection_fps"] == 8
+    assert rolled["detector_latency_ms"] == 150
+    with sqlite3.connect(store.path) as conn:
+        for column in ("detection_fps", "detector_latency_ms", "detector_p95_ms"):
+            conn.execute(f"alter table camera_metric_buckets drop column {column}")
+    upgraded = TelemetryStore(tmp_path)
+    historical = upgraded.operational_history(hours=2, bucket_minutes=1, now=now)[-1]
+    assert historical["detection_fps"] is None
+    assert historical["detector_latency_ms"] is None
+    assert len(upgraded.camera_history(since=now-timedelta(minutes=1), resolution_minutes=1)) == 2

@@ -26,7 +26,7 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
+import { trackReplaySource, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
 import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
@@ -654,11 +654,13 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
   const displayedEvent = viewerEvent;
   const trackingEvent = displayedEvent;
   const storedTracks = storedObjectTracks(trackingEvent);
-  const replayTrackCount = trackingEvent.object_tracking?.recording_overlay_compatible === false ? 0 : storedTracks.filter((track) => track.boxHistory.length).length;
+  const replaySource = trackReplaySource(trackingEvent, trackingVisible);
+  const replayTrackCount = storedTracks.filter((track) => track.boxHistory.length).length;
   const downloadName = `survng-${String(viewerEvent.camera_id || "camera")}-${String(viewerEvent.created_at || viewerEvent.id || "event").replace(/[^0-9A-Za-z_-]+/g, "-")}.mp4`;
 
   useEffect(() => {
     setTrackingVisible(false);
+    setVideoActive(false);
   }, [event.id]);
 
   useEffect(() => {
@@ -676,8 +678,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
       setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
-      setVideoActive(false);
-      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled, prefersNativeMobilePlayback());
+      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled, prefersNativeMobilePlayback(), replaySource);
       if (!info) return;
       setClipInfo(info);
       setPlayback(prefersNativeMobilePlayback()
@@ -686,7 +687,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch]);
+  }, [replaySource, viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch]);
 
   function playEventClip() {
     if (!clipInfo || clipError) return;
@@ -862,6 +863,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
     setMediaSize(incidentTrackingFrameSize(trackingEvent));
     setFullSnapshotRequested(false);
     setTrackingVisible(false);
+    setVideoActive(false);
   }, [event.id]);
 
   const mediaStyle = useMemo(() => {
@@ -1000,7 +1002,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
                 onError={() => {
                   setClipLoading(false);
                   setVideoActive(false);
-                  setClipError("No recording window found");
+                  setClipError(replaySource === "live" ? "No recorded substream found for Tracks replay. Use Clean replay, or confirm matching main/live fields of view in camera settings." : "No recording window found");
                 }}
                 onClick={(event) => event.stopPropagation()}
               /> : <ShakaVideo
@@ -1042,13 +1044,13 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
                   } else {
                     setClipLoading(false);
                     setVideoActive(false);
-                    setClipError("No recording window found");
+                    setClipError(replaySource === "live" ? "No recorded substream found for Tracks replay. Use Clean replay, or confirm matching main/live fields of view in camera settings." : "No recording window found");
                   }
                 }}
                 onClick={(event) => event.stopPropagation()}
               />}
 
-              {trackingVisible && trackingEvent.object_tracking?.recording_overlay_compatible !== false ? (
+              {trackingVisible ? (
                 <StoredTrackVideoOverlay
                   videoRef={clipVideoRef}
                   tracks={storedTracks}
@@ -1089,7 +1091,7 @@ export async function eventStreamTimelineStart(streamUrl, requestedWindowStartEp
   }
 }
 
-export async function loadIncidentClipInfo(event, isCancelled = () => false, preferNativeMp4 = false) {
+export async function loadIncidentClipInfo(event, isCancelled = () => false, preferNativeMp4 = false, source = "main") {
   const eventId = Number(event?.representative_event_id || event?.id);
   if (!Number.isFinite(eventId)) return null;
   let before = 5;
@@ -1110,7 +1112,7 @@ export async function loadIncidentClipInfo(event, isCancelled = () => false, pre
   const window = incidentClipWindow(event, safeBefore, safeAfter);
   const anchorEpoch = eventEpoch(event);
   const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
-  const streamUrl = eventStreamUrl(eventId, window.before, window.after);
+  const streamUrl = eventStreamUrl(eventId, window.before, window.after, source);
   const timelineStartEpoch = !preferNativeMp4 && Number.isFinite(requestedWindowStartEpoch)
     ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
     : requestedWindowStartEpoch;
@@ -1118,7 +1120,8 @@ export async function loadIncidentClipInfo(event, isCancelled = () => false, pre
   const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
   return {
     streamUrl,
-    downloadUrl: eventClipUrl(eventId, window.before, window.after),
+    source,
+    downloadUrl: eventClipUrl(eventId, window.before, window.after, source),
     before: window.before,
     after: window.after,
     duration: window.before + window.after,

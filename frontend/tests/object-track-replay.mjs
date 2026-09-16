@@ -124,3 +124,9 @@ assert.equal(trackingCoverageLabel({ state: "complete", coverage_incomplete: fal
 assert.match(trackingCoverageLabel({ state: "interrupted", completion_reason: "missing_media_while_object_active" }), /recording coverage unavailable/);
 assert.match(trackingCoverageLabel({ state: "interrupted", completion_reason: "processing_budget_exhausted" }), /processing time limit/);
 assert.equal(trackingCoverageLabel({ state: "complete", coverage_incomplete: true }), "Tracking incomplete");
+
+const { trackReplaySource } = await import("../src/objectTrackReplay.mjs");
+assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: false}}), "live");
+assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: true}}), "main");
+assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: false}}, false), "main");
+assert.equal(trackReplaySource({}), "main");

@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { crossCameraMatchCameraLabel, crossCameraMatchLabel, crossCameraTracePath } from "../crossCameraTrace.mjs";
 import { cameraReportsForIncident } from "../cameraSemantics.mjs";
-import { incidentTrackingSource, trackingCoverageLabel, storedObjectTracks } from "../objectTrackReplay.mjs";
+import { incidentTrackingSource, trackingCoverageLabel, storedObjectTracks, trackReplaySource } from "../objectTrackReplay.mjs";
 import { incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentTriggerLabel, showIncidentCardAnnotations } from "../incidentNavigation.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../relatedIncidents.mjs";
 import {
@@ -56,7 +56,9 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   const [clipError, setClipError] = useState("");
   const [playback, setPlayback] = useState(null);
   const [playbackOriginTime, setPlaybackOriginTime] = useState(null);
-  const storedTracks = storedObjectTracks(trackingEvent || event);
+  const trackEvent = trackingEvent || event;
+  const storedTracks = storedObjectTracks(trackEvent);
+  const replaySource = trackReplaySource(trackEvent, analysisMode === "tracks");
 
   useEffect(() => {
     let cancelled = false;
@@ -75,7 +77,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
       setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
-      const info = await loadIncidentClipInfo(event, () => cancelled, prefersNativeMobilePlayback());
+      const info = await loadIncidentClipInfo(event, () => cancelled, prefersNativeMobilePlayback(), replaySource);
       if (!info) return;
       setClipInfo(info);
       setPlayback(prefersNativeMobilePlayback()
@@ -84,7 +86,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [active, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch]);
+  }, [active, replaySource, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch]);
 
   if (!active) return null;
   return (
@@ -111,7 +113,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
             }}
             onError={() => {
               setClipLoading(false);
-              setClipError("No recording window found");
+              setClipError(replaySource === "live" ? "No recorded substream found for Tracks replay. Use Clean replay, or confirm matching main/live fields of view in camera settings." : "No recording window found");
             }}
             onEnded={onEnded}
           /> : <ShakaVideo
@@ -149,24 +151,24 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
                 setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
               } else {
                 setClipLoading(false);
-                setClipError("No recording window found");
+                setClipError(replaySource === "live" ? "No recorded substream found for Tracks replay. Use Clean replay, or confirm matching main/live fields of view in camera settings." : "No recording window found");
               }
             }}
             onEnded={onEnded}
           />}
-          {analysisMode === "tracks" && storedTracks.length && trackingEvent.object_tracking?.recording_overlay_compatible !== false ? (
+          {analysisMode === "tracks" && storedTracks.length ? (
             <StoredTrackVideoOverlay
               videoRef={videoRef}
               tracks={storedTracks}
               coordinateSize={{
-                width: Number(trackingEvent?.object_tracking?.frame_width),
-                height: Number(trackingEvent?.object_tracking?.frame_height),
+                width: Number(trackEvent?.object_tracking?.frame_width),
+                height: Number(trackEvent?.object_tracking?.frame_height),
               }}
               windowStartEpoch={clipInfo.windowStartEpoch}
               mediaStartTime={playbackOriginTime}
               mediaKey={playback.url}
-              sampleFps={trackingEvent?.object_tracking?.sample_fps}
-              lostTimeoutSeconds={trackingEvent?.object_tracking?.lost_timeout_seconds}
+              sampleFps={trackEvent?.object_tracking?.sample_fps}
+              lostTimeoutSeconds={trackEvent?.object_tracking?.lost_timeout_seconds}
             />
           ) : null}
 
@@ -1096,7 +1098,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
             <button type="button" className={depthLayer === "heatmap" ? "active" : ""} aria-pressed={depthLayer === "heatmap"} onClick={() => onDepthLayerChange?.("heatmap")} title="Show depth heatmap only">Heatmap</button>
           </div>
         ) : null}
-        {analysisMode === "tracks" ? <small>{trackingCoverageLabel(incidentTracking)} · {objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
+        {analysisMode === "tracks" ? <small>{trackingCoverageLabel(incidentTracking)} · {objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS · {incidentTracking?.recording_overlay_compatible === false ? "Recorded substream" : "Main recording"}</small> : null}
         {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
         {analysisMode === "depth" && analysisStats ? (
           <small className={analysisStats.error || analysisStats.depthError ? "analysis-error" : ""}>
