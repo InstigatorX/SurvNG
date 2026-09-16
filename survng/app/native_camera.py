@@ -70,6 +70,17 @@ class NativeCameraWorker:
         )
         self.activity = NativeActivity(camera, config, events, publish, self._evidence, native_zones=True)
         self.activity.offer_evidence = self._offer_evidence
+        if evidence_service is not None:
+            self.activity.admission = evidence_service.admission
+            self.activity.nominate = self._nominate
+            self.activity.verified_snapshot = lambda cover: self.media.write_snapshot(cover[0], datetime.fromtimestamp(cover[2], timezone.utc))
+
+    def _nominate(self, token, observation, epoch, obj):
+        with self._frames_lock:
+            frame = next((frame for frame in reversed(self._frames)
+                          if observation.matches_frame(frame.source_pts, frame.source_session)), None)
+        self.activity.admission.offer(token, self.camera.id, epoch, frame.image if frame is not None else None,
+                                      obj, (observation.width, observation.height))
 
     def _remember(self, frame):
         if frame.source == "live":

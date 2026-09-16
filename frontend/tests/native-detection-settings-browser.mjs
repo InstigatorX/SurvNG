@@ -37,6 +37,11 @@ try {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/test`);
+  const verification = page.getByLabel("Verify objects in main-recording crops before creating incidents");
+  assert.equal(await verification.isChecked(), true);
+  await verification.uncheck();
+  assert.equal(JSON.parse(await page.locator("#config").textContent()).native.verification_enabled, false);
+  await verification.check();
   await page.getByLabel("OpenVINO model").fill("new.xml");
   await page.getByLabel("Shared inference batch size", {exact:true}).fill("2");
   await page.getByLabel("Inference interval", {exact:true}).fill("3");

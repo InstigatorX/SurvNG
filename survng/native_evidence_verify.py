@@ -17,6 +17,7 @@ def main():
     Gst = _load_gstreamer()
     _require_detection_plugin(Gst)
     from gstgva import VideoFrame
+    from gi.repository import GstVideo
     config = json.loads(Path(sys.argv[1]).read_text())
     with configured_model(Path(config["model"]), config["model_proc"], config["nms"]) as (model, model_proc):
         graph = Gst.parse_launch('appsrc name=input format=time is-live=true ! gvadetect name=detector device=CPU batch-size=1 nireq=1 inference-interval=1 pre-process-backend=opencv ! gvametaconvert add-empty-results=true ! appsink name=output sync=false')
@@ -37,9 +38,17 @@ def main():
                 request = json.loads(line)
                 try:
                     sequence += 1
-                    source.set_property("caps", Gst.Caps.from_string(f'video/x-raw,format=BGR,width={request["width"]},height={request["height"]},framerate=1/1'))
+                    caps = Gst.Caps.from_string(f'video/x-raw,format=BGR,width={request["width"]},height={request["height"]},framerate=1/1')
+                    source.set_property("caps", caps)
                     graph.set_state(Gst.State.PLAYING)
                     pixels = Path(request["pixels"]).read_bytes()
+                    info = GstVideo.VideoInfo.new_from_caps(caps)
+                    row_bytes = request["width"] * 3
+                    if len(pixels) != row_bytes * request["height"]:
+                        raise ValueError("invalid packed BGR frame size")
+                    if info.stride[0] != row_bytes:
+                        padding = bytes(info.stride[0] - row_bytes)
+                        pixels = b"".join(pixels[y*row_bytes:(y+1)*row_bytes] + padding for y in range(request["height"]))
                     buffer = Gst.Buffer.new_wrapped(pixels)
                     buffer.pts = sequence * Gst.SECOND
                     buffer.duration = Gst.SECOND

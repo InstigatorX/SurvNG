@@ -186,6 +186,40 @@ def check_va(model):
     return {"va_surface_sharing": "passed", "fresh_results": len(results)}
 
 
+def check_verifier_crops(model):
+    import numpy as np
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = root/'config.json'
+        config.write_text(json.dumps({'model':str(model),'model_proc':'','nms':.45,'threshold':.1,
+                                      'labels_path':str(model.with_suffix('.txt')),'labels':[]}))
+        process = subprocess.Popen([sys.executable,'-m','survng.native_evidence_verify',str(config)],
+                                   stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
+        try:
+            for width,height in ((193,191),(287,239),(640,480)):
+                pixels, result = root/'frame.bgr', root/'result.json'
+                result.unlink(missing_ok=True)
+                pixels.write_bytes(np.zeros((height,width,3),np.uint8).tobytes())
+                process.stdin.write(json.dumps({'width':width,'height':height,'pixels':str(pixels),'result':str(result)})+'\n')
+                process.stdin.flush()
+                deadline=time.monotonic()+40
+                while not result.exists() and time.monotonic()<deadline and process.poll() is None:
+                    time.sleep(.05)
+                assert result.exists(), 'verifier did not return crop result'
+                payload=json.loads(result.read_text())
+                assert 'error' not in payload, payload
+                assert len(payload['objects'])==1, payload
+                obj=payload['objects'][0]
+                assert obj['label']=='car' and abs(obj['box']['x1']/width-.1)<.01, payload
+        finally:
+            process.stdin.close()
+            try: process.wait(timeout=5)
+            except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
+            diagnostics=process.stderr.read(); process.stderr.close()
+        assert 'GStreamer-CRITICAL' not in diagnostics, diagnostics
+    return {'odd_width_native_crops': 'passed', 'samples':3}
+
+
 def geometry_samples():
     from survng.dlstreamer_live import _load_gstreamer, _normalize_gva_objects
     from survng.native_spatial import analytics_zones
@@ -238,6 +272,9 @@ def main():
         model.with_suffix('.txt').write_text('car\n')
         (model.parent / "metadata.yaml").write_text("description: YOLO26 synthetic fixture\ntask: detect\n")
         proc = ""
+        if '--verify-crops' in sys.argv:
+            print(json.dumps(check_verifier_crops(model)))
+            return
         if '--va' in sys.argv:
             print(json.dumps(check_va(model)))
             return

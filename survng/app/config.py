@@ -843,6 +843,7 @@ class NativeActivityConfig(BaseModel):
     tracking_classes: list[str] | None = Field(default=None, max_length=256)
     stationary: NativeStationaryConfig = Field(default_factory=NativeStationaryConfig)
     budget: NativeBudgetConfig = Field(default_factory=NativeBudgetConfig)
+    verification_enabled: bool = True
 
     activity_timeout_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
     maximum_observation_age_seconds: float = Field(default=2.0, ge=0.2, le=10.0)

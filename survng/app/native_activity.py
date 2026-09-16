@@ -11,6 +11,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import time
+import uuid
 from typing import Callable
 
 from .live_detections import DetectionSnapshot
@@ -49,6 +50,11 @@ class NativeActivity:
         self.last_activity = 0.0
         self.last_persist = 0.0
         self.offer_evidence = None
+        self.nominate = None
+        self.admission = None
+        self.verified_snapshot = None
+        self._verification_pending = {}
+        self._verification_recent = deque(maxlen=16)
         self.event_id = None
         self.tracks = {}
         self._episode_tracks = {}
@@ -178,32 +184,101 @@ class NativeActivity:
         if eligible and not seen:
             self.health = "tracking_unavailable"
         confirmed = [track for key, track in self.tracks.items() if key in seen and track["state"] == "confirmed" and track["activity_eligible"]]
+        if self.admission is not None and self.config.native.verification_enabled:
+            confirmed = self._gate(confirmed, observation, epoch, now)
         if confirmed:
-            for track in confirmed:
-                self._record_activity_track(track, epoch)
-            self.last_activity = now
-            self.last_motion_at = iso(epoch)
-            if self.event_id is None:
-                stored = self._objects(self._episode_tracks.values())
-                path = self.snapshot(observation, epoch)
-                event = self.events.add_event(
-                    camera_id=self.camera.id, kind="motion", topic="native/object-presence",
-                    message="Confirmed native object presence", created_at=iso(epoch),
-                    snapshot_path=path, objects_json=json.dumps(stored),
-                    detection_intent_id=f"native:{self.camera.id}:{self.session}:{self.sequence}",
-                )
-                self.event_id = int(event["id"])
-                self.counts["events_created"] += 1
-                self.publish("incident", {"camera_id": self.camera.id, "event_id": self.event_id, "timestamp": iso(epoch), "kind": "motion"})
-                self.publish("object", {"camera_id": self.camera.id, "event_id": self.event_id,
-                             "timestamp": iso(epoch), "objects": stored, "source": "native",
-                             "snapshot_path": path})
-                self.persist("active", now=now)
-            elif now - self.last_persist >= 1.0:
-                self.persist("active", now=now)
-            if self.event_id is not None and self.offer_evidence is not None:
-                self.offer_evidence(observation, epoch, self.event_id, self._objects(confirmed))
+            self._activate(confirmed, observation, epoch, now)
         self.tick(now=now)
+
+    def _gate(self, confirmed, observation, epoch, now):
+        allowed = []
+        for track in confirmed:
+            state = track.get('_verification')
+            if state == 'confirmed':
+                allowed.append(track)
+                continue
+            if state in {'rejected', 'unverified'}:
+                before, box = track.get('_verification_box', track['box']), track['box']
+                scale = max(1, before['x2']-before['x1'], before['y2']-before['y1'])
+                moved = max(abs((box['x1']+box['x2']-before['x1']-before['x2'])/2),
+                            abs((box['y1']+box['y2']-before['y1']-before['y2'])/2)) > scale*.5
+                if not moved and (state != 'unverified' or now < track.get('_verification_retry_at', now)):
+                    continue
+                track.pop('_verification_token', None)
+                track.pop('_verification', None)
+            token = track.get('_verification_token')
+            if token is None:
+                if len(self._verification_pending) >= 32:
+                    self.counts['verification_capacity_drops'] += 1
+                    continue
+                token = track['_verification_token'] = uuid.uuid4().hex
+                track['_verification'] = 'pending'
+            pending = self._verification_pending.setdefault(token, {'started': now})
+            pending.update(track={k: deepcopy(v) for k,v in track.items() if not k.startswith('_')},
+                           observation=observation, epoch=epoch)
+            self.nominate(token, observation, epoch, self._objects([track])[0])
+        return allowed
+
+    def _poll_verification(self, now):
+        if self.admission is None:
+            return
+        for token, pending in list(self._verification_pending.items()):
+            result = self.admission.poll(token)
+            if result is None and now-pending['started'] < 150:
+                continue
+            if result is None:
+                self.admission.cancel(token)
+                result = {'status': 'unverified', 'reason': 'deadline'}
+            del self._verification_pending[token]
+            status = result['status']
+            self.counts['verification_'+status] += 1
+            track = pending['track']
+            self._verification_recent.append({'label': track['label'], 'status': status, 'reason': result.get('reason', ''),
+                                              'timestamp': iso(pending['epoch']), 'votes': result.get('votes', [])})
+            current = self.tracks.get((track['native_track_id'], track['label']))
+            if current is not None and current.get('_verification_token') == token:
+                current['_verification'] = status
+                current['_verification_box'] = deepcopy(track['box'])
+                current['_verification_retry_at'] = now+30
+                current['verification'] = {k:v for k,v in result.items() if k != 'cover'}
+            if status != 'confirmed':
+                continue
+            track['verification'] = {k:v for k,v in result.items() if k != 'cover'}
+            # These observations were fresh at nomination. Verification may finish
+            # after the object leaves; retain the original source-time history.
+            for point in track['box_history']:
+                sample = dict(track, box_history=[point], trajectory=[[point[0], (point[1]+point[3])/2, (point[2]+point[4])/2]], last_seen=iso(point[0]))
+                self._record_activity_track(sample, point[0])
+            self._activate([], pending['observation'], pending['epoch'], track['last_monotonic'],
+                           cover=result.get('cover'))
+
+    def _activate(self, confirmed, observation, epoch, now, cover=None):
+        for track in confirmed:
+            self._record_activity_track(track, epoch)
+        self.last_activity = max(self.last_activity, now)
+        self.last_motion_at = max(self.last_motion_at, iso(epoch))
+        if self.event_id is None:
+            stored = self._objects(self._episode_tracks.values())
+            path = self.verified_snapshot(cover) if cover is not None else self.snapshot(observation, epoch)
+            if cover is not None:
+                stored = [dict(cover[1], verification={"status": "confirmed", "source": "main_crop"})]
+            event = self.events.add_event(
+                camera_id=self.camera.id, kind="motion", topic="native/object-presence",
+                message="Confirmed native object presence", created_at=min((t["first_seen"] for t in self._episode_tracks.values()), default=iso(epoch)) if cover is not None else iso(epoch),
+                snapshot_path=path, objects_json=json.dumps(stored),
+                detection_intent_id=f"native:{self.camera.id}:{self.session}:{self.sequence}" + (f":{uuid.uuid4().hex}" if cover is not None else ""),
+            )
+            self.event_id = int(event["id"])
+            self.counts["events_created"] += 1
+            self.publish("incident", {"camera_id": self.camera.id, "event_id": self.event_id, "timestamp": iso(epoch), "kind": "motion"})
+            self.publish("object", {"camera_id": self.camera.id, "event_id": self.event_id,
+                         "timestamp": iso(epoch), "objects": stored, "source": "native",
+                         "snapshot_path": path})
+            self.persist("active", now=now)
+        elif now - self.last_persist >= 1.0:
+            self.persist("active", now=now)
+        if self.event_id is not None and self.offer_evidence is not None:
+            self.offer_evidence(observation, epoch, self.event_id, self._objects(confirmed))
 
     @staticmethod
     def _objects(tracks):
@@ -256,6 +331,7 @@ class NativeActivity:
         return budget.idle_fps if budget.enabled else self.config.live_sample_fps / self.config.native.inference_interval
 
     def tick(self, *, now: float):
+        self._poll_verification(now)
         if self.last_fresh and now - self.last_fresh > max(self.config.native.maximum_observation_age_seconds, (self.config.native.batch_size + .5) / self.fresh_detection_fps):
             self.health = "metadata_stale"
         if self.event_id is not None and now - self.last_activity >= self.config.native.activity_timeout_seconds:
@@ -272,6 +348,10 @@ class NativeActivity:
         self.event_id = None
         self._episode_tracks.clear()
         if reason != "complete":
+            if self.admission is not None:
+                for token in self._verification_pending:
+                    self.admission.cancel(token)
+            self._verification_pending.clear()
             self.tracks.clear()
             self._next_track_id = 1
         self.last_activity = 0.0
@@ -284,4 +364,6 @@ class NativeActivity:
                 "effective_fresh_fps": (len(self._fresh_times) - 1) / elapsed if elapsed > 0 else 0,
                 "last_fresh_age_seconds": max(0, time.monotonic() - self.last_fresh) if self.last_fresh else None,
                 "motion_states": dict(Counter(track.get("motion_state", "uncertain") for track in self.tracks.values())),
+                "verification_pending": len(self._verification_pending),
+                "verification_recent": list(self._verification_recent),
                 "tracks": self._objects(self.tracks.values()), "counters": dict(self.counts)}

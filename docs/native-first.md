@@ -356,3 +356,47 @@ Reduced input counts are not measured GPU savings. Idle sampling trades entry
 latency and brief-appearance recall for fewer inferences; validate these on each
 scene before enabling broadly. Motion still processes frames at the active rate,
 and shared compiled pools and batching affect realized compute and latency.
+
+### Main-recording incident confirmation
+
+`detector.native.verification_enabled` defaults true and is exposed under Admin →
+Detection → High-resolution incident confirmation. Low-resolution fresh detections
+nominate candidates after normal class, zone, confidence, movement and consecutive
+frame checks. They do not create events or publish incident/object notifications
+until a main-recording crop confirms the same object. Turning the option off restores
+immediate native presence admission.
+
+A bounded worker collects up to three nominations spaced at least 0.4 seconds
+apart. It waits initially 15 seconds for recorded segments, aligns each original
+preview to the matching main frame, and checks a contextual crop at its native
+resolution with the existing isolated CPU `gvadetect` verifier. Positive detections
+must match both class and location and satisfy the configured class/zone threshold.
+One clear positive confirms; three clear negatives reject. Missing recordings,
+failed registration, poor image quality, weak detections and verifier failures do
+not count as negatives. Unavailable evidence is retried for up to 90 seconds;
+remaining candidates are unverified and do not alert. Cameras without usable main
+recordings therefore cannot confirm incidents with this option enabled.
+
+Detection and tracking continue during this delay. Candidate histories are bounded
+and survive a track leaving the scene while verification runs. Accepted events retain
+the original observation timeline and start with a genuine main-resolution cover;
+cover objects and live tracking histories keep their respective coordinate geometry.
+Stream, geometry, policy and stop transitions cancel pending candidates and discard
+late results. Rejected tracks can be nominated again after substantial displacement;
+unverified tracks can retry after 30 seconds. No permanent detection mask is created.
+
+There are at most 32 pending jobs globally and 32 candidate histories per camera.
+Overload expires as unverified, never as rejection or an automatic alert. Camera
+status and the owner-only observability snapshot expose pending counts, confirmed/
+rejected/unverified counters and bounded recent outcomes. Continuous recordings and
+historical incidents are retained. Alert latency includes segment availability and
+CPU verification; this is a recall/latency tradeoff, not a guarantee against false
+positives. Failed cover-only verification remains separate from admission decisions.
+
+Validation includes delayed confirmation after departure, no notifications from
+pending/rejected/unverified candidates, cancellation of in-flight work, queue limits,
+spatial and confidence checks, and three distinct temporal samples. Native crop tests
+exercise varying odd-width BGR buffers (which require padded GStreamer row strides).
+Read-only replays of Back-Middle events 71408 and 71404 returned three negative crop
+checks each. Real person examples are also checked for positive confirmation; unknown
+alignment is explicitly not treated as evidence of absence.

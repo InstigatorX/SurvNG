@@ -956,6 +956,10 @@ class AppManager:
         """Apply policy-only detector settings without disturbing camera workers."""
         self.inference.reconfigure_policy(config.detector)
         self.config.detector = config.detector
+        self.native_evidence.config = self.config
+        self.native_evidence.verifier.config = config.detector
+        for worker in self.workers.values():
+            worker.reconfigure_policy(config.detector)
 
     def reconfigure_motion(
         self,

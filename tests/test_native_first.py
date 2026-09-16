@@ -235,7 +235,7 @@ ov.save_model(ov.Model([output],[image]),sys.argv[1],compress_to_fp16=False)
     manager = AppManager(AppConfig(
         storage_dir=str(tmp_path), database_dir=str(tmp_path / "db"),
         recording_index_dir=str(tmp_path / "recording-index"),
-        detector=DetectorConfig(enabled=True, model_path=str(model), native={"inference_interval": interval}),
+        detector=DetectorConfig(enabled=True, model_path=str(model), native={"inference_interval": interval, "verification_enabled": False}),
         cameras=[CameraConfig(id="front", name="Front", stream_url="rtsp://unused.invalid/live", record=False)],
         retention={"enabled": False},
     ))
