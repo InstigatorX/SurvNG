@@ -1,4 +1,5 @@
 import NativeBudgetSettings from "./NativeBudgetSettings.jsx";
+import NativeBudgetTelemetry from "./NativeBudgetTelemetry.jsx";
 import NativeRoiSettings from "./NativeRoiSettings.jsx";
 import { NativeDetectionSettings } from "./NativeDetectionSettings.jsx";
 import { nativeDetectionError } from "../nativeDetectionSettings.mjs";
@@ -4554,6 +4555,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <p>Last fresh result: {native.last_fresh_age_seconds == null ? "waiting" : `${Number(native.last_fresh_age_seconds).toFixed(1)} seconds ago`}</p>
       <p>{native.motion_states?.moving || 0} moving objects · {native.motion_states?.stationary || 0} stationary objects · {native.motion_states?.uncertain || 0} gathering evidence</p>
       <p>{native.active ? "Object presence active" : "No active presence episode"} · {native.counters?.events_created || 0} events · {native.counters?.metadata_restarts || 0} metadata recoveries</p>
+      <NativeBudgetTelemetry budget={pipeline.native_budget} detectionEnabled={status.detection_enabled} connected={status.connected} />
     </section>;
   }
   return <div className="empty-state">Waiting for native pipeline status…</div>;

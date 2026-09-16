@@ -140,6 +140,7 @@ class NativeBudget:
     def status(self):
         with self.lock:
             return {'mode': self.mode, 'target_fps': self.config[self.mode+'_fps'],
+                    'motion_enabled': self.config['motion_enabled'],
                     'idle_fps': self.config['idle_fps'], 'active_fps': self.config['active_fps'],
                     'cooldown_remaining_seconds': max(0, (self.active_until or 0)-(self.latest_pts or 0)),
                     **self.counts}

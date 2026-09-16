@@ -361,6 +361,12 @@ cooldown, admitted/skipped inputs, and wake counters. `excluded_motion_regions`
 counts otherwise-relevant motion rectangles fully suppressed by exclusions, once
 per rectangle per sampled frame; partial exclusions that still permit a wake do
 not increment it. Counters reset when the native pipeline is rebuilt.
+Health camera tiles display budget mode, target/idle/active rates, active hold,
+admitted/skipped/sampled inputs and skipped percentage, motion wake-up enablement,
+motion/object wake requests, excluded motion rectangles, and mode transitions.
+They distinguish disabled detection, fixed-rate operation, disconnected cameras,
+and pending telemetry. Wake requests include extensions of an existing active
+hold; skipped-input percentage is not measured GPU savings.
 `gstreamer-spatial-check.py
 --budget` verifies native admission, idle full-frame coordinates, motion wake-up,
 empty-result provenance, and mixed adaptive/fixed streams. `--va` also exercises

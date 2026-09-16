@@ -229,6 +229,7 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             )),
         },
         "inference_budget": {
+            "motion_enabled": _optional_bool(((raw.get("live_pipeline") or {}).get("native_budget") or {}).get("motion_enabled")),
             "mode": _motion_identifier(((raw.get("live_pipeline") or {}).get("native_budget") or {}).get("mode")),
             **_numeric_fields((raw.get("live_pipeline") or {}).get("native_budget"), (
                 "target_fps", "idle_fps", "active_fps", "cooldown_remaining_seconds", "sampled_frames",

@@ -33,6 +33,17 @@ def test_defaults_and_camera_inheritance():
     assert effective_native_budget(c, config.detector).enabled
 
 
+@pytest.mark.parametrize('enabled', [True, False])
+def test_budget_reports_effective_motion_setting(enabled):
+    p = plan()
+    p['budget']['motion_enabled'] = enabled
+    from survng.app.local_observability import _camera_snapshot
+    status = NativeBudget(p).status()
+    assert status['motion_enabled'] is enabled
+    snapshot = _camera_snapshot({'live_pipeline': {'native_budget': status}})
+    assert snapshot['inference_budget']['motion_enabled'] is enabled
+
+
 def test_idle_is_periodic_and_motion_wakes_immediately():
     b = NativeBudget(plan())
     admitted = [t/5 for t in range(35) if b.select(t/5)]
