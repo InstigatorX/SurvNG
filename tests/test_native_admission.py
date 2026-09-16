@@ -228,3 +228,104 @@ def test_cancel_during_time_window_decode_stops_before_matching_or_inference():
     assert evidence.read_frame.call_count == 2
     evidence.match_main.assert_called_once()
     evidence.verifier.detect.assert_not_called()
+
+
+def nominate_walk_with_id_change(a, *, second_start=8):
+    for seq in range(1, 8):
+        feed(a, seq)
+    for seq in range(8, second_start):
+        feed(a, seq, [])
+    replacement = {'label': 'dog', 'confidence': .8,
+                   'box': {'x1': 40, 'y1': 20, 'x2': 60, 'y2': 60},
+                   'native_track_id': 10, 'detection_provenance': 'native_fresh_detection'}
+    for seq in range(second_start, second_start + 8):
+        feed(a, seq, [replacement])
+    tokens = list(a._verification_pending)
+    for seq in range(second_start + 8, second_start + 70):
+        feed(a, seq, [])
+    return tokens
+
+
+def test_delayed_verified_id_change_continues_one_incident():
+    a = setup_activity()
+    first, second = nominate_walk_with_id_change(a)
+    results = {first: {'status': 'confirmed'}}
+    a.admission.poll.side_effect = lambda token: results.pop(token, None)
+    a.tick(now=116)
+    assert a.event_id == 1  # Await the adjacent track even after activity timeout.
+    assert a.events.add_event.call_count == 1
+    assert [t['native_track_id'] for t in a._episode_tracks.values()] == [9]
+    results[second] = {'status': 'confirmed'}
+    a.tick(now=117)
+    assert a.events.add_event.call_count == 1
+    final = a.events.update_object_tracking.call_args.args[1]
+    assert final['state'] == 'complete'
+    assert [t['native_track_id'] for t in final['tracks']] == [9, 10]
+    assert final['tracks'][0]['first_seen'] < final['tracks'][1]['first_seen']
+    assert a.event_id is None
+
+
+@pytest.mark.parametrize('status', ['rejected', 'unverified', 'deadline'])
+def test_failed_pending_continuation_closes_without_extending_confirmed_history(status):
+    a = setup_activity()
+    first, second = nominate_walk_with_id_change(a)
+    results = {first: {'status': 'confirmed'}}
+    a.admission.poll.side_effect = lambda token: results.pop(token, None)
+    a.tick(now=116)
+    assert a.event_id == 1
+    if status == 'deadline':
+        a.tick(now=300)
+        a.admission.cancel.assert_called_with(second)
+    else:
+        results[second] = {'status': status}
+        a.tick(now=117)
+    assert a.events.add_event.call_count == 1
+    final = a.events.update_object_tracking.call_args.args[1]
+    assert [t['native_track_id'] for t in final['tracks']] == [9]
+    assert a.event_id is None
+
+
+def test_later_verification_result_waits_for_earlier_activity():
+    a = setup_activity()
+    first, second = nominate_walk_with_id_change(a)
+    results = {second: {'status': 'confirmed'}}
+    a.admission.poll.side_effect = lambda token: results.pop(token, None)
+    a.tick(now=116)
+    a.events.add_event.assert_not_called()
+    assert second in results
+    results[first] = {'status': 'confirmed'}
+    a.tick(now=117)
+    assert a.events.add_event.call_count == 1
+    final = a.events.update_object_tracking.call_args.args[1]
+    assert [t['native_track_id'] for t in final['tracks']] == [9, 10]
+
+
+def test_separated_activity_stays_separate_even_when_results_arrive_together():
+    a = setup_activity()
+    first, second = nominate_walk_with_id_change(a, second_start=50)
+    results = {first: {'status': 'confirmed'}, second: {'status': 'confirmed'}}
+    a.admission.poll.side_effect = lambda token: results.pop(token, None)
+    a.tick(now=125)
+    assert a.events.add_event.call_count == 2
+    completed = [call.args[1] for call in a.events.update_object_tracking.call_args_list
+                 if call.args[1]['state'] == 'complete']
+    assert [[t['native_track_id'] for t in episode['tracks']] for episode in completed] == [[9], [10]]
+
+
+def test_renewed_candidate_cannot_hold_an_inactive_incident_forever():
+    a = setup_activity()
+    first, second = nominate_walk_with_id_change(a)
+    results = {first: {'status': 'confirmed'}}
+    a.admission.poll.side_effect = lambda token: results.pop(token, None)
+    a.tick(now=116)
+    assert a.event_id == 1
+    # A fresh retry of an old track must not restart the episode's hold limit.
+    a._verification_pending[second]['started'] = 240
+    a.last_fresh = 252
+    a.health = 'healthy'
+    a.tick(now=252)
+    assert a.event_id is None
+    assert second in a._verification_pending
+    final = a.events.update_object_tracking.call_args.args[1]
+    assert final['state'] == 'complete'
+    assert [t['native_track_id'] for t in final['tracks']] == [9]

@@ -221,10 +221,13 @@ class NativeActivity:
     def _poll_verification(self, now):
         if self.admission is None:
             return
-        for token, pending in list(self._verification_pending.items()):
+        # Resolve in observation order so a faster, later result cannot close
+        # or replace the episode before an earlier continuation is decided.
+        pending_items = sorted(self._verification_pending.items(), key=lambda item: item[1]['track']['first_seen'])
+        for token, pending in pending_items:
             result = self.admission.poll(token)
             if result is None and now-pending['started'] < 150:
-                continue
+                break
             if result is None:
                 self.admission.cancel(token)
                 result = {'status': 'unverified', 'reason': 'deadline'}
@@ -243,6 +246,8 @@ class NativeActivity:
             if status != 'confirmed':
                 continue
             track['verification'] = {k:v for k,v in result.items() if k != 'cover'}
+            if self.event_id is not None and not self._joins_episode(track):
+                self.finish('complete', now=now)
             # These observations were fresh at nomination. Verification may finish
             # after the object leaves; retain the original source-time history.
             for point in track['box_history']:
@@ -336,6 +341,16 @@ class NativeActivity:
         idle_fps = defaults.idle_fps if overrides.idle_fps is None else overrides.idle_fps
         return idle_fps if enabled else self.config.live_sample_fps / self.config.native.inference_interval
 
+    def _joins_episode(self, track):
+        """Group by observed activity, independent of verification completion."""
+        if not self._episode_tracks:
+            return False
+        start = min(datetime.fromisoformat(t['first_seen']).timestamp() for t in self._episode_tracks.values())
+        end = max(datetime.fromisoformat(t['last_seen']).timestamp() for t in self._episode_tracks.values())
+        timeout = self.config.native.activity_timeout_seconds
+        return (datetime.fromisoformat(track['first_seen']).timestamp() <= end + timeout
+                and datetime.fromisoformat(track['last_seen']).timestamp() >= start - timeout)
+
     def tick(self, *, now: float):
         self._poll_verification(now)
         if self.last_fresh and now - self.last_fresh > max(self.config.native.maximum_observation_age_seconds, (self.config.native.batch_size + .5) / self.fresh_detection_fps):
@@ -343,7 +358,10 @@ class NativeActivity:
         if self.event_id is not None and now - self.last_activity >= self.config.native.activity_timeout_seconds:
             if self.health != "healthy":
                 self.finish("metadata_lost", now=now)
-            elif self.last_fresh >= self.last_activity + self.config.native.activity_timeout_seconds:
+            elif (self.last_fresh >= self.last_activity + self.config.native.activity_timeout_seconds
+                  and not (now - self.last_activity < 150
+                           and any(now - pending['started'] < 150 and self._joins_episode(pending['track'])
+                                   for pending in self._verification_pending.values()))):
                 self.finish("complete", now=now)
             # The timer can cross the deadline between healthy metadata frames.
             # Wait for a fresh observation covering it, or for metadata to become
