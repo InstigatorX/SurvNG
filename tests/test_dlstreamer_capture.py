@@ -865,3 +865,14 @@ def test_tracking_class_command_roundtrip(selection):
 def test_tracking_class_cli_rejects_invalid_selection(value):
     with pytest.raises(SystemExit):
         _parser().parse_args(["--tracking-classes", value])
+
+
+def test_native_evidence_width_survives_command_and_handle_validation():
+    from survng.dlstreamer_live import _qualifier_width
+    backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(frame_width=0))
+    command = backend.command()
+    assert command[command.index('--frame-width')+1] == '0'
+    handle = DlStreamerCaptureHandle(read_timeout_ms=1000)
+    handle.set_frame_width(0)
+    assert handle.frame_width == _qualifier_width(0) == 0
+    assert _qualifier_width(2000) == 960  # Explicit resized consumers keep their limit.

@@ -325,7 +325,7 @@ class AppManager:
                 confidence_threshold=live_detection_threshold(config),
                 nms_threshold=detector.nms_threshold,
                 model_proc_path=adjacent_model_proc(detector.resolved_model_path()),
-                frame_width=640,
+                frame_width=0,
             ),
         )
         self.state_events = StateEventBroker()

@@ -69,7 +69,7 @@ def manager_owned_config(config: AppConfig) -> dict:
             "enabled", "backend", "model_path", "model_xml", "labels_path", "labels", "device", "nms_threshold",
         )},
         "sample_fps": config.detector.live_sample_fps,
-        "frame_width": 640,
+        "frame_width": 0,
         "detection_fps": config.detector.live_sample_fps,
         "tracking_enabled": config.detector.enabled,
         "tracking_fps": config.detector.live_sample_fps,

@@ -409,3 +409,32 @@ accepted inside a much larger nominated box. Verification now checks object exte
 not just containment. Its replay remains unverified rather than creating an alert;
 the two real-person examples still confirm. This does not establish universal recall
 or eliminate the model's underlying flower/dog confusion.
+
+
+### Native-resolution live evidence frames
+
+The application requests `frame_width=0` for the live/substream evidence branch:
+retain negotiated camera dimensions rather than resize to 640 pixels. Frames are
+sampled at the configured live rate (normally 5 FPS) before downloading VA memory.
+The native detector branch and separate JPEG preview branch retain their own rate
+and format settings. Explicit legacy resized consumers still support 240–960 pixels;
+main-stream display capture remains separately sized.
+
+Initial snapshots retain the original live pixels and must match detection geometry;
+they are no longer enlarged to make their coordinates fit. Main-recording confirmation
+and recorded-live candidate extraction now use native-resolution live frames too.
+Global registration may use a smaller working image to locate features, but the
+original images remain available for local matching and contextual main-stream crops.
+The latest confirmation rule still requires agreement in class, position and extent.
+
+Recent live evidence retains at most 32 frames and 64 MiB per camera (or one frame
+if a single image exceeds that limit); old frames are evicted without resizing new
+ones. Native frames increase CPU transfer and memory use, not detector inference
+resolution or inference count. Runtime status exposes actual `evidence_width`,
+`evidence_height`, and configured `evidence_sample_fps`.
+
+Checks cover native and resized software/VA graph construction, a real native
+capture/metadata path with matching image dimensions, the frame-byte bound, and
+native-resolution recorded replays. Foyer 71392 and Downstairs 71307 still confirm;
+Back-Middle 71408 and 71416 remain unverified without alerts. The recording-based
+confirmation delay is unchanged by this image-resolution change.

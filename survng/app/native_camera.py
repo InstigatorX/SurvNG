@@ -59,7 +59,7 @@ class NativeCameraWorker:
             camera_id=camera.id, source_url=camera.source_url, backend=NativeCaptureBinding(
                 capture_backend, lambda: self.config.enabled and self.runtime_state.detection_enabled,
                 lambda: self.camera.h264_decoder_compliance, lambda: spatial_plan(self.camera, self.config)),
-            frame_observer=self._remember, frame_width=lambda: 640,
+            frame_observer=self._remember, frame_width=lambda: 0,
             initial_open_timeout_ms=capture_backend.startup_timeout_ms,
         )
         self.media = CameraMediaService(
@@ -86,6 +86,11 @@ class NativeCameraWorker:
         if frame.source == "live":
             with self._frames_lock:
                 self._frames.append(frame)
+                # Retain native pixels without allowing unusually large camera
+                # streams to multiply the evidence ring's memory footprint.
+                total = sum(item.image.nbytes for item in self._frames)
+                while len(self._frames) > 1 and total > 64 * 1024 * 1024:
+                    total -= self._frames.popleft().image.nbytes
 
     def _offer_evidence(self, observation, epoch, event_id, objects):
         if self.evidence_service is None or epoch - self._last_evidence_offer < 1:
@@ -104,13 +109,10 @@ class NativeCameraWorker:
         if frame is None:
             self.activity.counts["snapshot_frame_missing"] += 1
             return ""
-        # Persist coordinates in the native observation geometry. Resize pixels,
-        # never substitute a main stream with a potentially different field of view.
-        import cv2
-        pixels = frame.image
         if (frame.width, frame.height) != (observation.width, observation.height):
-            pixels = cv2.resize(pixels, (observation.width, observation.height))
-        return self.media.write_snapshot(pixels, datetime.fromtimestamp(epoch, timezone.utc))
+            self.activity.counts["snapshot_geometry_mismatch"] += 1
+            return ""
+        return self.media.write_snapshot(frame.image, datetime.fromtimestamp(epoch, timezone.utc))
 
     def _image(self, source="live"):
         frame = self.capture.request_frame(self.camera.normalized_source(source))

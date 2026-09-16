@@ -609,8 +609,8 @@ class DlStreamerCaptureHandle:
         self.source_role = source
 
     def set_frame_width(self, width: int) -> None:
-        if not 240 <= width <= 960:
-            raise ValueError("capture frame width must be between 240 and 960")
+        if width != 0 and not 240 <= width <= 960:
+            raise ValueError("capture frame width must be zero (native) or between 240 and 960")
         self.frame_width = int(width)
 
     def start(self, command: list[str], source_url: str) -> None:
@@ -1028,7 +1028,7 @@ class DlStreamerCaptureBackend:
             "--device",
             self.options.inference_device or "GPU",
             "--frame-width",
-            str(max(240, min(960, int(self.options.frame_width or 320)))),
+            str(0 if self.options.frame_width == 0 else max(240, min(960, int(self.options.frame_width or 320)))),
             "--jpeg-fps",
             f"{max(0.0, min(5.0, float(self.options.jpeg_fps))):.6f}",
             "--supervisor",

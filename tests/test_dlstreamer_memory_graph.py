@@ -22,8 +22,9 @@ from survng import dlstreamer_live as live
 @pytest.mark.parametrize("compliance", ["auto", "strict", "normal", "flexible"])
 @pytest.mark.parametrize("spatial", [False, True])
 @pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("frame_width", [320, 0])
 def test_host_consumers_download_after_rate_limit_without_breaking_detection(
-    monkeypatch, decoder, detect, role, test_source, compliance, spatial, adaptive,
+    monkeypatch, decoder, detect, role, test_source, compliance, spatial, adaptive, frame_width,
 ):
     elements, links = {}, []
     callbacks = {}
@@ -88,7 +89,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     live._pump_pipeline(
         gst, args, url="rtsp://fixture.invalid/video", stream_id="test",
         detect=detect, model_path=Path("fixture.xml"), instance_id="fixture",
-        rate=Fraction(5), detect_rate=Fraction(5, 2), qualifier_width=320,
+        rate=Fraction(5), detect_rate=Fraction(5, 2), qualifier_width=frame_width,
         jpeg_rate=Fraction(1), open_timeout=3, stdout=None, stdout_lock=None,
         stop_event=stop, encode_frame=None, encode_jpeg=None, encode_json=None,
         TYPE_DETECTIONS=2, TYPE_STATUS=3, install_signals=False,
@@ -135,18 +136,20 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     assert elements["jpeg-caps"].properties["caps"] == "video/x-raw,format=I420,framerate=1/1"
     if va:
         assert elements["qualifier-download"].factory == "vapostproc"
-        assert elements["qualifier-host-caps"].properties["caps"] == "video/x-raw,format=NV12,width=320,pixel-aspect-ratio=1/1"
+        assert elements["qualifier-host-caps"].properties["caps"] == "video/x-raw,format=NV12" + (",width=320,pixel-aspect-ratio=1/1" if frame_width else "")
         assert ("qualifier-download", "qualifier-host-caps") in links
         assert ("qualifier-host-caps", "qualifier-gray") in links
         assert "qualifier-scale" not in elements  # resize before the host download
         assert ("qualifier-gray", "frame-caps") in links
-        assert "width=320" in elements["frame-caps"].properties["caps"]
+        assert ("width=320" in elements["frame-caps"].properties["caps"]) == bool(frame_width)
         assert elements["detect"].properties["pre-process-backend"] == "va-surface-sharing"
         assert elements["detect"].properties["pre-process-config"] == "VAAPI_THREAD_POOL_SIZE=1"
         assert elements["detect-rate-caps"].properties["caps"] == "video/x-raw(memory:VAMemory),framerate=" + ("5/1" if adaptive else "5/2")
         assert ("detect-va-memory", "motion-convert" if adaptive else "inference-region" if spatial else "detect") in links
-    else:
+    elif frame_width:
         assert elements["qualifier-scale"].factory == "videoscale"
+    else:
+        assert "qualifier-scale" not in elements
     if not detect:
         assert "format=BGR," in elements["frame-caps"].properties["caps"]
         assert "detect" not in elements

@@ -145,7 +145,7 @@ class NativeEvidenceService:
 
     def offer(self, event_id, epoch, frame, objects, size):
         # Called at most once a second by the native camera worker. Pixel work
-        # stays bounded to the 640-pixel preview; native inference never waits
+        # retains native live pixels in a bounded shortlist; inference never waits
         # for recording extraction.
         with self._condition:
             if self._closed or epoch - self._last_offer.get(event_id, 0) < 1:
@@ -254,7 +254,7 @@ class NativeEvidenceService:
                 if abs(point[0]-epoch) > 0.5:
                     continue
                 objects.append({"label": track["label"], "confidence": track.get("max_confidence", track.get("confidence", 0)), "track_id": track.get("track_id"), "incident_eligible": True, "box": dict(zip(("x1","y1","x2","y2"), point[1:5]))})
-            live = self.read_frame(event["camera_id"], epoch, "live", 640)
+            live = self.read_frame(event["camera_id"], epoch, "live")
             if live is None:
                 missing = True
                 continue

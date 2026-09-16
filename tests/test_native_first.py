@@ -250,6 +250,8 @@ ov.save_model(ov.Model([output],[image]),sys.argv[1],compress_to_fp16=False)
         while worker.activity.event_id is None and time.monotonic() < deadline:
             time.sleep(.05)
         assert worker.activity.event_id is not None, worker.status()
+        frame = worker.capture.latest("live")
+        assert (frame.width, frame.height) == worker.activity.dimensions == (320, 240)
         event_id = worker.activity.event_id
         row = events.get(event_id)
         assert row["topic"] == "native/object-presence"
@@ -524,3 +526,17 @@ def test_tracking_class_change_requires_shared_capture_reload():
     incoming = current.model_copy(deep=True)
     incoming.detector.native.tracking_classes = ["person"]
     assert manager_owned_config(current) != manager_owned_config(incoming)
+
+
+def test_native_frame_ring_limits_bytes_without_resizing():
+    from collections import deque
+    from types import SimpleNamespace
+    import threading
+    from survng.app.native_camera import NativeCameraWorker
+    worker = NativeCameraWorker.__new__(NativeCameraWorker)
+    worker._frames = deque(maxlen=32)
+    worker._frames_lock = threading.Lock()
+    frames = [SimpleNamespace(source='live', image=SimpleNamespace(nbytes=16*1024*1024)) for _ in range(7)]
+    for frame in frames:
+        worker._remember(frame)
+    assert [id(frame) for frame in worker._frames] == [id(frame) for frame in frames[-4:]]

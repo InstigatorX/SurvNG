@@ -223,7 +223,7 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             "motion_states": _numeric_fields(tracking.get("motion_states"), ("moving", "stationary", "uncertain", "presence")),
             "counters": _numeric_fields(tracking.get("counters"), (
                 "fresh_frames", "prediction_frames", "unknown_frames", "stale_observations", "invalid_zone_metadata",
-                "missing_track_id", "track_capacity_drops", "events_created", "snapshot_frame_missing", "metadata_restarts",
+                "missing_track_id", "track_capacity_drops", "events_created", "snapshot_frame_missing", "snapshot_geometry_mismatch", "metadata_restarts",
                 "stationary_vehicle_observations", "uncertain_vehicle_observations", "moving_transitions", "stationary_transitions", "episode_track_capacity_drops",
                 "verification_confirmed", "verification_rejected", "verification_unverified", "verification_capacity_drops",
             )),
@@ -238,6 +238,7 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             "detect_fps", "effective_inference_fps", "inference_interval", "batch_size", "native_evidence_invalid",
             "native_detector_average_ms", "native_detector_p95_ms", "native_detector_timing_samples",
             "native_zone_count", "native_roi_full_frame_interval",
+            "evidence_width", "evidence_height", "evidence_sample_fps",
         )),
         "tracking": {
             "active": bool(tracking.get("active")),

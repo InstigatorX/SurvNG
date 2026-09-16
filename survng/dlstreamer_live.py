@@ -106,7 +106,7 @@ def _parser() -> argparse.ArgumentParser:
         "--frame-width",
         type=int,
         default=320,
-        help="color evidence frame width in pixels",
+        help="color evidence frame width in pixels; zero preserves native dimensions",
     )
     parser.add_argument(
         "--jpeg-fps",
@@ -164,7 +164,7 @@ def _set_optional_property(element, name: str, value: object) -> None:
 
 
 def _qualifier_width(value: int) -> int:
-    return int(min(960, max(240, value)))
+    return 0 if value == 0 else int(min(960, max(240, value)))
 
 
 def _frame_rate(value: float) -> Fraction:
@@ -1003,26 +1003,28 @@ def _pump_pipeline(
     # The tee carries VA surfaces when detection uses VA preprocessing. CPU
     # consumers need an explicit download boundary; software videoconvert
     # cannot negotiate that transition. Drop frames BEFORE the VA conversion
-    # and resize on the GPU before mapping the evidence frame into host RAM.
+    # before mapping the evidence frame into host RAM. Width zero retains
+    # negotiated native dimensions; bounded legacy consumers can still resize.
+    frame_size = f",width={qualifier_width},pixel-aspect-ratio=1/1" if qualifier_width else ""
     frame_converters = []
     if va_memory:
         download = _element(Gst, "vapostproc", "qualifier-download")
         download_caps = _element(Gst, "capsfilter", "qualifier-host-caps")
-        # Download scaled NV12, then convert to BGR for evidence storage.
+        # Download NV12 at native or explicitly requested size, then convert to BGR.
         # Explicit square pixels preserve geometry when scaling.
         download_caps.set_property("caps", Gst.Caps.from_string(
-            f"video/x-raw,format=NV12,width={qualifier_width},pixel-aspect-ratio=1/1"
+            f"video/x-raw,format=NV12{frame_size}"
         ))
         frame_converters.extend([download, download_caps])
     frame_converters.append(_element(Gst, "videoconvert", "qualifier-gray"))
-    if not va_memory:
+    if not va_memory and qualifier_width:
         frame_converters.append(_element(Gst, "videoscale", "qualifier-scale"))
     capsfilter = _element(Gst, "capsfilter", "frame-caps")
     capsfilter.set_property(
         "caps",
         Gst.Caps.from_string(
-            f"video/x-raw,format={'BGR' if color_frames else 'GRAY8'},width="
-            f"{qualifier_width},pixel-aspect-ratio=1/1,framerate={rate.numerator}/{rate.denominator}"
+            f"video/x-raw,format={'BGR' if color_frames else 'GRAY8'}{frame_size},"
+            f"framerate={rate.numerator}/{rate.denominator}"
         ),
     )
     sink = _element(Gst, "appsink", "frame-sink")
@@ -1547,6 +1549,8 @@ def _pump_pipeline(
                             "detection_threshold": args.threshold if detect else None,
                             "requested_nms_threshold": args.nms_threshold if detect else None,
                             "qualifier_width": qualifier_width,
+                            "evidence_width": width, "evidence_height": height,
+                            "evidence_sample_fps": float(rate),
                             "detect_fps": float(detect_rate),
                             "native_evidence_invalid": native_evidence.invalid if detect else 0,
                             **(native_evidence.timing_status() if detect else {}),
