@@ -225,7 +225,7 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             )),
         },
         "live_pipeline": _numeric_fields(raw.get("live_pipeline"), (
-            "detect_fps", "effective_inference_fps", "inference_interval", "native_evidence_invalid",
+            "detect_fps", "effective_inference_fps", "inference_interval", "batch_size", "native_evidence_invalid",
             "native_detector_average_ms", "native_detector_p95_ms", "native_detector_timing_samples",
         )),
         "tracking": {
@@ -310,6 +310,7 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
         "native": bool(raw.get("native")),
         "active_cameras": _optional_number(raw.get("active_cameras")),
         "healthy_cameras": _optional_number(raw.get("healthy_cameras")),
+        "native_batch_size": config.detector.native.batch_size if raw.get("native") else None,
         "native_inference_requests": config.detector.native.inference_requests if raw.get("native") else None,
         "native_inference_streams": config.detector.native.inference_streams if raw.get("native") else None,
         "device": str(raw.get("configured_device") or config.detector.device),

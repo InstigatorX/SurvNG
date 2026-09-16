@@ -114,6 +114,7 @@ class DlStreamerCaptureOptions:
     model_proc_path: str = ""
     inference_device: str = "GPU"
     detect_enabled: bool = False
+    batch_size: int = 1
     inference_interval: int = 1
     inference_requests: int = 4
     inference_streams: int = 2
@@ -880,6 +881,8 @@ class DlStreamerCaptureBackend:
             raise ValueError("rtsp_transport must be tcp or udp")
         if self.options.decoder not in {"auto", "va"}:
             raise ValueError("decoder must be auto or va")
+        if not 1 <= int(self.options.batch_size) <= 4:
+            raise ValueError("batch_size must be between 1 and 4")
         if not 1 <= int(self.options.inference_interval) <= 5:
             raise ValueError("inference_interval must be between 1 and 5")
         if self.options.native_tracking not in {"off", "short-term-imageless"}:
@@ -1026,6 +1029,7 @@ class DlStreamerCaptureBackend:
         model_path = self.options.model_path.strip()
         if self.options.detect_enabled and model_path:
             command.extend(["--model", model_path])
+            command.extend(["--batch-size", str(int(self.options.batch_size))])
             command.extend(["--inference-interval", str(int(self.options.inference_interval))])
             command.extend(["--inference-requests", str(self.options.inference_requests)])
             command.extend(["--inference-streams", str(self.options.inference_streams)])

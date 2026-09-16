@@ -24,7 +24,7 @@ const server = await createServer({ root:fileURLToPath(new URL("..",import.meta.
     next();
   });},
   resolveId(id){if(id==="/entry.jsx")return id;},
-  load(id){if(id==="/entry.jsx")return `import React from 'react';import {createRoot} from 'react-dom/client';import {IncidentClipLayer} from '/src/incidents/IncidentCard.jsx';import {EventOverlay} from '/src/shared/evidence.jsx';const event=${JSON.stringify(event)};createRoot(document.getElementById('root')).render(location.search.includes('modal')?<EventOverlay event={event} events={[event]} timeZone="UTC" onClose={()=>{}} onSelect={()=>{}}/>:<IncidentClipLayer event={event} active={true} analysisMode="tracks"/>);`;}
+  load(id){if(id==="/entry.jsx")return `import React from 'react';import {createRoot} from 'react-dom/client';import {IncidentClipLayer} from '/src/incidents/IncidentCard.jsx';import {EventOverlay} from '/src/shared/evidence.jsx';const fullEvent=${JSON.stringify(event)};function App(){const [event,setEvent]=React.useState(location.search.includes('late')?{...fullEvent,object_tracking:{...fullEvent.object_tracking,tracks:[]}}:fullEvent);const [open,setOpen]=React.useState(true);window.completeTracks=()=>setEvent(fullEvent);window.reopen=()=>setOpen(value=>!value);return open?(location.search.includes('modal')?<EventOverlay event={event} events={[event]} timeZone="UTC" onClose={()=>setOpen(false)} onSelect={()=>{}}/>:<IncidentClipLayer event={{...event,object_tracking:undefined}} trackingEvent={event} active={true} analysisMode="tracks"/>):null;}createRoot(document.getElementById('root')).render(<App/>);`;}
 }]});
 let browser;
 try{
@@ -60,5 +60,27 @@ try{
  await desktop.locator("video").evaluate(v=>{v.pause();v.currentTime=22;});
  await desktop.waitForFunction(()=>{const v=document.querySelector("video");return v&&!v.seeking&&v.currentTime>=22;});
  await desktop.locator(".object-track-video-box").waitFor();
+ for (const surface of ["card", "modal"]) {
+   await desktop.goto(base+"/test?"+surface+"&late");
+   await desktop.waitForFunction(()=>typeof window.completeTracks === "function");
+   await desktop.waitForTimeout(300);
+   const fullManifest=desktop.waitForRequest(r=>r.url().includes("stream.m3u8")&&Number(new URL(r.url()).searchParams.get("after"))===26);
+   await desktop.evaluate(()=>window.completeTracks());
+   await fullManifest;
+   for(let repeat=0;repeat<3;repeat++) {
+     if(surface==="modal") {
+       await desktop.getByRole("button",{name:"Show stored object tracks",exact:true}).click();
+       await desktop.waitForFunction(()=>document.querySelector('a[aria-label="Download event video"]')?.href.includes('source=live'));
+       await desktop.locator(".event-detail-media").click();
+     }
+     await desktop.waitForFunction(()=>document.querySelector("video")?.readyState>=2);
+     await desktop.locator("video").evaluate(v=>{v.pause();v.currentTime=22;});
+     await desktop.waitForFunction(()=>!document.querySelector("video")?.seeking);
+     await desktop.locator(".object-track-video-box").waitFor();
+     await desktop.evaluate(()=>window.reopen());
+     await desktop.locator("video").waitFor({state:"detached"});
+     await desktop.evaluate(()=>window.reopen());
+   }
+ }
  assert.deepEqual(errors,[]);console.log("Both native replay surfaces render stored boxes over the recorded substream");
 }finally{await browser?.close();await server.close();rmSync(temporary,{recursive:true,force:true});}

@@ -57,6 +57,8 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   const [playback, setPlayback] = useState(null);
   const [playbackOriginTime, setPlaybackOriginTime] = useState(null);
   const trackEvent = trackingEvent || event;
+  const clipEvent = { ...event, object_tracking: trackEvent.object_tracking };
+  const replayBounds = incidentClipWindow(clipEvent, 0, 0);
   const storedTracks = storedObjectTracks(trackEvent);
   const replaySource = trackReplaySource(trackEvent, analysisMode === "tracks");
 
@@ -77,7 +79,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
       setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
-      const info = await loadIncidentClipInfo(event, () => cancelled, prefersNativeMobilePlayback(), replaySource);
+      const info = await loadIncidentClipInfo(clipEvent, () => cancelled, prefersNativeMobilePlayback(), replaySource);
       if (!info) return;
       setClipInfo(info);
       setPlayback(prefersNativeMobilePlayback()
@@ -86,7 +88,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [active, replaySource, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch]);
+  }, [active, replaySource, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch, replayBounds.before, replayBounds.after]);
 
   if (!active) return null;
   return (

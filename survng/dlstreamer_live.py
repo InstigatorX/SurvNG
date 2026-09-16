@@ -67,6 +67,8 @@ def _parser() -> argparse.ArgumentParser:
         default="off",
         help="optional DL Streamer ROI tracking between detector frames",
     )
+    parser.add_argument("--batch-size", type=int, default=1, choices=range(1, 5),
+                        help="shared inference batch size; 1 disables batching")
     parser.add_argument("--open-timeout", type=float, default=3.0)
     parser.add_argument("--rtsp-transport", choices=("tcp", "udp"), default="tcp")
     parser.add_argument("--decoder", choices=("auto", "va"), default="va")
@@ -1025,15 +1027,15 @@ def _pump_pipeline(
             compile_options += f",NUM_STREAMS={args.inference_streams}"
         if target == "GPU":
             # THROUGHPUT may enable OpenVINO automatic batching even though
-            # gvadetect batch-size is 1. Its request wrapper cannot bind this
+            # explicit gvadetect batching is configured. Its wrapper cannot bind this
             # model's VA surface inputs ("Input tensor with index 0 is not
             # found"). Keep parallel requests/streams, but disable auto batching.
             compile_options += ",ALLOW_AUTO_BATCHING=NO"
             compile_options += f",COMPILATION_NUM_THREADS={GPU_COMPILATION_NUM_THREADS}"
         detector.set_property("ie-config", compile_options)
-        # Parallel requests share one compiled model; never wait for a batch
-        # of cameras. Input/output queues remain bounded under overload.
-        detector.set_property("batch-size", 1)
+        # Explicit batches and parallel requests share one compiled model.
+        # Input/output queues remain bounded under overload.
+        detector.set_property("batch-size", args.batch_size)
         detector.set_property("nireq", args.inference_requests)
         detector.set_property("inference-interval", args.inference_interval)
         detector.set_property("no-block", False)
@@ -1353,6 +1355,7 @@ def _pump_pipeline(
                             "detect_fps": float(detect_rate),
                             "native_evidence_invalid": native_evidence.invalid if detect else 0,
                             **(native_evidence.timing_status() if detect else {}),
+                            "batch_size": args.batch_size if detect else None,
                             "inference_interval": args.inference_interval if detect else None,
                             "effective_inference_fps": (
                                 round(float(detect_rate) / args.inference_interval, 3)

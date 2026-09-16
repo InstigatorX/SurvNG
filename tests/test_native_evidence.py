@@ -100,3 +100,32 @@ def test_archived_images_survive_cleanup_after_promotion(tmp_path):
     events._delete_snapshot_if_unreferenced(str(old), preserve_archive=True)
     assert old.exists()
     assert len(list((tmp_path / "snapshots").rglob("*.webp"))) >= 1
+
+
+def test_completion_rescans_history_after_inflight_preview(tmp_path):
+    service, _, event, image, obj, _ = fixture(tmp_path)
+    event_id = event["id"]
+    service._active.add(event_id)
+    service.enqueue(event_id)
+    assert service._pending[event_id]["recorded_history"]
+    # A later preview must not downgrade the terminal full-history request.
+    service.offer(event_id, 101, image, [obj], (640, 360))
+    assert service._pending[event_id]["recorded_history"]
+    service._active.clear()
+    service._pending[event_id]["due"] = 0
+    def process(eid, candidates):
+        assert eid == event_id
+        assert candidates is None
+        service._closed = True
+        return {"status": "promoted"}
+    service.process = process
+    service._run()
+    assert service.counts["promoted"] == 1
+
+
+def test_completion_upgrades_existing_preview_shortlist(tmp_path):
+    service, _, event, image, obj, _ = fixture(tmp_path)
+    service.offer(event["id"], 101, image, [obj], (640, 360))
+    assert service._pending[event["id"]]["candidates"]
+    service.enqueue(event["id"])
+    assert service._pending[event["id"]]["recorded_history"]

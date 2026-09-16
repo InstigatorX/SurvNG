@@ -41,7 +41,7 @@ export function eventObjects(event) {
 }
 
 export function eventEpoch(event) {
-  const explicit = Number(event?.created_epoch);
+  const explicit = event?.created_epoch == null ? NaN : Number(event.created_epoch);
   if (Number.isFinite(explicit)) return explicit;
   const parsed = new Date(event?.created_at || 0).getTime() / 1000;
   return Number.isFinite(parsed) ? parsed : null;
@@ -517,6 +517,7 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
     video.addEventListener("playing", onPlaying);
     video.addEventListener("seeked", onSeeked);
     video.addEventListener("timeupdate", update);
+    update();
     if (!video.paused) onPlaying();
     return () => {
       stopped = true;
@@ -660,6 +661,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
   const trackingEvent = displayedEvent;
   const storedTracks = storedObjectTracks(trackingEvent);
   const replaySource = trackReplaySource(trackingEvent, trackingVisible);
+  const replayBounds = incidentClipWindow(viewerEvent, 0, 0);
   const replayTrackCount = storedTracks.filter((track) => track.boxHistory.length).length;
   const downloadName = `survng-${String(viewerEvent.camera_id || "camera")}-${String(viewerEvent.created_at || viewerEvent.id || "event").replace(/[^0-9A-Za-z_-]+/g, "-")}.mp4`;
 
@@ -692,7 +694,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [replaySource, viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch]);
+  }, [replaySource, viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch, replayBounds.before, replayBounds.after]);
 
   function playEventClip() {
     if (!clipInfo || clipError) return;

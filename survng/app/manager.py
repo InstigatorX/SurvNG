@@ -314,6 +314,7 @@ class AppManager:
                 model_path=detector.resolved_model_path(),
                 inference_device=detector.device,
                 detect_enabled=detector.enabled,
+                batch_size=detector.native.batch_size,
                 inference_interval=detector.native.inference_interval,
                 inference_requests=detector.native.inference_requests,
                 inference_streams=detector.native.inference_streams,

@@ -842,3 +842,12 @@ def test_periodic_native_status_preserves_receiver_error_count():
     handle._status["invalid_detection_snapshots"] = 2
     handle._apply_message(TYPE_STATUS, payload)
     assert handle._status["invalid_detection_snapshots"] == 2
+
+
+@pytest.mark.parametrize("batch", [1, 2, 4])
+def test_explicit_batch_reaches_native_command(batch):
+    backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(
+        detect_enabled=True, model_path="/models/yolo.xml", batch_size=batch,
+    ))
+    command = backend.command()
+    assert command[command.index("--batch-size") + 1] == str(batch)

@@ -1,6 +1,7 @@
 // Numeric controls mirror the native runtime's Pydantic configuration bounds.
 export const NATIVE_DETECTION_FIELDS = [
   { path: "live_sample_fps", label: "Detection frames per second", initial: 5, min: 0.5, max: 10, step: 0.5, group: "detection", help: "Live/substream frames entering the native pipeline. Fresh inference rate is this value divided by the inference interval." },
+  { path: "native.batch_size", label: "Shared inference batch size", initial: 1, min: 1, max: 4, step: 1, integer: true, group: "detection", help: "1 disables batching (default). 2–4 pool frames across cameras in the shared native inference worker. Larger batches can increase waiting time, especially with fewer cameras or higher inference intervals. Saving restarts native capture." },
   { path: "native.inference_interval", label: "Inference interval", initial: 1, min: 1, max: 5, step: 1, integer: true, group: "detection", help: "Run gvadetect every Nth sampled frame. At 5 FPS, interval 2 targets 2.5 fresh detections/sec; skipped frames use tracker predictions and cannot create or extend incidents." },
   { path: "confidence_threshold", label: "Confidence", initial: 0.45, min: 0.01, max: 0.99, step: 0.01, group: "detection" },
   { path: "event_confirmation_frames", label: "Confirmation frames", initial: 2, min: 1, max: 5, step: 1, group: "detection", integer: true },

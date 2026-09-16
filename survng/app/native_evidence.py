@@ -167,12 +167,15 @@ class NativeEvidenceService:
 
     def enqueue(self, event_id):
         with self._condition:
-            if self._closed or event_id in self._active:
+            if self._closed:
                 return
             if event_id not in self._pending and len(self._pending) >= 32:
                 self.counts["queue_full"] += 1
                 return
-            self._pending.setdefault(event_id, {"due": time.monotonic()+15, "deadline": time.monotonic()+120, "candidates": []})
+            # Preserve completion during preview processing; rescan all tracks.
+            job = self._pending.setdefault(event_id, {"due": time.monotonic()+15, "deadline": time.monotonic()+120, "candidates": []})
+            job["recorded_history"] = True
+            job["deadline"] = time.monotonic()+120
             self._condition.notify_all()
 
     def _run(self):
@@ -188,7 +191,7 @@ class NativeEvidenceService:
                 self._pending.pop(event_id)
                 self._active.add(event_id)
             try:
-                result = self.process(event_id, job["candidates"])
+                result = self.process(event_id, None if job.get("recorded_history") else job["candidates"])
                 self.counts[result["status"]] += 1
                 if result["status"] == "recording_pending" and time.monotonic() < job["deadline"]:
                     with self._condition:

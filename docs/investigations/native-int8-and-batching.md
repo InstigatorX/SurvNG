@@ -1,6 +1,6 @@
 # INT8 execution and native multistream investigation
 
-Checked 2026-09-15 EDT on the deployed native-first branch. Batching and architecture changes are investigation only.
+Checked 2026-09-15 EDT on the deployed native-first branch. The architecture alternatives below remain investigation only. Explicit shared batching is now implemented as described in the implementation update.
 
 ## Current execution path
 
@@ -50,3 +50,19 @@ SurvNG already uses Python/GStreamer bindings to orchestrate C++ native media/in
 Use standard GStreamer Python/C++ APIs for a future experiment. Do not start a rewrite around DL Streamer's preview Architecture 2.0 APIs: Intel documents that approach as being deprecated in favor of GStreamer analytics integration. [Architecture note](https://docs.openedgeplatform.intel.com/2026.1/edge-ai-libraries/dlstreamer/architecture_2.0/architecture_2.0.html).
 
 Recommended next experiment, not implemented: compare the existing shared batch-1 path against batches 2/4, testing `va` versus `va-surface-sharing` preprocessing. Intel's [performance guide](https://docs.openedgeplatform.intel.com/dev/edge-ai-libraries/dlstreamer/dev_guide/performance_guide.html) notes that the VA scaler can outperform surface-sharing resize on integrated GPUs. Measure per-camera fresh FPS, frame age and p95 latency, GPU/CPU utilization, fairness, startup and one-camera disconnect/reconnect. Preserve exact source/session/PTS associations for covers and replay. No speedup is claimed without those measurements.
+
+## Implementation update (2026-09-15 EDT)
+
+`detector.native.batch_size` is exposed in Admin, passed to every shared
+`gvadetect`, and reported in runtime/owner-socket status. Default 1 preserves
+unbatched behavior; accepted values are 1–4. Automatic batching remains disabled.
+Isolated GPU checks with the deployed INT8 model delivered all frames at batch 2
+(two sources, four frames each) and batch 4 (uneven sources, 3 and 17 frames),
+including continued output after the shorter source ended. These smoke checks do
+not establish a fleet-wide throughput improvement. Trackers remain camera-local.
+
+A batch-2 routing probe used a recorded person image and a black source with
+unequal lengths (7 and 19 frames): all seven person frames retained one ROI,
+all 19 black frames retained zero ROIs, and both reached EOS. This checks output
+routing with different source geometries and continued processing after one
+source ended, without attaching diagnostic instrumentation to live cameras.

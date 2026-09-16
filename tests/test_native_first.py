@@ -411,8 +411,11 @@ def test_native_interval_reaches_capture_and_status(tmp_path, interval):
     from survng.app.manager import AppManager
     config = AppConfig(storage_dir=str(tmp_path), cameras=[], retention={"enabled": False})
     config.detector.native.inference_interval = interval
+    config.detector.native.batch_size = 2
     manager = AppManager(config)
     try:
+        assert manager.capture_backend.options.batch_size == 2
+        assert manager.detector_status()["batch_size"] == 2
         assert manager.capture_backend.options.inference_interval == interval
         assert manager.detector_status()["inference_interval"] == interval
         assert manager.detector_status()["effective_inference_fps"] == 5 / interval

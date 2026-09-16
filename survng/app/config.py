@@ -793,6 +793,7 @@ class NativeActivityConfig(BaseModel):
     maximum_observation_age_seconds: float = Field(default=2.0, ge=0.2, le=10.0)
     maximum_tracks: int = Field(default=128, ge=1, le=1024)
     metadata_restart_seconds: float = Field(default=15.0, ge=5.0, le=120.0)
+    batch_size: int = Field(default=1, ge=1, le=4)
     inference_interval: int = Field(default=1, ge=1, le=5)
     inference_requests: int = Field(default=4, ge=1, le=16)
     inference_streams: int = Field(default=2, ge=1, le=8)

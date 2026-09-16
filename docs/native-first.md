@@ -19,7 +19,7 @@ Live/substream RTSP
   → shared VA surfaces
       ├─ sampled color frames / JPEG preview → preview and exact-PTS snapshots
       └─ drop-only sampling (target 5 FPS)
-          → gvadetect: OpenVINO, batch 1, configurable interval (default 1)
+          → gvadetect: OpenVINO, configurable shared batch and interval (both default 1)
           → gvatrack: short-term-imageless
           → bounded metadata delivery
           → session-qualified native observation consumer
@@ -185,3 +185,20 @@ makes no claim about the capacity of the deployed camera fleet.
 
 Real camera recognition quality, ID continuity through occlusion, fleet GPU
 capacity and long-running stationary-object behavior still require field testing.
+
+## Shared batching and recorded evidence
+
+Admin → Detection → Shared inference batch size configures
+`detector.native.batch_size` (integer 1–4). **1 is the default and means no
+batching**; 2–4 enable explicit DL Streamer batching across the shared model
+instance. The existing shared requests and streams remain independently
+configurable. Saving rebuilds native capture. OpenVINO automatic batching stays
+disabled for VA input compatibility. Larger batches wait for more frames and
+can increase latency; there is no supported VA batch-timeout control. Start at 2
+and measure actual camera FPS and latency before increasing it.
+
+Terminal events queue a full recorded-history cover selection even if preview
+selection is already running. Late track history refreshes the requested replay
+window in both incident views; the selected tracking event contributes its full
+bounds even when the incident summary contains no tracks. Paused replay initializes
+its overlay immediately.
