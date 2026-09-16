@@ -21,8 +21,9 @@ from survng import dlstreamer_live as live
 ])
 @pytest.mark.parametrize("compliance", ["auto", "strict", "normal", "flexible"])
 @pytest.mark.parametrize("spatial", [False, True])
+@pytest.mark.parametrize("adaptive", [False, True])
 def test_host_consumers_download_after_rate_limit_without_breaking_detection(
-    monkeypatch, decoder, detect, role, test_source, compliance, spatial,
+    monkeypatch, decoder, detect, role, test_source, compliance, spatial, adaptive,
 ):
     elements, links = {}, []
     callbacks = {}
@@ -81,6 +82,9 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     stop = threading.Event()
     stop.set()  # Construct/link the real graph, but do not enter its native loop.
     args = live._parser().parse_args(["--decoder", decoder, "--native-tracking", "short-term-imageless"])
+    from survng.app.config import NativeBudgetConfig
+    plan = {"zones": [], "revision": "test", "roi": {"enabled": spatial},
+            "budget": NativeBudgetConfig(enabled=adaptive, motion_threshold=.23, min_persistence=4).model_dump()}
     live._pump_pipeline(
         gst, args, url="rtsp://fixture.invalid/video", stream_id="test",
         detect=detect, model_path=Path("fixture.xml"), instance_id="fixture",
@@ -91,15 +95,25 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         test_source=test_source, source_role=role,
         va_context=shared_context,
         h264_decoder_compliance=compliance,
-        spatial_plan={"zones": [], "revision": "test", "roi": {"enabled": True}} if spatial else None,
+        spatial_plan=plan if spatial or adaptive else None,
     )
-    if detect and spatial:
+    if detect and (spatial or adaptive):
         assert elements["inference-region"].factory == "gvapython"
         assert elements["detect"].properties["inference-region"] == 1
         assert elements["detect"].properties["model-instance-id"].endswith("-roi")
         assert ("inference-region", "detect") in links
         assert ("native-track", "zone-analytics") in links
         assert ("zone-analytics", "detect-output-queue") in links
+    if detect and adaptive:
+        assert elements['budget-motion'].factory == 'gvamotiondetect'
+        assert elements['budget-motion'].properties['motion-threshold'] == .23
+        assert elements['budget-motion'].properties['min-persistence'] == 4
+        assert elements['detect'].properties['inference-interval'] == 1
+        assert ('budget-motion', 'budget-gate') in links
+        assert ('budget-gate', 'inference-region') in links
+        assert elements['motion-caps'].properties['caps'].endswith(',format=NV12')
+    else:
+        assert 'budget-gate' not in elements
     native_properties = {}
     native_decoder = SimpleNamespace(
         get_factory=lambda: SimpleNamespace(get_name=lambda: "vah264dec"),
@@ -129,8 +143,8 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert "width=320" in elements["frame-caps"].properties["caps"]
         assert elements["detect"].properties["pre-process-backend"] == "va-surface-sharing"
         assert elements["detect"].properties["pre-process-config"] == "VAAPI_THREAD_POOL_SIZE=1"
-        assert elements["detect-rate-caps"].properties["caps"] == "video/x-raw(memory:VAMemory),framerate=5/2"
-        assert ("detect-va-memory", "inference-region" if spatial else "detect") in links
+        assert elements["detect-rate-caps"].properties["caps"] == "video/x-raw(memory:VAMemory),framerate=" + ("5/1" if adaptive else "5/2")
+        assert ("detect-va-memory", "motion-convert" if adaptive else "inference-region" if spatial else "detect") in links
     else:
         assert elements["qualifier-scale"].factory == "videoscale"
     if not detect:
@@ -143,7 +157,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert elements["meta-sink"].properties["async"] is False
         assert elements["detect"].properties["nireq"] == 4
         assert ("detect", "native-track") in links
-        assert ("zone-analytics" if spatial else "native-track", "detect-output-queue") in links
+        assert ("zone-analytics" if spatial or adaptive else "native-track", "detect-output-queue") in links
         assert ("detect-output-queue", "detect-meta") in links
         assert elements["detect"].properties["scheduling-policy"] == "throughput"
 

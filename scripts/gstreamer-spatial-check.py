@@ -22,11 +22,15 @@ if not os.environ.get("SURVNG_SPATIAL_CHECK_READY"):
 from survng.app.dlstreamer_protocol import MessageReader, TYPE_DETECTIONS, TYPE_STATUS, decode_json_payload, decode_stream_payload
 
 
-def check(model, proc, *, interval=1, batch=1, threshold=.1):
+def check(model, proc, *, interval=1, batch=1, threshold=.1, budget=None, idle_objects=False, motion_wake=False):
     plan = {"revision": "spatial-check", "zones": [
         {"name": "right", "behavior": "incident", "enabled": True, "points": [
             {"x": .5, "y": 0}, {"x": 1, "y": 0}, {"x": 1, "y": 1}, {"x": .5, "y": 1}]}],
         "roi": {"enabled": True, "padding": 0, "full_frame_interval": 3}}
+    if budget is not None:
+        plan["budget"] = budget
+    if idle_objects:
+        plan["zones"][0]["object_classes"] = ["person"]
     cmd = [sys.executable, '-m', 'survng.dlstreamer_live', '--supervisor', '--test-source',
            '--device', 'CPU', '--decoder', 'auto', '--model', str(model), '--model-proc', str(proc),
            '--labels', str(model.with_suffix('.txt')), '--native-tracking', 'short-term-imageless',
@@ -34,6 +38,7 @@ def check(model, proc, *, interval=1, batch=1, threshold=.1):
            '--batch-size', str(batch), '--threshold', str(threshold), '--nms-threshold', '.45']
     snapshots = []
     other_snapshots = []
+    budget_status = {}
     reader = MessageReader()
     with tempfile.TemporaryFile() as err:
         process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
@@ -41,7 +46,7 @@ def check(model, proc, *, interval=1, batch=1, threshold=.1):
             process.stdin.write((json.dumps({"op": "add", "stream_id": "roi", "url": "rtsp://unused.invalid/live", "spatial_plan": plan})+'\n').encode())
             process.stdin.write((json.dumps({"op": "add", "stream_id": "full", "url": "rtsp://unused.invalid/live", "spatial_plan": {"revision": "full-check", "zones": [], "roi": {"enabled": False}}})+'\n').encode())
             process.stdin.flush()
-            deadline = time.monotonic()+20
+            deadline = time.monotonic()+35
             while time.monotonic() < deadline and (len(snapshots) < 18 or len(other_snapshots) < 18):
                 if not select.select([process.stdout], [], [], .2)[0]:
                     continue
@@ -57,6 +62,8 @@ def check(model, proc, *, interval=1, batch=1, threshold=.1):
                     payload = decode_json_payload(raw)
                     if kind == TYPE_STATUS:
                         assert payload.get('ok'), payload
+                        if stream_id == 'roi':
+                            budget_status = payload.get('native_budget', {})
                         if payload.get('native_evidence_invalid', 0):
                             err.seek(0); raise AssertionError(err.read().decode(errors='replace')[-5000:])
                     else:
@@ -98,7 +105,16 @@ def check(model, proc, *, interval=1, batch=1, threshold=.1):
                 found.add('crop')
                 assert obj['native_zone_ids'] == ['0'], obj
         assert found == {'full', 'crop'}, found
-    if interval > 1:
+    if budget is not None and not motion_wake:
+        assert budget_status.get("skipped_frames", 0) > 10, budget_status
+        assert budget_status["mode"] == "idle", budget_status
+        assert snapshots[-1]["source_pts"] - snapshots[0]["source_pts"] > 10
+    if idle_objects:
+        assert all(abs(o['box']['x1']/s['width']-.1) < .01 for s in snapshots[-8:] for o in s['objects'])
+    if motion_wake:
+        assert budget_status.get('motion_wakes', 0) > 0, budget_status
+        assert budget_status['mode'] == 'active', budget_status
+    if interval > 1 and budget is None:
         assert any(s['provenance'] == 'native_tracked_prediction' for s in snapshots)
     return {"interval": interval, "batch": batch, "threshold": threshold, "snapshots": len(snapshots), "fresh": len(fresh)}
 
@@ -117,7 +133,7 @@ def check_va(model):
     evidence = _NativeInferenceEvidence(1, tracking=True)
     with configured_model(model, "", .45) as (configured, _):
         graph = ('videotestsrc num-buffers=12 is-live=true ! video/x-raw,format=NV12,width=320,height=240,framerate=5/1 ! '
-                 'vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! gvapython name=roi ! '
+                 'vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! gvamotiondetect name=motion ! gvapython name=roi ! '
                  'gvadetect name=detect device=GPU pre-process-backend=va-surface-sharing inference-region=roi-list '
                  'batch-size=1 nireq=2 ie-config="PERFORMANCE_HINT=THROUGHPUT,ALLOW_AUTO_BATCHING=NO" ! '
                  'gvatrack tracking-type=short-term-imageless ! gvaanalytics name=zones evaluation-point=bottom-center '
@@ -142,6 +158,11 @@ def check_va(model):
                 failures.append(str(exc))
                 return Gst.PadProbeReturn.DROP
             return Gst.PadProbeReturn.OK
+        def clear_motion(pad, info):
+            with GST_PAD_PROBE_INFO_BUFFER(info) as buffer:
+                _filter_tracking_regions(buffer, pad.get_current_caps(), VideoFrame, frozenset())
+            return Gst.PadProbeReturn.OK
+        pipeline.get_by_name('motion').get_static_pad('src').add_probe(Gst.PadProbeType.BUFFER, clear_motion)
         detector.get_static_pad('src').add_probe(Gst.PadProbeType.BUFFER, capture)
         pipeline.set_state(Gst.State.PLAYING)
         results = []
@@ -219,6 +240,19 @@ def main():
         proc = ""
         if '--va' in sys.argv:
             print(json.dumps(check_va(model)))
+            return
+        if '--budget' in sys.argv:
+            policy = dict(enabled=True, idle_fps=1, active_fps=5, cooldown_seconds=.4, approach_padding=.1,
+                          motion_enabled=False, block_size=64, motion_threshold=1., min_persistence=2,
+                          max_miss=1, iou_threshold=.3, smooth_alpha=.5, confirm_frames=1,
+                          pixel_diff_threshold=255, min_rel_area=.0005)
+            results = [check(model, proc, interval=3, threshold=1, budget=policy)]
+            results.append(check(model, proc, budget=policy, idle_objects=True))
+            policy['motion_enabled'] = True
+            results.append(check(model, proc, threshold=1, budget=policy))
+            policy.update(motion_threshold=.001, pixel_diff_threshold=1, min_persistence=1, min_rel_area=0)
+            results.append(check(model, proc, threshold=1, budget=policy, motion_wake=True))
+            print(json.dumps(results))
             return
         results = [check(model, proc), check(model, proc, interval=3), check(model, proc, batch=2), check(model, proc, threshold=1)]
         print(json.dumps(results))

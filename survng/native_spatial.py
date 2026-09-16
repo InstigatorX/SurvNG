@@ -11,11 +11,19 @@ import math
 ROI_LABEL = "__survng_inference_region__"
 
 
-def spatial_plan(camera):
+def spatial_plan(camera, detector=None):
     zones = [zone.model_dump(mode="json") for zone in camera.zones]
     roi = camera.native_roi.model_dump(mode="json")
     revision = hashlib.sha256(json.dumps(zones, sort_keys=True).encode()).hexdigest()[:20]
-    return {"zones": zones, "roi": roi, "revision": revision}
+    plan = {"zones": zones, "roi": roi, "revision": revision}
+    if detector is not None:
+        from survng.app.config import effective_native_budget
+        plan["budget"] = effective_native_budget(camera, detector).model_dump()
+        confirmations = max([detector.event_confirmation_frames, *detector.event_class_confirmation_frames.values()])
+        plan["budget"]["confirmation_hold_seconds"] = (confirmations + detector.native.batch_size) / plan["budget"]["active_fps"]
+        plan["object_confidence"] = detector.confidence_threshold
+        plan["class_confidence"] = detector.event_class_confidence_thresholds
+    return plan
 
 
 def analytics_zones(plan, width, height):
@@ -49,16 +57,18 @@ def inference_rectangle(plan, width, height):
 
 class RoiInput:
     """gvapython supplies a writable buffer header; pixel memory stays shared."""
-    def __init__(self, plan, interval):
+    def __init__(self, plan, interval, budget_key=None):
         self.plan, self.interval = plan, interval
         self.sequence = 0
+        from survng.native_budget import BUDGETS
+        self.budget = BUDGETS.get(budget_key)
 
     def process_frame(self, frame):
         info = frame.video_info()
         width, height = info.width, info.height
         fresh_index = self.sequence // self.interval
         period = self.plan["roi"].get("full_frame_interval", 5)
-        rect = ((0, 0, width, height) if fresh_index % period == 0
+        rect = ((0, 0, width, height) if (self.budget is not None and self.budget.selected_full_frame) or fresh_index % period == 0
                 else inference_rectangle(self.plan, width, height))
         frame.add_region(*rect, ROI_LABEL, 1.0)
         self.sequence += 1

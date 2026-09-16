@@ -276,7 +276,7 @@ existing metadata watchdog to rebuild the stream, rather than evaluating new
 coordinates against old polygons. Cameras whose main/live fields of view differ
 must author zones for the live image; no new main-to-live projection is introduced.
 
-Admin → Cameras → Settings → Detection region exposes `camera.native_roi`:
+Admin → Cameras → Detection → Detection region exposes `camera.native_roi`:
 
 - `enabled`: false by default; opt in per camera.
 - `zone_names`: empty means all enabled incident zones; otherwise selects names.
@@ -293,7 +293,7 @@ attaches the rectangle using a writable buffer header, retaining VA pixel memory
 Inference-region markers are removed before fresh evidence capture and tracking.
 Fresh detections, empty results, and predictions retain distinct meanings.
 
-Detection FPS and inference interval remain unchanged. Objects outside the crop
+With adaptive inference disabled, detection FPS and inference interval remain unchanged. Objects outside the crop
 receive only periodic coverage and may not satisfy consecutive-frame confirmation;
 full-frame sweeps do not guarantee detection of brief appearances. Crop changes can
 also change boxes/track IDs. ROI selection is therefore an opt-in accuracy tradeoff,
@@ -303,8 +303,8 @@ ROI streams use a separate shared model-instance pool (`-roi` suffix). Native
 mixed-mode batch tests found incorrect crop coordinates when full-frame and ROI
 streams shared the same compiled preprocessing. ROI cameras share with each other;
 turning ROI on can allocate another compiled model and inference pool. Shared
-request/stream settings apply to each pool. There is no automatic cadence reduction,
-motion gating, or new secondary detector.
+request/stream settings apply to each pool. Adaptive cameras also use the ROI pool
+to preserve explicit full-frame idle inputs.
 
 Validation: `scripts/gstreamer-spatial-check.py` uses a synthetic batch-aware model
 to check mixed full-frame/ROI streams, batch sizes 1/2, inference intervals 1/3,
@@ -314,3 +314,45 @@ coordinates, zone IDs, tracking provenance, and fresh empty results. `--va` chec
 for 240 cases at three resolutions when the installed runtime is available. These
 checks verify plumbing; scene recall, GPU memory growth, and performance still need
 camera-specific measurement before broadly enabling ROI.
+
+
+### Adaptive per-camera inference budget
+
+Admin → Detection → Adaptive inference budget sets global defaults. Admin →
+Cameras → Detection provides an inherit/on/off switch and individual overrides;
+blank values inherit. The feature defaults off. Saving changed budget or motion
+settings rebuilds the affected native capture configuration.
+
+Defaults are 1 FPS idle, 5 FPS active, a 5-second cooldown, and an approach margin
+of 10% of frame width/height around incident polygons. Rates count fresh inference
+inputs: adaptive mode replaces the fixed inference interval with an upstream gate.
+Fresh, sufficiently confident objects of relevant classes near incident zones, or
+zone-overlapping native motion, extend the active period. Confirmation supplies a
+minimum hold even if cooldown is zero. Without incident zones, the whole frame is
+relevant. Ignore zones still suppress incidents without masking discovery.
+
+Every idle inference covers the full frame, even when optional ROI inference is
+enabled. Active ROI inference retains periodic full-frame sweeps. Fresh detections
+of stationary objects can keep a camera active. Tracker predictions cannot wake it;
+motion alone cannot confirm or extend incidents. Skipped inputs produce no synthetic
+empty detection results. Health checks allow intentional idle gaps; configurations
+whose idle batch fill exceeds freshness/recovery limits are rejected.
+
+The motion subsection controls `gvamotiondetect` before inference: `block-size`,
+`motion-threshold`, `min-persistence`, `max-miss`, `iou-threshold`, `smooth-alpha`,
+`confirm-frames`, `pixel-diff-threshold`, and `min-rel-area`. Each is also overridable
+per camera. Motion wake-up can be disabled independently of the budget. The element
+receives NV12 and retains VAMemory on the VA path; Python handles metadata only.
+Motion metadata is removed before object inference/tracking so it cannot become
+object evidence. Foliage and lighting may require higher thresholds/persistence.
+
+The owner-only status snapshot reports each camera's budget mode, target rates,
+cooldown, admitted/skipped inputs, and wake counters. `gstreamer-spatial-check.py
+--budget` verifies native admission, idle full-frame coordinates, motion wake-up,
+empty-result provenance, and mixed adaptive/fixed streams. `--va` also exercises
+native motion followed by GPU ROI inference while retaining VAMemory.
+
+Reduced input counts are not measured GPU savings. Idle sampling trades entry
+latency and brief-appearance recall for fewer inferences; validate these on each
+scene before enabling broadly. Motion still processes frames at the active rate,
+and shared compiled pools and batching affect realized compute and latency.

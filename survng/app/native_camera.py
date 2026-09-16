@@ -58,7 +58,7 @@ class NativeCameraWorker:
         self.capture = CameraCaptureService(
             camera_id=camera.id, source_url=camera.source_url, backend=NativeCaptureBinding(
                 capture_backend, lambda: self.config.enabled and self.runtime_state.detection_enabled,
-                lambda: self.camera.h264_decoder_compliance, lambda: spatial_plan(self.camera)),
+                lambda: self.camera.h264_decoder_compliance, lambda: spatial_plan(self.camera, self.config)),
             frame_observer=self._remember, frame_width=lambda: 640,
             initial_open_timeout_ms=capture_backend.startup_timeout_ms,
         )

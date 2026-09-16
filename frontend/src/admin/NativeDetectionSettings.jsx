@@ -1,3 +1,4 @@
+import NativeBudgetSettings from "./NativeBudgetSettings.jsx";
 import React, { useEffect, useState } from "react";
 import { DEFAULT_STATIONARY_LABELS, NATIVE_DETECTION_FIELDS, detectionFieldValue, nativeDetectionError } from "../nativeDetectionSettings.mjs";
 
@@ -34,6 +35,7 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
       <label>Labels file<input value={detector.labels_path || ""} onChange={(event) => update("labels_path", event.target.value)} /><small>Optional server path for custom model labels.</small></label>
       <label>Default incident eligibility<select value={String(detector.require_incident_zone ?? true)} onChange={(event) => update("require_incident_zone", event.target.value === "true")}><option value="true">Incident zones only</option><option value="false">Zones and full frame</option></select><small>Cameras can override this. Ignore zones always apply.</small></label>
     </div>
+    <NativeBudgetSettings values={detector.native?.budget || {}} onChange={(key, value) => update(`native.budget.${key}`, value)} />
     <details className="tracking-class-picker">
       <summary>Tracked classes: {trackedClasses === null ? "All model classes" : trackedClasses.length ? trackedClasses.join(", ") : "None"}</summary>
       <div className="form-grid" role="group" aria-label="Tracked classes">

@@ -540,6 +540,48 @@ class CameraLiveViewConfig(BaseModel):
     live: CameraViewFrameConfig = Field(default_factory=CameraViewFrameConfig)
 
 
+class NativeBudgetConfig(BaseModel):
+    enabled: bool = False
+    idle_fps: float = Field(default=1.0, ge=0.5, le=10.0)
+    active_fps: float = Field(default=5.0, ge=0.5, le=10.0)
+    cooldown_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
+    approach_padding: float = Field(default=0.1, ge=0.0, le=0.5)
+    motion_enabled: bool = True
+    block_size: int = Field(default=64, ge=16, le=512)
+    motion_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
+    min_persistence: int = Field(default=2, ge=1, le=30)
+    max_miss: int = Field(default=1, ge=0, le=30)
+    iou_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    smooth_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    confirm_frames: int = Field(default=1, ge=1, le=10)
+    pixel_diff_threshold: int = Field(default=15, ge=1, le=255)
+    min_rel_area: float = Field(default=0.0005, ge=0.0, le=0.25)
+
+    @model_validator(mode="after")
+    def check_rates(self):
+        if self.idle_fps > self.active_fps:
+            raise ValueError("adaptive idle FPS must not exceed active FPS")
+        return self
+
+
+class NativeBudgetOverrides(BaseModel):
+    enabled: bool | None = None
+    idle_fps: float | None = Field(default=None, ge=0.5, le=10.0)
+    active_fps: float | None = Field(default=None, ge=0.5, le=10.0)
+    cooldown_seconds: float | None = Field(default=None, ge=0.0, le=300.0)
+    approach_padding: float | None = Field(default=None, ge=0.0, le=0.5)
+    motion_enabled: bool | None = None
+    block_size: int | None = Field(default=None, ge=16, le=512)
+    motion_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_persistence: int | None = Field(default=None, ge=1, le=30)
+    max_miss: int | None = Field(default=None, ge=0, le=30)
+    iou_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    smooth_alpha: float | None = Field(default=None, ge=0.0, le=1.0)
+    confirm_frames: int | None = Field(default=None, ge=1, le=10)
+    pixel_diff_threshold: int | None = Field(default=None, ge=1, le=255)
+    min_rel_area: float | None = Field(default=None, ge=0.0, le=0.25)
+
+
 class NativeRoiConfig(BaseModel):
     enabled: bool = False
     zone_names: list[str] = Field(default_factory=list)
@@ -567,6 +609,7 @@ class CameraConfig(BaseModel):
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
     native_roi: NativeRoiConfig = Field(default_factory=NativeRoiConfig)
+    native_budget: NativeBudgetOverrides = Field(default_factory=NativeBudgetOverrides)
 
     @model_validator(mode="after")
     def derive_connection_from_url(self) -> "CameraConfig":
@@ -799,6 +842,7 @@ class NativeActivityConfig(BaseModel):
     """Native observation freshness and presence episode policy."""
     tracking_classes: list[str] | None = Field(default=None, max_length=256)
     stationary: NativeStationaryConfig = Field(default_factory=NativeStationaryConfig)
+    budget: NativeBudgetConfig = Field(default_factory=NativeBudgetConfig)
 
     activity_timeout_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
     maximum_observation_age_seconds: float = Field(default=2.0, ge=0.2, le=10.0)
@@ -1188,6 +1232,14 @@ class AppConfig(BaseModel):
     def validate_event_clip_window(self) -> "AppConfig":
         if self.event_clip_before_seconds + self.event_clip_after_seconds <= 0:
             raise ValueError("event clip window must include time before or after the event")
+        for camera in self.cameras:
+            budget = effective_native_budget(camera, self.detector)
+            if budget.enabled:
+                fill = (self.detector.native.batch_size - 1) / budget.idle_fps
+                if fill >= self.detector.native.maximum_observation_age_seconds:
+                    raise ValueError(f"{camera.id}: adaptive idle rate/batch fill must be below maximum observation age")
+                if (self.detector.native.batch_size + 0.5) / budget.idle_fps >= self.detector.native.metadata_restart_seconds:
+                    raise ValueError(f"{camera.id}: metadata recovery timeout must exceed adaptive idle coverage interval")
         camera_ids = [camera.id for camera in self.cameras]
         if len(camera_ids) != len(set(camera_ids)):
             raise ValueError("camera ids must be unique")
@@ -1373,3 +1425,9 @@ def save_config(
 
 def camera_by_id(config: AppConfig, camera_id: str) -> Optional[CameraConfig]:
     return next((camera for camera in config.cameras if camera.id == camera_id), None)
+
+
+def effective_native_budget(camera, detector) -> NativeBudgetConfig:
+    values = detector.native.budget.model_dump()
+    values.update(camera.native_budget.model_dump(exclude_none=True))
+    return NativeBudgetConfig.model_validate(values)

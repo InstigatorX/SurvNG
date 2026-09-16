@@ -224,6 +224,12 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
                 "stationary_vehicle_observations", "uncertain_vehicle_observations", "moving_transitions", "stationary_transitions", "episode_track_capacity_drops",
             )),
         },
+        "inference_budget": {
+            "mode": _motion_identifier(((raw.get("live_pipeline") or {}).get("native_budget") or {}).get("mode")),
+            **_numeric_fields((raw.get("live_pipeline") or {}).get("native_budget"), (
+                "target_fps", "idle_fps", "active_fps", "cooldown_remaining_seconds", "sampled_frames",
+                "admitted_frames", "skipped_frames", "motion_wakes", "object_wakes", "idle_transitions", "active_transitions")),
+        },
         "live_pipeline": _numeric_fields(raw.get("live_pipeline"), (
             "detect_fps", "effective_inference_fps", "inference_interval", "batch_size", "native_evidence_invalid",
             "native_detector_average_ms", "native_detector_p95_ms", "native_detector_timing_samples",

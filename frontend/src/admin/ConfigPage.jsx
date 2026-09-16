@@ -1,3 +1,4 @@
+import NativeBudgetSettings from "./NativeBudgetSettings.jsx";
 import NativeRoiSettings from "./NativeRoiSettings.jsx";
 import { NativeDetectionSettings } from "./NativeDetectionSettings.jsx";
 import { nativeDetectionError } from "../nativeDetectionSettings.mjs";
@@ -2439,6 +2440,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
               {selectedCamera ? <div id="camera-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`} onKeyDown={(event) => moveTabFocus(event, CAMERA_ADMIN_SECTIONS, cameraSection, (next) => selectAdminSubsection(next, setCameraSection, "cameras"))}>
                 <button id="camera-tab-settings" data-tab-id="settings" tabIndex={cameraSection === "settings" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => selectAdminSubsection("settings", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
+                <button id="camera-tab-detection" data-tab-id="detection" tabIndex={cameraSection === "detection" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "detection"}>Detection</button>
                 <button id="camera-tab-zones" data-tab-id="zones" tabIndex={cameraSection === "zones" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "zones" ? "active" : ""} onClick={() => selectAdminSubsection("zones", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "zones"}><Crop size={15} />Zones</button>
                 <button id="camera-tab-info" data-tab-id="info" tabIndex={cameraSection === "info" ? 0 : -1} aria-controls="camera-settings-panel" type="button" className={cameraSection === "info" ? "active" : ""} onClick={() => selectAdminSubsection("info", setCameraSection, "cameras")} role="tab" aria-selected={cameraSection === "info"}><Gauge size={15} />Info</button>
               </div> : null}
@@ -2450,6 +2452,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                       <div className="field-row camera-identity-fields">
                         <label>Name<input value={selectedCamera.name} onChange={(event) => updateCamera(selectedCamera.id, ["name"], event.target.value)} /></label>
                       </div>
+                    </> : null}
+
+                    {cameraSection === "detection" ? <>
+                      <NativeBudgetSettings values={selectedCamera.native_budget || {}} defaults={config.detector?.native?.budget || {}} overrides onChange={(key, value) => updateCamera(selectedCamera.id, ["native_budget", key], value)} />
+                      <NativeRoiSettings camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
                     </> : null}
 
                     {cameraSection === "zones" ? <div className="field-row camera-object-policy-fields">
@@ -2494,7 +2501,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                           </select><small>Applies to supported native H.264 decoders for this camera’s live and main streams. Flexible can reduce buffering but may affect frame ordering on some streams.</small></label>
                         </section>
                       </div>
-                      <NativeRoiSettings camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
+
                       <label className="check-field"><input type="checkbox" checked={selectedCamera.native_same_field_of_view || false} onChange={(event) => updateCamera(selectedCamera.id, ["native_same_field_of_view"], event.target.checked)} /> Main and live streams show the same field of view</label>
                       <small>Enables native track replay over main recordings. Leave off if either stream is cropped or has a different view.</small>
                       <label className="check-field"><input type="checkbox" checked={selectedCamera.incident_notifications_enabled !== false} onChange={(event) => updateCamera(selectedCamera.id, ["incident_notifications_enabled"], event.target.checked)} /> Send incident notifications</label>

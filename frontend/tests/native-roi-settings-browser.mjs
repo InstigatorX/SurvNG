@@ -17,9 +17,10 @@ const server = await createServer({ root, configFile: false, server: { host: "12
     import React, {useState} from 'react';
     import {createRoot} from 'react-dom/client';
     import Settings from '/src/admin/NativeRoiSettings.jsx';
+    import Budget from '/src/admin/NativeBudgetSettings.jsx';
     function App() {
       const [camera,setCamera]=useState({zones:[{name:'drive',enabled:true,behavior:'incident'},{name:'road',enabled:true,behavior:'ignore'}]});
-      return <><Settings camera={camera} onChange={(path,value)=>setCamera(c=>({...c,native_roi:{...c.native_roi,[path[1]]:value}}))}/><pre id="config">{JSON.stringify(camera)}</pre></>;
+      return <><Budget values={camera.native_budget || {}} defaults={{enabled:true,idle_fps:2,motion_threshold:.2}} overrides onChange={(key,value)=>setCamera(c=>({...c,native_budget:{...c.native_budget,[key]:value}}))}/><Settings camera={camera} onChange={(path,value)=>setCamera(c=>({...c,native_roi:{...c.native_roi,[path[1]]:value}}))}/><pre id="config">{JSON.stringify(camera)}</pre></>;
     }
     createRoot(document.getElementById('root')).render(<App/>);
   `; },
@@ -32,6 +33,22 @@ try {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/test`);
+  const budget = page.getByLabel('Adaptive inference enabled', {exact:true});
+  assert.equal(await budget.inputValue(), '');
+  await budget.selectOption('false');
+  await page.getByLabel('Idle detection FPS', {exact:true}).fill('1');
+  await page.getByText('Native motion wake-up (gvamotiondetect)', {exact:true}).click();
+  await page.getByLabel('Motion threshold', {exact:true}).fill('0.4');
+  let saved = JSON.parse(await page.locator('#config').textContent());
+  assert.deepEqual(saved.native_budget, {enabled:false,idle_fps:1,motion_threshold:.4});
+  await page.getByLabel('Motion threshold', {exact:true}).fill('');
+  await budget.selectOption('');
+  saved = JSON.parse(await page.locator('#config').textContent());
+  assert.equal(saved.native_budget.enabled,null);
+  assert.equal(saved.native_budget.motion_threshold,null);
+  await page.getByLabel('Idle detection FPS', {exact:true}).fill('9');
+  await page.getByRole('alert').waitFor();
+  await page.getByLabel('Idle detection FPS', {exact:true}).fill('');
   const enabled = page.getByRole('checkbox', {name:'Focus detection around incident zones'});
   assert.equal(await enabled.isChecked(), false);
   await enabled.check();

@@ -955,6 +955,13 @@ def _pump_pipeline(
 ) -> int:
     if h264_decoder_compliance not in H264_DECODER_COMPLIANCE:
         raise ValueError("invalid H.264 decoder compliance")
+    from survng.native_budget import BUDGETS, NativeBudget, MOTION_PROPERTIES
+    budget_enabled = bool(detect and spatial_plan and spatial_plan.get("budget", {}).get("enabled"))
+    budget = NativeBudget(spatial_plan) if budget_enabled else None
+    budget_key = f"{stream_id}:{id(budget)}" if budget is not None else None
+    if budget is not None:
+        detect_rate = _frame_rate(budget.config["active_fps"])
+    detector_interval = 1 if budget_enabled else args.inference_interval
     use_test_source = args.test_source if test_source is None else test_source
     pipeline = Gst.Pipeline.new(_pipeline_name(stream_id))
     if pipeline is None:
@@ -1071,6 +1078,7 @@ def _pump_pipeline(
     analytics = None
     roi_input = None
     roi_enabled = False
+    budget_elements = []
     meta_convert = None
     va_caps = None
     preprocess = ""
@@ -1115,17 +1123,17 @@ def _pump_pipeline(
         # Input/output queues remain bounded under overload.
         detector.set_property("batch-size", args.batch_size)
         detector.set_property("nireq", args.inference_requests)
-        detector.set_property("inference-interval", args.inference_interval)
+        detector.set_property("inference-interval", detector_interval)
         detector.set_property("no-block", False)
         roi_enabled = bool(spatial_plan and spatial_plan.get("roi", {}).get("enabled"))
-        detector.set_property("inference-region", 1 if roi_enabled else 0)
-        if roi_enabled and instance_id:
+        detector.set_property("inference-region", 1 if roi_enabled or budget_enabled else 0)
+        if (roi_enabled or budget_enabled) and instance_id:
             # Shared preprocessing is compiled from the first stream's region
             # mode. Mixing full-frame and ROI consumers misprojects batch output.
             # ROI cameras share a separate compiled pool with one another.
             instance_id += "-roi"
         native_evidence = _NativeInferenceEvidence(
-            args.inference_interval, tracking=args.native_tracking != "off",
+            detector_interval, tracking=args.native_tracking != "off",
         )
 
         selected_classes = getattr(args, "tracking_classes", None)
@@ -1149,6 +1157,12 @@ def _pump_pipeline(
                             print(f"survng-dls tracking class metadata filter failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                         return Gst.PadProbeReturn.DROP
                     native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)
+                    if budget is not None:
+                        with native_evidence.lock:
+                            provenance, objects = native_evidence.results.get(buffer.pts, ("unknown", []))
+                        if provenance == "native_fresh_detection":
+                            structure = pad.get_current_caps().get_structure(0)
+                            budget.objects(objects, structure.get_value("width"), structure.get_value("height"), buffer.pts / Gst.SECOND)
             return Gst.PadProbeReturn.OK
 
         spatial_dimensions = None
@@ -1170,7 +1184,7 @@ def _pump_pipeline(
                     if analytics is not None and dimensions != spatial_dimensions:
                         raise RuntimeError("zone geometry changed; stream rebuild required")
                     native_evidence.begin(buffer.pts)
-                except Exception:
+                except Exception as exc:
                     native_evidence.invalid += 1
                     native_evidence.identity_valid = False
                     with native_evidence.lock:
@@ -1225,11 +1239,50 @@ def _pump_pipeline(
             analytics.set_locked_state(True)
             analytics.set_state(Gst.State.READY)
             elements.append(analytics)
-        if roi_enabled:
+        if budget is not None:
+            if budget.config["motion_enabled"]:
+                converter = _element(Gst, "vapostproc" if va_memory else "videoconvert", "motion-convert")
+                motion_caps = _element(Gst, "capsfilter", "motion-caps")
+                motion_caps.set_property("caps", Gst.Caps.from_string(
+                    "video/x-raw" + ("(memory:VAMemory)" if va_memory else "") + ",format=NV12"))
+                motion_detector = _element(Gst, "gvamotiondetect", "budget-motion")
+                for name in MOTION_PROPERTIES:
+                    motion_detector.set_property(name.replace("_", "-"), budget.config[name])
+                budget_elements.extend([converter, motion_caps, motion_detector])
+            gate = _element(Gst, "identity", "budget-gate")
+            budget_elements.append(gate)
+
+            def admit_budget(pad, info):
+                try:
+                    with GST_PAD_PROBE_INFO_BUFFER(info) as buffer:
+                        if buffer is None:
+                            return Gst.PadProbeReturn.OK
+                        caps = pad.get_current_caps()
+                        structure = caps.get_structure(0)
+                        width, height = structure.get_value("width"), structure.get_value("height")
+                        frame = video_frame_type(buffer, caps=caps)
+                        motion = [(r.rect().x/width, r.rect().y/height,
+                                   (r.rect().x+r.rect().w)/width, (r.rect().y+r.rect().h)/height)
+                                  for r in frame.regions() if r.label() == "motion"]
+                        # Motion metadata (confidence 1) must never reach inference
+                        # evidence or tracking, including on skipped frames.
+                        _filter_tracking_regions(buffer, caps, video_frame_type, frozenset())
+                        if not budget.select(buffer.pts / Gst.SECOND, motion):
+                            return Gst.PadProbeReturn.DROP
+                except Exception as exc:
+                    native_evidence.invalid += 1
+                    if native_evidence.invalid == 1 or native_evidence.invalid % 100 == 0:
+                        print(f"survng-dls inference budget metadata failed: {type(exc).__name__}", file=sys.stderr, flush=True)
+                    return Gst.PadProbeReturn.DROP
+                return Gst.PadProbeReturn.OK
+
+            gate.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, admit_budget)
+            elements.extend(budget_elements)
+        if roi_enabled or budget_enabled:
             roi_input = _element(Gst, "gvapython", "inference-region")
             roi_input.set_property("module", str(Path(__file__).with_name("native_spatial.py")))
             roi_input.set_property("class", "RoiInput")
-            roi_input.set_property("kwarg", json.dumps({"plan": spatial_plan, "interval": args.inference_interval}))
+            roi_input.set_property("kwarg", json.dumps({"plan": spatial_plan, "interval": detector_interval, "budget_key": budget_key}))
             elements.append(roi_input)
         elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])
         if native_tracker is not None:
@@ -1291,27 +1344,16 @@ def _pump_pipeline(
                     f"could not link {left.get_name()} to {right.get_name()}"
                 )
     if detect and detect_queue is not None and detector is not None:
-        detect_input = roi_input if roi_input is not None else detector
-        if roi_input is not None and not roi_input.link(detector):
-            raise RuntimeError("could not link inference-region metadata")
+        input_chain = [detect_queue, detect_rate_el, detect_rate_caps]
         if va_caps is not None:
-            if (
-                detect_rate_el is None
-                or detect_rate_caps is None
-                or not detect_queue.link(detect_rate_el)
-                or not detect_rate_el.link(detect_rate_caps)
-                or not detect_rate_caps.link(va_caps)
-                or not va_caps.link(detect_input)
-            ):
-                raise RuntimeError("could not link VAMemory detect caps")
-        elif (
-            detect_rate_el is None
-            or detect_rate_caps is None
-            or not detect_queue.link(detect_rate_el)
-            or not detect_rate_el.link(detect_rate_caps)
-            or not detect_rate_caps.link(detect_input)
-        ):
-            raise RuntimeError("could not link detect queue")
+            input_chain.append(va_caps)
+        input_chain.extend(budget_elements)
+        if roi_input is not None:
+            input_chain.append(roi_input)
+        input_chain.append(detector)
+        for left, right in zip(input_chain, input_chain[1:]):
+            if not left.link(right):
+                raise RuntimeError(f"could not link native detection input: {left.get_name()} to {right.get_name()}")
         tracked_source = detector
         if native_tracker is not None:
             if not detector.link(native_tracker):
@@ -1391,6 +1433,8 @@ def _pump_pipeline(
             for signum in (signal.SIGINT, signal.SIGTERM)
         }
     inference_sequence = 0
+    if budget is not None:
+        BUDGETS[budget_key] = budget
     started = time.monotonic()
     first_frame_at: float | None = None
     last_status_at: float | None = None
@@ -1507,14 +1551,15 @@ def _pump_pipeline(
                             "native_evidence_invalid": native_evidence.invalid if detect else 0,
                             **(native_evidence.timing_status() if detect else {}),
                             "batch_size": args.batch_size if detect else None,
-                            "inference_interval": args.inference_interval if detect else None,
+                            "inference_interval": detector_interval if detect else None,
                             "effective_inference_fps": (
-                                round(float(detect_rate) / args.inference_interval, 3)
+                                round(float(detect_rate) / detector_interval, 3)
                                 if detect else 0.0
                             ),
                             "native_tracking": args.native_tracking if detect else "off",
                             "native_tracking_classes": getattr(args, "tracking_classes", None) if detect else None,
                             "native_zone_revision": spatial_plan.get("revision") if spatial_plan and detect else None,
+                            "native_budget": budget.status() if budget is not None else {"mode": "disabled"},
                             "native_roi_enabled": bool(spatial_plan and spatial_plan.get("roi", {}).get("enabled") and detect),
                             "native_zone_count": sum(z.get("enabled", True) and len(z.get("points", [])) >= 3 for z in spatial_plan.get("zones", [])) if spatial_plan and detect else 0,
                             "native_roi_full_frame_interval": spatial_plan.get("roi", {}).get("full_frame_interval", 5) if spatial_plan and roi_enabled else 0,
@@ -1568,6 +1613,8 @@ def _pump_pipeline(
         if analytics is not None:
             analytics.set_locked_state(False)
         pipeline.set_state(Gst.State.NULL)
+        if budget_key is not None:
+            BUDGETS.pop(budget_key, None)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
     return 0

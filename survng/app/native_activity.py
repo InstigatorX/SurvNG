@@ -16,6 +16,7 @@ from typing import Callable
 from .live_detections import DetectionSnapshot
 from .native_motion import NativeMotion
 from .zones import apply_detection_zones
+from .config import effective_native_budget
 from survng.native_spatial import spatial_plan
 
 
@@ -113,7 +114,7 @@ class NativeActivity:
                          or obj.get("label", "").strip().lower() in self.config.native.tracking_classes)]
         # Live context expires independently of the persisted episode archive.
         for key, track in list(self.tracks.items()):
-            if now - track["last_monotonic"] >= max(self.config.native.activity_timeout_seconds, 1.5 / self.fresh_detection_fps):
+            if now - track["last_monotonic"] >= max(self.config.native.activity_timeout_seconds, (self.config.native.batch_size + .5) / self.fresh_detection_fps):
                 del self.tracks[key]
         seen = set()
         for obj in eligible:
@@ -251,10 +252,11 @@ class NativeActivity:
 
     @property
     def fresh_detection_fps(self):
-        return self.config.live_sample_fps / self.config.native.inference_interval
+        budget = effective_native_budget(self.camera, self.config)
+        return budget.idle_fps if budget.enabled else self.config.live_sample_fps / self.config.native.inference_interval
 
     def tick(self, *, now: float):
-        if self.last_fresh and now - self.last_fresh > max(self.config.native.maximum_observation_age_seconds, 1.5 / self.fresh_detection_fps):
+        if self.last_fresh and now - self.last_fresh > max(self.config.native.maximum_observation_age_seconds, (self.config.native.batch_size + .5) / self.fresh_detection_fps):
             self.health = "metadata_stale"
         if self.event_id is not None and now - self.last_activity >= self.config.native.activity_timeout_seconds:
             if self.health != "healthy":

@@ -75,6 +75,10 @@ def manager_owned_config(config: AppConfig) -> dict:
         "tracking_fps": config.detector.live_sample_fps,
         "threshold": live_detection_threshold(config),
     }
+    from .config import effective_native_budget
+    if any(effective_native_budget(camera, config.detector).enabled for camera in config.cameras):
+        payload["gstreamer_capture"]["budget_admission"] = {name: getattr(config.detector, name) for name in (
+            "confidence_threshold", "event_class_confidence_thresholds", "event_confirmation_frames", "event_class_confirmation_frames")}
     for field in HOT_CONFIG_FIELDS | RECORDER_CONFIG_FIELDS:
         payload.pop(field, None)
     for camera in payload.get("cameras", []):
