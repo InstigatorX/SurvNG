@@ -2750,7 +2750,7 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
                 <button type="button" key={`${zone.name}-${index}`} className={index === selectedIndex ? "active" : ""} onClick={() => setSelectedIndex(index)}>
                   <span className="zone-swatch" style={{ background: zone.color || "#22c55e" }} />
                   <span>{zone.name || `Zone ${index + 1}`}</span>
-                  <small>{zone.behavior === "none" ? "no object effect" : zone.behavior}{zone.exclude_from_ema ? " · EMA excluded" : ""}</small>
+                  <small>{zone.behavior === "none" ? "no object effect" : zone.behavior}</small>
                 </button>
               ))}
               {!zones.length ? <div className="empty-state compact">No zones configured.</div> : null}
@@ -4526,7 +4526,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <p>{native.health} · {Number(native.effective_fresh_fps || 0).toFixed(1)} fresh detections/sec</p>
       <p>Detector time: {pipeline.native_detector_average_ms ?? "—"} ms average · {pipeline.native_detector_p95_ms ?? "—"} ms p95</p>
       <p>Last fresh result: {native.last_fresh_age_seconds == null ? "waiting" : `${Number(native.last_fresh_age_seconds).toFixed(1)} seconds ago`}</p>
-      <p>{native.motion_states?.moving || 0} moving vehicles · {native.motion_states?.stationary || 0} stationary vehicles · {native.motion_states?.uncertain || 0} gathering evidence</p>
+      <p>{native.motion_states?.moving || 0} moving objects · {native.motion_states?.stationary || 0} stationary objects · {native.motion_states?.uncertain || 0} gathering evidence</p>
       <p>{native.active ? "Object presence active" : "No active presence episode"} · {native.counters?.events_created || 0} events · {native.counters?.metadata_restarts || 0} metadata recoveries</p>
     </section>;
   }
