@@ -60,13 +60,21 @@ class NativeAdmission:
                 job = self.jobs[token] = {'camera_id': camera_id, 'samples': [], 'due': time.monotonic()+15,
                                          'deadline': time.monotonic()+90, 'cancelled': threading.Event()}
                 self.counts['nominated'] += 1
-            if frame is not None and len(job['samples']) < 3 and all(abs(epoch-c.epoch) >= .4 for c in job['samples']):
+            samples = job['samples']
+            if (frame is not None and (not samples or epoch > samples[-1].epoch)
+                    and all(abs(epoch-c.epoch) >= .4 for c in samples)):
                 h, w = frame.shape[:2]
                 # Capture publishes immutable allocations. Multiple objects in
                 # one frame can retain those pixels instead of duplicating them.
                 image = frame if not frame.flags.writeable else frame.copy()
                 image.setflags(write=False)
-                job['samples'].append(Candidate(epoch, image, resize_objects([obj], size, (w,h)), 0))
+                candidate = Candidate(epoch, image, resize_objects([obj], size, (w,h)), 0)
+                if len(samples) < 3:
+                    samples.append(candidate)
+                else:
+                    # Keep early evidence plus a recent view. Freezing all
+                    # three at entry misses later, unobstructed confirmation.
+                    samples[-1] = candidate
             self.condition.notify_all()
 
     def poll(self, token):
@@ -182,6 +190,9 @@ class NativeAdmission:
             with self.condition:
                 if self.jobs.get(token) is not job or self.closed:
                     continue  # Camera/session/policy canceled while verification ran.
+                if (result['status'] != 'confirmed' and time.monotonic() < job['deadline']
+                        and [s.epoch for s in samples] != [s.epoch for s in job['samples']]):
+                    continue  # Evaluate a newer view before finalizing failure.
                 if result['status'] == 'unverified' and (not result.get('votes') or any(v in {'unavailable', 'unaligned'} for v in result['votes'])) and time.monotonic() < job['deadline']:
                     continue
                 self.jobs.pop(token)

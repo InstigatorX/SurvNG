@@ -142,7 +142,7 @@ def test_nomination_requires_temporally_distinct_samples():
     obj={'box':{'x1':10,'x2':20,'y1':10,'y2':20}}
     image=np.zeros((100,100,3),np.uint8)
     for t in (1,1,1.1,1.2,1.5,2,3): service.offer('track','front',t,image,obj,(100,100))
-    assert [s.epoch for s in service.jobs['track']['samples']]==[1,1.5,2]
+    assert [s.epoch for s in service.jobs['track']['samples']]==[1,1.5,3]
 
 
 def test_nomination_shares_immutable_frames_but_owns_mutable_inputs():
@@ -329,3 +329,59 @@ def test_renewed_candidate_cannot_hold_an_inactive_incident_forever():
     final = a.events.update_object_tracking.call_args.args[1]
     assert final['state'] == 'complete'
     assert [t['native_track_id'] for t in final['tracks']] == [9]
+
+
+def test_recent_clear_view_can_confirm_after_early_negative_views():
+    main = np.random.default_rng(8).integers(0, 255, (600, 800, 3), dtype=np.uint8)
+    obj = {'label': 'person', 'confidence': .9,
+           'box': {'x1': 300, 'y1': 200, 'x2': 340, 'y2': 280}}
+    config = AppConfig(cameras=[{'id': 'front', 'name': 'Front', 'stream_url': 'rtsp://unused.invalid'}])
+    evidence = SimpleNamespace(config=config, read_frame=Mock(return_value=main),
+                               match_main=Mock(return_value=[obj]), verifier=Mock())
+    _, left, top = context_crop(main, obj['box'])
+    detected = dict(obj, box={k: v - (left if k.startswith('x') else top) for k, v in obj['box'].items()})
+    service = NativeAdmission(evidence)
+    for epoch in range(1, 8):
+        service.offer('track', 'front', epoch, main[::2, ::2], obj, (400, 300))
+    evidence.verifier.detect.side_effect = [[], [], [detected]]
+    samples = service.jobs['track']['samples']
+    assert [s.epoch for s in samples] == [1, 2, 7]
+    result = service.verify('front', samples)
+    assert result['status'] == 'confirmed'
+    assert result['votes'] == ['negative', 'negative', 'confirmed']
+    assert result['cover'][2] == 7
+
+
+def test_new_view_arriving_during_negative_verification_is_not_discarded():
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    service = NativeAdmission(None)
+    image = np.ones((20, 20, 3), np.uint8)
+    obj = {'box': {'x1': 0, 'y1': 0, 'x2': 10, 'y2': 10}}
+    for epoch in (1, 2, 3):
+        service.offer('track', 'front', epoch, image, obj, (20, 20))
+    def verify(camera, samples, **kwargs):
+        if samples[-1].epoch == 3:
+            entered.set()
+            assert release.wait(2)
+            return {'status': 'rejected', 'reason': 'test', 'votes': ['negative'] * 3}
+        return {'status': 'confirmed', 'reason': 'test', 'votes': ['confirmed']}
+    service.verify = verify
+    service.jobs['track']['due'] = 0
+    service.start()
+    try:
+        assert entered.wait(2)
+        service.offer('track', 'front', 4, image, obj, (20, 20))
+        with service.condition:
+            service.jobs['track']['due'] = 0
+        release.set()
+        # A condition wait releases the worker lock; avoid polling/sleep races.
+        import time
+        deadline = time.monotonic() + 2
+        with service.condition:
+            while 'track' not in service.results and time.monotonic() < deadline:
+                service.condition.wait(.01)
+        assert service.poll('track')['status'] == 'confirmed'
+    finally:
+        release.set()
+        service.stop()
