@@ -1,3 +1,5 @@
+import { NativeDetectionSettings } from "./NativeDetectionSettings.jsx";
+import { nativeDetectionError } from "../nativeDetectionSettings.mjs";
 import { WeatherSettings } from "./WeatherSettings.jsx";
 import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -66,9 +68,7 @@ import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hoo
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
 import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
 import { AccessSettings } from "./AccessSettings.jsx";
-import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
-import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
 
 export const ADMIN_DESTINATION_ICONS = {
   home: LayoutDashboard,
@@ -568,21 +568,14 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
           {selected ? <>
             <article><span>Live video</span><strong>{cameraConnectivityLabel(cameraCaptureConnectivity(selected))}</strong><small>Last frame {formatAge(selected.last_frame_age_seconds)}{selected.live_pipeline?.source_element ? ` · ${selected.live_pipeline.source_element}` : ""}{Number(selected.capture_reconnects || 0) ? ` · ${Number(selected.capture_reconnects).toLocaleString()} reconnects since restart` : ""}{selected.last_error ? ` · ${selected.last_error}` : ""}</small></article>
             <article><span>Stream interruptions · since restart</span><strong>{(selectedReadFailures + selectedOpenFailures).toLocaleString()}</strong><small>{selectedReadFailures.toLocaleString()} interrupted reads · {selectedOpenFailures.toLocaleString()} failed connections</small></article>
-            <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
-            <article><span>EMA coverage · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{runtimeTotals.eventLoss ? `${runtimeTotals.eventLoss} events lost` : "No events lost"}</small></article>
-            <article className="telemetry-memory-card"><span>Recorded decode memory</span><strong>{formatBytes(selected.recorded_decode?.reserved_bytes)}</strong><small>{selected.recorded_decode?.active_workflows ? `${selected.recorded_decode.active_workflows} active refinement${selected.recorded_decode.active_workflows === 1 ? "" : "s"}` : "No active refinement"}{selected.recorded_decoder_errors?.hevc_error_lines ? ` · ${selected.recorded_decoder_errors.hevc_error_lines} HEVC decode lines` : ""}</small></article>
           </> : <>
             <article><span>Camera uptime · 2h</span><strong>{formatCoverage(averageAvailability)}</strong><small>Lowest minute {formatCoverage(runtimeTotals.minimumAvailability)} · {runtimeTotals.interruptions ? `${runtimeTotals.interruptions.toLocaleString()} recovered stream issues` : "no stream interruptions"}</small></article>
-            <article><span>EMA coverage · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{analysisTotal ? (runtimeTotals.superseded ? `${runtimeTotals.superseded.toLocaleString()} stale frames skipped to stay current` : "Every sampled frame analyzed") : "No EMA samples in this window"}{runtimeTotals.eventLoss ? ` · ${runtimeTotals.eventLoss} events lost` : " · no events lost"}</small></article>
-            <article><span>Detector response</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{objectWorkers.alive_workers || (objectWorkers.worker_alive ? 1 : 0)}/{objectWorkers.configured_workers || 1} workers online · {Number(runtime.failed_inferences || 0) ? `${Number(runtime.failed_inferences).toLocaleString()} failures` : "no failures"}</small></article>
             <article><span>GPU</span><strong>{gpu.available ? "Available" : "Unavailable"}</strong><small>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}% busy now` : "Collecting activity"}</small></article>
             <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
-            <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.waited} delayed · {Number(backfillCounts.completed || 0).toLocaleString()} recovered · {Number(backfillCounts.queued || 0).toLocaleString()} waiting</small></article>
             <article><span>SurvNG uptime</span><strong>{formatServerUptime(Number(data.system?.uptime_seconds || 0))}</strong><small>Since the last service start</small></article>
             <article><span>CPU demand</span><strong>{data.system?.load_average?.one ?? "--"}</strong><small>Across {data.system?.cpu_count || 1} cores</small></article>
             <article className="telemetry-memory-card"><span>Host memory</span><strong>{formatBytes(memory.available_bytes)}</strong><small>{memory.used_percent || 0}% currently used</small></article>
-            <article className="telemetry-memory-card"><span>Application memory</span><strong>{formatBytes(serviceMemory.application_bytes)}</strong><small>SurvNG and AI workers</small></article>
-            <article className="telemetry-memory-card"><span>Recorded decode memory</span><strong>{formatBytes(recordedDecode.reserved_bytes)}</strong><small>{formatBytes(recordedDecode.memory_budget_bytes)} capacity · {recordedDecode.active_workflows || 0}/{recordedDecode.configured_processes || 0} active{recordedHevcErrors ? ` · ${recordedHevcErrors} HEVC decode lines` : ""}</small></article>
+            <article className="telemetry-memory-card"><span>Application memory</span><strong>{formatBytes(serviceMemory.application_bytes)}</strong><small>SurvNG and capture workers</small></article>
             <article className="telemetry-memory-card"><span>File cache</span><strong>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)}</strong><small>Released automatically as needed</small></article>
             <article><span>Local databases</span><strong>{formatBytes(data.system?.database?.bytes)}</strong><small>Events, indexes, and runtime state</small></article>
           </>}
@@ -593,16 +586,14 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
           <dl className="telemetry-details">
             <div><dt>CPU load · 1 / 5 / 15 min</dt><dd>{data.system?.load_average?.one ?? "--"} / {data.system?.load_average?.five ?? "--"} / {data.system?.load_average?.fifteen ?? "--"}</dd></div>
             <div><dt>Working set / service total</dt><dd>{formatBytes(serviceMemory.working_set_bytes)} / {formatBytes(serviceMemory.total_bytes)}</dd></div>
-            <div><dt>Main / inference-worker RSS</dt><dd>{formatBytes(data.system?.process_rss_bytes)} / {formatBytes(workerMemory.total_rss_bytes)}</dd></div>
             <div><dt>Allocator live / retained</dt><dd>{formatBytes(data.system?.process_memory?.malloc?.allocated_bytes)} / {formatBytes(data.system?.process_memory?.malloc?.free_bytes)}</dd></div>
             <div><dt>Allocator trims</dt><dd>{Number(memoryMaintenance.successful_trims || 0).toLocaleString()} <small>{formatBytes(memoryMaintenance.reclaimed_total_bytes)} reclaimed</small></dd></div>
             <div><dt>Threads / open files</dt><dd>{Number(data.system?.process_memory?.threads || 0).toLocaleString()} / {Number(data.system?.process_memory?.file_descriptors || 0).toLocaleString()}</dd></div>
-            <div><dt>Detector backend / device</dt><dd>{data.detector?.loaded_backend || "Not loaded"} / {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>
-            <div><dt>Object detector processes</dt><dd>{(objectWorkers.worker_pids || [objectWorkers.worker_pid]).filter(Boolean).join(", ") || "None"}</dd></div>
-            <div><dt>Per-detector response</dt><dd>{(runtime.workers || []).length ? runtime.workers.map((worker) => `#${worker.index} ${formatMilliseconds(worker.average_inference_ms)} · ${Number(worker.queue_depth || 0)} queued`).join(" · ") : "Waiting for samples"}</dd></div>
-            <div><dt>Inference requests / object hits</dt><dd>{Number(runtime.total_inferences || 0).toLocaleString()} / {Number(runtime.object_hit_inferences || 0).toLocaleString()}</dd></div>
+            <div><dt>Detector / device</dt><dd>Native gvadetect / {data.detector?.configured_device || "--"}</dd></div>
           </dl>
         </details> : null}
+
+        <section className="telemetry-section"><h3>Native camera activity</h3>{shownCameras.map((camera) => <div key={camera.id}><h4>{camera.name || camera.id}</h4><RuntimeStatus status={camera} /></div>)}</section>
 
         <section className="telemetry-section">
           <div className="telemetry-section-head"><div><h3>Events by hour{selected ? ` · ${selected.name}` : ""}</h3></div></div>
@@ -620,13 +611,7 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
           <div className="telemetry-legend"><span><i /> Events</span><span><i className="objects" /> Object incidents</span></div>
         </section>
 
-        <section className="telemetry-section">
-          <div className="telemetry-section-head"><div><h3>{selected ? `${selected.name} object tracking` : "Object tracking"}</h3></div></div>
-          <div className="telemetry-trend-grid two-column">
-            <TelemetryTrend title="Tracking · 2 hours" history={capacityShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Requested", className: "rate" }, { key: "waited", label: "Delayed", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
-            <TelemetryTrend title="Tracking · 7 days" history={capacityLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Requested", className: "rate" }, { key: "waited", label: "Delayed", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
-          </div>
-        </section>
+
 
         <section className="telemetry-section">
           <div className="telemetry-section-head"><div><h3>Camera reliability{selected ? ` · ${selected.name}` : ""}</h3></div></div>
@@ -638,23 +623,13 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
           </div>
         </section>
 
-        <section className="telemetry-section">
-          <div className="telemetry-section-head"><div><h3>Enhanced motion analysis{selected ? ` · ${selected.name}` : ""}</h3></div></div>
-          <div className="telemetry-trend-grid two-column">
-            <TelemetryTrend title="EMA coverage · 2 hours" history={runtimeShort} timeZone={timeZone} maximum={100} valueFormatter={formatCoverage} series={[{ key: "analysis_coverage_percent", label: "Coverage", className: "rate" }]} />
-            <TelemetryTrend title="EMA coverage · 7 days" history={runtimeLong} timeZone={timeZone} maximum={100} valueFormatter={formatCoverage} series={[{ key: "analysis_coverage_percent", label: "Coverage", className: "rate" }]} />
-            <TelemetryTrend title="EMA rescue path · 2 hours" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "ema_credible_episodes", label: "Credible", className: "secondary" }, { key: "object_checks_admitted", label: "Admitted", className: "warning" }, { key: "object_checks_completed", label: "Completed", className: "rate" }]} />
-            <TelemetryTrend title="EMA rescue path · 7 days" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "ema_credible_episodes", label: "Credible", className: "secondary" }, { key: "object_checks_admitted", label: "Admitted", className: "warning" }, { key: "object_checks_completed", label: "Completed", className: "rate" }]} />
-          </div>
-        </section>
+
 
         {!selected ? <section className="telemetry-section">
           <div className="telemetry-section-head"><div><h3>System performance</h3></div></div>
           <div className="telemetry-trend-grid two-column">
             <TelemetryTrend title="Host demand · 2 hours" history={runtimeShort} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
-            <TelemetryTrend title="Detector response · 2 hours" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "inference_ms", label: "Response", className: "inference" }]} />
             <TelemetryTrend title="Host demand · 7 days" history={runtimeLong} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
-            <TelemetryTrend title="Detector response · 7 days" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "inference_ms", label: "Response", className: "inference" }]} />
           </div>
         </section> : null}
 
@@ -671,32 +646,9 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
             <div className="telemetry-section-head"><div><h3>{selected ? `${selected.name} activity` : "Object activity"}</h3></div></div>
             <dl className="telemetry-details">
               <div><dt>Top labels · 24h</dt><dd>{topLabels.length ? topLabels.map(([label, count]) => `${label} ${count}`).join(" · ") : "None"}</dd></div>
-              <div><dt>Activity attribution · since restart</dt><dd>{activityAttribution.evaluated.toLocaleString()} checked <small>{activityAttribution.active.toLocaleString()} active · {activityAttribution.sceneContext.toLocaleString()} scene context · {activityAttribution.indeterminate.toLocaleString()} uncertain</small></dd></div>
-              <div><dt>Context prevented from labeling incidents</dt><dd>{activityAttribution.enforced.toLocaleString()} <small>{activityAttribution.modes.size ? [...activityAttribution.modes].join(" / ").replaceAll("_", " ") : "waiting for detections"}</small></dd></div>
-              <div><dt>Object admission · since restart</dt><dd>{activityAttribution.detectorAdmissions.toLocaleString()} detector-eligible <small>{activityAttribution.confidenceRejections.toLocaleString()} low confidence · {activityAttribution.zoneRejections.toLocaleString()} zone-rejected · {activityAttribution.temporalRejections.toLocaleString()} unconfirmed · {activityAttribution.enforced.toLocaleString()} scene context</small></dd></div>
-              <div><dt>Depth-shadow health · 24h</dt><dd><DepthShadowPerformance cameraId={selected?.id || ""} label={selected ? "Depth shadow · this camera · last 24 hours" : "Depth shadow · all cameras · last 24 hours"} /></dd></div>
             </dl>
           </section>
-          {!selected ? <section className="telemetry-section">
-            <div className="telemetry-section-head"><div><h3>Semantic search</h3></div></div>
-            <dl className="telemetry-details">
-              <div><dt>Status</dt><dd>{String(semantic.state || (semantic.enabled ? "starting" : "disabled")).replaceAll("_", " ")}{semantic.device ? ` · ${semantic.device}` : ""}</dd></div>
-              <div><dt>Indexed incidents</dt><dd>{Number(semantic.event_count || 0).toLocaleString()}</dd></div>
-              <div><dt>Search evidence</dt><dd>{Number(semantic.evidence_count || 0).toLocaleString()} <small>whole images and object crops</small></dd></div>
-              <div><dt>Queue / added since restart</dt><dd>{Number(semantic.queue_depth || 0).toLocaleString()} / {Number(semantic.indexed_since_start || 0).toLocaleString()}</dd></div>
-              {semantic.error || semantic.reason ? <div><dt>Last issue</dt><dd>{semantic.error || semantic.reason}</dd></div> : null}
-            </dl>
-          </section> : null}
-          {!selected ? <section className="telemetry-section">
-            <div className="telemetry-section-head"><div><h3>Face recognition</h3></div></div>
-            <dl className="telemetry-details">
-              <div><dt>Recognizable faces</dt><dd>{Number(faceRecognition.actionable_observations || 0).toLocaleString()} <small>{Number(faceRecognition.known || 0).toLocaleString()} identified · {Number(faceRecognition.unknown || 0).toLocaleString()} unknown</small></dd></div>
-              <div><dt>Identification rate</dt><dd>{Number(faceRecognition.identified_percent || 0).toFixed(1)}%</dd></div>
-              <div><dt>Unusable faces</dt><dd>{Number(faceRecognition.too_small || 0).toLocaleString()} <small>{Number(faceRecognition.processing_failed || 0).toLocaleString()} failures</small></dd></div>
-              <div><dt>Candidate frames / multi-frame tracks</dt><dd>{Number(faceRecognition.candidate_frames || 0).toLocaleString()} / {Number(faceRecognition.multi_frame_tracks || 0).toLocaleString()}</dd></div>
-              <div><dt>Recognition queue</dt><dd>{Number(faceRecognition.recognition?.queue_depth || 0).toLocaleString()} <small>{Number(faceRecognition.recognition?.pending || 0).toLocaleString()} pending · {Number(faceRecognition.recognition?.failed || 0).toLocaleString()} failed</small></dd></div>
-            </dl>
-          </section> : null}
+
         </div>
 
         {selected ? <section className="telemetry-section">
@@ -727,9 +679,6 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
                   <div><dt>Recording timeline</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
                   <div><dt>Used-Recordings</dt><dd>{formatBytes(camera.storage?.recording_bytes)}</dd></div>
                   <div><dt>Used-Snapshots</dt><dd>{formatBytes(camera.storage?.snapshot_bytes)}</dd></div>
-                  <div><dt>Processing health</dt><dd>{performance.summary || "Collecting a representative processing sample"}</dd></div>
-                  <div><dt>Camera event connection</dt><dd>{cameraEventStatus}</dd></div>
-                  <div><dt>Recorded decode memory</dt><dd>{camera.recorded_decode?.active_workflows ? `${formatBytes(camera.recorded_decode.reserved_bytes)} · ${camera.recorded_decode.active_workflows} active` : "Idle"}</dd></div>
                 </dl>
                 <details className="telemetry-technical">
                   <summary>Technical diagnostics</summary>
@@ -738,26 +687,15 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
                     <div><dt>Live decoded FPS</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)}</dd></div>
                     <div><dt>Live source element</dt><dd>{camera.live_pipeline?.source_element || "Unknown"}</dd></div>
                     <div><dt>Shared gvadetect</dt><dd>{camera.live_pipeline?.model_instance_id || "not reported yet"}</dd></div>
-                    <div><dt>Recorded decode reservation</dt><dd>{camera.recorded_decode?.active_workflows ? `${formatBytes(camera.recorded_decode.reserved_bytes)} · ${formatBytes(camera.recorded_decode.frame_bytes)} × ${camera.recorded_decode.frames || 0} frames` : "None"}</dd></div>
                     <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
                     <div><dt>Read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
-                    <div><dt>Capture-to-analysis p95 / p99</dt><dd>{formatMilliseconds(analysisRuntime.capture_to_analysis_p95_ms)} / {formatMilliseconds(analysisRuntime.capture_to_analysis_p99_ms)}</dd></div>
-                    <div><dt>Performance gates</dt><dd>{(performance.checks || []).map((check) => `${check.label}: ${Number(check.value || 0).toFixed(check.unit === "%" ? 1 : 2)}${check.unit}`).join(" · ") || "Waiting for samples"}</dd></div>
-                    <div><dt>Analyzed / stale skipped / deferred</dt><dd>{analyzed.toLocaleString()} / {superseded.toLocaleString()} / {Number(analysisRuntime.analysis_slot_deferrals || 0).toLocaleString()}</dd></div>
-                    <div><dt>Motion passed / rejected / suppressed</dt><dd>{camera.motion?.passed || 0} / {camera.motion?.rejected || 0} / {camera.motion?.suppressed || 0}</dd></div>
-                    <div><dt>Object admission / confidence / zone / confirmation / context</dt><dd>{Number(objectActivity.detector_admissions || 0).toLocaleString()} / {Number(objectActivity.confidence_rejections || 0).toLocaleString()} / {Number(objectActivity.zone_rejections || 0).toLocaleString()} / {Number(objectActivity.temporal_rejections || 0).toLocaleString()} / {Number(objectActivity.enforced_suppressions || 0).toLocaleString()}</dd></div>
-                    <div><dt>Event queue peak / evicted / rejected / retry lost</dt><dd>{camera.motion?.event_runtime?.queue_high_water || 0} / {camera.motion?.event_runtime?.evicted || 0} / {camera.motion?.event_runtime?.rejected || 0} / {camera.motion?.event_runtime?.retries_dropped || 0}</dd></div>
-                    <div><dt>EMA requests · admitted / merged / failed</dt><dd>{camera.motion?.event_runtime?.episode?.decision_counts?.request_admitted || 0} / {camera.motion?.event_runtime?.episode?.decision_counts?.merged_with_request || 0} / {camera.motion?.event_runtime?.episode?.decision_counts?.detector_failed || 0}</dd></div>
-                    <div><dt>ONVIF notices / renewals / issues</dt><dd>{camera.onvif?.notifications || 0} / {camera.onvif?.renewals || 0} / {onvifIssues}</dd></div>
-                    <div><dt>Tracking waits / longest / timeouts</dt><dd>{camera.tracking?.capacity_waits || 0} / {Number(camera.tracking?.capacity_wait_seconds_max || 0).toFixed(1)}s / {camera.tracking?.capacity_timeouts || 0}</dd></div>
-                    <div><dt>ReID checks / recoveries / failures</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0} / {camera.tracking?.reid_failures || 0}</dd></div>
                   </dl>
                 </details>
               </article>
             })}
           </div>
         </section> : null}
-        <p className="telemetry-footnote">Availability, interruptions, EMA coverage, event delivery, and tracking capacity are the primary health signals. “Stale skipped” means a newer frame replaced an older pending sample so analysis stayed current; it matters only when coverage drops persistently. One-minute detail is retained for 48 hours, with compact summaries retained longer.</p>
+        <p className="telemetry-footnote">Native detection health, fresh result rate, stream availability, and recording health describe the active pipeline. Detector timing includes native scheduling and is not end-to-end video latency.</p>
       </div>
     </TelemetryInterruptionsContext.Provider>
   );
@@ -1075,8 +1013,10 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const [mqttStatus, setMqttStatus] = useState(null);
   const [detectorStatus, setDetectorStatus] = useState(null);
   const [motionCatalog, setMotionCatalog] = useState(null);
-  const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", initialAdminWorkspace, { preferInitial: initialAdminParams.has("section") });
-  const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", readAdminSubsection(initialAdminSearch, GENERAL_ADMIN_SECTIONS, "general"), { preferInitial: initialAdminWorkspace === "general" && initialAdminParams.has("subsection") });
+  const [storedSettingsTab, setSettingsTab] = useStoredState("survng.configTab", initialAdminWorkspace, { preferInitial: initialAdminParams.has("section") });
+  const [storedGeneralSection, setGeneralSection] = useStoredState("survng.generalSection.v1", readAdminSubsection(initialAdminSearch, GENERAL_ADMIN_SECTIONS, "general"), { preferInitial: initialAdminWorkspace === "general" && initialAdminParams.has("subsection") });
+  const settingsTab = ["audit", "calibration"].includes(storedSettingsTab) ? "general" : storedSettingsTab;
+  const generalSection = GENERAL_ADMIN_SECTIONS.includes(storedGeneralSection) ? storedGeneralSection : "detection";
   const [cameraSection, setCameraSection] = useStoredState("survng.cameraSection.v1", readAdminSubsection(initialAdminSearch, CAMERA_ADMIN_SECTIONS, "settings"), { preferInitial: initialAdminWorkspace === "cameras" && initialAdminParams.has("subsection") });
   const [selectedId, setSelectedId] = useState(() => new URLSearchParams(initialAdminSearch).get("camera") || "");
   const [saveNotice, setSaveNotice] = useState(null);
@@ -1383,9 +1323,8 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
         optionalPayload("/api/detector/models"),
         optionalPayload("/api/recordings/cache/status"),
         optionalPayload("/api/system/status"),
-        optionalPayload("/api/motion/pipeline/catalog"),
         optionalPayload("/api/retention/status"),
-      ]).then(([status, acceleratorPayload, models, cache, system, catalog, retention]) => {
+      ]).then(([status, acceleratorPayload, models, cache, system, retention]) => {
         if (sequence !== configLoadSequence.current) return;
         if (Array.isArray(status)) setRuntimeStatus(status);
         if (acceleratorPayload) setAccelerator(acceleratorPayload);
@@ -1395,7 +1334,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           setMqttStatus(system.mqtt || null);
           setDetectorStatus(system.detector || null);
         }
-        if (catalog) setMotionCatalog(catalog);
         if (retention) setRetentionStatus(retention);
       });
       return true;
@@ -1410,28 +1348,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     return () => { configLoadSequence.current += 1; };
   }, []);
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("section") !== "audit") return;
-    setSettingsTab("audit");
-    const auditId = Number(params.get("audit_id"));
-    if (!Number.isInteger(auditId) || auditId <= 0) return;
-    let active = true;
-    fetch(`/api/motion-audit/${auditId}`)
-      .then((response) => {
-        if (!response.ok) throw new Error(`Motion audit failed to load (${response.status})`);
-        return response.json();
-      })
-      .then((item) => {
-        if (!active) return;
-        setLinkedAudit(item);
-        setSelectedAuditId(item.id);
-      })
-      .catch((error) => {
-        if (active) setAuditError(error.message || "Unable to open the selected motion audit.");
-      });
-    return () => { active = false; };
-  }, [setSettingsTab]);
 
   async function loadRetention() {
     try {
@@ -1921,6 +1837,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
   async function save() {
     if (generalSaving) return false;
+    const detectionError = nativeDetectionError(config.detector);
+    if (detectionError) {
+      setSaveNotice({ state: "error", text: detectionError });
+      return false;
+    }
     const ids = new Set();
     const configToSave = {
       ...config,
@@ -2337,7 +2258,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
               <div className="admin-home-summary" aria-label="System setup summary">
                 <article><span className="admin-home-summary-icon"><Camera size={18} /></span><div><strong>{cameras.length}</strong><small>{cameras.length === 1 ? "Camera configured" : "Cameras configured"}</small></div><em className={cameras.length ? "good" : "attention"}>{cameras.length ? "Ready" : "Start here"}</em></article>
                 <article><span className="admin-home-summary-icon"><ShieldCheck size={18} /></span><div><strong>{runtimeStatus.filter((item) => item.running !== false).length}/{cameras.length}</strong><small>Camera workers running</small></div><em className={cameras.length && runtimeStatus.filter((item) => item.running !== false).length === cameras.length ? "good" : "attention"}>{cameras.length && runtimeStatus.filter((item) => item.running !== false).length === cameras.length ? "Healthy" : "Review"}</em></article>
-                <article><span className="admin-home-summary-icon"><Cpu size={18} /></span><div><strong>{detectorStatus?.running === false ? "Offline" : config.detector ? "Enabled" : "Not set"}</strong><small>Detection engine</small></div><em className={detectorStatus?.running === false ? "attention" : "good"}>{detectorStatus?.running === false ? "Check" : "Ready"}</em></article>
+                <article><span className="admin-home-summary-icon"><Cpu size={18} /></span><div><strong>{!config.detector?.enabled ? "Disabled" : detectorStatus?.ready ? "Ready" : "Waiting"}</strong><small>Detection engine</small></div><em className={config.detector?.enabled && !detectorStatus?.ready ? "attention" : "good"}>{config.detector?.enabled ? `${detectorStatus?.healthy_cameras ?? 0}/${detectorStatus?.active_cameras ?? 0} healthy` : "Off"}</em></article>
                 <article><span className="admin-home-summary-icon"><HardDrive size={18} /></span><div><strong>{retentionStatus?.state ? String(retentionStatus.state).replaceAll("_", " ") : "Calculating"}</strong><small>Storage plan</small></div><em className={retentionStatus?.state === "error" ? "attention" : "good"}>{retentionStatus?.state === "error" ? "Review" : "Tracked"}</em></article>
               </div>
               <div className="admin-home-section-head"><div><h2>Choose a task</h2><p>Configuration is organized by the outcome you want, with advanced controls inside each area.</p></div></div>
@@ -2358,8 +2279,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 <button type="button" aria-current={generalSection === "access" ? "page" : undefined} className={generalSection === "access" ? "active" : ""} onClick={() => selectAdminSubsection("access", setGeneralSection, "general")}><KeyRound size={16} /><span>Access</span></button>
                 <span className="tree-group-label">Intelligence</span>
                 <button type="button" aria-current={generalSection === "detection" ? "page" : undefined} className={generalSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setGeneralSection, "general")}><Cpu size={16} /><span>Object Detection</span></button>
-                <span className="tree-group-label">Tools</span>
-                <button type="button" aria-current={generalSection === "motion-review" ? "page" : undefined} className={generalSection === "motion-review" ? "active" : ""} onClick={() => selectAdminSubsection("motion-review", setGeneralSection, "general")}><Sparkles size={16} /><span>Camera Advisor</span></button>
               </div>
             </section>
             <section id="admin-panel-general" className="bento-card config-editor settings-panel" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
@@ -2392,28 +2311,11 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
               />
             </section>
           </>
-        ) : settingsTab === "audit" ? (
-          <section id="admin-panel-audit" className="bento-card config-editor settings-panel settings-panel-wide motion-audit-panel" aria-labelledby="admin-destination-audit">
-              <MotionAuditViewer
-                items={auditItems}
-                total={auditTotal}
-                page={auditPage}
-                pageSize={auditPageSize}
-                setPage={setAuditPage}
-                loading={auditLoading}
-                error={auditError}
-                timeZone={timeZone}
-                onOpen={(item) => setSelectedAuditId(item.id)}
-              />
-          </section>
-        ) : settingsTab === "calibration" ? (
-          <CalibrationLab key={`calibration-${calibrationViewNonce}`} cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
         ) : settingsTab === "telemetry" ? (
           <>
             <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide subsection-workspace" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
               {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
               {telemetrySection === "diagnostics" ? <div id="telemetry-view-panel" className="telemetry-tab-panel" role="tabpanel"><div className="telemetry-diagnostics">
-                <ModelsAndHardwarePanel config={config} updateConfig={updateConfig} detectorModels={detectorModels} accelerator={accelerator} />
                 <section className="telemetry-section support-bundle-section">
                   <div className="telemetry-section-head"><div><h3>Support bundle</h3><p>Download one redacted system report to share when you need help troubleshooting. It includes software and runtime status, safe configuration, recent health events, diagnostics, and logs—never video, images, passwords, tokens, cookies, private keys, or camera stream URLs.</p></div><a className="button primary" href={appUrl("/api/support-bundle")} download="survng-support-bundle.json"><Download size={15} />Download support bundle</a></div>
                 </section>
@@ -2442,17 +2344,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
               </div></div> : (
                 <div className="detection-settings subsection-workspace health-subsection-workspace">
-                  <nav id="health-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label="Health sections" onKeyDown={(event) => moveTabFocus(event, HEALTH_TELEMETRY_SECTIONS, telemetrySection === "occupancy" ? "occupancy" : "health", (next) => selectAdminSubsection(next, setTelemetrySection, "telemetry"))}>
-                    <button id="health-tab-health" data-tab-id="health" type="button" tabIndex={telemetrySection === "occupancy" ? -1 : 0} aria-controls="telemetry-view-panel" className={telemetrySection === "occupancy" ? "" : "active"} onClick={() => selectAdminSubsection("health", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection !== "occupancy"}><Gauge size={15} />Telemetry</button>
-                    <button id="health-tab-occupancy" data-tab-id="occupancy" type="button" tabIndex={telemetrySection === "occupancy" ? 0 : -1} aria-controls="telemetry-view-panel" className={telemetrySection === "occupancy" ? "active" : ""} onClick={() => selectAdminSubsection("occupancy", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "occupancy"}><Cpu size={15} />Detection at a glance</button>
-                  </nav>
-                  <div id="telemetry-view-panel" className="detection-settings-content health-subsection-content telemetry-tab-panel" role="tabpanel" aria-labelledby={telemetrySection === "occupancy" ? "health-tab-occupancy" : "health-tab-health"}>
-                    {telemetrySection === "occupancy" ? (
-                      <DetectionOccupancyCard telemetry={telemetry} cameraId={telemetryCamera} config={config} onOpenSetting={openOccupancySetting} />
-                    ) : (
-                      <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
-                    )}
-                  </div>
+                  <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
                 </div>
               )}
             </section>
@@ -2607,7 +2499,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
 
                     {cameraSection === "info" ? <>
                       <RuntimeStatus status={selectedRuntimeStatus} timeZone={timeZone} motionCatalog={motionCatalog} />
-                      <MotionDebugViewer cameraId={selectedCamera.id} timeZone={timeZone} />
                       {probe ? <ProbeResult probe={probe} /> : null}
                     </> : null}
                   </>
@@ -2905,7 +2796,6 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
                 </div>
                 <label className="zone-field-confidence">Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder={selectedZone.behavior === "none" ? "N/A" : "Global"} disabled={selectedZone.behavior === "none"} value={selectedZone.confidence_threshold ?? ""} onChange={(event) => replaceZone(selectedIndex, { confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
                 <div className="zone-toggle-stack">
-                  <label title="Motion inside this zone will not validate or trigger EMA activity. Object incident rules remain unchanged."><input type="checkbox" checked={selectedZone.exclude_from_ema === true} onChange={(event) => replaceZone(selectedIndex, { exclude_from_ema: event.target.checked })} /> Exclude from EMA</label>
                   <label title="Allow Home Assistant and MQTT incident notifications for this zone."><input type="checkbox" checked={selectedZone.notifications_enabled !== false} onChange={(event) => replaceZone(selectedIndex, { notifications_enabled: event.target.checked })} /> HA/MQTT Notifications</label>
                   <label><input type="checkbox" checked={selectedZone.enabled !== false} onChange={(event) => replaceZone(selectedIndex, { enabled: event.target.checked })} /> Enabled</label>
                 </div>
@@ -4154,7 +4044,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}><option value="auto">Auto (VAAPI preferred)</option><option value="vaapi">VAAPI</option><option value="qsv">Intel QSV</option><option value="off">Off</option></select></label>
               <label>RTSP Capture Transport<select value={config.capture_rtsp_transport || "tcp"} onChange={(event) => updateConfig(["capture_rtsp_transport"], event.target.value)}><option value="tcp">TCP (recommended)</option><option value="udp">UDP</option></select><small>TCP prevents packet-loss decoder errors on most camera networks. UDP is available for cameras or relays that require it.</small></label>
             </div>
-            <p className="admin-action-note">Changing RTSP transport reloads camera capture workers. Existing custom <code>OPENCV_FFMPEG_CAPTURE_OPTIONS</code> remains an advanced environment override.</p>
+            <p className="admin-action-note">Changing RTSP transport reloads camera capture workers. Native live capture uses GStreamer.</p>
           </section>
         )}
         </>
@@ -4360,7 +4250,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           </section>
           <section className="api-access-settings ai-provider-settings" id="ai-provider-settings" hidden={apiSection !== "ai"}>
             <div className="detection-settings-subhead">
-              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Sparkles size={16} /></span>AI Provider</strong><small>Shared provider for the assistant, Motion Audit reviews, and Camera Advisor.</small></div>
+              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Sparkles size={16} /></span>AI Provider</strong><small>Provider for the SurvNG assistant.</small></div>
               <span className="admin-action-kind">Save settings to apply</span>
             </div>
             <div className="detection-field-grid">
@@ -4371,7 +4261,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 <option value="gemini">Google Gemini</option>
                 <option value="openai_compatible">OpenAI compatible</option>
               </select></label>
-              <label>Everyday AI model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /><small>Used for Motion Audit reviews, finding incidents, status questions, and straightforward answers.</small></label>
+              <label>Everyday AI model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /><small>Used for finding incidents, status questions, and straightforward answers.</small></label>
               <label>Detailed analysis model<input value={config.audit_ai?.assistant_reasoning_model || ""} onChange={(event) => updateConfig(["audit_ai", "assistant_reasoning_model"], event.target.value)} placeholder="Leave blank to use the everyday model" /><small>Optional second model for visual incident reviews, difficult diagnoses, comparisons, and tuning advice.</small></label>
               <label>API Key<input type="password" value={secretInputValue(config.audit_ai?.api_key)} placeholder={secretInputHint(config.audit_ai?.api_key)} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
               <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
@@ -4383,38 +4273,8 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
         </div>
       ) : null}
 
-      {section === "detection" ? (
-        <section className="sub-panel detection-settings-card">
-          <h3>Native detection and tracking</h3>
-          <p>Each live stream runs gvadetect and gvatrack continuously. Fresh object presence in eligible zones creates incidents.</p>
-          <div className="form-grid">
-            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.enabled || false} onChange={(event) => updateConfig(["detector", "enabled"], event.target.checked)} /><span>Detection enabled</span></label>
-            <label>OpenVINO model<input value={config.detector?.model_path || config.detector?.model_xml || ""} onChange={(event) => updateConfig(["detector", "model_path"], event.target.value)} /></label>
-            <label>Device<input value={config.detector?.device || "GPU"} onChange={(event) => updateConfig(["detector", "device"], event.target.value)} /></label>
-            <label>Labels file<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} /></label>
-            <label>Frames per second<input type="number" min="0.5" max="10" step="0.5" value={config.detector?.live_sample_fps ?? 5} onChange={(event) => updateConfig(["detector", "live_sample_fps"], Number(event.target.value))} /><small>Every sampled frame runs detection and tracking.</small></label>
-            <label>Confidence<input type="number" min="0.01" max="1" step="0.01" value={config.detector?.confidence_threshold ?? 0.35} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /></label>
-            <label>Confirmation frames<input type="number" min="1" max="5" value={config.detector?.event_confirmation_frames ?? 2} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))} /></label>
-            <label>Presence timeout (seconds)<input type="number" min="1" max="60" step="0.5" value={config.detector?.native?.activity_timeout_seconds ?? 5} onChange={(event) => updateConfig(["detector", "native", "activity_timeout_seconds"], Number(event.target.value))} /><small>Time without fresh eligible presence before the episode ends.</small></label>
-          </div>
-          <div className="form-grid">
-            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.native?.stationary?.enabled ?? true} onChange={(event) => updateConfig(["detector", "native", "stationary", "enabled"], event.target.checked)} /><span>Suppress stationary vehicle incidents</span></label>
-            <label>Stationary after (seconds)<input type="number" min="1" max="120" step="1" value={config.detector?.native?.stationary?.stationary_seconds ?? 8} onChange={(event) => updateConfig(["detector", "native", "stationary", "stationary_seconds"], Number(event.target.value))} /><small>Vehicles must show movement to start an incident. Stable vehicles remain tracked as scene context.</small></label>
-          </div>
-          <p>People retain presence alerts, including while standing still. Native IDs last for one stream session; reconnects require new movement evidence for vehicles.</p>
-        </section>
-      ) : null}
+      {section === "detection" ? <NativeDetectionSettings detector={config.detector || {}} updateConfig={updateConfig} modelClasses={eventConfirmationClasses} /> : null}
 
-      {section === "motion-review" ? (
-        <MotionAiReviewPanel
-          cameras={config.cameras || []}
-          runtimeStatus={runtimeStatus}
-          advisorEnabled={config.audit_ai?.enabled ?? false}
-          cameraId={advisorCameraId}
-          onCameraIdChange={onAdvisorCameraIdChange}
-          hideScopePicker={Boolean(onAdvisorCameraIdChange)}
-        />
-      ) : null}
     </div>
   );
 }
@@ -4658,7 +4518,7 @@ export function DepthShadowPerformance({ cameraId = "", mode = "", label = "Dept
 }
 
 export function RuntimeStatus({ status, timeZone, motionCatalog }) {
-  if (status.native_activity) {
+  if (status?.native_activity?.health) {
     const native = status.native_activity;
     const pipeline = status.live_pipeline || {};
     return <section className="sub-panel">
@@ -4670,60 +4530,5 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <p>{native.active ? "Object presence active" : "No active presence episode"} · {native.counters?.events_created || 0} events · {native.counters?.metadata_restarts || 0} metadata recoveries</p>
     </section>;
   }
-  if (!status) {
-    return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
-  }
-  const motionMode = status.motion_qualification?.mode;
-  const cameraAlertsOnly = !["adaptive", "enforce"].includes(motionMode);
-  const visualBackupEnabled = motionMode === "camera_rescue";
-  const missingMotionNotices = cameraAlertsOnly
-    && status.onvif_enabled
-    && Number(status.onvif_motion_events_received || 0) === 0;
-  const missingCameraTrigger = cameraAlertsOnly && !status.onvif_enabled;
-  return (
-    <div className="probe-result runtime-result">
-      <strong>Runtime</strong>
-      <span>Stream worker: {status.running ? "running" : "not running"}</span>
-      <span>Live source: {status.live_pipeline?.source_element || "not reported yet"}{status.live_pipeline?.model_instance_id ? ` · ${status.live_pipeline.model_instance_id}` : ""}</span>
-      <span>Recording: {status.recording ? "running" : "stopped"}</span>
-      <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
-      {status.onvif_last_event_at ? <span>Last ONVIF notification (any type): {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
-      {status.onvif_enabled ? <span>{status.onvif_notifications_received || 0} notifications · {status.onvif_motion_events_received || 0} active motion · {status.onvif_inactive_motion_events || 0} inactive motion · {status.onvif_renewals || 0} subscription renewals</span> : null}
-      {status.motion_qualification ? (
-        <div className="motion-runtime-status">
-          <div className="motion-runtime-summary">
-            <strong>Motion processing</strong>
-            <span>{motionModeInfo(status.motion_qualification.mode).status} · {status.motion_qualification.sensitivity} sensitivity · {status.motion_qualification.frame_width || 320}px</span>
-            <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} legacy preview rejects · {status.motion_qualification.suppressed || 0} filtered</span>
-            <span>{status.motion_qualification.continuous_frames || 0} visual frames analyzed · {status.motion_qualification.continuous_candidates || 0} accepted analysis frames · {status.motion_qualification.triggers || 0} triggers delivered · {status.motion_qualification.analysis_frames_dropped || 0} stale requests replaced</span>
-            <span>Capture-to-analysis p95 {formatMilliseconds(status.motion_qualification.analysis_runtime?.capture_to_analysis_p95_ms)} · preprocessing p99 {formatMilliseconds(status.motion_qualification.analysis_runtime?.preprocess_p99_ms)} · {formatBytes(status.motion_qualification.analysis_runtime?.copy_bytes || 0)} copied for motion analysis</span>
-            <span>Light and shadow filtering {status.motion_qualification.illumination_filter_enabled ? "enabled" : "measuring only"} · {status.motion_qualification.illumination_evaluations || 0} evaluated · {status.motion_qualification.illumination_candidates || 0} likely illumination changes · {status.motion_qualification.illumination_filtered || 0} filtered</span>
-            <span>{status.motion_qualification.validation_failures || 0} validator errors · {status.motion_qualification.validation_fail_opens || 0} allowed through safely</span>
-            <span>{status.motion_qualification.active_followup_triggers || 0} active-event follow-ups · {status.motion_qualification.active_followup_objects || 0} found an object · {status.motion_qualification.active_followup_no_object || 0} found none · {status.motion_qualification.active_followup_episode_limited || 0} held by the episode limit</span>
-            {missingCameraTrigger ? <span className="motion-runtime-warning">{visualBackupEnabled ? "ONVIF is disabled, so the conservative visual backup is the only automatic trigger. Restore ONVIF for primary coverage." : "ONVIF is disabled. Camera-triggered mode has no automatic trigger source; only manual tests can run object detection."}</span> : null}
-            {missingMotionNotices ? <span className="motion-runtime-warning">{visualBackupEnabled ? "No recognized ONVIF motion notices since this worker started. Strong persistent visual motion can still invoke the backup detector path." : "No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident."}</span> : null}
-            {visualBackupEnabled ? <>
-              <span>{status.motion_qualification.visual_backup?.scene_ready ? "EMA background ready" : "EMA learning scene"} · {status.motion_qualification.visual_backup_triggers || 0} visual backups · {status.motion_qualification.visual_backup_onvif_matches || 0} strong candidates matched to camera notices · {status.motion_qualification.visual_backup_rate_limited || 0} limited</span>
-              <span>{status.motion_qualification.visual_backup_not_ready || 0} strong candidates held during scene learning · {status.motion_qualification.visual_backup_uncorrelated_objects || 0} detected objects outside motion areas rejected</span>
-            </> : null}
-            <MotionEffectiveness cameraId={status.id} mode={status.motion_qualification.mode} />
-            <DepthShadowPerformance cameraId={status.id} mode={status.motion_qualification.mode} label="Depth shadow · current mode · last 24 hours" />
-          </div>
-          <div className="motion-pipeline-runtime-grid">
-            <MotionPipelineRuntimeCard label="Motion analysis" pipeline={status.motion_qualification.pipeline} origin={status.motion_qualification.pipeline_origins?.qualification} motionCatalog={motionCatalog} />
-            <MotionPipelineRuntimeCard label="Extra sources" pipeline={status.motion_qualification.observation_pipeline} origin={status.motion_qualification.pipeline_origins?.observation} motionCatalog={motionCatalog} />
-            <MotionPipelineRuntimeCard label="Decision" pipeline={status.motion_qualification.fusion_pipeline} origin={status.motion_qualification.pipeline_origins?.fusion} motionCatalog={motionCatalog} />
-          </div>
-          <div className="motion-evidence-runtime">
-            {Object.entries(status.motion_qualification.evidence_sources || {}).map(([source, evidence]) => (
-              <span key={source} className={evidence.enabled ? "enabled" : "disabled"}>
-                <strong>{source === "onvif" ? "Camera signal" : source === "depth_object" ? "Depth evidence" : source}</strong>
-                {evidence.enabled ? `${evidence.sample_count || 0} samples${evidence.last?.score != null ? ` · ${Math.round(Number(evidence.last.score) * 100)}% last confidence` : ""}${source === "depth_object" && evidence.last?.nearest_m != null ? ` · nearest ${Number(evidence.last.nearest_m).toFixed(1)}m` : ""}` : "Disabled"}
-              </span>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
+  return <div className="empty-state">Waiting for native pipeline status…</div>;
 }

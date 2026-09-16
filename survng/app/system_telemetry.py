@@ -606,6 +606,7 @@ class SystemTelemetryService:
             },
             "capture": dict(status.get("capture_stats") or {}),
             "live_pipeline": dict(status.get("live_pipeline") or {}),
+            "native_activity": dict(status.get("native_activity") or {}),
             "lifecycle": dict(status.get("lifecycle") or {}),
             "activity": per_camera_activity.get(
                 camera_id,

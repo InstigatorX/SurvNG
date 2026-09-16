@@ -31,6 +31,17 @@ class SystemTelemetryRouterTest(unittest.TestCase):
             lifecycle_events=Mock(return_value=[]),
         )
 
+    def test_camera_payload_preserves_native_health_and_timing(self) -> None:
+        native = {"health": "healthy", "effective_fresh_fps": 5.0,
+                  "motion_states": {"stationary": 2}, "counters": {"metadata_restarts": 1}}
+        timing = {"native_detector_average_ms": 123.0}
+        payload = SystemTelemetryService._camera_payload(
+            {"id": "gate", "native_activity": native, "live_pipeline": timing}, {}, {},
+        )
+        self.assertEqual(payload["native_activity"], native)
+        self.assertEqual(payload["live_pipeline"], timing)
+        self.assertIsNot(payload["native_activity"], native)
+
     def test_persisted_history_cache_is_invalidated_for_new_event_store(self) -> None:
         service = SystemTelemetryService()
         first_store = self._event_store("first")

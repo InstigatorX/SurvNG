@@ -2,8 +2,6 @@ export const ADMIN_WORKSPACES = Object.freeze([
   { id: "home", label: "Configure Home" },
   { id: "general", label: "Settings" },
   { id: "cameras", label: "Cameras" },
-  { id: "audit", label: "Motion Audit" },
-  { id: "calibration", label: "Detection Tune-Up" },
   { id: "telemetry", label: "Telemetry" },
   { id: "maintenance", label: "Maintenance" },
   { id: "logs", label: "Logs" },
@@ -27,7 +25,6 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
     label: "Observe",
     items: [
       { id: "health", label: "Health", workspace: "telemetry" },
-      { id: "audit", label: "Audit", workspace: "audit" },
       { id: "logs", label: "Logs", workspace: "logs" },
     ],
   },
@@ -35,10 +32,8 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
     id: "act",
     label: "Act",
     items: [
-      { id: "tuneup", label: "Tune-Up", workspace: "calibration" },
       { id: "diagnostics", label: "Diagnostics", workspace: "telemetry", subsection: "diagnostics" },
       { id: "maintenance", label: "Maintenance", workspace: "maintenance" },
-      { id: "advisor", label: "Camera Advisor", workspace: "general", subsection: "motion-review", secondary: true },
     ],
   },
 ]);
@@ -49,12 +44,10 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
 export const ADMIN_NAV_GROUPS = Object.freeze([
   { id: "configure", label: "Configure", items: [
     { id: "home", label: "Configure Home", workspace: "home", description: "See what needs attention and jump into setup." },
-    { id: "cameras", label: "Cameras", workspace: "cameras", description: "Add cameras, tune video, motion, and zones." },
+    { id: "cameras", label: "Cameras", workspace: "cameras", description: "Add cameras, configure streams and incident zones." },
   ] },
   { id: "intelligence", label: "Intelligence", items: [
     { id: "detection", label: "Detection", workspace: "general", subsection: "detection", description: "Models, confidence, and object recognition." },
-    { id: "tuneup", label: "Detection Tune-Up", workspace: "calibration", description: "Review evidence and apply bounded improvements." },
-    { id: "advisor", label: "Camera Advisor", workspace: "general", subsection: "motion-review", description: "Get camera-specific recommendations." },
   ] },
   { id: "data", label: "Data & Retention", items: [
     { id: "storage", label: "Storage & Retention", workspace: "general", subsection: "storage", description: "Locations, retention plans, and cleanup." },
@@ -71,7 +64,6 @@ export const ADMIN_NAV_GROUPS = Object.freeze([
   ] },
   { id: "observe", label: "Observe", items: [
     { id: "health", label: "Health", workspace: "telemetry", description: "Runtime health across cameras and services." },
-    { id: "audit", label: "Motion Audit", workspace: "audit", description: "Inspect motion decisions and outcomes." },
     { id: "diagnostics", label: "Diagnostics", workspace: "telemetry", subsection: "diagnostics", description: "Capture bounded troubleshooting data." },
     { id: "logs", label: "Logs", workspace: "logs", description: "Review server activity and errors." },
   ] },
@@ -94,14 +86,12 @@ export function adminHomeDestinations() {
 export function normalizeTelemetrySection(value = "") {
   const candidate = String(value || "");
   if (candidate === "diagnostics") return "diagnostics";
-  if (candidate === "occupancy") return "occupancy";
   return "health";
 }
 
 export function telemetryLocationOptions(section = "health", camera = "") {
   const normalized = normalizeTelemetrySection(section);
   if (normalized === "diagnostics") return { subsection: "diagnostics" };
-  if (normalized === "occupancy") return { subsection: "occupancy", camera };
   return { camera };
 }
 
@@ -125,7 +115,6 @@ export const GENERAL_SECTION_LABELS = Object.freeze({
   mqtt: "Integrations",
   access: "Access",
   detection: "Object Detection",
-  "motion-review": "Camera Advisor",
 });
 
 export function nextTabId(ids, selected, key) {
@@ -140,6 +129,7 @@ export function nextTabId(ids, selected, key) {
 
 export function adminWorkspaceId(value, fallback = "general") {
   const candidate = String(value || "");
+  if (["audit", "calibration"].includes(candidate)) return "general";
   return ADMIN_WORKSPACES.some((item) => item.id === candidate) ? candidate : fallback;
 }
 
