@@ -143,13 +143,19 @@ model/device/cadence/native-pool changes use the existing manager reload boundar
 Lowering a zone threshold below the native graph floor uses that same transactional
 reload so the detector can actually supply the newly eligible objects.
 
-Zones use **live/substream coordinates**, matching the zone editor. Main recordings
-can have a different field of view. Native replay overlays are automatically
-allowed when the same URL supplies live and main; otherwise explicitly set
-`native_same_field_of_view: true` on the camera only after verifying the views.
-Snapshot annotations remain valid without that setting. No automatic image
-registration or high-resolution main-stream refinement runs. An exact snapshot
-frame miss can leave an event without a cover; its counter remains visible.
+Zones use **live/substream coordinates**, matching the zone editor. Native replay
+uses the main recording when live and main share a URL, or when the camera has
+`native_same_field_of_view: true`. This confirmation also applies to historical
+native tracks at response time, without changing their archived coordinates.
+For confirmed cameras, Clean and Tracks use the same high-resolution recording;
+Tracks adds scaled boxes. An old false compatibility flag means unverified, not
+an observed FOV mismatch. Without confirmation, Tracks uses recorded substream
+video (complete MP4 on Safari); Clean uses main recordings.
+
+The existing alignment estimator is shared with offline cover selection. That
+bounded process verifies full-resolution main frames before promoting a cover;
+it does not automatically change camera replay geometry settings. Exact-PTS
+snapshot misses remain visible in counters.
 
 ## What to measure
 
@@ -195,7 +201,10 @@ instance. The existing shared requests and streams remain independently
 configurable. Saving rebuilds native capture. OpenVINO automatic batching stays
 disabled for VA input compatibility. Larger batches wait for more frames and
 can increase latency; there is no supported VA batch-timeout control. Start at 2
-and measure actual camera FPS and latency before increasing it.
+and measure actual camera FPS and latency before increasing it. Configuration
+validation rejects nominal batch-fill times at or above the maximum result age,
+including the case where only one camera remains connected. Lower actual source
+FPS can still increase waiting beyond that nominal estimate.
 
 Terminal events queue a full recorded-history cover selection even if preview
 selection is already running. Late track history refreshes the requested replay

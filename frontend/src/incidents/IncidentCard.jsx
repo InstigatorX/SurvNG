@@ -1,3 +1,4 @@
+import { playbackEpochAt } from "../objectTrackReplay.mjs";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -34,7 +35,7 @@ import { writeVisualSearchTrail } from "../visualSearchTrail.mjs";
 import { appUrl, fetch, incidentRecordingContext, recordingsHref } from "../shared/api.js";
 import { formatDateTime, formatTimeOnly, formatDuration } from "../shared/format.js";
 import { eventSnapshotDownloadUrl, eventClipUrl } from "../shared/mediaUrls.js";
-import { prefersNativeMobilePlayback, ShakaVideo } from "../shared/media.jsx";
+import { prefersIncidentMp4Playback, ShakaVideo } from "../shared/media.jsx";
 import {
   IncidentObjectBadges,
   IncidentSourceDot,
@@ -47,6 +48,8 @@ import {
   incidentLabels,
   incidentZones,
   loadIncidentClipInfo,
+  resumeIncidentClip,
+  fallbackIncidentClip,
 } from "../shared/evidence.jsx";
 
 export function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean", depthLayer = "both", onAnalysisStats, onEnded }) {
@@ -74,21 +77,25 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
         setClipError(active ? "No event video available" : "");
         return;
       }
+      const video = videoRef.current;
+      const sameEvent = clipInfo?.eventId === eventId;
+      if (sameEvent && clipInfo.source === replaySource && video && !video.ended && trackEvent.object_tracking?.state === "active") return;
+      const resumeEpoch = sameEvent && video ? playbackEpochAt(clipInfo.windowStartEpoch, video.currentTime, playbackOriginTime) : null;
       setClipInfo(null);
       setPlayback(null);
       setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
-      const info = await loadIncidentClipInfo(clipEvent, () => cancelled, prefersNativeMobilePlayback(), replaySource);
+      const info = await loadIncidentClipInfo(clipEvent, () => cancelled, prefersIncidentMp4Playback(replaySource), replaySource);
       if (!info) return;
-      setClipInfo(info);
-      setPlayback(prefersNativeMobilePlayback()
+      setClipInfo(resumeIncidentClip(info, resumeEpoch));
+      setPlayback(prefersIncidentMp4Playback(replaySource)
         ? { url: info.downloadUrl, mimeType: "video/mp4" }
         : { url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [active, replaySource, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch, replayBounds.before, replayBounds.after]);
+  }, [active, replaySource, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch, replayBounds.before, replayBounds.after, trackEvent.object_tracking?.state]);
 
   if (!active) return null;
   return (
@@ -145,11 +152,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
               if (playback.url !== clipInfo.downloadUrl) {
                 setClipLoading(true);
                 setPlaybackOriginTime(null);
-                setClipInfo((current) => current ? {
-                  ...current,
-                  windowStartEpoch: current.requestedWindowStartEpoch,
-                  playbackStartOffset: current.initialPlaybackOffset,
-                } : current);
+                setClipInfo(fallbackIncidentClip(clipInfo, videoRef.current, playbackOriginTime));
                 setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
               } else {
                 setClipLoading(false);

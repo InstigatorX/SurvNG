@@ -239,6 +239,20 @@ def _incident_event_payload(event: dict) -> dict:
     return payload
 
 
+def apply_native_replay_geometry(incident: dict, cameras: dict) -> None:
+    """Apply an explicit camera geometry confirmation to historical playback.
+
+    A stored False meant unverified, not a measured FOV mismatch. Project the
+    current confirmation into responses without rewriting archived track data.
+    """
+    for item in [incident, *incident.get("events", [])]:
+        camera = cameras.get(str(item.get("camera_id") or incident.get("camera_id") or ""))
+        tracking = item.get("object_tracking")
+        if (getattr(camera, "native_same_field_of_view", False) is True
+                and isinstance(tracking, dict) and tracking.get("implementation") == "gvatrack"):
+            item["object_tracking"] = {**tracking, "recording_overlay_compatible": True}
+
+
 def _incident_list_payload(incident: dict) -> dict:
     """Return the media-card data without expensive investigation details."""
     payload = dict(incident)

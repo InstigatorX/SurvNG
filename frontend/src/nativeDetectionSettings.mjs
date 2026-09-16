@@ -28,6 +28,10 @@ export function nativeDetectionError(detector = {}) {
       return `${field.label} must be ${field.integer ? "a whole number " : ""}between ${field.min} and ${field.max}.`;
     }
   }
+  const native = detector.native || {};
+  const batchSize = native.batch_size ?? 1;
+  const batchWait = (batchSize - 1) * (native.inference_interval ?? 1) / (detector.live_sample_fps ?? 5);
+  if (batchSize > 1 && batchWait >= (native.maximum_observation_age_seconds ?? 2)) return "Batch waiting time must be below maximum result age when only one camera is connected. Reduce batch size or inference interval, increase detection FPS, or increase maximum result age.";
   const stationary = detector.native?.stationary || {};
   if ((stationary.stationary_threshold ?? 0.05) >= (stationary.moving_threshold ?? 0.15)) return "Stationary jitter threshold must be below the movement threshold.";
   if ((stationary.labels || []).length > 64) return "Stationary filtering supports at most 64 object classes.";

@@ -1019,6 +1019,15 @@ class DetectorConfig(BaseModel):
         return normalized
 
     @model_validator(mode="after")
+    def validate_native_batch_cadence(self) -> "DetectorConfig":
+        # Explicit VA batches have no supported fill timeout. A configuration
+        # must remain usable when every other source disconnects.
+        fill_seconds = (self.native.batch_size - 1) * self.native.inference_interval / self.live_sample_fps
+        if self.native.batch_size > 1 and fill_seconds >= self.native.maximum_observation_age_seconds:
+            raise ValueError("native batch waiting time must be below maximum result age; reduce batch size or inference interval, increase detection FPS, or increase maximum result age")
+        return self
+
+    @model_validator(mode="after")
     def ensure_tracking_protected_incident_lane(self) -> "DetectorConfig":
         """Keep a dedicated object worker when tracking shares the accelerator.
 

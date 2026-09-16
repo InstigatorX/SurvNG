@@ -33,7 +33,7 @@ import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
 import { eventSnapshotUrl, eventThumbnailUrl, eventClipUrl, eventStreamUrl } from "./mediaUrls.js";
-import { prefersNativeMobilePlayback, ShakaVideo } from "./media.jsx";
+import { prefersIncidentMp4Playback, ShakaVideo } from "./media.jsx";
 import { AI_DETECTION_SAMPLE_MS, advanceDebugDetectionTracks, debugDetectionIou, updateDebugDetectionTracks } from "../debugDetectionTracks.mjs";
 
 export function eventObjects(event) {
@@ -680,21 +680,27 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
         setClipError("No event video available");
         return;
       }
+      const video = clipVideoRef.current;
+      const sameEvent = clipInfo?.eventId === eventId;
+      // Play a stable window while an ongoing incident receives updates. The
+      // terminal history refresh extends it once, preserving playback position.
+      if (sameEvent && clipInfo.source === replaySource && video && !video.ended && trackingEvent.object_tracking?.state === "active") return;
+      const resumeEpoch = sameEvent && video ? playbackEpochAt(clipInfo.windowStartEpoch, video.currentTime, playbackOriginTime) : null;
       setClipInfo(null);
       setPlayback(null);
       setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
-      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled, prefersNativeMobilePlayback(), replaySource);
+      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled, prefersIncidentMp4Playback(replaySource), replaySource);
       if (!info) return;
-      setClipInfo(info);
-      setPlayback(prefersNativeMobilePlayback()
+      setClipInfo(resumeIncidentClip(info, resumeEpoch));
+      setPlayback(prefersIncidentMp4Playback(replaySource)
         ? { url: info.downloadUrl, mimeType: "video/mp4" }
         : { url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [replaySource, viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch, replayBounds.before, replayBounds.after]);
+  }, [replaySource, viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch, replayBounds.before, replayBounds.after, trackingEvent.object_tracking?.state]);
 
   function playEventClip() {
     if (!clipInfo || clipError) return;
@@ -1042,11 +1048,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
                   if (playback.url !== clipInfo.downloadUrl) {
                     setClipLoading(true);
                     setPlaybackOriginTime(null);
-                    setClipInfo((current) => current ? {
-                      ...current,
-                      windowStartEpoch: current.requestedWindowStartEpoch,
-                      playbackStartOffset: current.initialPlaybackOffset,
-                    } : current);
+                    setClipInfo(fallbackIncidentClip(clipInfo, clipVideoRef.current, playbackOriginTime));
                     setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
                   } else {
                     setClipLoading(false);
@@ -1098,6 +1100,20 @@ export async function eventStreamTimelineStart(streamUrl, requestedWindowStartEp
   }
 }
 
+export function fallbackIncidentClip(info, video, origin) {
+  const epoch = video ? playbackEpochAt(info.windowStartEpoch, video.currentTime, origin) : null;
+  return resumeIncidentClip({ ...info, windowStartEpoch: info.requestedWindowStartEpoch,
+    playbackStartOffset: info.initialPlaybackOffset }, epoch);
+}
+
+export function resumeIncidentClip(info, epoch) {
+  if (!Number.isFinite(epoch)) return info;
+  return { ...info,
+    initialPlaybackOffset: Math.max(0, epoch - info.requestedWindowStartEpoch),
+    playbackStartOffset: Math.max(0, epoch - info.windowStartEpoch),
+  };
+}
+
 export async function loadIncidentClipInfo(event, isCancelled = () => false, preferNativeMp4 = false, source = "main") {
   const eventId = Number(event?.representative_event_id || event?.id);
   if (!Number.isFinite(eventId)) return null;
@@ -1126,6 +1142,7 @@ export async function loadIncidentClipInfo(event, isCancelled = () => false, pre
   if (isCancelled()) return null;
   const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
   return {
+    eventId,
     streamUrl,
     source,
     downloadUrl: eventClipUrl(eventId, window.before, window.after, source),

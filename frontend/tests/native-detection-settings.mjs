@@ -15,3 +15,7 @@ const destinations = ADMIN_NAV_GROUPS.flatMap((group) => group.items);
 for (const retired of ["audit", "tuneup", "advisor"]) assert.ok(!destinations.some((item) => item.id === retired));
 assert.ok(!("motion-review" in GENERAL_SECTION_LABELS));
 console.log("Native detection settings passed");
+
+assert.match(nativeDetectionError({live_sample_fps: .5, native:{batch_size:2}}), /Batch waiting time/);
+assert.equal(nativeDetectionError({live_sample_fps:5, native:{batch_size:4}}), "");
+assert.equal(nativeDetectionError({live_sample_fps:.5, native:{batch_size:1,inference_interval:5}}), "");

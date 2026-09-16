@@ -18,6 +18,15 @@ export function prefersNativeMobilePlayback() {
     || (typeof window !== "undefined" && Boolean(window.matchMedia?.("(pointer: coarse)").matches));
 }
 
+// Safari substream replay uses a complete MP4 for segment compatibility.
+// Confirmed same-FOV cameras retain the working main-recording HLS path.
+export function prefersIncidentMp4Playback(source = "main") {
+  return prefersNativeMobilePlayback()
+    || (source === "live" && typeof navigator !== "undefined" && navigator.vendor === "Apple Computer, Inc."
+      && typeof document !== "undefined"
+      && Boolean(document.createElement("video").canPlayType("application/vnd.apple.mpegurl")));
+}
+
 export const ShakaVideo = forwardRef(function ShakaVideo({
   src,
   mimeType,
@@ -71,7 +80,7 @@ export const ShakaVideo = forwardRef(function ShakaVideo({
       return nextPlayer.attach(videoRef.current).then(() => {
         if (!disposed) setRuntime({ player: nextPlayer, shaka });
       });
-    }).catch((error) => callbacksRef.current.onError?.(error));
+    }).catch((error) => { if (!disposed) callbacksRef.current.onError?.(error); });
     return () => {
       disposed = true;
       if (nextPlayer && handleError) nextPlayer.removeEventListener("error", handleError);

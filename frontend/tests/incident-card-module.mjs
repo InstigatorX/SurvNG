@@ -30,7 +30,7 @@ assert.match(incidentCard, /export function IncidentClipLayer\(/);
 assert.match(incidentCard, /export function RelatedAppearanceIncidents\(/);
 assert.match(incidentCard, /export function CrossCameraTracePanel\(/);
 assert.doesNotMatch(incidentCard, /export function IncidentListItem\(/);
-assert.match(incidentCard, /prefersNativeMobilePlayback\(\)/);
+assert.match(incidentCard, /prefersIncidentMp4Playback\(replaySource\)/);
 assert.match(incidentCard, /url: info\.downloadUrl, mimeType: "video\/mp4"/);
 assert.match(incidentCard, /playback\.mimeType === "video\/mp4" \? <video/);
 
@@ -39,7 +39,7 @@ assert.match(evidence, /export function SnapshotImage\(/);
 assert.match(evidence, /export function EventOverlay\(/);
 assert.doesNotMatch(evidence, /export function IncidentCard\(/);
 assert.doesNotMatch(evidence, /export function IncidentInspector\(/);
-assert.match(evidence, /loadIncidentClipInfo\(viewerEvent, \(\) => cancelled, prefersNativeMobilePlayback\(\), replaySource\)/);
+assert.match(evidence, /loadIncidentClipInfo\(viewerEvent, \(\) => cancelled, prefersIncidentMp4Playback\(replaySource\), replaySource\)/);
 assert.match(evidence, /playback\.mimeType === "video\/mp4" \? <video/);
 
 assert.match(incidentsPage, /import \{ IncidentCard, IncidentInspector \} from "\.\/IncidentCard\.jsx"/);

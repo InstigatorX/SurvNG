@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from .audit_ai import motion_audit_interpretation
 from .cross_camera_trace import build_cross_camera_trace
 from .incident_presenter import (
+    apply_native_replay_geometry,
     _event_row,
     _incident_list_payload,
     _incident_row,
@@ -262,6 +263,9 @@ class IncidentQueryService:
     def with_faces(
         manager: AppManager, incidents: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
+        cameras = {camera.id: camera for camera in getattr(getattr(manager, "config", None), "cameras", [])}
+        for incident in incidents:
+            apply_native_replay_geometry(incident, cameras)
         event_ids = [
             int(event["id"])
             for incident in incidents

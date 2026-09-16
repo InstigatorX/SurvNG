@@ -452,3 +452,44 @@ def test_native_interval_change_requires_shared_capture_reload():
     incoming = current.model_copy(deep=True)
     incoming.detector.native.inference_interval = 2
     assert manager_owned_config(current) != manager_owned_config(incoming)
+
+
+@pytest.mark.parametrize("settings", [
+    {"live_sample_fps": .5, "native": {"batch_size": 4, "inference_interval": 5}},
+    {"live_sample_fps": .5, "native": {"batch_size": 2}},
+    {"live_sample_fps": 5, "native": {"batch_size": 4, "inference_interval": 5}},
+])
+def test_batch_cadence_must_survive_loss_of_other_sources(settings):
+    with pytest.raises(ValueError, match="batch waiting time"):
+        DetectorConfig(**settings)
+
+
+@pytest.mark.parametrize("settings", [
+    {"live_sample_fps": .5, "native": {"batch_size": 1, "inference_interval": 5}},
+    {"live_sample_fps": 5, "native": {"batch_size": 4}},
+    {"live_sample_fps": 1, "native": {"batch_size": 2, "maximum_observation_age_seconds": 3}},
+])
+def test_safe_batch_cadence_is_accepted(settings):
+    assert DetectorConfig(**settings).native.batch_size == settings["native"]["batch_size"]
+
+
+def test_camera_fov_confirmation_applies_to_historical_tracks_without_rewriting_them():
+    from survng.app.incident_presenter import apply_native_replay_geometry
+    camera = CameraConfig(id="front", name="Front", stream_url="rtsp://example.test/main", native_same_field_of_view=True)
+    archived = {"implementation": "gvatrack", "recording_overlay_compatible": False,
+                "frame_width": 896, "frame_height": 672, "tracks": [{"track_id": 1}]}
+    incident = {"camera_id": "front", "object_tracking": archived,
+                "events": [{"camera_id": "front", "object_tracking": archived}]}
+    apply_native_replay_geometry(incident, {"front": camera})
+    assert incident["object_tracking"]["recording_overlay_compatible"] is True
+    assert incident["events"][0]["object_tracking"]["recording_overlay_compatible"] is True
+    assert archived["recording_overlay_compatible"] is False
+    assert incident["object_tracking"]["tracks"] == archived["tracks"]
+
+
+def test_unconfirmed_camera_does_not_override_historical_geometry():
+    from survng.app.incident_presenter import apply_native_replay_geometry
+    camera = CameraConfig(id="front", name="Front", stream_url="rtsp://example.test/main")
+    incident = {"camera_id": "front", "object_tracking": {"implementation": "gvatrack", "recording_overlay_compatible": False}}
+    apply_native_replay_geometry(incident, {"front": camera})
+    assert incident["object_tracking"]["recording_overlay_compatible"] is False
