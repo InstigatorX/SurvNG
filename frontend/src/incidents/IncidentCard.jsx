@@ -517,6 +517,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
               </div>
             ) : null}
             <IncidentClipLayer
+              key={replayRequest}
               event={incident}
               trackingEvent={trackingPreview}
               active={expanded && inlineVideoActive}
