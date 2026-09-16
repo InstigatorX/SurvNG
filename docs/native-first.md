@@ -438,3 +438,9 @@ capture/metadata path with matching image dimensions, the frame-byte bound, and
 native-resolution recorded replays. Foyer 71392 and Downstairs 71307 still confirm;
 Back-Middle 71408 and 71416 remain unverified without alerts. The recording-based
 confirmation delay is unchanged by this image-resolution change.
+
+Native-size VA downloads must force `vapostproc disable-passthrough=true` so Python
+maps a distinct surface, not the decoder surface still used by `gvadetect`. Without
+this separation, live testing produced VA rendering failures. The GPU `--va` spatial
+check now maps native-size BGR evidence concurrently with VA-surface-sharing inference
+and verifies twelve results on both branches.

@@ -1009,6 +1009,9 @@ def _pump_pipeline(
     frame_converters = []
     if va_memory:
         download = _element(Gst, "vapostproc", "qualifier-download")
+        # Even at identical dimensions, download a distinct surface. Mapping
+        # the decoder's shared surface can collide with gvadetect VA rendering.
+        download.set_property("disable-passthrough", True)
         download_caps = _element(Gst, "capsfilter", "qualifier-host-caps")
         # Download NV12 at native or explicitly requested size, then convert to BGR.
         # Explicit square pixels preserve geometry when scaling.

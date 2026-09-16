@@ -136,6 +136,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     assert elements["jpeg-caps"].properties["caps"] == "video/x-raw,format=I420,framerate=1/1"
     if va:
         assert elements["qualifier-download"].factory == "vapostproc"
+        assert elements["qualifier-download"].properties["disable-passthrough"] is True
         assert elements["qualifier-host-caps"].properties["caps"] == "video/x-raw,format=NV12" + (",width=320,pixel-aspect-ratio=1/1" if frame_width else "")
         assert ("qualifier-download", "qualifier-host-caps") in links
         assert ("qualifier-host-caps", "qualifier-gray") in links

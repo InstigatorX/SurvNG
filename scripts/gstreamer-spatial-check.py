@@ -133,13 +133,27 @@ def check_va(model):
     evidence = _NativeInferenceEvidence(1, tracking=True)
     with configured_model(model, "", .45) as (configured, _):
         graph = ('videotestsrc num-buffers=12 is-live=true ! video/x-raw,format=NV12,width=320,height=240,framerate=5/1 ! '
-                 'vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! gvamotiondetect name=motion ! gvapython name=roi ! '
+                 'vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! tee name=t '
+                 't. ! queue ! vapostproc disable-passthrough=true ! video/x-raw,format=NV12 ! videoconvert ! video/x-raw,format=BGR ! fakesink name=evidence signal-handoffs=true sync=false '
+                 't. ! queue ! gvamotiondetect name=motion ! gvapython name=roi ! '
                  'gvadetect name=detect device=GPU pre-process-backend=va-surface-sharing inference-region=roi-list '
                  'batch-size=1 nireq=2 ie-config="PERFORMANCE_HINT=THROUGHPUT,ALLOW_AUTO_BATCHING=NO" ! '
                  'gvatrack tracking-type=short-term-imageless ! gvaanalytics name=zones evaluation-point=bottom-center '
                  'draw-zones=false draw-tripwires=false ! gvametaconvert add-empty-results=true ! appsink name=out sync=false')
         pipeline = Gst.parse_launch(graph)
         pipeline.set_context(_create_shared_va_context(Gst))
+        evidence_frames = []
+        def host_frame(sink, buffer, pad):
+            caps = pad.get_current_caps()
+            assert caps.get_structure(0).get_value('width') == 320
+            assert caps.get_structure(0).get_value('height') == 240
+            mapped, info = buffer.map(Gst.MapFlags.READ)
+            assert mapped
+            try:
+                evidence_frames.append(len(bytes(info.data)))
+            finally:
+                buffer.unmap(info)
+        pipeline.get_by_name('evidence').connect('handoff', host_frame)
         roi = pipeline.get_by_name('roi')
         roi.set_property('module', str(Path(__file__).resolve().parents[1]/'survng/native_spatial.py'))
         roi.set_property('class', 'RoiInput')
@@ -181,6 +195,7 @@ def check_va(model):
                 assert obj['native_zone_ids'] == ([] if index % 3 == 0 else ['0']), payload
                 results.append(obj)
             assert not failures and evidence.invalid == 0
+            assert len(evidence_frames) == 12 and all(size == 320*240*3 for size in evidence_frames)
         finally:
             pipeline.set_state(Gst.State.NULL)
     return {"va_surface_sharing": "passed", "fresh_results": len(results)}
