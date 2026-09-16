@@ -61,6 +61,7 @@ class SemanticEvidence:
     image_path: str
     object_label: str = ""
     bbox: tuple[int, int, int, int] | None = None
+    evidence_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,13 @@ def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
         and str(item.get("label") or "").strip()
         and item.get("snapshot_visible") is not False
     ]
+
+
+def semantic_event_searchable(event: dict[str, Any]) -> bool:
+    """One eligibility policy for live work, backfill and durable reconciliation."""
+    return bool(event.get("snapshot_path")) and any(
+        item.get("incident_eligible") is not False for item in semantic_event_objects(event)
+    )
 
 
 def semantic_object_bbox(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
@@ -277,6 +285,18 @@ class SemanticIndex:
 
     MAX_CANDIDATE_ROWS = 50_000
 
+    @staticmethod
+    def _event_matches(connection: sqlite3.Connection, event: dict[str, Any]) -> bool:
+        columns = {row[1] for row in connection.execute("pragma table_info(events)")}
+        guarded = [name for name in ("evidence_revision", "snapshot_path") if name in columns]
+        row = connection.execute(
+            f"select {','.join(['id', *guarded])} from events where id = ?", (int(event["id"]),),
+        ).fetchone()
+        return row is not None and all(
+            row[name] == event.get(name, 0 if name == "evidence_revision" else "")
+            for name in guarded
+        )
+
     def __init__(
         self,
         database_path: Path,
@@ -318,6 +338,7 @@ class SemanticIndex:
                     embedding_size integer not null,
                     embedding_blob blob not null,
                     created_at text not null,
+                    evidence_revision integer not null default 0,
                     foreign key(event_id) references events(id) on delete cascade,
                     unique(
                         event_id, source_kind, source_key,
@@ -326,6 +347,11 @@ class SemanticIndex:
                 )
                 """
             )
+            columns = {row[1] for row in connection.execute("pragma table_info(semantic_embeddings)")}
+            if "evidence_revision" not in columns:
+                connection.execute(
+                    "alter table semantic_embeddings add column evidence_revision integer not null default 0"
+                )
             connection.execute(
                 """
                 create index if not exists idx_semantic_generation_time
@@ -340,17 +366,32 @@ class SemanticIndex:
                 on semantic_embeddings(event_id)
                 """
             )
+            connection.execute("""
+                create table if not exists semantic_projection_receipts (
+                    event_id integer not null references events(id) on delete cascade,
+                    model_fingerprint text not null, preprocessing_fingerprint text not null,
+                    evidence_revision integer not null, image_path text not null,
+                    plan_key text not null, outcome_json text not null,
+                    primary key(event_id,model_fingerprint,preprocessing_fingerprint)
+                )
+            """)
 
     def upsert(
         self,
         evidence: Iterable[SemanticEvidence],
         embeddings: object,
         identity: SemanticModelIdentity,
+        *,
+        expected_event: dict[str, Any] | None = None,
+        reconcile_sources: dict[str, set[str]] | None = None,
+        projection_receipt: dict[str, Any] | None = None,
     ) -> int:
         records = list(evidence)
-        if not records:
+        if projection_receipt is not None and expected_event is None:
+            raise ValueError("projection completion requires an authoritative event guard")
+        if not records and not reconcile_sources and projection_receipt is None:
             return 0
-        vectors = normalized_matrix(embeddings)
+        vectors = normalized_matrix(embeddings) if records else np.empty((0, identity.dimensions))
         if vectors.shape != (len(records), identity.dimensions):
             raise ValueError("semantic evidence and embedding dimensions do not match")
         now = datetime.now(timezone.utc).isoformat()
@@ -364,16 +405,23 @@ class SemanticIndex:
                 identity.implementation, identity.model_fingerprint,
                 identity.preprocessing_fingerprint, identity.dimensions,
                 np.ascontiguousarray(vector, dtype=np.float16).tobytes(), now,
+                int(record.evidence_revision),
             ))
         with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
+            if expected_event is not None:
+                # Guard against an event commit that has not yet delivered its
+                # outbox notification. In-memory tokens alone cannot see it.
+                if not self._event_matches(connection, expected_event):
+                    return 0
             connection.executemany(
                 """
                 insert into semantic_embeddings (
                     event_id, camera_id, captured_at, source_kind, source_key,
                     image_path, object_label, bbox_json, implementation,
                     model_fingerprint, preprocessing_fingerprint, embedding_size,
-                    embedding_blob, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    embedding_blob, created_at, evidence_revision
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(
                     event_id, source_kind, source_key,
                     model_fingerprint, preprocessing_fingerprint
@@ -385,11 +433,45 @@ class SemanticIndex:
                     bbox_json=excluded.bbox_json,
                     embedding_size=excluded.embedding_size,
                     embedding_blob=excluded.embedding_blob,
-                    created_at=excluded.created_at
+                    created_at=excluded.created_at,
+                    evidence_revision=excluded.evidence_revision
                 """,
                 prepared,
             )
+            if expected_event is not None:
+                for source_kind, desired_keys in (reconcile_sources or {}).items():
+                    parameters: list[Any] = [
+                        int(expected_event["id"]), identity.model_fingerprint,
+                        identity.preprocessing_fingerprint, source_kind,
+                    ]
+                    clause = ""
+                    if desired_keys:
+                        clause = f" and source_key not in ({','.join('?' for _ in desired_keys)})"
+                        parameters.extend(sorted(desired_keys))
+                    connection.execute(
+                        "delete from semantic_embeddings where event_id = ? "
+                        "and model_fingerprint = ? and preprocessing_fingerprint = ? "
+                        f"and source_kind = ?{clause}", parameters,
+                    )
+            if projection_receipt is not None:
+                connection.execute(
+                    "insert or replace into semantic_projection_receipts values(?,?,?,?,?,?,?)",
+                    (int(expected_event["id"]), identity.model_fingerprint, identity.preprocessing_fingerprint,
+                     int(expected_event.get("evidence_revision") or 0), str(expected_event.get("snapshot_path") or ""),
+                     projection_receipt["plan_key"], json.dumps(projection_receipt)),
+                )
         return len(prepared)
+
+    def projection_receipt(self, event: dict[str, Any], identity: SemanticModelIdentity, plan_key: str):
+        with self._connect() as connection:
+            row = connection.execute(
+                "select outcome_json from semantic_projection_receipts where event_id=? "
+                "and model_fingerprint=? and preprocessing_fingerprint=? and evidence_revision=? "
+                "and image_path=? and plan_key=?",
+                (int(event["id"]), identity.model_fingerprint, identity.preprocessing_fingerprint,
+                 int(event.get("evidence_revision") or 0), str(event.get("snapshot_path") or ""), plan_key),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
 
     def search(
         self,
@@ -453,6 +535,13 @@ class SemanticIndex:
             parameters.append(str(end_at))
         parameters.append(self.MAX_CANDIDATE_ROWS)
         with self._connect() as connection:
+            columns = {row[1] for row in connection.execute("pragma table_info(events)")}
+            if "evidence_revision" in columns and "snapshot_path" in columns:
+                # Retain prior embeddings until replacement succeeds, but never
+                # present their scores/crops as evidence for the current image.
+                clauses.append("exists(select 1 from events e where e.id=semantic_embeddings.event_id "
+                               "and e.evidence_revision=semantic_embeddings.evidence_revision "
+                               "and e.snapshot_path=semantic_embeddings.image_path)")
             rows = connection.execute(
                 f"""
                 select * from semantic_embeddings
@@ -593,11 +682,11 @@ class SemanticIndex:
                     event_id, camera_id, captured_at, source_kind, source_key,
                     image_path, object_label, bbox_json, implementation,
                     model_fingerprint, preprocessing_fingerprint, embedding_size,
-                    embedding_blob, created_at
+                    embedding_blob, created_at, evidence_revision
                 )
                 select event_id, camera_id, captured_at, source_kind, source_key,
                     image_path, object_label, bbox_json, ?, ?, ?, ?,
-                    embedding_blob, ?
+                    embedding_blob, ?, evidence_revision
                 from semantic_embeddings
                 where model_fingerprint = ? and preprocessing_fingerprint = ?
                 on conflict(
@@ -634,38 +723,38 @@ class SemanticIndex:
         event_id: int,
         identity: SemanticModelIdentity,
         source_kind: str,
+        *,
+        event: dict[str, Any] | None = None,
     ) -> bool:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                select 1 from semantic_embeddings
-                where event_id = ? and model_fingerprint = ?
-                    and preprocessing_fingerprint = ? and source_kind = ? limit 1
-                """,
-                (int(event_id), identity.model_fingerprint,
-                 identity.preprocessing_fingerprint, str(source_kind)),
-            ).fetchone()
-        return row is not None
+        return bool(self.event_source_keys(event_id, identity, source_kind, event=event))
 
     def event_source_keys(
         self,
         event_id: int,
         identity: SemanticModelIdentity,
         source_kind: str,
+        *,
+        event: dict[str, Any] | None = None,
     ) -> set[str]:
+        parameters: list[Any] = [
+            int(event_id), identity.model_fingerprint,
+            identity.preprocessing_fingerprint, str(source_kind),
+        ]
+        current_evidence = ""
+        if event is not None:
+            current_evidence = " and evidence_revision = ? and image_path = ?"
+            parameters.extend([
+                int(event.get("evidence_revision") or 0), str(event.get("snapshot_path") or ""),
+            ])
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 select source_key from semantic_embeddings
                 where event_id = ? and model_fingerprint = ?
                     and preprocessing_fingerprint = ? and source_kind = ?
+                    {current_evidence}
                 """,
-                (
-                    int(event_id),
-                    identity.model_fingerprint,
-                    identity.preprocessing_fingerprint,
-                    str(source_kind),
-                ),
+                parameters,
             ).fetchall()
         return {str(row["source_key"]) for row in rows}
 
@@ -720,13 +809,18 @@ class SemanticIndex:
             )
         return max(0, int(cursor.rowcount or 0))
 
-    def delete_event(self, event_id: int) -> int:
+    def delete_event(self, event_id: int, *, expected_event: dict[str, Any] | None = None) -> int:
         """Remove semantic evidence for an event that is not object-searchable."""
         with self._lock, self._connect() as connection:
+            if expected_event is not None:
+                connection.execute("begin immediate")
+                if not self._event_matches(connection, expected_event):
+                    return 0
             cursor = connection.execute(
                 "delete from semantic_embeddings where event_id = ?",
                 (int(event_id),),
             )
+            connection.execute("delete from semantic_projection_receipts where event_id=?", (int(event_id),))
         return max(0, int(cursor.rowcount or 0))
 
     def indexed_event_ids(self) -> set[int]:
@@ -1292,6 +1386,7 @@ class IsolatedOpenVinoManifestEncoder:
 class _SemanticEventRevision:
     event: dict[str, Any]
     valid: bool = True
+    pending: bool = False
 
 
 class SemanticSearchService(DisabledSemanticSearch):
@@ -1490,33 +1585,14 @@ class SemanticSearchService(DisabledSemanticSearch):
                 if self._stop.is_set():
                     return
                 event_id = int(event.get("id") or 0)
-                objects = semantic_event_objects(event)
-                if not objects:
+                if not semantic_event_searchable(event):
                     if event_id > 0 and event_id in indexed_event_ids:
                         # Resolve current evidence before acting on a historical snapshot.
                         self.index_event(event)
                         indexed_event_ids.discard(event_id)
                     continue
-                if self.encoder:
-                    full_ready = not self.config.index_full_frame or self.index.event_source_indexed(
-                        event_id, self.encoder.identity, "full_frame"
-                    )
-                    crop_candidates = semantic_object_crop_candidates(
-                        objects, self.config.max_object_crops_per_event
-                    )
-                    desired_crop_keys = {
-                        semantic_crop_source_key(index, item)
-                        for index, item, _coordinates in crop_candidates
-                    }
-                    existing_crop_keys = self.index.event_source_keys(
-                        event_id, self.encoder.identity, "object_crop"
-                    )
-                    crops_ready = (
-                        not self.config.index_object_crops
-                        or existing_crop_keys == desired_crop_keys
-                    )
-                    if full_ready and crops_ready:
-                        continue
+                if self.encoder and self.projection_current(event):
+                    continue
                 while not self._stop.is_set():
                     if not self._history_queue_has_capacity():
                         self._stop.wait(0.1)
@@ -1557,7 +1633,6 @@ class SemanticSearchService(DisabledSemanticSearch):
         """Invalidate queued and in-flight evidence before submitting its replacement."""
         with self._event_revision_lock:
             event = self._revision_event(event, refresh=True)
-            self.index.delete_event(int(event.get("id") or 0))
             return self._queue_event_revision(event)
 
     def queue_event(self, event: dict[str, Any]) -> bool:
@@ -1565,19 +1640,69 @@ class SemanticSearchService(DisabledSemanticSearch):
             return self._queue_event_revision(self._revision_event(event))
 
     def _queue_event_revision(self, event: dict[str, Any]) -> bool:
-        if (
-            self.encoder is None
-            or not event.get("snapshot_path")
-            or not event.get("id")
-            or not semantic_event_objects(event)
-        ):
+        if not event.get("id"):
             return False
+        if not semantic_event_searchable(event):
+            # A negative correction is complete without an encoder. Queued
+            # work checks the same policy again before any image/model work.
+            self.index.delete_event(int(event["id"]), expected_event=event)
+            return True
+        if self.encoder is None:
+            return False
+        revision = event["_semantic_revision"]
+        if revision.pending:
+            return True
         try:
             self._queue.put_nowait((0, next(self._queue_sequence), dict(event)))
+            revision.pending = True
             return True
         except queue.Full:
             self._error = "index queue is full"
             return False
+
+    def projection_pending(self, event: dict[str, Any]) -> bool:
+        with self._event_revision_lock:
+            token = self._event_revisions.get(int(event.get("id") or 0))
+            return bool(token and token.valid and token.pending
+                        and token.event.get("evidence_revision", 0) == event.get("evidence_revision", 0)
+                        and token.event.get("snapshot_path") == event.get("snapshot_path"))
+
+    def _projection_plan_key(self, objects: list[dict[str, Any]]) -> str:
+        plan = {
+            "full_frame": self.config.index_full_frame,
+            "object_crops": self.config.index_object_crops,
+            "crops": [semantic_crop_source_key(index, item) for index, item, _
+                      in semantic_object_crop_candidates(objects, self.config.max_object_crops_per_event)],
+        }
+        return hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+
+    def projection_current(self, event: dict[str, Any]) -> bool:
+        encoder = self.encoder
+        if encoder is None:
+            return False
+        event_id = int(event.get("id") or 0)
+        objects = semantic_event_objects(event)
+        if not semantic_event_searchable(event):
+            return not self.index.event_indexed(event_id, encoder.identity)
+        if self.config.index_full_frame and not self.index.event_source_indexed(
+            event_id, encoder.identity, "full_frame", event=event
+        ):
+            return False
+        if not self.config.index_object_crops:
+            return True
+        desired = {
+            semantic_crop_source_key(index, item)
+            for index, item, _ in semantic_object_crop_candidates(objects, self.config.max_object_crops_per_event)
+        }
+        receipt = self.index.projection_receipt(event, encoder.identity, self._projection_plan_key(objects))
+        if receipt is not None:
+            # Explicitly skipped crops are terminal for this image/revision and
+            # plan. Missing files and failed inference never produce receipts.
+            desired = set(receipt["indexed_crop_keys"])
+        return (
+            self.index.event_source_keys(event_id, encoder.identity, "object_crop", event=event) == desired
+            and self.index.event_source_keys(event_id, encoder.identity, "object_crop") == desired
+        )
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -1595,6 +1720,10 @@ class SemanticSearchService(DisabledSemanticSearch):
             except Exception as exc:
                 self._error = str(exc)
                 LOGGER.warning("semantic indexing failed for event %s: %s", event.get("id"), exc)
+            finally:
+                revision = event.get("_semantic_revision")
+                if isinstance(revision, _SemanticEventRevision):
+                    revision.pending = False
 
     def index_event(self, event: dict[str, Any]) -> int:
         """Synchronously index one event for tooling and the worker loop.
@@ -1602,8 +1731,6 @@ class SemanticSearchService(DisabledSemanticSearch):
         New evidence is generation-isolated and idempotent. Encoder use is
         serialized by the service.
         """
-        if self.encoder is None:
-            return 0
         event_id = int(event.get("id") or 0)
         if event_id <= 0:
             return 0
@@ -1613,12 +1740,17 @@ class SemanticSearchService(DisabledSemanticSearch):
             if not revision.valid:
                 return 0
             objects = semantic_event_objects(event)
-            if not objects:
-                self.index.delete_event(event_id)
+            if not semantic_event_searchable(event):
+                self.index.delete_event(event_id, expected_event=event)
                 return 0
+            if self.encoder is None:
+                return 0
+            if self.projection_current(event):
+                return 0
+            plan_key = self._projection_plan_key(objects)
             identity = self.encoder.identity
             full_frame_needed = self.config.index_full_frame and not self.index.event_source_indexed(
-                event_id, identity, "full_frame"
+                event_id, identity, "full_frame", event=event
             )
             crop_candidates = semantic_object_crop_candidates(
                 objects, self.config.max_object_crops_per_event
@@ -1628,16 +1760,18 @@ class SemanticSearchService(DisabledSemanticSearch):
                 for index, item, _coordinates in crop_candidates
             }
             existing_crop_keys = self.index.event_source_keys(
-                event_id, identity, "object_crop"
+                event_id, identity, "object_crop", event=event
             )
+            all_crop_keys = self.index.event_source_keys(event_id, identity, "object_crop")
             object_crops_needed = (
                 self.config.index_object_crops
                 and bool(desired_crop_keys - existing_crop_keys)
             )
             if not full_frame_needed and not object_crops_needed:
-                if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
-                    self.index.reconcile_event_source_keys(
-                        event_id, identity, "object_crop", desired_crop_keys
+                if self.config.index_object_crops and all_crop_keys != desired_crop_keys:
+                    self.index.upsert(
+                        [], [], identity, expected_event=event,
+                        reconcile_sources={"object_crop": desired_crop_keys},
                     )
                 return 0
         try:
@@ -1649,10 +1783,12 @@ class SemanticSearchService(DisabledSemanticSearch):
         if frame is None:
             self._skipped_missing += 1
             return 0
+        skipped_crops: dict[str, str] = {}
+        indexed_crop_keys: set[str] = set(existing_crop_keys & desired_crop_keys)
         evidence: list[SemanticEvidence] = []
         images: list[np.ndarray] = []
         if full_frame_needed:
-            evidence.append(SemanticEvidence(event_id, str(event.get("camera_id") or ""), str(event.get("created_at") or ""), "full_frame", "frame", str(event["snapshot_path"])))
+            evidence.append(SemanticEvidence(event_id, str(event.get("camera_id") or ""), str(event.get("created_at") or ""), "full_frame", "frame", str(event["snapshot_path"]), evidence_revision=int(event.get("evidence_revision") or 0)))
             images.append(frame)
         if object_crops_needed:
             height, width = frame.shape[:2]
@@ -1670,28 +1806,31 @@ class SemanticSearchService(DisabledSemanticSearch):
                 )
                 x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
                 if x2 <= x1 or y2 <= y1:
+                    skipped_crops[source_key] = "empty_after_clipping"
                     continue
+                indexed_crop_keys.add(source_key)
                 label = str(item.get("label") or "").strip().lower()
-                evidence.append(SemanticEvidence(event_id, str(event.get("camera_id") or ""), str(event.get("created_at") or ""), "object_crop", source_key, str(event["snapshot_path"]), label, (x1, y1, x2, y2)))
+                evidence.append(SemanticEvidence(event_id, str(event.get("camera_id") or ""), str(event.get("created_at") or ""), "object_crop", source_key, str(event["snapshot_path"]), label, (x1, y1, x2, y2), int(event.get("evidence_revision") or 0)))
                 images.append(frame[y1:y2, x1:x2])
+        embeddings = []
         if images:
             with self._encoder_lock:
                 if self.encoder is None:
                     return 0
                 embeddings = self.encoder.encode_images(images)
-            with self._event_revision_lock:
-                if not revision.valid:
-                    return 0
-                written = self.index.upsert(evidence, embeddings, self.encoder.identity)
-                self._indexed += written
-                if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
-                    # Preserve prior searchable evidence until replacements have
-                    # encoded successfully, then remove only stale source keys.
-                    self.index.reconcile_event_source_keys(
-                        event_id, identity, "object_crop", desired_crop_keys
-                    )
-                return written
-        return 0
+        with self._event_revision_lock:
+            if not revision.valid:
+                return 0
+            written = self.index.upsert(
+                evidence, embeddings, identity, expected_event=event,
+                reconcile_sources=(
+                    {"object_crop": indexed_crop_keys} if self.config.index_object_crops else {}
+                ),
+                projection_receipt={"plan_key": plan_key,
+                    "indexed_crop_keys": sorted(indexed_crop_keys), "skipped_crops": skipped_crops},
+            )
+            self._indexed += written
+            return written
 
     def _index_event(self, event: dict[str, Any]) -> int:
         """Backward-compatible internal alias for existing integrations."""

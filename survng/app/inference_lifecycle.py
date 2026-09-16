@@ -477,6 +477,7 @@ class InferenceLifecycle:
             appearance_encoder=self.person_reidentifier,
             appearance_indexer=self.appearance_index.replace_event,
             cover_promoter=self.events.promote_tracking_cover,
+            cover_revision_provider=lambda event_id: (self.events.get(event_id) or {}).get("evidence_revision"),
         )
 
     def _build_backfill(self, config: DetectorConfig) -> DeferredAppearanceBackfill:

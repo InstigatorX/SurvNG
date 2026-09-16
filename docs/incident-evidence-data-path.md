@@ -308,3 +308,48 @@ a substream cover does not mean SurvNG skipped main-stream refinement.
 | Tracking-based cover verification/promotion | `survng/app/object_tracking.py` |
 | Live client refresh without duplicate notification | `survng/app/manager.py` |
 | EMA audit outcome | `survng/app/motion_decisions.py` |
+
+## Durable cover recovery on v1.2
+
+New provisional incidents own an `event_cover_requirements` row in the event
+SQLite database. Admission creates the event, its first `evidence_revision`,
+and the recovery obligation in one transaction. Existing events receive revision
+zero during migration; migration does not schedule historical recovery.
+
+A requirement starts pending, becomes satisfied after a compatible main-recording
+or tracking cover is adopted, or becomes exhausted. Recovery has a five-minute
+deadline, at most three attempts, a 15-second initial delay and retry delay, and a
+60-second worker lease. Each attempt requests at most 20 seconds of recorded
+sampling, progressing through the existing +4/+8/+12-second stages when available.
+An already running inference completes within its existing request timeout;
+cooperative cancellation is checked between requests and while waiting for
+capacity. The lease and deadline are checked again before cover adoption.
+
+The per-camera refiner claims cover work only after ordinary detection jobs.
+New security work preempts recovery without charging an attempt or extending the
+deadline. Cover inference uses optional device admission, so security work from
+other cameras also takes precedence. The security job freshness window stays at
+60 seconds. Recovery only updates presentation evidence for the existing incident;
+it does not readmit the incident, start tracking, or send another original object
+notification. Ambiguous subjects and unavailable recordings leave the prior cover
+in place. The last three attempt summaries provide bounded diagnostics.
+
+Delayed refinement, tracking, and manual detection writers check the event revision
+before changing evidence. Snapshot references, matching annotations, revision
+increments, cover settlement, and downstream outbox entries commit atomically.
+A restarted projection worker replays those entries to refresh semantic search,
+existing incident notifications, and the browser. Delivery is at least once:
+publication checkpoints and same-revision coalescing avoid routine duplicates,
+but a crash between external delivery and its checkpoint can replay an update.
+Replay cannot create a new incident notification group.
+
+Semantic search retains old embeddings until replacements encode successfully.
+Queries exclude embeddings whose revision or image path differs from the current
+event. A full queue or unavailable encoder therefore delays current search coverage
+without deleting the recoverable old index. The outbox remains pending until the
+current projection is applied. Browser and notification image URLs carry the
+revision; stale numeric revisions receive HTTP 409, and current-image aliases
+require cache revalidation.
+
+Recovery uses v1.2's existing FFmpeg recordings and decode budget. It adds no
+GStreamer collectors, main-stream ring buffers, or face-history ledger.

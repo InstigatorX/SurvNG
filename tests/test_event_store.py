@@ -1980,7 +1980,7 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual([row["id"] for row in second_page], [events[3]["id"], events[2]["id"], events[1]["id"]])
             self.assertEqual(
                 set(first_page[0]),
-                {"id", "camera_id", "kind", "snapshot_path", "recording_path", "objects_json", "created_at"},
+                {"id", "camera_id", "kind", "snapshot_path", "recording_path", "objects_json", "created_at", "evidence_revision"},
             )
             self.assertTrue(first_page[0]["snapshot_path"])
             self.assertTrue(first_page[0]["recording_path"])

@@ -34,6 +34,17 @@ class AppearanceRouteBundle:
     handlers: dict[str, Callable[..., Any]]
 
 
+def _validate_evidence_revision(event: dict[str, Any], requested: str) -> None:
+    # Old clients sent paths or the public "available" marker as v. Those
+    # requests remain current-image aliases, with mandatory revalidation.
+    if requested.isdecimal() and int(requested) != int(event.get("evidence_revision") or 0):
+        raise HTTPException(
+            status_code=409,
+            detail="event evidence changed; refresh the incident",
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+
 def _jpeg_thumbnail(frame: np.ndarray, width: int, quality: int) -> bytes:
     frame_height, frame_width = frame.shape[:2]
     if frame_width > width:
@@ -315,11 +326,12 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             return operation(active)
 
     @router.get("/api/events/{event_id}/snapshot.jpg")
-    def event_snapshot(event_id: int, download: bool = False) -> FileResponse:
+    def event_snapshot(event_id: int, download: bool = False, v: str = "") -> FileResponse:
         def response(active_manager: AppManager) -> FileResponse:
             event = active_manager.events.get(event_id)
             if event is None:
                 raise HTTPException(status_code=404, detail="event not found")
+            _validate_evidence_revision(event, v)
             try:
                 snapshot_path = event_snapshot_path(
                     active_manager.storage_dir,
@@ -334,7 +346,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 snapshot_path,
                 media_type=snapshot_media_type(snapshot_path),
                 filename=snapshot_path.name if download else None,
-                headers={"Cache-Control": "private, max-age=3600"},
+                headers={"Cache-Control": "private, no-cache"},
             )
 
         return with_manager(response)
@@ -350,6 +362,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
         aspect_w: float = 0.0,
         aspect_h: float = 0.0,
         focus_bbox: str = "",
+        v: str = "",
     ) -> FileResponse:
         safe_width = max(160, min(int(width), 2560))
         safe_quality = max(50, min(int(quality), 95))
@@ -380,6 +393,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             event = active_manager.events.get(event_id)
             if event is None:
                 raise HTTPException(status_code=404, detail="event not found")
+            _validate_evidence_revision(event, v)
             try:
                 snapshot_path = event_snapshot_path(
                     active_manager.storage_dir,
@@ -393,6 +407,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             identity = (
                 f"{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:"
+                f"{int(event.get('evidence_revision') or 0)}:"
                 f"{safe_width}:{safe_quality}:{int(focus_enabled)}:{focus_zoom:.3f}:"
                 f"{focus_aspect_w:.3f}:{focus_aspect_h:.3f}:{int(incident_eligible_only)}:"
                 f"{focus_bbox}"
@@ -424,7 +439,7 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             return FileResponse(
                 cached,
                 media_type="image/jpeg",
-                headers={"Cache-Control": "private, max-age=86400, immutable"},
+                headers={"Cache-Control": "private, no-cache"},
             )
 
         return with_manager(response)

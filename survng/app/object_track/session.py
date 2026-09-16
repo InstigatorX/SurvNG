@@ -6,7 +6,7 @@ import inspect
 import logging
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -131,6 +131,7 @@ class ObjectTrackingSession:
         cover_frame_provider: TrackingCoverFrameProvider | None = None,
         snapshot_writer: TrackingSnapshotWriter | None = None,
         cover_promoter: TrackingCoverPromoter | None = None,
+        cover_revision_provider: Callable[[int], int | None] | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -156,6 +157,7 @@ class ObjectTrackingSession:
         self.cover_frame_provider = cover_frame_provider
         self.snapshot_writer = snapshot_writer
         self.cover_promoter = cover_promoter
+        self.cover_revision_provider = cover_revision_provider
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -499,6 +501,10 @@ class ObjectTrackingSession:
             "cover_promotion_result": "decode_unavailable",
             "cover_source": "object_tracking",
         }
+        expected_revision = (
+            self.cover_revision_provider(event_id)
+            if self.cover_revision_provider is not None else None
+        )
         frame = self.cover_frame_provider(
             candidate.captured_at,
             self._frame_width,
@@ -631,7 +637,12 @@ class ObjectTrackingSession:
                 "snapshot_subject_area_ratio": round(final_area, 6),
                 "snapshot_edge_clearance_ratio": round(final_clearance, 6),
                 "snapshot_quality_score": round(final_quality, 6),
+                "recorded_cover_requirement_satisfied": bool(
+                    candidate.frame_reference.exact
+                    and frame_width * frame_height > self._frame_width * self._frame_height
+                ),
             },
+            **({"expected_revision": expected_revision} if expected_revision is not None else {}),
         )
         if promoted is None:
             self._cover_promotion.update({
@@ -1710,6 +1721,7 @@ class ObjectTrackingSessionFactory:
         appearance_encoder: AppearanceEncoder | None = None,
         appearance_indexer: AppearanceIndexWriter | None = None,
         cover_promoter: TrackingCoverPromoter | None = None,
+        cover_revision_provider: Callable[[int], int | None] | None = None,
     ) -> None:
         self.config = config
         self.detector = detector
@@ -1720,6 +1732,7 @@ class ObjectTrackingSessionFactory:
         self.appearance_encoder = appearance_encoder
         self.appearance_indexer = appearance_indexer
         self.cover_promoter = cover_promoter
+        self.cover_revision_provider = cover_revision_provider
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
 
@@ -1746,4 +1759,5 @@ class ObjectTrackingSessionFactory:
             cover_frame_provider=cover_frame_provider,
             snapshot_writer=snapshot_writer,
             cover_promoter=self.cover_promoter,
+            cover_revision_provider=self.cover_revision_provider,
         )

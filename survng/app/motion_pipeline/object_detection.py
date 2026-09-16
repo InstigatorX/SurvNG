@@ -16,6 +16,7 @@ from typing import Any, Callable, Protocol
 import cv2
 import numpy as np
 
+from ..evidence_work import check_evidence_cancellation, evidence_cancelled
 from ..config import CameraConfig
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
@@ -1285,11 +1286,14 @@ class RecordedMotionObjectDetector:
         self.live_frame_provider = live_frame_provider
         self.timestamped_live_frame_provider = timestamped_live_frame_provider
         self.timestamped_evidence_frame_provider = timestamped_evidence_frame_provider
-        self.stop_requested = stop_requested
+        self._camera_stop_requested = stop_requested
         self.decode_budget = decode_budget
         # Compatibility-only: refinement depth no longer publishes rolling
         # motion evidence, so callers may keep passing this legacy argument.
         _ = motion_evidence
+
+    def stop_requested(self) -> bool:
+        return self._camera_stop_requested() or evidence_cancelled()
 
     def detect(
         self,
@@ -1308,6 +1312,21 @@ class RecordedMotionObjectDetector:
             event_at=event_at,
             camera_id=self.camera.id,
         )
+        sampling = qualification.get("evidence_sampling", {}) if isinstance(qualification, dict) else {}
+        minimum_last_offset = None
+        if isinstance(sampling, dict):
+            try:
+                requested = float(sampling.get("minimum_last_offset_seconds"))
+                if math.isfinite(requested):
+                    minimum_last_offset = min(max(_flatten_refinement_stages(stages)), max(0.0, requested))
+            except (TypeError, ValueError):
+                pass
+            try:
+                timeout = float(sampling.get("timeout_seconds"))
+                if math.isfinite(timeout) and timeout >= 0:
+                    retry_seconds = min(retry_seconds, timeout)
+            except (TypeError, ValueError):
+                pass
         route_dense = bool(
             qualification
             and isinstance(qualification.get("features"), dict)
@@ -1332,6 +1351,7 @@ class RecordedMotionObjectDetector:
             allow_representative_refinement=True,
             refinement_pending=False,
             route_dense=route_dense,
+            minimum_last_offset_seconds=minimum_last_offset,
         )
 
     def detect_initial(
@@ -1504,6 +1524,7 @@ class RecordedMotionObjectDetector:
         settle_seconds: float = RECORDED_EVENT_SETTLE_SECONDS,
         retry_interval_seconds: float = RECORDED_EVENT_RETRY_INTERVAL_SECONDS,
         representative_timeout_seconds: float = RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
+        minimum_last_offset_seconds: float | None = None,
     ) -> RecordedDetectionResult:
         workflow_started = time.monotonic()
         timing = {
@@ -1545,7 +1566,12 @@ class RecordedMotionObjectDetector:
         wait_seconds = max(0.0, newest_needed - time.time())
         if wait_seconds > 0:
             slept = min(wait_seconds, 3.0)
-            time.sleep(slept)
+            remaining_wait = slept
+            while remaining_wait > 0:
+                check_evidence_cancellation()
+                pause = min(remaining_wait, 0.05)
+                time.sleep(pause)
+                remaining_wait -= pause
             timing["temporal_confirmation_wait_ms"] += slept * 1000.0
 
         deadline = time.monotonic() + max(0.0, retry_seconds)
@@ -1608,6 +1634,7 @@ class RecordedMotionObjectDetector:
                 deadline=deadline,
                 planned_offsets=planned_offsets,
                 prefetched_rows=prefetched_rows,
+                minimum_last_offset_seconds=minimum_last_offset_seconds,
             )
         finally:
             if memory_lease is not None:
@@ -1675,6 +1702,7 @@ class RecordedMotionObjectDetector:
         settle_seconds: float = RECORDED_EVENT_SETTLE_SECONDS,
         retry_interval_seconds: float = RECORDED_EVENT_RETRY_INTERVAL_SECONDS,
         representative_timeout_seconds: float = RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
+        minimum_last_offset_seconds: float | None = None,
     ) -> RecordedDetectionResult:
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
@@ -1895,7 +1923,11 @@ class RecordedMotionObjectDetector:
                                 samples_by_source_frame[source_key] = sample
                         samples_by_offset[sample_offset] = sample
                         samples = ordered_samples()
-                        if _refinement_early_exit_ready(
+                        if (minimum_last_offset_seconds is None or any(
+                            item.requested_offset is not None
+                            and item.requested_offset >= minimum_last_offset_seconds
+                            for item in samples
+                        )) and _refinement_early_exit_ready(
                             stage_index=stage_index,
                             stage_offsets=stage_offsets,
                             samples_by_offset=samples_by_offset,
@@ -1924,7 +1956,13 @@ class RecordedMotionObjectDetector:
                         default_required,
                         class_confirmations,
                     )
-                    if any(item.get("temporal_consensus") is True for item in objects):
+                    if any(item.get("temporal_consensus") is True for item in objects) and (
+                        minimum_last_offset_seconds is None or any(
+                            item.requested_offset is not None
+                            and item.requested_offset >= minimum_last_offset_seconds
+                            for item in samples
+                        )
+                    ):
                         # Detection is already proven. If its cover image clips,
                         # obscures, or barely shows the active/new subject, spend
                         # one existing +4 second stage looking for a better frame.
@@ -2051,6 +2089,12 @@ class RecordedMotionObjectDetector:
                 event_epoch=event_epoch,
             )
 
+        return self._live_fallback_result(event_epoch, timing, workflow_started, refinement_pending)
+
+    def _live_fallback_result(
+        self, event_epoch: float, timing: dict[str, float],
+        workflow_started: float, refinement_pending: bool,
+    ) -> RecordedDetectionResult:
         fallback_sample = (
             self.timestamped_live_frame_provider()
             if self.timestamped_live_frame_provider is not None
@@ -2220,6 +2264,7 @@ class RecordedMotionObjectDetector:
         enrich_faces: bool = True,
         workload: str = "refinement",
     ) -> list[dict[str, Any]]:
+        check_evidence_cancellation()
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
         class_thresholds = dict(
@@ -2253,6 +2298,7 @@ class RecordedMotionObjectDetector:
             frame,
             confidence_threshold=candidate_threshold,
         )
+        check_evidence_cancellation()
         detector_ms = (time.monotonic() - detector_started) * 1000.0
         if timing is not None:
             timing["detector_request_ms"] += detector_ms
@@ -2324,6 +2370,7 @@ class RecordedMotionObjectDetector:
         detect_faces = getattr(self.detector, "detect_faces", None)
         if not callable(detect_faces):
             return objects
+        check_evidence_cancellation()
         enrichment_started = time.monotonic()
         confirmed_objects = [
             item
@@ -2398,6 +2445,7 @@ class RecordedMotionObjectDetector:
         estimate_depth = getattr(self.detector, "estimate_depth_for_objects", None)
         if not callable(estimate_depth):
             return objects
+        check_evidence_cancellation()
         enrichment_started = time.monotonic()
         visible_objects = [
             item
@@ -2453,6 +2501,7 @@ class RecordedMotionObjectDetector:
             and _box(item) is not None
         ]
         for person in sorted(people, key=_confidence, reverse=True)[:max_people]:
+            check_evidence_cancellation()
             box = _box(person)
             if box is None:
                 continue

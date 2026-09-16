@@ -49,6 +49,7 @@ def manager_with_mocks() -> AppManager:
     manager.inference.tracking_factory = Mock()
     manager.inference.status.return_value = {}
     manager._motion_analysis_limiter = Mock()
+    manager.evidence_projection = Mock()
     manager.motion_object_detector_factory = Mock()
     manager.motion_object_detector_factory.decode_budget.status.return_value = {}
     manager.recorder = Mock()
@@ -1162,6 +1163,8 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.inference.start_core.assert_called_once_with()
         manager.inference.start_auxiliary.assert_called_once_with()
+        manager.evidence_projection.start.assert_called_once_with()
+        manager.evidence_projection.stop.assert_called_once_with()
         manager.workers["gate"].start.assert_called_once_with()
         manager.workers["gate"].request_stop.assert_called_once_with()
         manager.inference.close.assert_called_once_with()

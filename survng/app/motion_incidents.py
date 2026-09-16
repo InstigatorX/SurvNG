@@ -17,6 +17,7 @@ from typing import Any, Callable, Protocol
 import numpy as np
 
 from .durable_payload import durable_json_copy
+from .evidence_work import EvidenceWorkPreempted, cancellable_evidence_work
 from .event_store.jobs import (
     DETECTION_COMPLETION_JOB_MAXIMUM_AGE_SECONDS,
     DETECTION_EVENT_JOB_MAXIMUM_AGE_SECONDS,
@@ -59,7 +60,7 @@ class DetectionJobStore(Protocol):
         maximum_age_seconds: float = DETECTION_JOB_MAXIMUM_AGE_SECONDS,
         event_maximum_age_seconds: float | None = None,
     ) -> dict[str, Any] | None: ...
-    def complete_detection_job(self, job_id: str, event_id: int | None, *, lease_owner: str = "") -> None: ...
+    def complete_detection_job(self, job_id: str, event_id: int | None, *, lease_owner: str = "") -> bool | None: ...
     def checkpoint_detection_job(
         self, job_id: str, payload: dict[str, Any], *, lease_owner: str = "",
     ) -> bool: ...
@@ -162,6 +163,7 @@ class _RefinementJob:
     initial_outcome: MotionDecisionOutcome
     refined_outcome: MotionDecisionOutcome | None = None
     handoff_completed: bool = False
+    handoff_disposition: str = "pending"
 
     def key(self) -> tuple[str, str | int | float]:
         # Once the fast path persists an incident, that canonical event—not the
@@ -203,6 +205,7 @@ class _RefinementJob:
                 else None
             ),
             "handoff_completed": self.handoff_completed,
+            "handoff_disposition": self.handoff_disposition,
         }
 
     @classmethod
@@ -232,6 +235,7 @@ class _RefinementJob:
                 else None
             ),
             handoff_completed=bool(payload.get("handoff_completed")),
+            handoff_disposition=str(payload.get("handoff_disposition") or "pending"),
         )
 
 
@@ -407,13 +411,14 @@ class _MemoryDetectionJobStore:
         with self._lock:
             job = self._jobs[job_id]
             if job["state"] != "running":
-                return
+                return False
             if lease_owner and str(job.get("lease_owner") or "") != lease_owner:
-                return
+                return False
             job["state"] = "completed"
             job["event_id"] = event_id
             job["lease_owner"] = ""
             job["lease_expires_at"] = None
+            return True
 
     def checkpoint_detection_job(self, job_id, payload, *, lease_owner=""):
         with self._lock:
@@ -513,6 +518,7 @@ class MotionIncidentService:
         self._handoff_event_order: deque[int] = deque()
         self._refinement_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
         self._lease_owner = uuid.uuid4().hex
+        self._security_work_pending = threading.Event()
         self._refinement_callbacks: dict[str, RefinementCallback] = {}
         self._refinement_progress: dict[str, _RefinementJob] = {}
         self._refinement_completion_handler: RefinementCompletionHandler | None = None
@@ -639,6 +645,7 @@ class MotionIncidentService:
         # from live evidence instead of waiting for a job that will not run.
         with self._status_lock:
             self._refinement_accepting = False
+            self._security_work_pending.set()
         try:
             self._refinement_queue.put_nowait(True)
         except queue.Full:
@@ -833,6 +840,9 @@ class MotionIncidentService:
             if admission == "coalesced":
                 self._refinements_coalesced += 1
                 return admission
+            # Coalescing can refer to a terminal job; only new admission is
+            # a wakeup. Existing durable retries are checked by the worker.
+            self._security_work_pending.set()
             if job.callback is not None:
                 self._refinement_callbacks[job_id] = job.callback
             self._refinements_queued += 1
@@ -902,6 +912,67 @@ class MotionIncidentService:
                     self._refinement_callbacks.pop(job_id, None)
                     self._refinement_progress.pop(job_id, None)
 
+    def _run_cover_requirement(self) -> bool:
+        claim = getattr(self.refinement_store, "claim_cover_requirement", None)
+        if not callable(claim):
+            return False
+        if self._security_work_pending.is_set():
+            return False
+        requirement = claim(self.camera_id, lease_owner=self._lease_owner)
+        if requirement is None:
+            return False
+        event_id = int(requirement["event_id"])
+        reason = "cover_attempt_failed"
+        next_priority_check = 0.0
+
+        def preempted() -> bool:
+            nonlocal next_priority_check
+            if self._security_work_pending.is_set() or bool(self._refinement_stop and self._refinement_stop.is_set()):
+                return True
+            # A durable retry can become due without a new in-memory enqueue.
+            # Bound the read frequency while decoding/awaiting capacity.
+            now = time.monotonic()
+            if now >= next_priority_check:
+                next_priority_check = now + 0.25
+                due = getattr(self.refinement_store, "has_due_detection_job", None)
+                if callable(due) and due(self.camera_id):
+                    self._security_work_pending.set()
+                    return True
+            return False
+
+        try:
+            payload = requirement["payload"]
+            qualification = copy.deepcopy(payload.get("qualification") or {})
+            qualification["cover_only"] = True
+            qualification["cover_requirement_lease_owner"] = self._lease_owner
+            qualification["evidence_sampling"] = {
+                "minimum_last_offset_seconds": min(12.0, 4.0 * int(requirement["attempts"])),
+                "timeout_seconds": max(0.1, min(20.0, float(requirement["deadline_epoch"]) - time.time())),
+            }
+            with cancellable_evidence_work(preempted):
+                outcome = self.decision_processor.refine(
+                    str(payload.get("topic") or ""),
+                    str(payload.get("message") or ""),
+                    datetime.fromisoformat(payload["event_at"]),
+                    qualification,
+                    existing_event_id=event_id,
+                    require_eligible_object=True,
+                    require_motion_correlation=True,
+                )
+            reason = outcome.cover_promotion_reason or outcome.rejection_reason or "cover_not_satisfied"
+        except EvidenceWorkPreempted:
+            self.refinement_store.defer_cover_requirement(
+                event_id, lease_owner=self._lease_owner, reason="security_work_preempted",
+            )
+            return True
+        except Exception as error:
+            reason = f"cover_attempt_failed:{type(error).__name__}"
+            LOGGER.exception("cover recovery failed for %s event %d", self.camera_id, event_id)
+        self.refinement_store.finish_cover_attempt(
+            event_id, lease_owner=self._lease_owner, reason=reason,
+        )
+        return True
+
     def _run_refinements_until_error(self) -> None:
         last_prune = 0.0
         last_stale_expiry = 0.0
@@ -948,6 +1019,10 @@ class MotionIncidentService:
                             "stale motion refinement expiration failed for %s",
                             self.camera_id,
                         )
+            # Clear before inspecting the durable queue. Admission after this
+            # point sets the token, including the race between claim and cover.
+            with self._status_lock:
+                self._security_work_pending.clear()
             claimed = self.refinement_store.claim_detection_job(
                 self.camera_id,
                 lease_owner=self._lease_owner,
@@ -957,6 +1032,11 @@ class MotionIncidentService:
                 ),
             )
             if claimed is None:
+                # The event owns cover completion independently of terminal
+                # security jobs. Poll its durable requirements only after
+                # ordinary refinement has had first access to this worker.
+                if self._run_cover_requirement():
+                    continue
                 try:
                     self._refinement_queue.get(timeout=0.5)
                 except queue.Empty:
@@ -1004,6 +1084,10 @@ class MotionIncidentService:
                     handoff_completed=(
                         durable_job.handoff_completed
                         or local_progress.handoff_completed
+                    ),
+                    handoff_disposition=(
+                        durable_job.handoff_disposition if durable_job.handoff_completed
+                        else local_progress.handoff_disposition
                     ),
                 )
             refinement_qualification = dict(job.qualification)
@@ -1090,8 +1174,12 @@ class MotionIncidentService:
                 ):
                     continue
                 if not job.handoff_completed:
-                    self._handoff(outcome, job.event_at)
-                    job = replace(job, handoff_completed=True)
+                    started = self._handoff(outcome, job.event_at)
+                    disposition = (
+                        "started" if started else
+                        "not_applicable" if not outcome.object_detected else "declined"
+                    )
+                    job = replace(job, handoff_completed=True, handoff_disposition=disposition)
                     with self._status_lock:
                         self._refinement_progress[job_id] = job
                 if (
@@ -1129,11 +1217,13 @@ class MotionIncidentService:
                             redact_secret_text(error)[:500],
                         )
                 try:
-                    self.refinement_store.complete_detection_job(
+                    transitioned = self.refinement_store.complete_detection_job(
                         job_id,
                         outcome.event_id,
                         lease_owner=self._lease_owner,
                     )
+                    if transitioned is False:
+                        raise RuntimeError("refinement completion lost its owner lease")
                 except Exception as error:
                     self._record_refinement_completion_failure(job, error)
                     self._retry_refinement_completion(job_id, error)

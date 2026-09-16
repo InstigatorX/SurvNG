@@ -243,7 +243,7 @@ class MqttServiceTest(unittest.TestCase):
         self.assertEqual(complete["classes"], ["dog", "person"])
         self.assertEqual(complete["zones"], ["Porch", "Walkway"])
         self.assertEqual(complete["representative_event_id"], 42)
-        self.assertEqual(complete["snapshot_url"], "/survng/api/events/42/snapshot.jpg")
+        self.assertEqual(complete["snapshot_url"], "/survng/api/events/42/snapshot.jpg?v=0")
         self.assertTrue(all(retained is False for _, _, retained in publications))
 
     def test_incident_depth_summary_uses_true_median(self) -> None:
