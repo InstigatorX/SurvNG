@@ -173,3 +173,58 @@ def test_rejected_location_can_be_reverified_after_object_moves():
     feed(a,6,[obj])
     assert len(a._verification_pending)==1
     assert a.tracks[(9,'dog')]['_verification_token'] != old
+
+
+@pytest.mark.parametrize('offset', [.5, -.5, 1., -1.])
+def test_verification_finds_time_skewed_main_pose_and_preserves_frame_time(offset):
+    main = np.random.default_rng(9).integers(0, 255, (600, 800, 3), dtype=np.uint8)
+    obj = {'label': 'person', 'confidence': .8,
+           'box': {'x1': 300, 'y1': 200, 'x2': 340, 'y2': 280}}
+    config = AppConfig(cameras=[{'id': 'front', 'name': 'Front', 'stream_url': 'rtsp://unused.invalid'}])
+    selected = main.copy()
+    evidence = SimpleNamespace(
+        config=config,
+        read_frame=Mock(side_effect=lambda camera, epoch, source: selected if epoch == 100 + offset else main),
+        match_main=Mock(side_effect=lambda candidate, frame: [obj] if frame is selected else []),
+        verifier=Mock())
+    _, left, top = context_crop(main, obj['box'])
+    evidence.verifier.detect.return_value = [dict(obj, box={
+        k: v - (left if k.startswith('x') else top) for k, v in obj['box'].items()})]
+    service = NativeAdmission(evidence)
+    result = service.verify('front', [Candidate(100, main[::2, ::2], [obj], 0)])
+    assert result['status'] == 'confirmed'
+    assert result['votes'] == ['confirmed']
+    assert result['cover'][0] is selected
+    assert result['cover'][1]['frame_captured_at_epoch'] == 100 + offset
+    assert result['cover'][2] == 100 + offset
+    evidence.verifier.detect.assert_called_once()
+    assert evidence.read_frame.call_count <= 5
+
+
+def test_time_window_does_not_bypass_appearance_matching():
+    main = np.random.default_rng(9).integers(0, 255, (600, 800, 3), dtype=np.uint8)
+    evidence = SimpleNamespace(read_frame=Mock(return_value=main),
+                               match_main=Mock(return_value=[]), verifier=Mock())
+    result = NativeAdmission(evidence).verify('front', [Candidate(100, main[::2, ::2], [], 0)])
+    assert result['status'] == 'unverified'
+    assert result['votes'] == ['unaligned']
+    assert [call.args[1] for call in evidence.read_frame.call_args_list] == [100, 100.5, 99.5, 101, 99]
+    evidence.verifier.detect.assert_not_called()
+
+
+def test_cancel_during_time_window_decode_stops_before_matching_or_inference():
+    import threading
+    cancelled = threading.Event()
+    main = np.ones((40, 40, 3), np.uint8)
+    def read(camera, epoch, source):
+        if epoch != 100:
+            cancelled.set()
+        return main
+    evidence = SimpleNamespace(read_frame=Mock(side_effect=read),
+                               match_main=Mock(return_value=[]), verifier=Mock())
+    result = NativeAdmission(evidence).verify(
+        'front', [Candidate(100, main[::2, ::2], [], 0)], cancelled=cancelled)
+    assert result == {'status': 'unverified', 'reason': 'stopped'}
+    assert evidence.read_frame.call_count == 2
+    evidence.match_main.assert_called_once()
+    evidence.verifier.detect.assert_not_called()

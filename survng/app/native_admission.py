@@ -99,6 +99,23 @@ class NativeAdmission:
                 votes.append('unavailable')
                 continue
             aligned = self.evidence.match_main(candidate, main)
+            frame_epoch = candidate.epoch
+            if not aligned:
+                # Independently recorded streams can differ by a fraction of a
+                # second. Keep the appearance and extent safeguards, but look
+                # for the matching pose within a bounded recording window.
+                for offset in (.5, -.5, 1., -1.):
+                    if self.closed or (cancelled is not None and cancelled.is_set()):
+                        return {'status': 'unverified', 'reason': 'stopped'}
+                    alternate = self.evidence.read_frame(camera_id, candidate.epoch + offset, 'main')
+                    if self.closed or (cancelled is not None and cancelled.is_set()):
+                        return {'status': 'unverified', 'reason': 'stopped'}
+                    if alternate is None or alternate.shape[0]*alternate.shape[1] <= candidate.image.shape[0]*candidate.image.shape[1]:
+                        continue
+                    aligned = self.evidence.match_main(candidate, alternate)
+                    if aligned:
+                        main, frame_epoch = alternate, candidate.epoch + offset
+                        break
             if not aligned:
                 votes.append('unaligned')
                 continue
@@ -130,8 +147,9 @@ class NativeAdmission:
             accepted = [d for d in relevant if d['confidence'] >= threshold]
             if accepted:
                 actual = max(accepted, key=lambda d: d['confidence'])
-                cover = dict(obj, box=actual['box'], confidence=actual['confidence'], native_cover_verified=True)
-                best = (main, cover, candidate.epoch)
+                cover = dict(obj, box=actual['box'], confidence=actual['confidence'], native_cover_verified=True,
+                             frame_captured_at_epoch=frame_epoch)
+                best = (main, cover, frame_epoch)
                 votes.append('confirmed')
                 # One clear positive decides admission. Remaining samples are
                 # only needed to establish rejection, not to reconfirm success.
