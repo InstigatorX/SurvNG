@@ -341,12 +341,14 @@ class _SharedLiveProcess:
         self._stderr_thread.start()
         self._reader_thread.start()
 
-    def add_stream(self, stream_id: str, source_url: str, *, source_role: str = "live", frame_width: int | None = None, detection_enabled: bool = True, h264_decoder_compliance: str = "auto") -> _StreamInbox:
+    def add_stream(self, stream_id: str, source_url: str, *, source_role: str = "live", frame_width: int | None = None, detection_enabled: bool = True, h264_decoder_compliance: str = "auto", spatial_plan: dict | None = None) -> _StreamInbox:
         inbox = _StreamInbox()
         with self._lock:
             self._inboxes[stream_id] = inbox
         command = {"op": "add", "stream_id": stream_id, "url": source_url, "source_role": source_role, "detection_enabled": detection_enabled}
         command["h264_decoder_compliance"] = h264_decoder_compliance
+        if spatial_plan is not None:
+            command["spatial_plan"] = spatial_plan
         if frame_width is not None:
             command["frame_width"] = frame_width
         self._send(command)
@@ -978,6 +980,7 @@ class DlStreamerCaptureBackend:
             stream_id, source_url, source_role=handle.source_role, frame_width=handle.frame_width,
             detection_enabled=getattr(handle, "detection_enabled", True),
             h264_decoder_compliance=handle.h264_decoder_compliance,
+            spatial_plan=getattr(handle, "spatial_plan", None),
         ))
         if cancelled():
             handle.close()

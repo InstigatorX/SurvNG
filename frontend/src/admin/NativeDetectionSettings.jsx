@@ -26,7 +26,7 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
   const error = nativeDetectionError(detector);
   return <section className="sub-panel detection-settings-card">
     <h3>Native detection and tracking</h3>
-    <p>Live/substream → gvadetect → gvatrack → incident policy. Tracking uses short-term-imageless; the inference interval controls how often sampled frames run detection. Save settings to apply changes.</p>
+    <p>Live/substream → gvadetect → gvatrack → zone checks → incident policy. Tracking uses short-term-imageless; the inference interval controls how often sampled frames run detection. Save settings to apply changes.</p>
     <div className="form-grid">
       <label className="compact-toggle"><input type="checkbox" checked={detector.enabled ?? false} onChange={(event) => update("enabled", event.target.checked)} /><span>Detection enabled</span></label>
       <label>OpenVINO model<input value={detector.model_path || detector.model_xml || ""} onChange={(event) => { update("model_path", event.target.value); update("model_xml", ""); }} /><small>Server path to the model. An adjacent model-proc file is discovered automatically.</small></label>

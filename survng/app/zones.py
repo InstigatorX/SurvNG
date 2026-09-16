@@ -53,6 +53,22 @@ def _point_in_polygon(x: float, y: float, zone: DetectionZone) -> bool:
     return inside
 
 
+def _native_zone_contains(detected, index, x, y, zone, width, height):
+    # Native polygons and bottom-center use integer pixels. Preserve inclusive
+    # boundaries and subpixel geometry only within the rounding error band.
+    px, py = x * width, y * height
+    previous = zone.points[-1]
+    for current in zone.points:
+        ax, ay = previous.x * width, previous.y * height
+        dx, dy = (current.x - previous.x) * width, (current.y - previous.y) * height
+        length = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((px-ax)*dx + (py-ay)*dy) / length)) if length else 0.0
+        if math.hypot(px-ax-t*dx, py-ay-t*dy) <= 2.0:
+            return _point_in_polygon(x, y, zone)
+        previous = current
+    return str(index) in detected["native_zone_ids"]
+
+
 def class_confidence_threshold(
     label: str,
     default: float,
@@ -91,6 +107,7 @@ def apply_detection_zones(
     default_confidence: float,
     require_incident_zone: bool = True,
     class_confidence_thresholds: dict[str, float] | None = None,
+    *, native_membership: bool = False,
 ) -> list[dict[str, Any]]:
     zones = [zone for zone in camera.zones if zone.enabled and len(zone.points) >= 3]
     if not zones:
@@ -178,7 +195,10 @@ def apply_detection_zones(
             for zone in zones
             if zone.behavior != "none" and _class_applies(zone, label)
         ]
-        spatial_matches = [zone for zone in relevant if _point_in_polygon(x, y, zone)]
+        membership = {id(zone): (_native_zone_contains(detected, index, x, y, zone, width, height)
+                                 if native_membership else _point_in_polygon(x, y, zone))
+                      for index, zone in enumerate(camera.zones) if zone in relevant}
+        spatial_matches = [zone for zone in relevant if membership[id(zone)]]
         spatial_ignored = any(zone.behavior == "ignore" for zone in spatial_matches)
         spatial_admitted = any(zone.behavior == "incident" for zone in spatial_matches)
         zone_required = (
@@ -201,7 +221,7 @@ def apply_detection_zones(
         matches = []
         for zone in relevant:
             threshold = zone.confidence_threshold if zone.confidence_threshold is not None else label_threshold
-            if confidence >= threshold and _point_in_polygon(x, y, zone):
+            if confidence >= threshold and membership[id(zone)]:
                 matches.append(zone)
 
         ignored = any(zone.behavior == "ignore" for zone in matches)

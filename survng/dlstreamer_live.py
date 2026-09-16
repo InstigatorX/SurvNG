@@ -450,6 +450,11 @@ def _normalize_gva_objects(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 native_track_id = int(native_track_id)
                 if native_track_id >= 0:
                     normalized["native_track_id"] = native_track_id
+            if "zone_violations" in item:
+                ids = item["zone_violations"]
+                if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
+                    raise ValueError("invalid native zone membership")
+                normalized["native_zone_ids"] = list(ids)
             objects.append(normalized)
         except (TypeError, ValueError):
             continue
@@ -471,8 +476,9 @@ def _packed_gray(pixels: bytes, width: int, height: int) -> bytes:
 class _NativeInferenceEvidence:
     """Bounded pre-tracker evidence, before the leaky output queue.
 
-    gvadetect's full-frame, no-block=false contract runs the first buffer and
+    gvadetect's no-block=false contract runs the first buffer and
     every inference-interval buffer thereafter, emitting buffers in order.
+    ROI mode supplies exactly one region on every input, including sweeps.
     Count here, never at appsink (which drops buffers). Capture ROIs here too:
     gvatrack can append predictions even on frames with fresh detections.
     See DL Streamer inference_impl.cpp::TransformFrameIp and tracker.cpp::track.
@@ -553,12 +559,12 @@ class _NativeInferenceEvidence:
 
 def _filter_tracking_regions(buffer, caps, video_frame_type, allowed_classes):
     """Remove excluded ROI metadata before tracking, without mapping pixel memory."""
-    if allowed_classes is None:
-        return
+    from survng.native_spatial import ROI_LABEL
     from gi.repository import GstAnalytics, GLib
     frame = video_frame_type(buffer, caps=caps)
     regions = list(frame.regions())
-    selected = [region for region in regions if region.label().strip().lower() in allowed_classes]
+    selected = [region for region in regions if region.label() != ROI_LABEL
+                and (allowed_classes is None or region.label().strip().lower() in allowed_classes)]
     if len(selected) == len(regions):
         return
     kept = [(region.rect(), region.label(), region.confidence(), region.label_id()) for region in selected]
@@ -582,7 +588,7 @@ def _filter_tracking_regions(buffer, caps, video_frame_type, allowed_classes):
 
 
 def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gst_second: int,
-                        clock_time_none: int, native_result=None):
+                        clock_time_none: int, native_result=None, spatial_plan=None):
     """Read GstGVAJSONMeta; mapping a video buffer yields pixels, not JSON."""
     from survng.app.live_detections import DetectionSnapshot
     buffer = sample.get_buffer()
@@ -602,6 +608,10 @@ def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gs
     normalized = _normalize_gva_objects(payload)
     if len(normalized) != len(objects):
         raise ValueError("incomplete inference metadata")
+    if spatial_plan is not None:
+        for obj in normalized:
+            obj.setdefault("native_zone_ids", [])
+            obj["native_zone_revision"] = spatial_plan["revision"]
     provenance, fresh_objects = native_result or ("unknown", [])
     # gvatrack preserves detector ROIs and appends unassociated predictions.
     # Transfer IDs only on an exact, unambiguous detector ROI match. Never
@@ -626,6 +636,8 @@ def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gs
         "height": int(structure.get_value("height") or 0),
         "objects": normalized,
     }
+    if spatial_plan is not None:
+        snapshot["zone_revision"] = spatial_plan["revision"]
     DetectionSnapshot.parse(snapshot)
     return snapshot
 
@@ -800,7 +812,7 @@ def _run_supervisor(
         with workers_lock:
             workers.pop(stream_id, None)
 
-    def start_stream(stream_id: str, url: str, source_role: str = "live", frame_width: int = qualifier_width, detection_enabled: bool = True, h264_decoder_compliance: str = "auto") -> None:
+    def start_stream(stream_id: str, url: str, source_role: str = "live", frame_width: int = qualifier_width, detection_enabled: bool = True, h264_decoder_compliance: str = "auto", spatial_plan: dict | None = None) -> None:
         stop_stream(stream_id)
         event = threading.Event()
 
@@ -813,6 +825,7 @@ def _run_supervisor(
                     stream_id=stream_id,
                     detect=detect and detection_enabled and source_role == "live",
                     h264_decoder_compliance=h264_decoder_compliance,
+                    spatial_plan=spatial_plan,
                     model_path=model_path,
                     instance_id=instance_id,
                     rate=rate if source_role == "live" else _frame_rate(args.main_fps),
@@ -894,7 +907,7 @@ def _run_supervisor(
                     lock=stdout_lock,
                 )
                 continue
-            start_stream(stream_id, url, source_role, frame_width, command.get("detection_enabled") is not False, compliance)
+            start_stream(stream_id, url, source_role, frame_width, command.get("detection_enabled") is not False, compliance, command.get("spatial_plan"))
     finally:
         request_stop()
         with workers_lock:
@@ -938,6 +951,7 @@ def _pump_pipeline(
     source_role: str = "live",
     va_context=None,
     h264_decoder_compliance: str = "auto",
+    spatial_plan: dict | None = None,
 ) -> int:
     if h264_decoder_compliance not in H264_DECODER_COMPLIANCE:
         raise ValueError("invalid H.264 decoder compliance")
@@ -1054,6 +1068,9 @@ def _pump_pipeline(
     detector = None
     detect_output_queue = None
     native_tracker = None
+    analytics = None
+    roi_input = None
+    roi_enabled = False
     meta_convert = None
     va_caps = None
     preprocess = ""
@@ -1100,7 +1117,13 @@ def _pump_pipeline(
         detector.set_property("nireq", args.inference_requests)
         detector.set_property("inference-interval", args.inference_interval)
         detector.set_property("no-block", False)
-        detector.set_property("inference-region", 0)  # full-frame
+        roi_enabled = bool(spatial_plan and spatial_plan.get("roi", {}).get("enabled"))
+        detector.set_property("inference-region", 1 if roi_enabled else 0)
+        if roi_enabled and instance_id:
+            # Shared preprocessing is compiled from the first stream's region
+            # mode. Mixing full-frame and ROI consumers misprojects batch output.
+            # ROI cameras share a separate compiled pool with one another.
+            instance_id += "-roi"
         native_evidence = _NativeInferenceEvidence(
             args.inference_interval, tracking=args.native_tracking != "off",
         )
@@ -1128,10 +1151,33 @@ def _pump_pipeline(
                     native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)
             return Gst.PadProbeReturn.OK
 
+        spatial_dimensions = None
+
         def capture_native_start(pad, info):
+            nonlocal spatial_dimensions
             buffer = info.get_buffer()
             if buffer is not None:
-                native_evidence.begin(buffer.pts)
+                try:
+                    structure = pad.get_current_caps().get_structure(0)
+                    dimensions = (int(structure.get_value("width")), int(structure.get_value("height")))
+                    if analytics is not None and spatial_dimensions is None:
+                        from survng.native_spatial import analytics_zones
+                        analytics.set_property("zones", json.dumps(analytics_zones(spatial_plan, *dimensions)))
+                        analytics.set_locked_state(False)
+                        if not analytics.sync_state_with_parent():
+                            raise RuntimeError("could not start zone analytics")
+                        spatial_dimensions = dimensions
+                    if analytics is not None and dimensions != spatial_dimensions:
+                        raise RuntimeError("zone geometry changed; stream rebuild required")
+                    native_evidence.begin(buffer.pts)
+                except Exception:
+                    native_evidence.invalid += 1
+                    native_evidence.identity_valid = False
+                    with native_evidence.lock:
+                        native_evidence.results.clear()
+                    if native_evidence.invalid == 1 or native_evidence.invalid % 100 == 0:
+                        print("survng-dls spatial geometry unavailable; stream rebuild required", file=sys.stderr, flush=True)
+                    return Gst.PadProbeReturn.DROP
             return Gst.PadProbeReturn.OK
 
         detector.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, capture_native_start)
@@ -1168,6 +1214,23 @@ def _pump_pipeline(
                 )
             native_tracker = _element(Gst, "gvatrack", "native-track")
             native_tracker.set_property("tracking-type", args.native_tracking)
+        if spatial_plan is not None:
+            analytics = _element(Gst, "gvaanalytics", "zone-analytics")
+            analytics.set_property("evaluation-point", 1)
+            analytics.set_property("draw-zones", False)
+            analytics.set_property("draw-tripwires", False)
+
+            # 2026.2 reads polygons on READY -> PAUSED, not on property writes.
+            # Wait for detector input caps before starting this metadata element.
+            analytics.set_locked_state(True)
+            analytics.set_state(Gst.State.READY)
+            elements.append(analytics)
+        if roi_enabled:
+            roi_input = _element(Gst, "gvapython", "inference-region")
+            roi_input.set_property("module", str(Path(__file__).with_name("native_spatial.py")))
+            roi_input.set_property("class", "RoiInput")
+            roi_input.set_property("kwarg", json.dumps({"plan": spatial_plan, "interval": args.inference_interval}))
+            elements.append(roi_input)
         elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])
         if native_tracker is not None:
             elements.append(native_tracker)
@@ -1228,6 +1291,9 @@ def _pump_pipeline(
                     f"could not link {left.get_name()} to {right.get_name()}"
                 )
     if detect and detect_queue is not None and detector is not None:
+        detect_input = roi_input if roi_input is not None else detector
+        if roi_input is not None and not roi_input.link(detector):
+            raise RuntimeError("could not link inference-region metadata")
         if va_caps is not None:
             if (
                 detect_rate_el is None
@@ -1235,7 +1301,7 @@ def _pump_pipeline(
                 or not detect_queue.link(detect_rate_el)
                 or not detect_rate_el.link(detect_rate_caps)
                 or not detect_rate_caps.link(va_caps)
-                or not va_caps.link(detector)
+                or not va_caps.link(detect_input)
             ):
                 raise RuntimeError("could not link VAMemory detect caps")
         elif (
@@ -1243,7 +1309,7 @@ def _pump_pipeline(
             or detect_rate_caps is None
             or not detect_queue.link(detect_rate_el)
             or not detect_rate_el.link(detect_rate_caps)
-            or not detect_rate_caps.link(detector)
+            or not detect_rate_caps.link(detect_input)
         ):
             raise RuntimeError("could not link detect queue")
         tracked_source = detector
@@ -1251,6 +1317,10 @@ def _pump_pipeline(
             if not detector.link(native_tracker):
                 raise RuntimeError("could not link gvatrack")
             tracked_source = native_tracker
+        if analytics is not None:
+            if not tracked_source.link(analytics):
+                raise RuntimeError("could not link native zone analytics")
+            tracked_source = analytics
         # Track every completed detection before shedding metadata delivery.
         if detect_output_queue is None or not tracked_source.link(detect_output_queue):
             raise RuntimeError("could not link native output queue")
@@ -1360,6 +1430,7 @@ def _pump_pipeline(
                             inference_sequence=inference_sequence,
                             gst_second=Gst.SECOND, clock_time_none=Gst.CLOCK_TIME_NONE,
                             native_result=native_evidence.pop(meta_sample.get_buffer().pts),
+                            spatial_plan=spatial_plan,
                         )
                     except Exception:
                         # Malformed metadata must leave video available for
@@ -1443,6 +1514,10 @@ def _pump_pipeline(
                             ),
                             "native_tracking": args.native_tracking if detect else "off",
                             "native_tracking_classes": getattr(args, "tracking_classes", None) if detect else None,
+                            "native_zone_revision": spatial_plan.get("revision") if spatial_plan and detect else None,
+                            "native_roi_enabled": bool(spatial_plan and spatial_plan.get("roi", {}).get("enabled") and detect),
+                            "native_zone_count": sum(z.get("enabled", True) and len(z.get("points", [])) >= 3 for z in spatial_plan.get("zones", [])) if spatial_plan and detect else 0,
+                            "native_roi_full_frame_interval": spatial_plan.get("roi", {}).get("full_frame_interval", 5) if spatial_plan and roi_enabled else 0,
                             "native_inference_requests": args.inference_requests if detect else 0,
                             "native_inference_streams": args.inference_streams if detect else 0,
                             "native_tracking_authoritative": native_tracker is not None,
@@ -1490,6 +1565,8 @@ def _pump_pipeline(
                     lock=stdout_lock,
                 )
     finally:
+        if analytics is not None:
+            analytics.set_locked_state(False)
         pipeline.set_state(Gst.State.NULL)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)

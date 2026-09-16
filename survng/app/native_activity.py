@@ -16,6 +16,7 @@ from typing import Callable
 from .live_detections import DetectionSnapshot
 from .native_motion import NativeMotion
 from .zones import apply_detection_zones
+from survng.native_spatial import spatial_plan
 
 
 def iso(epoch: float) -> str:
@@ -33,8 +34,10 @@ def compact_history(samples, limit=1024):
 
 
 class NativeActivity:
-    def __init__(self, camera, config, events, publish: Callable, snapshot: Callable):
+    def __init__(self, camera, config, events, publish: Callable, snapshot: Callable, *, native_zones=False):
         self.camera, self.config = camera, config
+        self.native_zones = native_zones
+        self.zone_revision = spatial_plan(camera)["revision"]
         self.events, self.publish, self.snapshot = events, publish, snapshot
         self.session = ""
         self.identity_epoch = 0
@@ -77,6 +80,16 @@ class NativeActivity:
         if observation.provenance != "native_fresh_detection":
             self.counts["prediction_frames" if observation.provenance == "native_tracked_prediction" else "unknown_frames"] += 1
             return
+        if self.native_zones:
+            revision = self.zone_revision
+            valid_ids = {str(i) for i, z in enumerate(self.camera.zones) if z.enabled and len(z.points) >= 3}
+            if observation.zone_revision != revision or any(obj.get("native_zone_revision") != revision
+                   or not isinstance(obj.get("native_zone_ids"), list)
+                   or any(not isinstance(i, str) or i not in valid_ids for i in obj["native_zone_ids"])
+                   for obj in observation.objects):
+                self.counts["invalid_zone_metadata"] += 1
+                self.health = "zone_metadata_invalid"
+                return
         dimensions = (observation.width, observation.height)
         if self.dimensions != (0, 0) and self.dimensions != dimensions:
             self.finish("geometry_changed", now=now)
@@ -91,6 +104,7 @@ class NativeActivity:
             self.camera, observation.scaled_objects(observation.width, observation.height),
             observation.width, observation.height, self.config.confidence_threshold,
             self.config.require_incident_zone, self.config.event_class_confidence_thresholds,
+            native_membership=self.native_zones,
         )
         eligible = [obj for obj in objects
                     if obj.get("detection_provenance") == "native_fresh_detection"

@@ -14,8 +14,8 @@ export const NATIVE_DETECTION_FIELDS = [
   { path: "native.maximum_observation_age_seconds", label: "Maximum result age (seconds)", initial: 2, min: 0.2, max: 10, step: 0.1, group: "advanced", help: "Older arriving results cannot create or extend incidents." },
   { path: "native.maximum_tracks", label: "Track capacity per camera", initial: 128, min: 1, max: 1024, step: 1, integer: true, group: "advanced", help: "Separate limits for live context and the active episode archive." },
   { path: "native.metadata_restart_seconds", label: "Metadata recovery timeout (seconds)", initial: 15, min: 5, max: 120, step: 1, group: "advanced", help: "Restart capture when frames arrive but fresh detection metadata remains absent." },
-  { path: "native.inference_requests", label: "Shared inference requests", initial: 4, min: 1, max: 16, step: 1, integer: true, group: "advanced", help: "Request pool for the model shared by native camera pipelines. Higher values use more resources." },
-  { path: "native.inference_streams", label: "Shared inference streams", initial: 2, min: 1, max: 8, step: 1, integer: true, group: "advanced", help: "OpenVINO GPU/CPU execution streams for the shared native model." },
+  { path: "native.inference_requests", label: "Shared inference requests", initial: 4, min: 1, max: 16, step: 1, integer: true, group: "advanced", help: "Requests per shared model pool. Full-frame and ROI cameras use separate pools; higher values use more resources." },
+  { path: "native.inference_streams", label: "Shared inference streams", initial: 2, min: 1, max: 8, step: 1, integer: true, group: "advanced", help: "OpenVINO execution streams per shared model pool. Full-frame and ROI cameras use separate pools." },
 ];
 export const DEFAULT_STATIONARY_LABELS = ["car", "truck", "bus", "van", "suv", "motorcycle"];
 export function detectionFieldValue(detector, field) {

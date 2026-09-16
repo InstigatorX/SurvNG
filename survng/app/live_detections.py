@@ -24,6 +24,7 @@ class DetectionSnapshot:
     session: str = ""
     provenance: str = "unknown"
     received_monotonic: float = field(default_factory=time.monotonic)
+    zone_revision: str = ""
 
     def matches_frame(self, pts: float, session: str) -> bool:
         # PTS is transported as seconds; allow only floating-point rounding,
@@ -61,7 +62,7 @@ class DetectionSnapshot:
         if provenance not in ("unknown", "native_fresh_detection", "native_tracked_prediction"):
             raise ValueError("invalid detection provenance")
         return cls(float(pts), payload["inference_sequence"], payload["width"], payload["height"],
-                   tuple(deepcopy(objects)), session, provenance)
+                   tuple(deepcopy(objects)), session, provenance, zone_revision=str(payload.get("zone_revision", "")))
 
     def scaled_objects(self, width: int, height: int) -> list[dict[str, Any]]:
         if width <= 0 or height <= 0:

@@ -22,16 +22,18 @@ Live/substream RTSP
           → gvadetect: OpenVINO, configurable shared batch and interval (both default 1)
           → selected-class metadata filter (no pixel mapping)
           → gvatrack: short-term-imageless
+          → gvaanalytics: live-coordinate zone membership
           → bounded metadata delivery
           → session-qualified native observation consumer
-              → class confidence + live-coordinate zones
+              → class confidence + zone admission policy
               → fresh-observation confirmation
               → presence episode → event database, incident updates, MQTT/SSE
 
 Main stream → existing continuous recorder → incident video/playback
 ```
 
-The compiled model is shared across camera graphs. The initial throughput
+The compiled model is shared across camera graphs with the same inference-region
+mode (full-frame or ROI). The initial throughput
 profile uses four inference requests and two CPU/GPU inference streams. GPU
 compilation remains serialized to avoid the known driver compiler issue.
 GPU automatic batching is explicitly disabled: the throughput hint can otherwise
@@ -253,3 +255,62 @@ Validation with the installed native runtime:
 `/usr/bin/python3 scripts/check-native-class-filter.py` exercises all/none/subset
 selection through real gvatrack and JSON conversion, retained IDs, and unchanged
 pixel-memory references.
+
+## Native zones and optional inference regions
+
+Each camera sends its existing normalized zone configuration to its native graph.
+`gvaanalytics` runs after `gvatrack`, evaluating bottom-center points in uncropped
+live-stream coordinates. Python consumes native zone IDs and retains class and
+confidence rules, ignore precedence, confirmation, and notification policy. The
+2026.2 plugin rounds geometry to integer pixels and does not include every polygon
+edge; a narrow two-pixel boundary compatibility check preserves SurvNG's existing
+inclusive, normalized-coordinate behavior. This is an architectural change, not
+an inference-rate optimization.
+
+Zone metadata includes a configuration revision. Missing/mismatched revisions,
+including on empty observations, cannot supply incident evidence. Zone edits stop
+and recreate that camera's capture session before accepting the new configuration.
+The plugin reads polygons at startup, so the graph defers analytics startup until
+input dimensions are known. A later resolution change stops admission and uses the
+existing metadata watchdog to rebuild the stream, rather than evaluating new
+coordinates against old polygons. Cameras whose main/live fields of view differ
+must author zones for the live image; no new main-to-live projection is introduced.
+
+Admin → Cameras → Settings → Detection region exposes `camera.native_roi`:
+
+- `enabled`: false by default; opt in per camera.
+- `zone_names`: empty means all enabled incident zones; otherwise selects names.
+- `padding`: fraction of frame width/height around their enclosing rectangle;
+  default 0.15, range 0–0.5. Include whole people/vehicles above floor polygons.
+- `full_frame_interval`: every N actual inference inputs is full-frame, starting
+  with the first; default 5, range 1–30. 1 always covers the full frame.
+
+The initial implementation uses **one enclosing rectangle**, bounding each input
+to one inference rather than multiplying work across overlapping crops. No matching
+valid incident zones means full-frame coverage. A metadata-only `gvapython` adapter
+attaches the rectangle using a writable buffer header, retaining VA pixel memory;
+`gvadetect inference-region=roi-list` restores detections to full-frame coordinates.
+Inference-region markers are removed before fresh evidence capture and tracking.
+Fresh detections, empty results, and predictions retain distinct meanings.
+
+Detection FPS and inference interval remain unchanged. Objects outside the crop
+receive only periodic coverage and may not satisfy consecutive-frame confirmation;
+full-frame sweeps do not guarantee detection of brief appearances. Crop changes can
+also change boxes/track IDs. ROI selection is therefore an opt-in accuracy tradeoff,
+not a promise of faster inference or unchanged recall.
+
+ROI streams use a separate shared model-instance pool (`-roi` suffix). Native
+mixed-mode batch tests found incorrect crop coordinates when full-frame and ROI
+streams shared the same compiled preprocessing. ROI cameras share with each other;
+turning ROI on can allocate another compiled model and inference pool. Shared
+request/stream settings apply to each pool. There is no automatic cadence reduction,
+motion gating, or new secondary detector.
+
+Validation: `scripts/gstreamer-spatial-check.py` uses a synthetic batch-aware model
+to check mixed full-frame/ROI streams, batch sizes 1/2, inference intervals 1/3,
+coordinates, zone IDs, tracking provenance, and fresh empty results. `--va` checks
+12 results using GPU inference and VA-surface-sharing with VAMemory retained.
+`tests/test_native_spatial.py` compares native polygon output against SurvNG policy
+for 240 cases at three resolutions when the installed runtime is available. These
+checks verify plumbing; scene recall, GPU memory growth, and performance still need
+camera-specific measurement before broadly enabling ROI.

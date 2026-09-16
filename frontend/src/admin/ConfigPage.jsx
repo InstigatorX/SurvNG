@@ -1,3 +1,4 @@
+import NativeRoiSettings from "./NativeRoiSettings.jsx";
 import { NativeDetectionSettings } from "./NativeDetectionSettings.jsx";
 import { nativeDetectionError } from "../nativeDetectionSettings.mjs";
 import { WeatherSettings } from "./WeatherSettings.jsx";
@@ -2493,6 +2494,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                           </select><small>Applies to supported native H.264 decoders for this camera’s live and main streams. Flexible can reduce buffering but may affect frame ordering on some streams.</small></label>
                         </section>
                       </div>
+                      <NativeRoiSettings camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
                       <label className="check-field"><input type="checkbox" checked={selectedCamera.native_same_field_of_view || false} onChange={(event) => updateCamera(selectedCamera.id, ["native_same_field_of_view"], event.target.checked)} /> Main and live streams show the same field of view</label>
                       <small>Enables native track replay over main recordings. Leave off if either stream is cropped or has a different view.</small>
                       <label className="check-field"><input type="checkbox" checked={selectedCamera.incident_notifications_enabled !== false} onChange={(event) => updateCamera(selectedCamera.id, ["incident_notifications_enabled"], event.target.checked)} /> Send incident notifications</label>

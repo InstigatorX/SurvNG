@@ -540,6 +540,13 @@ class CameraLiveViewConfig(BaseModel):
     live: CameraViewFrameConfig = Field(default_factory=CameraViewFrameConfig)
 
 
+class NativeRoiConfig(BaseModel):
+    enabled: bool = False
+    zone_names: list[str] = Field(default_factory=list)
+    padding: float = Field(default=0.15, ge=0.0, le=0.5)
+    full_frame_interval: int = Field(default=5, ge=1, le=30)
+
+
 class CameraConfig(BaseModel):
     native_same_field_of_view: bool = False
     main_evidence_enabled: bool | None = None
@@ -559,6 +566,7 @@ class CameraConfig(BaseModel):
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
+    native_roi: NativeRoiConfig = Field(default_factory=NativeRoiConfig)
 
     @model_validator(mode="after")
     def derive_connection_from_url(self) -> "CameraConfig":

@@ -20,8 +20,9 @@ from survng import dlstreamer_live as live
     ("va", True, "live", True),
 ])
 @pytest.mark.parametrize("compliance", ["auto", "strict", "normal", "flexible"])
+@pytest.mark.parametrize("spatial", [False, True])
 def test_host_consumers_download_after_rate_limit_without_breaking_detection(
-    monkeypatch, decoder, detect, role, test_source, compliance,
+    monkeypatch, decoder, detect, role, test_source, compliance, spatial,
 ):
     elements, links = {}, []
     callbacks = {}
@@ -44,6 +45,12 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         def get_static_pad(self, name):
             return SimpleNamespace(add_probe=lambda *args: 1)
 
+        def set_locked_state(self, locked):
+            self.locked = locked
+
+        def set_state(self, state):
+            return 0
+
         def get_name(self):
             return self.name
 
@@ -62,10 +69,11 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         Pipeline=SimpleNamespace(new=lambda name: pipeline),
         Caps=SimpleNamespace(from_string=lambda text: text),
         PadProbeType=SimpleNamespace(BUFFER=1),
-        State=SimpleNamespace(PLAYING=1, NULL=0),
+        State=SimpleNamespace(PLAYING=1, NULL=0, READY=2),
         StateChangeReturn=SimpleNamespace(FAILURE=-1),
     )
     monkeypatch.setitem(sys.modules, "gstgva", SimpleNamespace(VideoFrame=object))
+    monkeypatch.setitem(sys.modules, "gstgva.util", SimpleNamespace(GST_PAD_PROBE_INFO_BUFFER=object))
     monkeypatch.setattr(live, "_element", lambda gst, factory, name: Element(factory, name))
     monkeypatch.setattr(live, "_factory_available", lambda gst, name: True)
     monkeypatch.setattr(live, "_make_live_source", lambda gst, **kwargs: (Element("source", "source"), "source"))
@@ -83,7 +91,15 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         test_source=test_source, source_role=role,
         va_context=shared_context,
         h264_decoder_compliance=compliance,
+        spatial_plan={"zones": [], "revision": "test", "roi": {"enabled": True}} if spatial else None,
     )
+    if detect and spatial:
+        assert elements["inference-region"].factory == "gvapython"
+        assert elements["detect"].properties["inference-region"] == 1
+        assert elements["detect"].properties["model-instance-id"].endswith("-roi")
+        assert ("inference-region", "detect") in links
+        assert ("native-track", "zone-analytics") in links
+        assert ("zone-analytics", "detect-output-queue") in links
     native_properties = {}
     native_decoder = SimpleNamespace(
         get_factory=lambda: SimpleNamespace(get_name=lambda: "vah264dec"),
@@ -114,7 +130,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert elements["detect"].properties["pre-process-backend"] == "va-surface-sharing"
         assert elements["detect"].properties["pre-process-config"] == "VAAPI_THREAD_POOL_SIZE=1"
         assert elements["detect-rate-caps"].properties["caps"] == "video/x-raw(memory:VAMemory),framerate=5/2"
-        assert ("detect-va-memory", "detect") in links
+        assert ("detect-va-memory", "inference-region" if spatial else "detect") in links
     else:
         assert elements["qualifier-scale"].factory == "videoscale"
     if not detect:
@@ -127,7 +143,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert elements["meta-sink"].properties["async"] is False
         assert elements["detect"].properties["nireq"] == 4
         assert ("detect", "native-track") in links
-        assert ("native-track", "detect-output-queue") in links
+        assert ("zone-analytics" if spatial else "native-track", "detect-output-queue") in links
         assert ("detect-output-queue", "detect-meta") in links
         assert elements["detect"].properties["scheduling-policy"] == "throughput"
 

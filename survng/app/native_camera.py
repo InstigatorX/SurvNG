@@ -11,6 +11,7 @@ from .camera_capture import CameraCaptureService, FRAME_STALE_SECONDS
 from .camera_lifecycle import CameraLifecyclePhase, CameraRuntimeState, CameraStopTicket
 from .camera_media import CameraMediaService
 from .native_activity import NativeActivity
+from survng.native_spatial import spatial_plan
 from .security import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
@@ -18,15 +19,17 @@ LOGGER = logging.getLogger(__name__)
 
 class NativeCaptureBinding:
     """Per-camera admission preference on the shared native process."""
-    def __init__(self, backend, enabled, compliance=lambda: "auto"):
+    def __init__(self, backend, enabled, compliance=lambda: "auto", spatial=lambda: None):
         self.backend, self.enabled = backend, enabled
         self.compliance = compliance
+        self.spatial = spatial
         self.startup_timeout_ms = backend.startup_timeout_ms
 
     def create_handle(self):
         handle = self.backend.create_handle()
         handle.detection_enabled = bool(self.enabled())
         handle.h264_decoder_compliance = self.compliance()
+        handle.spatial_plan = self.spatial()
         return handle
 
     def open(self, *args, **kwargs):
@@ -55,7 +58,7 @@ class NativeCameraWorker:
         self.capture = CameraCaptureService(
             camera_id=camera.id, source_url=camera.source_url, backend=NativeCaptureBinding(
                 capture_backend, lambda: self.config.enabled and self.runtime_state.detection_enabled,
-                lambda: self.camera.h264_decoder_compliance),
+                lambda: self.camera.h264_decoder_compliance, lambda: spatial_plan(self.camera)),
             frame_observer=self._remember, frame_width=lambda: 640,
             initial_open_timeout_ms=capture_backend.startup_timeout_ms,
         )
@@ -65,7 +68,7 @@ class NativeCameraWorker:
             rejected_sample_rate=lambda: 0, stop_requested=self._stop.is_set,
             media_storage=media_storage, jpeg_provider=self.capture.latest_jpeg,
         )
-        self.activity = NativeActivity(camera, config, events, publish, self._evidence)
+        self.activity = NativeActivity(camera, config, events, publish, self._evidence, native_zones=True)
         self.activity.offer_evidence = self._offer_evidence
 
     def _remember(self, frame):
@@ -261,9 +264,31 @@ class NativeCameraWorker:
 
     def update_zones(self, zones):
         with self._lock:
-            self.activity.finish("zones_changed", now=time.monotonic())
-            self.camera.zones = [zone.model_copy(deep=True) for zone in zones]
-            self._enabled_at = time.monotonic()
+            previous = [zone.model_copy(deep=True) for zone in self.camera.zones]
+            if previous == zones:
+                return
+            running = self.runtime_state.enabled
+        if running:
+            self.stop()
+        try:
+            with self._lock:
+                self.activity.finish("zones_changed", now=time.monotonic())
+                self.camera.zones = [zone.model_copy(deep=True) for zone in zones]
+                self.activity.zone_revision = spatial_plan(self.camera)["revision"]
+                self._enabled_at = time.monotonic()
+            if running:
+                self.start()
+        except Exception:
+            try:
+                self.stop()
+                with self._lock:
+                    self.camera.zones = previous
+                    self.activity.zone_revision = spatial_plan(self.camera)["revision"]
+                if running:
+                    self.start()
+            except Exception:
+                LOGGER.exception("failed to restore native camera zones for %s", self.camera.id)
+            raise
 
     def reconfigure_policy(self, config):
         with self._lock:
