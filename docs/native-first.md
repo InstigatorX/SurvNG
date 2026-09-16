@@ -370,7 +370,10 @@ A bounded worker collects up to three nominations spaced at least 0.4 seconds
 apart. It waits initially 15 seconds for recorded segments, aligns each original
 preview to the matching main frame, and checks a contextual crop at its native
 resolution with the existing isolated CPU `gvadetect` verifier. Positive detections
-must match both class and location and satisfy the configured class/zone threshold.
+must match class, location and extent (IoU at least 0.3, with half of the detected
+box overlapping the nominated object) and satisfy the configured class/zone threshold.
+A same-class fragment inside the original box is ambiguous, not confirmation or a
+clear negative.
 One clear positive confirms; three clear negatives reject. Missing recordings,
 failed registration, poor image quality, weak detections and verifier failures do
 not count as negatives. Unavailable evidence is retried for up to 90 seconds;
@@ -400,3 +403,9 @@ exercise varying odd-width BGR buffers (which require padded GStreamer row strid
 Read-only replays of Back-Middle events 71408 and 71404 returned three negative crop
 checks each. Real person examples are also checked for positive confirmation; unknown
 alignment is explicitly not treated as evidence of absence.
+
+A post-deployment example (Back-Middle 71416) exposed a small flower fragment being
+accepted inside a much larger nominated box. Verification now checks object extent,
+not just containment. Its replay remains unverified rather than creating an alert;
+the two real-person examples still confirm. This does not establish universal recall
+or eliminate the model's underlying flower/dog confusion.

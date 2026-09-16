@@ -24,7 +24,7 @@ def context_crop(main, box):
 def matches(expected, actual):
     intersection = max(0, min(expected['x2'], actual['x2'])-max(expected['x1'], actual['x1'])) * max(0, min(expected['y2'], actual['y2'])-max(expected['y1'], actual['y1']))
     area = lambda b: max(1, (b['x2']-b['x1'])*(b['y2']-b['y1']))
-    return intersection/area(actual) >= .5 and intersection/area(expected) >= .2
+    return intersection/area(actual) >= .5 and intersection/(area(actual)+area(expected)-intersection) >= .3
 
 
 class NativeAdmission:
@@ -105,11 +105,14 @@ class NativeAdmission:
                 continue
             detected = self.evidence.verifier.detect(crop)
             relevant = []
+            nearby = False
             for item in detected:
                 if item['label'] != obj['label']:
                     continue
                 item = deepcopy(item)
                 item['box'] = {k: v+(left if k.startswith('x') else top) for k,v in item['box'].items()}
+                a, b = obj['box'], item['box']
+                nearby |= min(a['x2'], b['x2']) > max(a['x1'], b['x1']) and min(a['y2'], b['y2']) > max(a['y1'], b['y1'])
                 if matches(obj['box'], item['box']):
                     relevant.append(item)
             config = self.evidence.config.detector
@@ -125,7 +128,7 @@ class NativeAdmission:
                 best = (main, cover, candidate.epoch)
                 votes.append('confirmed')
             else:
-                votes.append('ambiguous' if relevant else 'negative')
+                votes.append('ambiguous' if nearby else 'negative')
         status = 'confirmed' if votes.count('confirmed') >= 1 else 'rejected' if votes.count('negative') >= 3 else 'unverified'
         result = {'status': status, 'votes': votes, 'reason': 'main_crop_verification'}
         if status == 'confirmed':

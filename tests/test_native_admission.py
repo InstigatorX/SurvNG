@@ -84,6 +84,9 @@ def test_verifier_requires_multiple_clear_views_and_spatial_match():
     assert service.verify('front',samples)['status']=='confirmed'
     evidence.verifier.detect.side_effect=[[dict(detection,confidence=.4)],[],[]]
     assert service.verify('front',samples)['status']=='unverified'
+    fragment = dict(detection, confidence=.95, box={**detection['box'], 'x2': detection['box']['x1']+12, 'y2': detection['box']['y1']+15})
+    evidence.verifier.detect.side_effect=[[fragment],[fragment],[fragment]]
+    assert service.verify('front',samples)['status']=='unverified'
     evidence.verifier.detect.side_effect=None
     evidence.read_frame.return_value=None
     assert service.verify('front',samples)['status']=='unverified'
