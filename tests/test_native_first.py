@@ -204,7 +204,8 @@ def test_missing_model_cannot_silently_use_frames_only():
         validate_manager_configuration(AppConfig(detector={"enabled": True}))
 
 
-def test_real_native_camera_creates_incident_without_python_inference(tmp_path):
+@pytest.mark.parametrize("interval", [1, 3])
+def test_real_native_camera_creates_incident_without_python_inference(tmp_path, interval):
     """Real synthetic GStreamer source -> IPC -> capture -> native activity -> DB."""
     import json
     import subprocess
@@ -234,7 +235,7 @@ ov.save_model(ov.Model([output],[image]),sys.argv[1],compress_to_fp16=False)
     manager = AppManager(AppConfig(
         storage_dir=str(tmp_path), database_dir=str(tmp_path / "db"),
         recording_index_dir=str(tmp_path / "recording-index"),
-        detector=DetectorConfig(enabled=True, model_path=str(model)),
+        detector=DetectorConfig(enabled=True, model_path=str(model), native={"inference_interval": interval}),
         cameras=[CameraConfig(id="front", name="Front", stream_url="rtsp://unused.invalid/live", record=False)],
         retention={"enabled": False},
     ))
@@ -254,6 +255,9 @@ ov.save_model(ov.Model([output],[image]),sys.argv[1],compress_to_fp16=False)
         assert row["topic"] == "native/object-presence"
         assert worker.status()["native_activity"]["counters"]["fresh_frames"] >= 2
         assert worker.status()["live_pipeline"]["native_tracking"] == "short-term-imageless"
+        assert worker.status()["live_pipeline"]["inference_interval"] == interval
+        if interval > 1:
+            assert worker.status()["native_activity"]["counters"].get("prediction_frames", 0) > 0
         old_session = worker.activity.session
         # Kill only this test's private synthetic-source process. Capture must
         # recover natively and cannot carry an ID into the new stream session.
@@ -400,3 +404,48 @@ def test_native_observation_clock_is_stable_across_arrival_bursts():
     assert worker._observation_epoch(second, frame, 100.1, 100.1) == pytest.approx(99.2)
     reconnected = replace(first, source_pts=0, session="new", received_monotonic=101)
     assert worker._observation_epoch(reconnected, None, 101, 101) == 101
+
+
+@pytest.mark.parametrize("interval", [1, 3, 5])
+def test_native_interval_reaches_capture_and_status(tmp_path, interval):
+    from survng.app.manager import AppManager
+    config = AppConfig(storage_dir=str(tmp_path), cameras=[], retention={"enabled": False})
+    config.detector.native.inference_interval = interval
+    manager = AppManager(config)
+    try:
+        assert manager.capture_backend.options.inference_interval == interval
+        assert manager.detector_status()["inference_interval"] == interval
+        assert manager.detector_status()["effective_inference_fps"] == 5 / interval
+    finally:
+        manager.stop_all()
+
+
+def test_sparse_fresh_frames_preserve_confirmation_and_health(activity):
+    activity.config.live_sample_fps = 0.5
+    activity.config.native.inference_interval = 5
+    for sequence, now in [(1, 100), (2, 110)]:
+        activity.consume(observation(sequence, received=now), now=now, epoch=1000+now)
+    assert activity.event_id == 1
+    activity.tick(now=120)
+    assert activity.health == "healthy"
+    assert activity.event_id == 1
+    tracking = activity.events.update_object_tracking.call_args.args[1]
+    assert tracking["sample_fps"] == 0.1
+    activity.tick(now=126)
+    assert activity.health == "metadata_stale"
+    assert activity.event_id is None
+
+
+@pytest.mark.parametrize("interval", [0, 6, 1.5])
+def test_native_interval_rejects_invalid_values(interval):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        DetectorConfig(native={"inference_interval": interval})
+
+
+def test_native_interval_change_requires_shared_capture_reload():
+    from survng.app.config_application import manager_owned_config
+    current = AppConfig()
+    incoming = current.model_copy(deep=True)
+    incoming.detector.native.inference_interval = 2
+    assert manager_owned_config(current) != manager_owned_config(incoming)

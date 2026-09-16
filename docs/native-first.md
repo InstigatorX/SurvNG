@@ -4,7 +4,9 @@ This experimental branch replaces the application camera execution path. It is
 independent of PR #206 and does not provide a legacy/fallback pipeline switch.
 No application Python object-inference pool, Hybrid/ByteTrack tracking session,
 EMA admission, ONVIF event subscription, ReID, face recognition, depth inference,
-recorded-frame refinement, or semantic inference worker runs in this design.
+legacy recorded-frame refinement, or semantic inference worker runs in this design.
+A separate bounded native CPU verifier checks shortlisted main-recording images
+for high-resolution incident covers; it is not continuous main-stream detection.
 Historical events, recordings, identity records, and existing media APIs remain
 readable. Some legacy library/configuration definitions remain for historical
 features and standalone tests; they are not an alternative camera runtime.
@@ -17,7 +19,7 @@ Live/substream RTSP
   → shared VA surfaces
       ├─ sampled color frames / JPEG preview → preview and exact-PTS snapshots
       └─ drop-only sampling (target 5 FPS)
-          → gvadetect: OpenVINO, batch 1, interval 1
+          → gvadetect: OpenVINO, batch 1, configurable interval (default 1)
           → gvatrack: short-term-imageless
           → bounded metadata delivery
           → session-qualified native observation consumer
@@ -105,6 +107,7 @@ activation flag is `detector.enabled`. A minimal detector section is:
       "activity_timeout_seconds": 5,
       "maximum_observation_age_seconds": 2,
       "metadata_restart_seconds": 15,
+      "inference_interval": 1,
       "inference_requests": 4,
       "inference_streams": 2,
       "maximum_tracks": 128
@@ -116,11 +119,17 @@ activation flag is `detector.enabled`. A minimal detector section is:
 Replace the model placeholder with your existing OpenVINO IR model. Existing
 labels, model-proc, confidence and zone settings still apply. An enabled detector
 with no model path is rejected. `live_sample_fps` is a target per camera, not a
-throughput guarantee: 13 cameras at 5 FPS request 65 inferences per second.
+throughput guarantee: 13 enabled cameras at 5 FPS and interval 1 request 65
+inferences per second. `native.inference_interval` accepts integers 1–5 and is
+available in Admin → Detection → Inference interval. Interval 2 at 5 FPS targets
+2.5 fresh detections/sec per camera; tracker predictions fill intervening pipeline
+frames but cannot admit or extend incidents. Confirmation and stationary decisions
+take longer with fewer fresh observations. Saving an interval change reloads native
+capture. Requests/streams configure the shared model, not separate per-camera pools.
 
 Do not add PR #206's `live_pipeline_inference_enabled`,
 `live_pipeline_inference_interval`, or `live_pipeline_tracking` settings. This
-branch fixes interval 1 and native tracking. The old `detector.tracking.enabled`,
+branch uses `detector.native.inference_interval` and native tracking. The old `detector.tracking.enabled`,
 EMA, enrichment, and main-evidence buffering settings do not select runtime paths.
 
 Switching to this branch with `detector.enabled: true` activates native inference

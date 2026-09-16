@@ -38,9 +38,10 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/test`);
   await page.getByLabel("OpenVINO model").fill("new.xml");
+  await page.getByLabel("Inference interval", {exact:true}).fill("3");
   await page.getByLabel("Classes requiring movement").fill("car, truck, person");
   await page.getByText("Advanced native pipeline settings", { exact: true }).click();
-  await page.getByLabel("Inference requests per camera").fill("6");
+  await page.getByLabel("Shared inference requests").fill("6");
   await page.getByLabel("Stationary jitter threshold").fill("0.2");
   await page.getByRole("alert").waitFor();
   assert.match(await page.getByRole("alert").textContent(), /below the movement/);
@@ -53,6 +54,7 @@ try {
   assert.equal(config.model_xml, "");
   assert.deepEqual(config.native.stationary.labels, ["car", "truck", "person"]);
   assert.equal(config.native.inference_requests, 6);
+  assert.equal(config.native.inference_interval, 3);
   assert.equal(config.event_class_confidence_thresholds.person, 0.7);
   assert.equal(config.event_class_confirmation_frames.person, 3);
   assert.equal(await page.getByRole("alert").count(), 0);

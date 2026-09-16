@@ -97,7 +97,7 @@ class NativeActivity:
                     and obj.get("incident_eligible")]
         # Live context expires independently of the persisted episode archive.
         for key, track in list(self.tracks.items()):
-            if now - track["last_monotonic"] >= self.config.native.activity_timeout_seconds:
+            if now - track["last_monotonic"] >= max(self.config.native.activity_timeout_seconds, 1.5 / self.fresh_detection_fps):
                 del self.tracks[key]
         seen = set()
         for obj in eligible:
@@ -123,7 +123,7 @@ class NativeActivity:
                          "box_history": [], "trajectory": [], "_motion": NativeMotion()}
                 self.tracks[key] = track
                 self._next_track_id += 1
-            if now - track["last_monotonic"] > max(self.config.native.maximum_observation_age_seconds, 3 / self.config.live_sample_fps):
+            if now - track["last_monotonic"] > max(self.config.native.maximum_observation_age_seconds, 3 / self.fresh_detection_fps):
                 track["consecutive"] = 0
             track.update(last_monotonic=now, last_seen=iso(epoch),
                          box=deepcopy(obj["box"]), confidence=obj["confidence"],
@@ -142,7 +142,7 @@ class NativeActivity:
             applies = policy.enabled and obj["label"].lower() in policy.labels
             track["motion_state"] = (track["_motion"].update(
                 box, observation.source_pts, policy,
-                max(self.config.native.maximum_observation_age_seconds, 3 / self.config.live_sample_fps),
+                max(self.config.native.maximum_observation_age_seconds, 3 / self.fresh_detection_fps),
             ) if applies else "presence")
             track["motion_extent"] = round(track["_motion"].extent, 4) if applies else None
             track["activity_eligible"] = track["motion_state"] in {"moving", "presence"}
@@ -221,7 +221,7 @@ class NativeActivity:
         for track in tracks:
             track["duration_seconds"] = max(0, datetime.fromisoformat(track["last_seen"]).timestamp() - datetime.fromisoformat(track["first_seen"]).timestamp())
         payload = {"implementation": "gvatrack", "state": state,
-                   "sample_fps": self.config.live_sample_fps,
+                   "sample_fps": self.fresh_detection_fps,
                    "tracks": tracks, "updated_at": self.last_motion_at,
                    "frame_width": self.dimensions[0], "frame_height": self.dimensions[1],
                    "source": "live", "native_session": self.session,
@@ -233,8 +233,12 @@ class NativeActivity:
                                       "timestamp": self.last_motion_at, "updated": True})
         self.last_persist = now
 
+    @property
+    def fresh_detection_fps(self):
+        return self.config.live_sample_fps / self.config.native.inference_interval
+
     def tick(self, *, now: float):
-        if self.last_fresh and now - self.last_fresh > max(self.config.native.maximum_observation_age_seconds, 1.5 / self.config.live_sample_fps):
+        if self.last_fresh and now - self.last_fresh > max(self.config.native.maximum_observation_age_seconds, 1.5 / self.fresh_detection_fps):
             self.health = "metadata_stale"
         if self.event_id is not None and now - self.last_activity >= self.config.native.activity_timeout_seconds:
             if self.health != "healthy":

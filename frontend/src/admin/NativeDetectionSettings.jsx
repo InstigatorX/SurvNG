@@ -15,7 +15,7 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
   const classes = [...new Set([...modelClasses, ...(detector.labels || []), ...addedClasses,
     ...Object.keys(detector.event_class_confirmation_frames || {}), ...Object.keys(detector.event_class_confidence_thresholds || {})])].sort();
   const update = (path, value) => updateConfig(["detector", ...path.split(".")], value);
-  const numericFields = (group) => <div className="form-grid">{NATIVE_DETECTION_FIELDS.filter((field) => field.group === group).map((field) => <label key={field.path}>{field.label}<input type="number" min={field.min} max={field.max} step={field.step} value={detectionFieldValue(detector, field)} onChange={(event) => update(field.path, event.target.value === "" ? "" : Number(event.target.value))} />{field.help ? <small>{field.help}</small> : null}</label>)}</div>;
+  const numericFields = (group) => <div className="form-grid">{NATIVE_DETECTION_FIELDS.filter((field) => field.group === group).map((field) => <label key={field.path}>{field.label}<input type="number" aria-label={field.label} min={field.min} max={field.max} step={field.step} value={detectionFieldValue(detector, field)} onChange={(event) => update(field.path, event.target.value === "" ? "" : Number(event.target.value))} />{field.help ? <small>{field.help}</small> : null}</label>)}</div>;
   function override(key, label, value) {
     const next = { ...detector[key] };
     if (value === "") delete next[label];
@@ -25,7 +25,7 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
   const error = nativeDetectionError(detector);
   return <section className="sub-panel detection-settings-card">
     <h3>Native detection and tracking</h3>
-    <p>Live/substream → gvadetect → gvatrack → incident policy. Tracking uses short-term-imageless; every sampled frame is inferred. Save settings to apply changes.</p>
+    <p>Live/substream → gvadetect → gvatrack → incident policy. Tracking uses short-term-imageless; the inference interval controls how often sampled frames run detection. Save settings to apply changes.</p>
     <div className="form-grid">
       <label className="compact-toggle"><input type="checkbox" checked={detector.enabled ?? false} onChange={(event) => update("enabled", event.target.checked)} /><span>Detection enabled</span></label>
       <label>OpenVINO model<input value={detector.model_path || detector.model_xml || ""} onChange={(event) => { update("model_path", event.target.value); update("model_xml", ""); }} /><small>Server path to the model. An adjacent model-proc file is discovered automatically.</small></label>
@@ -47,7 +47,7 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
         <label>{label} confirmation frames<input type="number" min="1" max="5" step="1" placeholder={`Global (${detector.event_confirmation_frames ?? 2})`} value={detector.event_class_confirmation_frames?.[label] ?? ""} onChange={(event) => override("event_class_confirmation_frames", label, event.target.value)} /></label>
       </div>)}
     </details>
-    <details><summary>Advanced native pipeline settings</summary>{numericFields("advanced")}<p>Inference capacity applies to each enabled camera. These changes reload camera workers when saved.</p></details>
+    <details><summary>Advanced native pipeline settings</summary>{numericFields("advanced")}<p>Inference requests and execution streams belong to the model shared across cameras. These changes reload native capture when saved.</p></details>
     {error ? <p role="alert" className="error-banner">{error}</p> : null}
   </section>;
 }

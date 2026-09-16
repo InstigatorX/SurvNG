@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { nativeDetectionError } from "../src/nativeDetectionSettings.mjs";
 import { ADMIN_NAV_GROUPS, GENERAL_SECTION_LABELS } from "../src/adminWorkspace.mjs";
 assert.equal(nativeDetectionError({}), "");
+for (const value of [0, 6, 1.5]) assert.match(nativeDetectionError({native:{inference_interval:value}}), /Inference interval/);
+assert.equal(nativeDetectionError({native:{inference_interval:5}}), "");
 assert.equal(nativeDetectionError({ native: { stationary: { stationary_threshold: 0.05, moving_threshold: 0.05 } } }), "Stationary jitter threshold must be below the movement threshold.");
 assert.match(nativeDetectionError({ native: { inference_requests: 1.5 } }), /whole number/);
 assert.match(nativeDetectionError({ live_sample_fps: "" }), /frames per second/);

@@ -48,7 +48,8 @@ class NativeDetectorStatus:
         return {"enabled": self.enabled, "ready": bool(healthy), "implementation": "dlstreamer",
                 "configured_device": self.config.device, "device": self.config.device,
                 "labels": self.labels, "native": True, "sample_fps": self.config.live_sample_fps,
-                "inference_interval": 1, "tracking": "short-term-imageless",
+                "inference_interval": self.config.native.inference_interval,
+                "effective_inference_fps": self.config.live_sample_fps / self.config.native.inference_interval, "tracking": "short-term-imageless",
                 "native_cameras": cameras, "healthy_cameras": healthy, "active_cameras": len(expected),
                 "degraded": bool(expected and healthy < len(expected)),
                 "python_inference_workers": 0, "model_path": self.config.resolved_model_path()}

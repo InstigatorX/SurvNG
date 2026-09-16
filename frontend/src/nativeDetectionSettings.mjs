@@ -1,6 +1,7 @@
 // Numeric controls mirror the native runtime's Pydantic configuration bounds.
 export const NATIVE_DETECTION_FIELDS = [
-  { path: "live_sample_fps", label: "Detection frames per second", initial: 5, min: 0.5, max: 10, step: 0.5, group: "detection", help: "Every sampled live/substream frame runs detection and tracking." },
+  { path: "live_sample_fps", label: "Detection frames per second", initial: 5, min: 0.5, max: 10, step: 0.5, group: "detection", help: "Live/substream frames entering the native pipeline. Fresh inference rate is this value divided by the inference interval." },
+  { path: "native.inference_interval", label: "Inference interval", initial: 1, min: 1, max: 5, step: 1, integer: true, group: "detection", help: "Run gvadetect every Nth sampled frame. At 5 FPS, interval 2 targets 2.5 fresh detections/sec; skipped frames use tracker predictions and cannot create or extend incidents." },
   { path: "confidence_threshold", label: "Confidence", initial: 0.45, min: 0.01, max: 0.99, step: 0.01, group: "detection" },
   { path: "event_confirmation_frames", label: "Confirmation frames", initial: 2, min: 1, max: 5, step: 1, group: "detection", integer: true },
   { path: "native.activity_timeout_seconds", label: "Presence timeout (seconds)", initial: 5, min: 1, max: 60, step: 0.5, group: "detection", help: "Time without fresh eligible activity before the episode ends." },
@@ -12,8 +13,8 @@ export const NATIVE_DETECTION_FIELDS = [
   { path: "native.maximum_observation_age_seconds", label: "Maximum result age (seconds)", initial: 2, min: 0.2, max: 10, step: 0.1, group: "advanced", help: "Older arriving results cannot create or extend incidents." },
   { path: "native.maximum_tracks", label: "Track capacity per camera", initial: 128, min: 1, max: 1024, step: 1, integer: true, group: "advanced", help: "Separate limits for live context and the active episode archive." },
   { path: "native.metadata_restart_seconds", label: "Metadata recovery timeout (seconds)", initial: 15, min: 5, max: 120, step: 1, group: "advanced", help: "Restart capture when frames arrive but fresh detection metadata remains absent." },
-  { path: "native.inference_requests", label: "Inference requests per camera", initial: 4, min: 1, max: 16, step: 1, integer: true, group: "advanced", help: "Concurrent native inference requests. Higher values use more resources." },
-  { path: "native.inference_streams", label: "Inference streams per camera", initial: 2, min: 1, max: 8, step: 1, integer: true, group: "advanced", help: "OpenVINO execution streams per camera model." },
+  { path: "native.inference_requests", label: "Shared inference requests", initial: 4, min: 1, max: 16, step: 1, integer: true, group: "advanced", help: "Request pool for the model shared by native camera pipelines. Higher values use more resources." },
+  { path: "native.inference_streams", label: "Shared inference streams", initial: 2, min: 1, max: 8, step: 1, integer: true, group: "advanced", help: "OpenVINO GPU/CPU execution streams for the shared native model." },
 ];
 export const DEFAULT_STATIONARY_LABELS = ["car", "truck", "bus", "van", "suv", "motorcycle"];
 export function detectionFieldValue(detector, field) {

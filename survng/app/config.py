@@ -793,6 +793,7 @@ class NativeActivityConfig(BaseModel):
     maximum_observation_age_seconds: float = Field(default=2.0, ge=0.2, le=10.0)
     maximum_tracks: int = Field(default=128, ge=1, le=1024)
     metadata_restart_seconds: float = Field(default=15.0, ge=5.0, le=120.0)
+    inference_interval: int = Field(default=1, ge=1, le=5)
     inference_requests: int = Field(default=4, ge=1, le=16)
     inference_streams: int = Field(default=2, ge=1, le=8)
 
@@ -800,7 +801,7 @@ class NativeActivityConfig(BaseModel):
 class DetectorConfig(BaseModel):
     native: NativeActivityConfig = Field(default_factory=NativeActivityConfig)
     enabled: bool = False
-    # Native gvadetect cadence; every sampled frame is inferred and tracked.
+    # Native pipeline input cadence; inference can skip frames via its interval.
     live_sample_fps: float = Field(default=5.0, ge=0.5, le=10.0)
     backend: Literal["openvino", "coreml"] = "openvino"
     object_worker_count: int = Field(default=2, ge=1, le=4)
