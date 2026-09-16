@@ -92,81 +92,74 @@ class NativeAdmission:
         with self.condition:
             return {'pending': len(self.jobs), 'counters': dict(self.counts), 'recent': list(self.recent)}
 
+    def _verify_frame(self, camera_id, candidate, main, frame_epoch, cancelled):
+        aligned = self.evidence.project_main(candidate, main)
+        if not aligned:
+            return 'unaligned', None
+        obj = aligned[0]
+        crop, left, top = context_crop(main, obj['box'])
+        if image_quality(crop) is None:
+            return 'unclear', None
+        if self.closed or (cancelled is not None and cancelled.is_set()):
+            return 'stopped', None
+        detected = self.evidence.verifier.detect(crop)
+        relevant = []
+        nearby = False
+        for item in detected:
+            if item['label'] != obj['label']:
+                continue
+            item = deepcopy(item)
+            item['box'] = {k: v+(left if k.startswith('x') else top) for k,v in item['box'].items()}
+            a, b = obj['box'], item['box']
+            nearby |= min(a['x2'], b['x2']) > max(a['x1'], b['x1']) and min(a['y2'], b['y2']) > max(a['y1'], b['y1'])
+            if matches(obj['box'], item['box']):
+                relevant.append(item)
+        config = self.evidence.config.detector
+        threshold = config.event_class_confidence_thresholds.get(obj['label'], config.confidence_threshold)
+        # Preserve a lower explicit zone threshold already used for nomination.
+        camera = next(c for c in self.evidence.config.cameras if c.id == camera_id)
+        thresholds = [z.confidence_threshold for z in camera.zones if z.name in obj.get('zones', []) and z.confidence_threshold is not None]
+        threshold = min([threshold, *thresholds])
+        accepted = [d for d in relevant if d['confidence'] >= threshold]
+        if accepted:
+            actual = max(accepted, key=lambda d: d['confidence'])
+            cover = dict(obj, box=actual['box'], confidence=actual['confidence'], native_cover_verified=True,
+                         frame_captured_at_epoch=frame_epoch)
+            return 'confirmed', (main, cover, frame_epoch)
+        return ('ambiguous' if nearby else 'negative'), None
+
     def verify(self, camera_id, samples, *, cancelled=None):
-        votes, best = [], None
-        for candidate in samples:
-            if self.closed or (cancelled is not None and cancelled.is_set()):
-                return {'status': 'unverified', 'reason': 'stopped'}
-            main = self.evidence.read_frame(camera_id, candidate.epoch, 'main')
-            if self.closed or (cancelled is not None and cancelled.is_set()):
-                return {'status': 'unverified', 'reason': 'stopped'}
-            if main is None:
-                votes.append('unavailable')
-                continue
-            if main.shape[0]*main.shape[1] <= candidate.image.shape[0]*candidate.image.shape[1]:
-                votes.append('unavailable')
-                continue
-            aligned = self.evidence.match_main(candidate, main)
-            frame_epoch = candidate.epoch
-            if not aligned:
-                # Independently recorded streams can differ by a fraction of a
-                # second. Keep the appearance and extent safeguards, but look
-                # for the matching pose within a bounded recording window.
-                for offset in (.5, -.5, 1., -1.):
-                    if self.closed or (cancelled is not None and cancelled.is_set()):
-                        return {'status': 'unverified', 'reason': 'stopped'}
-                    alternate = self.evidence.read_frame(camera_id, candidate.epoch + offset, 'main')
-                    if self.closed or (cancelled is not None and cancelled.is_set()):
-                        return {'status': 'unverified', 'reason': 'stopped'}
-                    if alternate is None or alternate.shape[0]*alternate.shape[1] <= candidate.image.shape[0]*candidate.image.shape[1]:
-                        continue
-                    aligned = self.evidence.match_main(candidate, alternate)
-                    if aligned:
-                        main, frame_epoch = alternate, candidate.epoch + offset
-                        break
-            if not aligned:
-                votes.append('unaligned')
-                continue
-            obj = aligned[0]
-            crop, left, top = context_crop(main, obj['box'])
-            if image_quality(crop) is None:
-                votes.append('unclear')
-                continue
-            if self.closed or (cancelled is not None and cancelled.is_set()):
-                return {'status': 'unverified', 'reason': 'stopped'}
-            detected = self.evidence.verifier.detect(crop)
-            relevant = []
-            nearby = False
-            for item in detected:
-                if item['label'] != obj['label']:
-                    continue
-                item = deepcopy(item)
-                item['box'] = {k: v+(left if k.startswith('x') else top) for k,v in item['box'].items()}
-                a, b = obj['box'], item['box']
-                nearby |= min(a['x2'], b['x2']) > max(a['x1'], b['x1']) and min(a['y2'], b['y2']) > max(a['y1'], b['y1'])
-                if matches(obj['box'], item['box']):
-                    relevant.append(item)
-            config = self.evidence.config.detector
-            threshold = config.event_class_confidence_thresholds.get(obj['label'], config.confidence_threshold)
-            # Preserve a lower explicit zone threshold already used for nomination.
-            camera = next(c for c in self.evidence.config.cameras if c.id == camera_id)
-            thresholds = [z.confidence_threshold for z in camera.zones if z.name in obj.get('zones', []) and z.confidence_threshold is not None]
-            threshold = min([threshold, *thresholds])
-            accepted = [d for d in relevant if d['confidence'] >= threshold]
-            if accepted:
-                actual = max(accepted, key=lambda d: d['confidence'])
-                cover = dict(obj, box=actual['box'], confidence=actual['confidence'], native_cover_verified=True,
-                             frame_captured_at_epoch=frame_epoch)
-                best = (main, cover, frame_epoch)
-                votes.append('confirmed')
-                # One clear positive decides admission. Remaining samples are
-                # only needed to establish rejection, not to reconfirm success.
+        votes, checks, best = [], [], None
+        for candidate in samples[:3]:
+            frame_votes = []
+            for offset in (0., .5, -.5, 1., -1.):
+                if self.closed or (cancelled is not None and cancelled.is_set()):
+                    return {'status': 'unverified', 'reason': 'stopped'}
+                frame_epoch = candidate.epoch + offset
+                main = self.evidence.read_frame(camera_id, frame_epoch, 'main')
+                if self.closed or (cancelled is not None and cancelled.is_set()):
+                    return {'status': 'unverified', 'reason': 'stopped'}
+                if main is None or main.shape[0]*main.shape[1] <= candidate.image.shape[0]*candidate.image.shape[1]:
+                    vote, cover = 'unavailable', None
+                else:
+                    vote, cover = self._verify_frame(camera_id, candidate, main, frame_epoch, cancelled)
+                if vote == 'stopped':
+                    return {'status': 'unverified', 'reason': 'stopped'}
+                frame_votes.append(vote)
+                if vote == 'confirmed':
+                    best = cover
+                    break
+            # Nearby timestamps are alternative views of one nomination, not
+            # independent votes. An unclear/missing view cannot prove absence.
+            vote = next((v for v in ('confirmed', 'ambiguous', 'unaligned', 'unavailable', 'unclear')
+                         if v in frame_votes), 'negative')
+            votes.append(vote)
+            checks.append({'epoch': candidate.epoch, 'votes': frame_votes})
+            if best is not None:
                 break
-            else:
-                votes.append('ambiguous' if nearby else 'negative')
-        status = 'confirmed' if votes.count('confirmed') >= 1 else 'rejected' if votes.count('negative') >= 3 else 'unverified'
-        result = {'status': status, 'votes': votes, 'reason': 'main_crop_verification'}
-        if status == 'confirmed':
+        status = 'confirmed' if best is not None else 'rejected' if votes.count('negative') >= 3 else 'unverified'
+        result = {'status': status, 'votes': votes, 'checks': checks, 'reason': 'main_crop_verification'}
+        if best is not None:
             result['cover'] = best
         return result
 

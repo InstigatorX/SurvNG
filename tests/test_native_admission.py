@@ -71,7 +71,7 @@ def test_verifier_requires_multiple_clear_views_and_spatial_match():
     box={'x1':300,'y1':200,'x2':340,'y2':250}
     obj={'label':'dog','box':box,'confidence':.8}
     config=AppConfig(cameras=[{'id':'front','name':'Front','stream_url':'rtsp://unused.invalid'}])
-    evidence=SimpleNamespace(config=config,read_frame=Mock(return_value=main),match_main=Mock(return_value=[obj]), verifier=Mock())
+    evidence=SimpleNamespace(config=config,read_frame=Mock(return_value=main),project_main=Mock(return_value=[obj]), verifier=Mock())
     service=NativeAdmission(evidence)
     samples=[Candidate(i,main[::2,::2], [obj],0) for i in range(3)]
     crop,left,top=context_crop(main,box)
@@ -80,20 +80,20 @@ def test_verifier_requires_multiple_clear_views_and_spatial_match():
     assert service.verify('front',samples)['status']=='confirmed'
     assert evidence.read_frame.call_count == 1
     evidence.verifier.detect.assert_called_once()
-    evidence.verifier.detect.side_effect=[[],[],[]]
+    evidence.verifier.detect.side_effect=[[] for _ in range(15)]
     assert service.verify('front',samples)['status']=='rejected'
     evidence.verifier.detect.side_effect=[[detection],[],[]]
     assert service.verify('front',samples)['status']=='confirmed'
-    evidence.verifier.detect.side_effect=[[dict(detection,confidence=.4)],[],[]]
+    evidence.verifier.detect.side_effect=[[dict(detection,confidence=.4)] for _ in range(15)]
     assert service.verify('front',samples)['status']=='unverified'
     fragment = dict(detection, confidence=.95, box={**detection['box'], 'x2': detection['box']['x1']+12, 'y2': detection['box']['y1']+15})
-    evidence.verifier.detect.side_effect=[[fragment],[fragment],[fragment]]
+    evidence.verifier.detect.side_effect=[[fragment] for _ in range(15)]
     assert service.verify('front',samples)['status']=='unverified'
     evidence.verifier.detect.side_effect=None
     evidence.read_frame.return_value=None
     assert service.verify('front',samples)['status']=='unverified'
     evidence.read_frame.return_value=main
-    evidence.match_main.return_value=[]
+    evidence.project_main.return_value=[]
     assert service.verify('front',samples)['status']=='unverified'
     assert crop.shape[0] >= 192 and crop.shape[1] >=192
 
@@ -127,13 +127,13 @@ def test_cancelled_nomination_does_not_start_inference_after_decode():
     def read(*args):
         cancelled.set()
         return main
-    evidence = SimpleNamespace(read_frame=Mock(side_effect=read), match_main=Mock(), verifier=Mock())
+    evidence = SimpleNamespace(read_frame=Mock(side_effect=read), project_main=Mock(), verifier=Mock())
     service = NativeAdmission(evidence)
     samples = [Candidate(i, main[::2, ::2], [], 0) for i in range(3)]
     result = service.verify('front', samples, cancelled=cancelled)
     assert result['status'] == 'unverified'
     evidence.read_frame.assert_called_once()
-    evidence.match_main.assert_not_called()
+    evidence.project_main.assert_not_called()
     evidence.verifier.detect.assert_not_called()
 
 
@@ -185,7 +185,7 @@ def test_verification_finds_time_skewed_main_pose_and_preserves_frame_time(offse
     evidence = SimpleNamespace(
         config=config,
         read_frame=Mock(side_effect=lambda camera, epoch, source: selected if epoch == 100 + offset else main),
-        match_main=Mock(side_effect=lambda candidate, frame: [obj] if frame is selected else []),
+        project_main=Mock(side_effect=lambda candidate, frame: [obj] if frame is selected else []),
         verifier=Mock())
     _, left, top = context_crop(main, obj['box'])
     evidence.verifier.detect.return_value = [dict(obj, box={
@@ -201,10 +201,10 @@ def test_verification_finds_time_skewed_main_pose_and_preserves_frame_time(offse
     assert evidence.read_frame.call_count <= 5
 
 
-def test_time_window_does_not_bypass_appearance_matching():
+def test_time_window_does_not_bypass_geometry_alignment():
     main = np.random.default_rng(9).integers(0, 255, (600, 800, 3), dtype=np.uint8)
     evidence = SimpleNamespace(read_frame=Mock(return_value=main),
-                               match_main=Mock(return_value=[]), verifier=Mock())
+                               project_main=Mock(return_value=[]), verifier=Mock())
     result = NativeAdmission(evidence).verify('front', [Candidate(100, main[::2, ::2], [], 0)])
     assert result['status'] == 'unverified'
     assert result['votes'] == ['unaligned']
@@ -221,12 +221,12 @@ def test_cancel_during_time_window_decode_stops_before_matching_or_inference():
             cancelled.set()
         return main
     evidence = SimpleNamespace(read_frame=Mock(side_effect=read),
-                               match_main=Mock(return_value=[]), verifier=Mock())
+                               project_main=Mock(return_value=[]), verifier=Mock())
     result = NativeAdmission(evidence).verify(
         'front', [Candidate(100, main[::2, ::2], [], 0)], cancelled=cancelled)
     assert result == {'status': 'unverified', 'reason': 'stopped'}
     assert evidence.read_frame.call_count == 2
-    evidence.match_main.assert_called_once()
+    evidence.project_main.assert_called_once()
     evidence.verifier.detect.assert_not_called()
 
 
@@ -337,13 +337,13 @@ def test_recent_clear_view_can_confirm_after_early_negative_views():
            'box': {'x1': 300, 'y1': 200, 'x2': 340, 'y2': 280}}
     config = AppConfig(cameras=[{'id': 'front', 'name': 'Front', 'stream_url': 'rtsp://unused.invalid'}])
     evidence = SimpleNamespace(config=config, read_frame=Mock(return_value=main),
-                               match_main=Mock(return_value=[obj]), verifier=Mock())
+                               project_main=Mock(return_value=[obj]), verifier=Mock())
     _, left, top = context_crop(main, obj['box'])
     detected = dict(obj, box={k: v - (left if k.startswith('x') else top) for k, v in obj['box'].items()})
     service = NativeAdmission(evidence)
     for epoch in range(1, 8):
         service.offer('track', 'front', epoch, main[::2, ::2], obj, (400, 300))
-    evidence.verifier.detect.side_effect = [[], [], [detected]]
+    evidence.verifier.detect.side_effect = [[] for _ in range(10)] + [[detected]]
     samples = service.jobs['track']['samples']
     assert [s.epoch for s in samples] == [1, 2, 7]
     result = service.verify('front', samples)
@@ -385,3 +385,21 @@ def test_new_view_arriving_during_negative_verification_is_not_discarded():
     finally:
         release.set()
         service.stop()
+
+
+def test_ambiguous_pose_checks_nearby_time_before_deciding():
+    main = np.random.default_rng(8).integers(0, 255, (600, 800, 3), dtype=np.uint8)
+    obj = {'label': 'person', 'confidence': .9,
+           'box': {'x1': 300, 'y1': 200, 'x2': 340, 'y2': 280}}
+    config = AppConfig(cameras=[{'id': 'front', 'name': 'Front', 'stream_url': 'rtsp://unused.invalid'}])
+    evidence = SimpleNamespace(config=config, read_frame=Mock(return_value=main),
+                               project_main=Mock(return_value=[obj]), verifier=Mock())
+    _, left, top = context_crop(main, obj['box'])
+    actual = dict(obj, box={k: v - (left if k.startswith('x') else top) for k, v in obj['box'].items()})
+    fragment = dict(actual, box={**actual['box'], 'x2': actual['box']['x1'] + 5})
+    evidence.verifier.detect.side_effect = [[fragment], [], [actual]]
+    result = NativeAdmission(evidence).verify('front', [Candidate(100, main[::2, ::2], [obj], 0)])
+    assert result['status'] == 'confirmed'
+    assert result['votes'] == ['confirmed']
+    assert result['checks'] == [{'epoch': 100, 'votes': ['ambiguous', 'negative', 'confirmed']}]
+    assert result['cover'][2] == 99.5

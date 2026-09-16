@@ -275,6 +275,31 @@ class NativeEvidenceService:
                 candidates.append(Candidate(epoch, live, objects, score))
         return candidates, missing
 
+    def project_main(self, candidate, main):
+        """Locate verification crops using scene geometry, not object appearance."""
+        alignment = estimate_stream_alignment(candidate.image, main)
+        if alignment is None:
+            return []
+        sx, sy, ox, oy = alignment
+        if not (0.25 < sx < 4 and 0.25 < sy < 4 and abs(ox) < 1 and abs(oy) < 1):
+            return []
+        lh, lw = candidate.image.shape[:2]
+        mh, mw = main.shape[:2]
+        projected = []
+        for original in candidate.objects:
+            box = original['box']
+            values = [(box['x1']/lw*sx+ox)*mw, (box['y1']/lh*sy+oy)*mh,
+                      (box['x2']/lw*sx+ox)*mw, (box['y2']/lh*sy+oy)*mh]
+            if not (0 <= values[0] < values[2] <= mw and 0 <= values[1] < values[3] <= mh):
+                continue
+            obj = deepcopy(original)
+            obj.update(box=dict(zip(('x1', 'y1', 'x2', 'y2'), values)),
+                       detection_frame_width=mw, detection_frame_height=mh, frame_source='recorded_main',
+                       frame_captured_at_epoch=candidate.epoch, snapshot_visible=True,
+                       native_alignment={'scale_x': sx, 'scale_y': sy, 'offset_x': ox, 'offset_y': oy})
+            projected.append(obj)
+        return projected
+
     def match_main(self, candidate, main):
         alignment = estimate_stream_alignment(candidate.image, main)
         if alignment is None:

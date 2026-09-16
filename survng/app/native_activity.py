@@ -236,7 +236,8 @@ class NativeActivity:
             self.counts['verification_'+status] += 1
             track = pending['track']
             self._verification_recent.append({'label': track['label'], 'status': status, 'reason': result.get('reason', ''),
-                                              'timestamp': iso(pending['epoch']), 'votes': result.get('votes', [])})
+                                              'epoch': pending['epoch'], 'timestamp': iso(pending['epoch']),
+                                              'votes': result.get('votes', []), 'checks': result.get('checks', [])})
             current = self.tracks.get((track['native_track_id'], track['label']))
             if current is not None and current.get('_verification_token') == token:
                 current['_verification'] = status

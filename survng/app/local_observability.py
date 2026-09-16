@@ -218,7 +218,12 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
             "last_fresh_age_seconds": _optional_number(tracking.get("last_fresh_age_seconds")),
             "effective_fresh_fps": _optional_number(tracking.get("effective_fresh_fps")),
             "verification_pending": _number(tracking.get("verification_pending")),
-            "verification_recent": [{key: _motion_identifier(item.get(key)) for key in ("label", "status", "reason")}
+            "verification_recent": [{**{key: _motion_identifier(item.get(key)) for key in ("label", "status", "reason")},
+                                     "epoch": _optional_number(item.get("epoch")),
+                                     "votes": [_motion_identifier(v) for v in (item.get("votes") or [])[:3]],
+                                     "checks": [{"epoch": _optional_number(check.get("epoch")),
+                                                 "votes": [_motion_identifier(v) for v in (check.get("votes") or [])[:5]]}
+                                                for check in (item.get("checks") or [])[:3] if isinstance(check, dict)]}
                                     for item in (tracking.get("verification_recent") or [])[-16:] if isinstance(item, dict)],
             "motion_states": _numeric_fields(tracking.get("motion_states"), ("moving", "stationary", "uncertain", "presence")),
             "counters": _numeric_fields(tracking.get("counters"), (

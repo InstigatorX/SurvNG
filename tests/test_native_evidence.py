@@ -208,3 +208,18 @@ def test_optional_calibration_failure_does_not_block_disabled_mode_promotion(tmp
     assert service.process(event['id'], [Candidate(100,image,[obj],5), Candidate(101,image,[obj],5)])['status'] == 'promoted'
     service.verifier.detect.assert_called_once()
     assert service.counts['calibration_unavailable'] == 1
+
+
+def test_verification_projection_survives_changed_object_appearance(tmp_path):
+    service, _, _, image, obj, _ = fixture(tmp_path)
+    main = cv2.resize(image, (1280, 720))
+    main[160:600, 200:480] = 100  # Room geometry matches; subject appearance does not.
+    candidate = Candidate(100, image, [obj], 5)
+    assert service.match_main(candidate, main) == []
+    projected = service.project_main(candidate, main)
+    assert len(projected) == 1
+    for key, value in obj['box'].items():
+        assert abs(projected[0]['box'][key] - value * 2) < 5
+    assert 'native_cover_verified' not in projected[0]
+    unrelated = np.random.default_rng(19).integers(0, 256, main.shape, dtype=np.uint8)
+    assert service.project_main(candidate, unrelated) == []
