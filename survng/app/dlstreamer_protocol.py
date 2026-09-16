@@ -47,7 +47,7 @@ def encode_stream_payload(stream_id: str, payload: bytes) -> bytes:
     return STREAM_ID_HEADER.pack(len(encoded)) + encoded + payload
 
 
-def decode_stream_payload(payload: bytes) -> tuple[str, bytes]:
+def decode_stream_payload(payload: bytes | memoryview) -> tuple[str, bytes | memoryview]:
     if len(payload) < STREAM_ID_HEADER.size:
         raise ProtocolError("truncated live-capture stream id")
     (length,) = STREAM_ID_HEADER.unpack_from(payload)
@@ -56,7 +56,7 @@ def decode_stream_payload(payload: bytes) -> tuple[str, bytes]:
     if length < 1 or end > len(payload):
         raise ProtocolError("truncated live-capture stream id")
     try:
-        stream_id = payload[start:end].decode("utf-8")
+        stream_id = bytes(payload[start:end]).decode("utf-8")
     except UnicodeDecodeError as error:
         raise ProtocolError("live-capture stream id is invalid") from error
     if not stream_id:
@@ -77,13 +77,23 @@ def encode_frame(
     pixels: bytes,
     stream_id: str = "",
 ) -> bytes:
+    return b"".join(encode_frame_parts(width=width, height=height, sequence=sequence,
+                                     pts=pts, pixels=pixels, stream_id=stream_id))
+
+
+def encode_frame_parts(
+    *, width: int, height: int, sequence: int, pts: float,
+    pixels: bytes, stream_id: str = "",
+) -> tuple[bytes, bytes]:
+    """Preserve framing without concatenating the large pixel allocation."""
     pixel_count = width * height
     if width <= 0 or height <= 0 or len(pixels) not in {pixel_count, pixel_count * 3}:
         raise ProtocolError("live-capture frame payload does not match gray or BGR dimensions")
-    return encode_message(
-        TYPE_FRAME,
-        _payload(FRAME_HEADER.pack(width, height, sequence, float(pts)) + pixels, stream_id),
-    )
+    prefix = _payload(FRAME_HEADER.pack(width, height, sequence, float(pts)), stream_id)
+    length = len(prefix) + len(pixels)
+    if length > MAX_MESSAGE_BYTES:
+        raise ProtocolError("live-capture message exceeded 256 MiB")
+    return MESSAGE_HEADER.pack(MAGIC, TYPE_FRAME, length) + prefix, pixels
 
 
 def encode_jpeg(
@@ -144,7 +154,7 @@ def encode_detection_snapshot(
     )
 
 
-def decode_frame_payload(payload: bytes) -> tuple[int, int, int, float, bytes]:
+def decode_frame_payload(payload: bytes | memoryview) -> tuple[int, int, int, float, bytes | memoryview]:
     if len(payload) < FRAME_HEADER.size:
         raise ProtocolError("truncated live-capture frame header")
     width, height, sequence, pts = FRAME_HEADER.unpack_from(payload)
@@ -203,7 +213,9 @@ class MessageReader:
         total = MESSAGE_HEADER.size + length
         if len(self._buffer) < total:
             return None
-        payload = bytes(self._buffer[MESSAGE_HEADER.size : total])
+        # Copy out once before resizing the mutable input buffer. A bytearray
+        # slice followed by bytes() otherwise copies every frame twice.
+        payload = bytes(memoryview(self._buffer)[MESSAGE_HEADER.size : total])
         del self._buffer[:total]
         return message_type, payload
 
@@ -222,17 +234,19 @@ class ProtocolWriter:
         self._lock = threading.Lock()
         self._failed = False
 
-    def send(self, message: bytes) -> None:
+    def send(self, message: bytes | tuple[bytes, ...]) -> None:
         with self._lock:
             if self._failed:
                 raise BrokenPipeError("live-capture protocol writer failed")
             try:
-                remaining = memoryview(message)
-                while remaining:
-                    written = self.stream.write(remaining)
-                    if written is None or written <= 0:
-                        raise BrokenPipeError("live-capture protocol write made no progress")
-                    remaining = remaining[written:]
+                parts = message if isinstance(message, tuple) else (message,)
+                for part in parts:
+                    remaining = memoryview(part)
+                    while remaining:
+                        written = self.stream.write(remaining)
+                        if written is None or written <= 0:
+                            raise BrokenPipeError("live-capture protocol write made no progress")
+                        remaining = remaining[written:]
                 self.stream.flush()
             except BaseException:
                 self._failed = True

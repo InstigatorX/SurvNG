@@ -39,6 +39,30 @@ def test_admission_requires_distinct_fresh_observations(activity):
     assert activity.tracks[(7, "person")]["observations"] == 2
 
 
+def test_effective_fps_tracks_live_policy_changes_without_stale_cache(activity):
+    from survng.app.config import effective_native_budget
+    for enabled, override, idle in [(False, None, None), (True, None, None),
+                                     (True, False, .5), (False, True, .5), (True, None, 2)]:
+        activity.config.native.budget.enabled = enabled
+        activity.camera.native_budget.enabled = override
+        activity.camera.native_budget.idle_fps = idle
+        budget = effective_native_budget(activity.camera, activity.config)
+        expected = budget.idle_fps if budget.enabled else activity.config.live_sample_fps / activity.config.native.inference_interval
+        assert activity.fresh_detection_fps == expected
+
+
+def test_episode_history_updates_do_not_mutate_published_snapshots(activity):
+    feed(activity, 1)
+    feed(activity, 2)
+    published = activity.events.update_object_tracking.call_args.args[1]
+    history = published['tracks'][0]['box_history']
+    original = [list(point) for point in history]
+    for sequence in range(3, 50):
+        feed(activity, sequence, received=100+sequence/5)
+    assert history == original
+    assert len(activity._episode_tracks[(7, 'person')]['box_history']) > len(history)
+
+
 def test_predictions_cannot_create_or_extend_activity(activity):
     feed(activity, 1, provenance="native_tracked_prediction")
     assert activity.tracks == {}

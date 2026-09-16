@@ -17,7 +17,6 @@ from typing import Callable
 from .live_detections import DetectionSnapshot
 from .native_motion import NativeMotion
 from .zones import apply_detection_zones
-from .config import effective_native_budget
 from survng.native_spatial import spatial_plan
 
 
@@ -295,8 +294,10 @@ class NativeActivity:
             return
         stored = {k: deepcopy(v) for k, v in track.items()
                   if not k.startswith("_") and k not in {"last_monotonic", "consecutive", "box_history", "trajectory"}}
-        box_history = list(previous["box_history"]) if previous else []
-        trajectory = list(previous["trajectory"]) if previous else []
+        # Episode history has a single owner. Publication/persistence already
+        # takes deep copies; do not recopy up to 1024 entries on each detection.
+        box_history = previous["box_history"] if previous else []
+        trajectory = previous["trajectory"] if previous else []
         box_history.append(deepcopy(track["box_history"][-1]))
         trajectory.append(deepcopy(track["trajectory"][-1]))
         stored.update(first_seen=previous["first_seen"] if previous else iso(epoch),
@@ -327,8 +328,13 @@ class NativeActivity:
 
     @property
     def fresh_detection_fps(self):
-        budget = effective_native_budget(self.camera, self.config)
-        return budget.idle_fps if budget.enabled else self.config.live_sample_fps / self.config.native.inference_interval
+        # Configuration is validated when applied. Reading two effective fields
+        # here must not serialize and revalidate the entire motion policy on
+        # every health poll, track expiry check, and incident update.
+        defaults, overrides = self.config.native.budget, self.camera.native_budget
+        enabled = defaults.enabled if overrides.enabled is None else overrides.enabled
+        idle_fps = defaults.idle_fps if overrides.idle_fps is None else overrides.idle_fps
+        return idle_fps if enabled else self.config.live_sample_fps / self.config.native.inference_interval
 
     def tick(self, *, now: float):
         self._poll_verification(now)

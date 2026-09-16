@@ -12,6 +12,7 @@ import pytest
 from survng.app.dlstreamer_capture import _start_child
 from survng.app.dlstreamer_protocol import (
     MessageReader, ProtocolWriter, TYPE_STATUS, decode_json_payload, encode_json,
+    encode_frame_parts, encode_frame, decode_frame_payload, decode_stream_payload, TYPE_FRAME,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +61,54 @@ def test_writer_never_reuses_connection_after_partial_failure():
     with pytest.raises(BrokenPipeError):
         writer.send(b"next message")
     assert output.calls == calls
+
+
+def test_frame_parts_share_pixels_and_remain_atomic_with_short_writes():
+    class ShortWrites(io.BytesIO):
+        def write(self, data):
+            return super().write(data[:113])
+
+    pixels = bytes(range(256)) * 300
+    args = dict(width=320, height=240, sequence=1, pts=.2, pixels=pixels, stream_id='camera')
+    parts = encode_frame_parts(**args)
+    assert parts[1] is pixels
+    assert b''.join(parts) == encode_frame(**args)
+    output = ShortWrites()
+    writer = ProtocolWriter(output)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _: writer.send(parts), range(8)))
+    reader = MessageReader()
+    reader.feed(output.getvalue())
+    count = 0
+    while (message := reader.pop()) is not None:
+        kind, payload = message
+        assert kind == TYPE_FRAME
+        stream, inner = decode_stream_payload(payload)
+        assert stream == 'camera'
+        assert decode_frame_payload(inner)[4] == pixels
+        count += 1
+    assert count == 8
+
+
+def test_frame_parts_failure_after_header_poison_writer():
+    class BrokenPixels:
+        calls = 0
+        def write(self, data):
+            self.calls += 1
+            if self.calls == 1:
+                return len(data)
+            raise BrokenPipeError('pixel write failed')
+        def flush(self):
+            pass
+
+    output = BrokenPixels()
+    writer = ProtocolWriter(output)
+    parts = encode_frame_parts(width=1, height=1, sequence=1, pts=0, pixels=b'x')
+    with pytest.raises(BrokenPipeError):
+        writer.send(parts)
+    with pytest.raises(BrokenPipeError):
+        writer.send(parts)
+    assert output.calls == 2
 
 
 @pytest.mark.parametrize("fatal", [False, True])

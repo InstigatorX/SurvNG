@@ -513,7 +513,9 @@ class _SharedLiveProcess:
         if message_type == TYPE_FATAL:
             decoded = decode_json_payload(payload)
             raise RuntimeError(str(decoded.get("error") or "DL Streamer startup failed"))
-        stream_id, inner = decode_stream_payload(payload)
+        # Keep the stream/frame header slices as views until the final owned
+        # NumPy allocation. Native-resolution BGR payloads can be many MiB.
+        stream_id, inner = decode_stream_payload(memoryview(payload) if message_type == TYPE_FRAME else payload)
         with self._lock:
             inbox = self._inboxes.get(stream_id)
         if inbox is None:

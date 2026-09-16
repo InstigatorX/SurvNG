@@ -57,6 +57,8 @@ class Candidate:
 
 
 def candidate_score(image, objects):
+    if not any(obj.get("incident_eligible") is not False for obj in objects):
+        return None
     quality = image_quality(image)
     if quality is None:
         return None
@@ -78,6 +80,13 @@ def candidate_score(image, objects):
         clearance = min(x1/width, y1/height, (width-x2)/width, (height-y2)/height)
         scores.append(float(obj.get("confidence") or 0) + min(area*8, 2) + crop_quality + min(clearance*10, 0.5))
     return quality + max(scores) if scores else None
+
+
+def matches_object_extent(expected, actual):
+    """A same-class fragment is not confirmation of the nominated object."""
+    intersection = max(0, min(expected['x2'], actual['x2'])-max(expected['x1'], actual['x1'])) * max(0, min(expected['y2'], actual['y2'])-max(expected['y1'], actual['y1']))
+    area = lambda b: max(1, (b['x2']-b['x1'])*(b['y2']-b['y1']))
+    return intersection/area(actual) >= .5 and intersection/(area(actual)+area(expected)-intersection) >= .3
 
 
 def resize_objects(objects, from_size, to_size):
@@ -218,7 +227,9 @@ class NativeEvidenceService:
         command = [self.config.ffmpeg_path, "-nostdin", "-v", "error", "-threads", "1", "-ss", str(max(0, epoch-float(row["start_epoch"]))), "-i", str(row["path"]), "-frames:v", "1", "-an", "-sn"]
         if maximum_width:
             command += ["-vf", f"scale='min({maximum_width},iw)':-2"]
-        command += ["-threads", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
+        # This is local IPC, not an archived image. BMP preserves BGR pixels
+        # without PNG compression/decompression on every verification sample.
+        command += ["-threads", "1", "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1"]
         result = subprocess.run(command, capture_output=True, timeout=12)
         if result.returncode or not result.stdout:
             self.counts["decode_failed"] += 1
@@ -349,9 +360,7 @@ class NativeEvidenceService:
                     if detected.get("label") != obj["label"] or detected.get("confidence", 0) < threshold:
                         continue
                     actual = detected.get("box") or {}
-                    overlap = max(0,min(expected["x2"],actual.get("x2",0))-max(expected["x1"],actual.get("x1",0)))*max(0,min(expected["y2"],actual.get("y2",0))-max(expected["y1"],actual.get("y1",0)))
-                    area = max(1,(actual.get("x2",0)-actual.get("x1",0))*(actual.get("y2",0)-actual.get("y1",0)))
-                    if overlap/area >= 0.25:
+                    if all(k in actual for k in ("x1", "y1", "x2", "y2")) and matches_object_extent(expected, actual):
                         matching.append(detected)
                 if matching:
                     actual = max(matching,key=lambda x:x.get("confidence",0))

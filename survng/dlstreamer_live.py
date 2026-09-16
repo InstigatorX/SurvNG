@@ -644,7 +644,7 @@ def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gs
 
 def _write(
     stdout,
-    message: bytes,
+    message: bytes | tuple[bytes, ...],
     *,
     lock: threading.Lock | None = None,
 ) -> None:
@@ -654,12 +654,10 @@ def _write(
         stdout.send(message)
         return
     if lock is None:
-        stdout.write(message)
-        stdout.flush()
+        ProtocolWriter(stdout).send(message)
         return
     with lock:
-        stdout.write(message)
-        stdout.flush()
+        ProtocolWriter(stdout).send(message)
 
 
 def run(argv: list[str] | None = None, *, output=None) -> int:
@@ -671,7 +669,7 @@ def _run(argv: list[str] | None, resources: ExitStack, *, output=None) -> int:
     from survng.app.dlstreamer_protocol import (
         TYPE_DETECTIONS,
         TYPE_STATUS,
-        encode_frame,
+        encode_frame_parts as encode_frame,
         encode_jpeg,
         encode_json,
     )
@@ -766,7 +764,7 @@ def _run_supervisor(
     from survng.app.dlstreamer_protocol import (
         TYPE_DETECTIONS,
         TYPE_STATUS,
-        encode_frame,
+        encode_frame_parts as encode_frame,
         encode_jpeg,
         encode_json,
     )

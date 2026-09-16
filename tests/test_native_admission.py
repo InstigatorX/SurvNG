@@ -78,6 +78,8 @@ def test_verifier_requires_multiple_clear_views_and_spatial_match():
     detection=dict(obj,box={k:v-(left if k.startswith('x') else top) for k,v in box.items()})
     evidence.verifier.detect.side_effect=[[detection],[detection],[]]
     assert service.verify('front',samples)['status']=='confirmed'
+    assert evidence.read_frame.call_count == 1
+    evidence.verifier.detect.assert_called_once()
     evidence.verifier.detect.side_effect=[[],[],[]]
     assert service.verify('front',samples)['status']=='rejected'
     evidence.verifier.detect.side_effect=[[detection],[],[]]
@@ -103,7 +105,7 @@ def test_queue_is_bounded_and_cancel_discards_inflight_result():
     assert len(service.jobs)==32
     for i in range(40): service.cancel(str(i))
     entered, release=threading.Event(), threading.Event()
-    def verify(*args):
+    def verify(*args, **kwargs):
         entered.set()
         assert release.wait(2)
         return {'status':'rejected','reason':'test'}
@@ -118,12 +120,44 @@ def test_queue_is_bounded_and_cancel_discards_inflight_result():
     assert service.poll('old') is None
 
 
+def test_cancelled_nomination_does_not_start_inference_after_decode():
+    import threading
+    cancelled = threading.Event()
+    main = np.zeros((20, 20, 3), np.uint8)
+    def read(*args):
+        cancelled.set()
+        return main
+    evidence = SimpleNamespace(read_frame=Mock(side_effect=read), match_main=Mock(), verifier=Mock())
+    service = NativeAdmission(evidence)
+    samples = [Candidate(i, main[::2, ::2], [], 0) for i in range(3)]
+    result = service.verify('front', samples, cancelled=cancelled)
+    assert result['status'] == 'unverified'
+    evidence.read_frame.assert_called_once()
+    evidence.match_main.assert_not_called()
+    evidence.verifier.detect.assert_not_called()
+
+
 def test_nomination_requires_temporally_distinct_samples():
     service=NativeAdmission(None)
     obj={'box':{'x1':10,'x2':20,'y1':10,'y2':20}}
     image=np.zeros((100,100,3),np.uint8)
     for t in (1,1,1.1,1.2,1.5,2,3): service.offer('track','front',t,image,obj,(100,100))
     assert [s.epoch for s in service.jobs['track']['samples']]==[1,1.5,2]
+
+
+def test_nomination_shares_immutable_frames_but_owns_mutable_inputs():
+    service = NativeAdmission(None)
+    obj = {'box': {'x1': 0, 'y1': 0, 'x2': 10, 'y2': 10}}
+    writable = np.ones((20, 20, 3), np.uint8)
+    service.offer('mutable', 'front', 1, writable, obj, (20, 20))
+    saved = service.jobs['mutable']['samples'][0].image
+    writable[:] = 0
+    assert saved.all() and not saved.flags.writeable
+    immutable = np.ones_like(writable)
+    immutable.setflags(write=False)
+    for token in ('one', 'two'):
+        service.offer(token, 'front', 1, immutable, obj, (20, 20))
+        assert service.jobs[token]['samples'][0].image is immutable
 
 
 def test_rejected_location_can_be_reverified_after_object_moves():

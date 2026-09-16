@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 
-from .native_evidence import Candidate, image_quality, resize_objects
+from .native_evidence import Candidate, image_quality, resize_objects, matches_object_extent as matches
 
 LOGGER = logging.getLogger(__name__)
 
@@ -19,12 +19,6 @@ def context_crop(main, box):
     left, top = max(0, int(cx-side/2)), max(0, int(cy-side/2))
     right, bottom = min(w, int(cx+side/2)), min(h, int(cy+side/2))
     return main[top:bottom, left:right].copy(), left, top
-
-
-def matches(expected, actual):
-    intersection = max(0, min(expected['x2'], actual['x2'])-max(expected['x1'], actual['x1'])) * max(0, min(expected['y2'], actual['y2'])-max(expected['y1'], actual['y1']))
-    area = lambda b: max(1, (b['x2']-b['x1'])*(b['y2']-b['y1']))
-    return intersection/area(actual) >= .5 and intersection/(area(actual)+area(expected)-intersection) >= .3
 
 
 class NativeAdmission:
@@ -45,6 +39,8 @@ class NativeAdmission:
     def stop(self):
         with self.condition:
             self.closed = True
+            for job in self.jobs.values():
+                job['cancelled'].set()
             self.jobs.clear()
             self.results.clear()
             self.condition.notify_all()
@@ -62,11 +58,15 @@ class NativeAdmission:
                 if len(self.jobs) + len(self.results) >= 32:
                     return  # Caller expires this as unverified, never as rejection.
                 job = self.jobs[token] = {'camera_id': camera_id, 'samples': [], 'due': time.monotonic()+15,
-                                         'deadline': time.monotonic()+90}
+                                         'deadline': time.monotonic()+90, 'cancelled': threading.Event()}
                 self.counts['nominated'] += 1
             if frame is not None and len(job['samples']) < 3 and all(abs(epoch-c.epoch) >= .4 for c in job['samples']):
                 h, w = frame.shape[:2]
-                job['samples'].append(Candidate(epoch, frame.copy(), resize_objects([obj], size, (w,h)), 0))
+                # Capture publishes immutable allocations. Multiple objects in
+                # one frame can retain those pixels instead of duplicating them.
+                image = frame if not frame.flags.writeable else frame.copy()
+                image.setflags(write=False)
+                job['samples'].append(Candidate(epoch, image, resize_objects([obj], size, (w,h)), 0))
             self.condition.notify_all()
 
     def poll(self, token):
@@ -75,19 +75,23 @@ class NativeAdmission:
 
     def cancel(self, token):
         with self.condition:
-            self.jobs.pop(token, None)
+            job = self.jobs.pop(token, None)
+            if job is not None:
+                job['cancelled'].set()
             self.results.pop(token, None)
 
     def status(self):
         with self.condition:
             return {'pending': len(self.jobs), 'counters': dict(self.counts), 'recent': list(self.recent)}
 
-    def verify(self, camera_id, samples):
+    def verify(self, camera_id, samples, *, cancelled=None):
         votes, best = [], None
         for candidate in samples:
-            if self.closed:
+            if self.closed or (cancelled is not None and cancelled.is_set()):
                 return {'status': 'unverified', 'reason': 'stopped'}
             main = self.evidence.read_frame(camera_id, candidate.epoch, 'main')
+            if self.closed or (cancelled is not None and cancelled.is_set()):
+                return {'status': 'unverified', 'reason': 'stopped'}
             if main is None:
                 votes.append('unavailable')
                 continue
@@ -103,6 +107,8 @@ class NativeAdmission:
             if image_quality(crop) is None:
                 votes.append('unclear')
                 continue
+            if self.closed or (cancelled is not None and cancelled.is_set()):
+                return {'status': 'unverified', 'reason': 'stopped'}
             detected = self.evidence.verifier.detect(crop)
             relevant = []
             nearby = False
@@ -127,6 +133,9 @@ class NativeAdmission:
                 cover = dict(obj, box=actual['box'], confidence=actual['confidence'], native_cover_verified=True)
                 best = (main, cover, candidate.epoch)
                 votes.append('confirmed')
+                # One clear positive decides admission. Remaining samples are
+                # only needed to establish rejection, not to reconfirm success.
+                break
             else:
                 votes.append('ambiguous' if nearby else 'negative')
         status = 'confirmed' if votes.count('confirmed') >= 1 else 'rejected' if votes.count('negative') >= 3 else 'unverified'
@@ -148,7 +157,7 @@ class NativeAdmission:
                 samples = list(job['samples'])
                 job['due'] = time.monotonic()+10
             try:
-                result = self.verify(job['camera_id'], samples)
+                result = self.verify(job['camera_id'], samples, cancelled=job['cancelled'])
             except Exception as exc:
                 result = {'status': 'unverified', 'reason': type(exc).__name__}
                 LOGGER.warning('Native admission verification unavailable for %s (%s)', job['camera_id'], type(exc).__name__)

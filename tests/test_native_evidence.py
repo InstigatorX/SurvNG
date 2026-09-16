@@ -90,6 +90,40 @@ def test_registration_alone_cannot_promote_an_empty_background(tmp_path):
     assert events.get(event["id"])["snapshot_path"] == event["snapshot_path"]
 
 
+def test_cover_cannot_replace_verified_subject_with_small_same_class_fragment(tmp_path):
+    service, events, event, image, obj, _ = fixture(tmp_path)
+    main = cv2.resize(image, (1280, 720))
+    service.read_frame = Mock(return_value=main)
+    expected = dict(obj, box={k: v*2 for k, v in obj['box'].items()})
+    service.match_main = Mock(return_value=[expected])
+    fragment = dict(expected, box={**expected['box'], 'x2': 240, 'y2': 200})
+    service.verifier.detect = Mock(return_value=[fragment])
+    assert service.process(event['id'], [Candidate(100, image, [obj], 5)])['status'] == 'no_verified_candidate'
+    assert events.get(event['id'])['snapshot_path'] == event['snapshot_path']
+
+
+def test_empty_candidates_skip_image_quality_work(monkeypatch):
+    from survng.app.native_evidence import candidate_score
+    quality = Mock(side_effect=AssertionError('unnecessary pixel work'))
+    monkeypatch.setattr('survng.app.native_evidence.image_quality', quality)
+    assert candidate_score(None, []) is None
+    assert candidate_score(None, [{'incident_eligible': False}]) is None
+
+
+def test_recorded_frame_uses_lossless_uncompressed_ipc(tmp_path, monkeypatch):
+    service, _, _, image, _, _ = fixture(tmp_path)
+    service.recorder.recording_at.return_value = {'path': str(tmp_path/'video.mp4'), 'start_epoch': 99}
+    encoded = cv2.imencode('.bmp', image)[1].tobytes()
+    from types import SimpleNamespace
+    run = Mock(return_value=SimpleNamespace(returncode=0, stdout=encoded))
+    monkeypatch.setattr('survng.app.native_evidence.subprocess.run', run)
+    actual = service.read_frame('test', 100, 'main')
+    assert np.array_equal(actual, image)
+    command = run.call_args.args[0]
+    assert command[command.index('-c:v')+1] == 'bmp'
+    assert command[command.index('-pix_fmt')+1] == 'bgr24'
+
+
 def test_archived_images_survive_cleanup_after_promotion(tmp_path):
     service, events, event, image, obj, _ = fixture(tmp_path)
     service.read_frame = Mock(return_value=cv2.resize(image, (1280, 720)))

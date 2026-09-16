@@ -148,8 +148,12 @@ class NativeCameraWorker:
         last_log = 0.0
         while not self._stop.wait(0.05):
             try:
-                observations = self.capture.native_observations()
-                frame = self.capture.latest("live")
+                observations = self.capture.native_observations(
+                    after_session=self.activity.session, after_sequence=self.activity.sequence)
+                # Only timestamps and session identity are read here. Keep the
+                # capture-owned immutable allocation instead of copying pixels
+                # on every 50 ms metadata/watchdog poll.
+                frame = self.capture.latest("live", copy=False)
                 now, epoch = time.monotonic(), time.time()
                 with self._lock:
                     if self._stop.is_set():
