@@ -29,6 +29,8 @@ export function nativeDetectionError(detector = {}) {
     }
   }
   const native = detector.native || {};
+  const tracked = native.tracking_classes;
+  if (tracked != null && (!Array.isArray(tracked) || tracked.length > 256 || tracked.some((label) => typeof label !== "string" || !label.trim() || label.length > 128))) return "Tracked classes must contain at most 256 nonempty model labels.";
   const batchSize = native.batch_size ?? 1;
   const batchWait = (batchSize - 1) * (native.inference_interval ?? 1) / (detector.live_sample_fps ?? 5);
   if (batchSize > 1 && batchWait >= (native.maximum_observation_age_seconds ?? 2)) return "Batch waiting time must be below maximum result age when only one camera is connected. Reduce batch size or inference interval, increase detection FPS, or increase maximum result age.";

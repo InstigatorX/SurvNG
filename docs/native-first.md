@@ -20,6 +20,7 @@ Live/substream RTSP
       ├─ sampled color frames / JPEG preview → preview and exact-PTS snapshots
       └─ drop-only sampling (target 5 FPS)
           → gvadetect: OpenVINO, configurable shared batch and interval (both default 1)
+          → selected-class metadata filter (no pixel mapping)
           → gvatrack: short-term-imageless
           → bounded metadata delivery
           → session-qualified native observation consumer
@@ -229,3 +230,26 @@ the video. Original track coordinates/timestamps and cover imagery are retained.
 It is not a camera-wide offset or a claim of shared hardware timestamps between
 the independent capture and recording paths. Existing incidents require recorded
 verification to gain a correction; they do not inherit another incident's result.
+
+
+## Selecting tracked classes
+
+Admin → Native detection and tracking → **Tracked classes** is a checkbox
+selection dropdown populated from model labels. Save applies it by rebuilding
+native capture. `detector.native.tracking_classes` is `null` by default (all
+classes), `[]` disables tracking/admission for every class, and an explicit
+array such as `["person", "car", "cat", "dog", "robot_lawnmower"]` excludes
+face detections from this model. Labels are trimmed, lowercased and deduplicated.
+Changing the model does not automatically expand an explicit selection.
+
+Filtering runs after gvadetect and before both native evidence capture and
+gvatrack. It removes excluded detections from both GstVideo ROI and GstAnalytics
+relation metadata; removing only the former does not filter this DL Streamer
+version's tracker input. Selected bounding boxes, confidence and class IDs are
+retained without mapping/copying pixel memory. Model inference still evaluates
+all output classes. Existing stored tracks are not rewritten. ReID remains off.
+
+Validation with the installed native runtime:
+`/usr/bin/python3 scripts/check-native-class-filter.py` exercises all/none/subset
+selection through real gvatrack and JSON conversion, retained IDs, and unchanged
+pixel-memory references.

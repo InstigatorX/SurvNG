@@ -319,6 +319,7 @@ class AppManager:
                 inference_requests=detector.native.inference_requests,
                 inference_streams=detector.native.inference_streams,
                 native_tracking="short-term-imageless",
+                tracking_classes=None if detector.native.tracking_classes is None else tuple(detector.native.tracking_classes),
                 labels_path=detector.labels_path,
                 labels=tuple(detector.labels),
                 confidence_threshold=live_detection_threshold(config),

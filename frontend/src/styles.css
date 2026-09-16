@@ -14338,3 +14338,10 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .incident-camera-report > small {
   grid-column: 1 / -1;
 }
+
+
+.tracking-class-picker > .form-grid {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 8px 0;
+}

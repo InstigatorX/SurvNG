@@ -310,6 +310,7 @@ def _detector_snapshot(config: AppConfig, raw: dict[str, Any]) -> dict[str, Any]
         "native": bool(raw.get("native")),
         "active_cameras": _optional_number(raw.get("active_cameras")),
         "healthy_cameras": _optional_number(raw.get("healthy_cameras")),
+        "native_tracking_classes": config.detector.native.tracking_classes if raw.get("native") else None,
         "native_batch_size": config.detector.native.batch_size if raw.get("native") else None,
         "native_inference_requests": config.detector.native.inference_requests if raw.get("native") else None,
         "native_inference_streams": config.detector.native.inference_streams if raw.get("native") else None,

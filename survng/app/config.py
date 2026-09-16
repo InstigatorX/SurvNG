@@ -789,7 +789,9 @@ class NativeStationaryConfig(BaseModel):
 
 class NativeActivityConfig(BaseModel):
     """Native observation freshness and presence episode policy."""
+    tracking_classes: list[str] | None = Field(default=None, max_length=256)
     stationary: NativeStationaryConfig = Field(default_factory=NativeStationaryConfig)
+
     activity_timeout_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
     maximum_observation_age_seconds: float = Field(default=2.0, ge=0.2, le=10.0)
     maximum_tracks: int = Field(default=128, ge=1, le=1024)
@@ -798,6 +800,16 @@ class NativeActivityConfig(BaseModel):
     inference_interval: int = Field(default=1, ge=1, le=5)
     inference_requests: int = Field(default=4, ge=1, le=16)
     inference_streams: int = Field(default=2, ge=1, le=8)
+
+    @field_validator("tracking_classes")
+    @classmethod
+    def normalize_tracking_classes(cls, value):
+        if value is None:
+            return None
+        labels = [label.strip().lower() for label in value]
+        if any(not label or len(label) > 128 for label in labels):
+            raise ValueError("tracking classes must be nonempty labels of at most 128 characters")
+        return list(dict.fromkeys(labels))
 
 
 class DetectorConfig(BaseModel):

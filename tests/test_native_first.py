@@ -412,8 +412,11 @@ def test_native_interval_reaches_capture_and_status(tmp_path, interval):
     config = AppConfig(storage_dir=str(tmp_path), cameras=[], retention={"enabled": False})
     config.detector.native.inference_interval = interval
     config.detector.native.batch_size = 2
+    config.detector.native.tracking_classes = ["person"]
     manager = AppManager(config)
     try:
+        assert manager.capture_backend.options.tracking_classes == ("person",)
+        assert manager.detector_status()["tracking_classes"] == ["person"]
         assert manager.capture_backend.options.batch_size == 2
         assert manager.detector_status()["batch_size"] == 2
         assert manager.capture_backend.options.inference_interval == interval
@@ -493,3 +496,31 @@ def test_unconfirmed_camera_does_not_override_historical_geometry():
     incident = {"camera_id": "front", "object_tracking": {"implementation": "gvatrack", "recording_overlay_compatible": False}}
     apply_native_replay_geometry(incident, {"front": camera})
     assert incident["object_tracking"]["recording_overlay_compatible"] is False
+
+
+@pytest.mark.parametrize("selection,expected", [(None, None), ([], []), ([" Person ", "person", "CAR"], ["person", "car"])])
+def test_tracking_class_selection_normalization(selection, expected):
+    assert DetectorConfig(native={"tracking_classes": selection}).native.tracking_classes == expected
+
+
+@pytest.mark.parametrize("selection", [[""], [" "], [3], "person", ["a" * 129]])
+def test_tracking_class_selection_rejects_invalid_labels(selection):
+    with pytest.raises(ValueError):
+        DetectorConfig(native={"tracking_classes": selection})
+
+
+@pytest.mark.parametrize("selection", [[], ["car"]])
+def test_excluded_class_cannot_start_incident(activity, selection):
+    activity.config.native.tracking_classes = selection
+    feed(activity, 1)
+    feed(activity, 2)
+    assert activity.tracks == {}
+    activity.events.add_event.assert_not_called()
+
+
+def test_tracking_class_change_requires_shared_capture_reload():
+    from survng.app.config_application import manager_owned_config
+    current = AppConfig()
+    incoming = current.model_copy(deep=True)
+    incoming.detector.native.tracking_classes = ["person"]
+    assert manager_owned_config(current) != manager_owned_config(incoming)

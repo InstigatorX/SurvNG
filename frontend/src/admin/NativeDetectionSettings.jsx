@@ -12,8 +12,9 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
   }, [configuredLabels]);
   const [extraClass, setExtraClass] = useState("");
   const [addedClasses, setAddedClasses] = useState([]);
-  const classes = [...new Set([...modelClasses, ...(detector.labels || []), ...addedClasses,
+  const classes = [...new Set([...modelClasses, ...(detector.labels || []), ...(detector.native?.tracking_classes || []), ...addedClasses,
     ...Object.keys(detector.event_class_confirmation_frames || {}), ...Object.keys(detector.event_class_confidence_thresholds || {})])].sort();
+  const trackedClasses = detector.native?.tracking_classes ?? null;
   const update = (path, value) => updateConfig(["detector", ...path.split(".")], value);
   const numericFields = (group) => <div className="form-grid">{NATIVE_DETECTION_FIELDS.filter((field) => field.group === group).map((field) => <label key={field.path}>{field.label}<input type="number" aria-label={field.label} min={field.min} max={field.max} step={field.step} value={detectionFieldValue(detector, field)} onChange={(event) => update(field.path, event.target.value === "" ? "" : Number(event.target.value))} />{field.help ? <small>{field.help}</small> : null}</label>)}</div>;
   function override(key, label, value) {
@@ -33,6 +34,18 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
       <label>Labels file<input value={detector.labels_path || ""} onChange={(event) => update("labels_path", event.target.value)} /><small>Optional server path for custom model labels.</small></label>
       <label>Default incident eligibility<select value={String(detector.require_incident_zone ?? true)} onChange={(event) => update("require_incident_zone", event.target.value === "true")}><option value="true">Incident zones only</option><option value="false">Zones and full frame</option></select><small>Cameras can override this. Ignore zones always apply.</small></label>
     </div>
+    <details className="tracking-class-picker">
+      <summary>Tracked classes: {trackedClasses === null ? "All model classes" : trackedClasses.length ? trackedClasses.join(", ") : "None"}</summary>
+      <div className="form-grid" role="group" aria-label="Tracked classes">
+        <label className="compact-toggle"><input type="checkbox" checked={trackedClasses === null} onChange={(event) => update("native.tracking_classes", event.target.checked ? null : [])} /><span>All model classes</span></label>
+        {classes.map((label) => <label className="compact-toggle" key={label}><input type="checkbox" aria-label={`Track ${label}`} checked={trackedClasses === null || trackedClasses.includes(label)} onChange={(event) => {
+          const current = trackedClasses ?? classes;
+          update("native.tracking_classes", event.target.checked ? [...new Set([...current, label])] : current.filter((value) => value !== label));
+        }} /><span>{label}</span></label>)}
+      </div>
+      {!classes.length ? <p>Choose a model or add a class under Per-class incident thresholds to populate this list.</p> : null}
+      <small>Only selected classes receive tracking IDs and create native incidents. The model still evaluates all its output classes. Save to restart native tracking with this selection.</small>
+    </details>
     {numericFields("detection")}
     <h3>Stationary object policy</h3>
     <label className="compact-toggle"><input type="checkbox" checked={detector.native?.stationary?.enabled ?? true} onChange={(event) => update("native.stationary.enabled", event.target.checked)} /><span>Require movement for selected classes</span></label>

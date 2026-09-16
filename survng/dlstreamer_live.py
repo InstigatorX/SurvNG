@@ -32,6 +32,17 @@ class StreamShutdownError(RuntimeError):
     """The native process must be replaced; admitting another graph is unsafe."""
 
 
+def _tracking_classes_argument(value):
+    try:
+        labels = json.loads(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("tracking classes must be a JSON array") from exc
+    if (not isinstance(labels, list) or len(labels) > 256
+            or any(not isinstance(label, str) or not label.strip() or len(label.strip()) > 128 for label in labels)):
+        raise argparse.ArgumentTypeError("tracking classes must be an array of nonempty labels")
+    return list(dict.fromkeys(label.strip().lower() for label in labels))
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -67,6 +78,8 @@ def _parser() -> argparse.ArgumentParser:
         default="off",
         help="optional DL Streamer ROI tracking between detector frames",
     )
+    parser.add_argument("--tracking-classes", type=_tracking_classes_argument, default=None,
+                        help="JSON array of classes admitted to gvatrack; omitted means all, [] means none")
     parser.add_argument("--batch-size", type=int, default=1, choices=range(1, 5),
                         help="shared inference batch size; 1 disables batching")
     parser.add_argument("--open-timeout", type=float, default=3.0)
@@ -536,6 +549,36 @@ class _NativeInferenceEvidence:
     def pop(self, pts):
         with self.lock:
             return self.results.pop(pts, ("unknown", []))
+
+
+def _filter_tracking_regions(buffer, caps, video_frame_type, allowed_classes):
+    """Remove excluded ROI metadata before tracking, without mapping pixel memory."""
+    if allowed_classes is None:
+        return
+    from gi.repository import GstAnalytics, GLib
+    frame = video_frame_type(buffer, caps=caps)
+    regions = list(frame.regions())
+    selected = [region for region in regions if region.label().strip().lower() in allowed_classes]
+    if len(selected) == len(regions):
+        return
+    kept = [(region.rect(), region.label(), region.confidence(), region.label_id()) for region in selected]
+    for region in regions:
+        frame.remove_region(region)
+    # DL Streamer 2026 also stores detections in analytics relation metadata;
+    # its public API has no individual-record removal. Rebuild the selected
+    # bounding-box detections in both representations, retaining class IDs.
+    meta = buffer.get_meta(GstAnalytics.relation_meta_api_get_type())
+    if meta is not None and not buffer.remove_meta(meta):
+        raise RuntimeError("could not replace tracking analytics metadata")
+    for rect, label, confidence, label_id in kept:
+        roi = frame.add_region(rect.x, rect.y, rect.w, rect.h, label, confidence)
+        relation = GstAnalytics.buffer_get_analytics_relation_meta(buffer)
+        quarks = [0] * (label_id + 1)
+        scores = [0.0] * (label_id + 1)
+        quarks[label_id], scores[label_id] = GLib.quark_from_string(label), confidence
+        success, classification = relation.add_cls_mtd(scores, quarks)
+        if not success or not relation.set_relation(GstAnalytics.RelTypes.RELATE_TO, roi.meta().id, classification.id):
+            raise RuntimeError("could not retain tracking class identity")
 
 
 def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gst_second: int,
@@ -1017,6 +1060,7 @@ def _pump_pipeline(
     video_frame_type = None
     if detect:
         from gstgva import VideoFrame
+        from gstgva.util import GST_PAD_PROBE_INFO_BUFFER
         video_frame_type = VideoFrame
         detect_queue = _element(Gst, "queue", "detect-queue")
         detect_queue.set_property("max-size-buffers", 1)
@@ -1061,10 +1105,27 @@ def _pump_pipeline(
             args.inference_interval, tracking=args.native_tracking != "off",
         )
 
+        selected_classes = getattr(args, "tracking_classes", None)
+        allowed_classes = None if selected_classes is None else frozenset(label.strip().lower() for label in selected_classes)
+
         def capture_native_evidence(pad, info):
-            buffer = info.get_buffer()
-            if buffer is not None:
-                native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)
+            # Intel's context manager lends the probe buffer without the extra
+            # Python reference that otherwise makes metadata read-only.
+            with GST_PAD_PROBE_INFO_BUFFER(info) as buffer:
+                if buffer is not None:
+                    try:
+                        _filter_tracking_regions(buffer, pad.get_current_caps(), video_frame_type, allowed_classes)
+                    except Exception as exc:
+                        native_evidence.invalid += 1
+                        # A dropped detector output loses the inference-interval
+                        # phase. Fail closed until the watchdog recreates capture.
+                        native_evidence.identity_valid = False
+                        with native_evidence.lock:
+                            native_evidence.results.clear()
+                        if native_evidence.invalid == 1 or native_evidence.invalid % 100 == 0:
+                            print(f"survng-dls tracking class metadata filter failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                        return Gst.PadProbeReturn.DROP
+                    native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)
             return Gst.PadProbeReturn.OK
 
         def capture_native_start(pad, info):
@@ -1381,6 +1442,7 @@ def _pump_pipeline(
                                 if detect else 0.0
                             ),
                             "native_tracking": args.native_tracking if detect else "off",
+                            "native_tracking_classes": getattr(args, "tracking_classes", None) if detect else None,
                             "native_inference_requests": args.inference_requests if detect else 0,
                             "native_inference_streams": args.inference_streams if detect else 0,
                             "native_tracking_authoritative": native_tracker is not None,

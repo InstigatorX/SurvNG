@@ -94,7 +94,9 @@ class NativeActivity:
         )
         eligible = [obj for obj in objects
                     if obj.get("detection_provenance") == "native_fresh_detection"
-                    and obj.get("incident_eligible")]
+                    and obj.get("incident_eligible")
+                    and (self.config.native.tracking_classes is None
+                         or obj.get("label", "").strip().lower() in self.config.native.tracking_classes)]
         # Live context expires independently of the persisted episode archive.
         for key, track in list(self.tracks.items()):
             if now - track["last_monotonic"] >= max(self.config.native.activity_timeout_seconds, 1.5 / self.fresh_detection_fps):

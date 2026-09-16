@@ -19,3 +19,6 @@ console.log("Native detection settings passed");
 assert.match(nativeDetectionError({live_sample_fps: .5, native:{batch_size:2}}), /Batch waiting time/);
 assert.equal(nativeDetectionError({live_sample_fps:5, native:{batch_size:4}}), "");
 assert.equal(nativeDetectionError({live_sample_fps:.5, native:{batch_size:1,inference_interval:5}}), "");
+
+for (const tracking_classes of [null, [], ["person"]]) assert.equal(nativeDetectionError({native:{tracking_classes}}), "");
+for (const tracking_classes of ["person", [""], [3]]) assert.match(nativeDetectionError({native:{tracking_classes}}), /Tracked classes/);

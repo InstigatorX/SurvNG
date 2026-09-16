@@ -24,7 +24,7 @@ const server = await createServer({ root, configFile: false, server: { host: "12
           for(const key of path.slice(1,-1)) target=target[key] ||= {};
           target[path.at(-1)]=value; return next;});
       }
-      return <><NativeDetectionSettings detector={detector} updateConfig={updateConfig} modelClasses={['person','car']}/><pre id="config">{JSON.stringify(detector)}</pre></>;
+      return <><NativeDetectionSettings detector={detector} updateConfig={updateConfig} modelClasses={['person','car','face']}/><pre id="config">{JSON.stringify(detector)}</pre></>;
     }
     createRoot(document.getElementById('root')).render(<App/>);
   `; },
@@ -50,6 +50,15 @@ try {
   await page.getByText("Per-class incident thresholds", { exact: true }).click();
   await page.getByLabel("person confidence", { exact: true }).fill("0.7");
   await page.getByLabel("person confirmation frames").fill("3");
+  await page.getByText("Tracked classes: All model classes", {exact:true}).click();
+  await page.getByRole("checkbox", {name:"Track face", exact:true}).uncheck();
+  assert.deepEqual(JSON.parse(await page.locator("#config").textContent()).native.tracking_classes, ["car", "person"]);
+  await page.getByRole("checkbox", {name:"All model classes", exact:true}).check();
+  assert.equal(JSON.parse(await page.locator("#config").textContent()).native.tracking_classes, null);
+  await page.getByRole("checkbox", {name:"All model classes", exact:true}).uncheck();
+  assert.deepEqual(JSON.parse(await page.locator("#config").textContent()).native.tracking_classes, []);
+  await page.getByRole("checkbox", {name:"Track person", exact:true}).check();
+  assert.deepEqual(JSON.parse(await page.locator("#config").textContent()).native.tracking_classes, ["person"]);
   const config = JSON.parse(await page.locator("#config").textContent());
   assert.equal(config.model_path, "new.xml");
   assert.equal(config.model_xml, "");

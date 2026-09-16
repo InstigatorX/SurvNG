@@ -119,6 +119,7 @@ class DlStreamerCaptureOptions:
     inference_requests: int = 4
     inference_streams: int = 2
     native_tracking: str = "off"
+    tracking_classes: tuple[str, ...] | None = None
     frame_width: int = 320
     jpeg_fps: float = 1.0
     confidence_threshold: float = 0.1
@@ -1037,6 +1038,8 @@ class DlStreamerCaptureBackend:
             command.extend(["--inference-requests", str(self.options.inference_requests)])
             command.extend(["--inference-streams", str(self.options.inference_streams)])
             command.extend(["--native-tracking", self.options.native_tracking])
+            if self.options.tracking_classes is not None:
+                command.extend(["--tracking-classes", json.dumps(self.options.tracking_classes)])
             command.extend(
                 [
                     "--model-instance-id",

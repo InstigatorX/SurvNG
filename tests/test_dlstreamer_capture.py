@@ -851,3 +851,17 @@ def test_explicit_batch_reaches_native_command(batch):
     ))
     command = backend.command()
     assert command[command.index("--batch-size") + 1] == str(batch)
+
+
+@pytest.mark.parametrize("selection", [None, (), ("person", "car")])
+def test_tracking_class_command_roundtrip(selection):
+    backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(detect_enabled=True, model_path="/models/test.xml", tracking_classes=selection))
+    command = backend.command()
+    parsed = _parser().parse_args(command[3:])
+    assert parsed.tracking_classes == (None if selection is None else list(selection))
+
+
+@pytest.mark.parametrize("value", ['"person"', '{}', '[3]', '[""]', 'null'])
+def test_tracking_class_cli_rejects_invalid_selection(value):
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["--tracking-classes", value])
