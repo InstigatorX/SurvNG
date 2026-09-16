@@ -398,6 +398,14 @@
   min-height: 28px;
 }
 
+.telemetry-camera-grid.native-camera-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+}
+
+.native-camera-grid > .telemetry-camera-card {
+  padding: 10px;
+}
+
 .telemetry-camera-card {
   border-radius: 3px;
   background: var(--panel-soft);

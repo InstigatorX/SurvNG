@@ -1,28 +1,27 @@
-# Native incident imagery proposal
+# Native incident imagery
 
-## Current failure modes
+## Implemented flow
 
-Native capture exposes a 640-pixel preview. `NativeCameraWorker._evidence` saves that frame only when an episode starts. Resizing it to detection coordinates does not recover main-stream detail. Missing exact-session/PTS preview frames yield an empty snapshot path.
+Native capture exposes a 640-pixel preview. Initial incident evidence still uses an exact-session/PTS preview when available. A missing preview can leave the initial snapshot empty; background selection now fills it from recordings when a verified subject image is available.
 
-Meanwhile, `NativeActivity.persist` updates incident objects with later track coordinates, but leaves the original snapshot unchanged. Object-focused thumbnails can therefore crop a location the subject has already left. Incident representative selection ranks object confidence ahead of image availability, and does not assess image quality. These are code-level findings; individual gray-image examples still need pixel-level inspection to distinguish bad capture from bad cropping.
+1. **Nominate frames from native tracks.** Evaluate at most one preview per second per event and retain the best three, spaced at least one second apart. Score subject area, confidence, edge clearance, sharpness, and contrast. Reject near-uniform frames and subject crops. Dark but useful night images remain eligible.
+2. **Extract existing main recordings at full resolution.** Two background workers share a queue of at most 32 event jobs. Initial work waits 20 seconds for recording availability; completed events can also request selection. Missing recordings retry within a 120-second deadline. No main-stream inference runs continuously per camera.
+3. **Verify geometry and subject presence.** Reuse the existing ORB/RANSAC alignment estimator, then local template correspondence. These checks establish spatial correspondence, not proof that an object is present: a single shared native `gvadetect` CPU subprocess confirms the same class at an overlapping location in the actual main image. It processes only nominated images, uses one inference request and two inference threads, and applies configured class confidence thresholds. The live GPU pipeline stays separate.
+4. **Commit paired evidence atomically.** Choose a materially better valid cover, retaining its exact main-frame dimensions, timestamp, and verified boxes together. Preserve track history independently. Increment `evidence_revision` and publish an incident update. Archive up to three shortlisted images; preserve the prior cover through the source-observation archive. Never upscale a preview and label it high resolution. Failed verification keeps the existing cover.
+5. **Prefer usable incident representatives.** Image availability and verified cover quality take precedence over confidence alone. Existing focus/thumbnail rendering uses the full-resolution original and its own subject coordinates.
 
-## Recommended pipeline
+The earlier claim that routine track updates overwrite snapshot boxes was incorrect: `EventStore.update_object_tracking` preserves the snapshot objects and updates the separate tracking diagnostic.
 
-1. **Keep immutable image evidence.** Store the image timestamp, source/session/PTS, dimensions, and the objects observed in that exact frame together. Separate snapshot annotations from latest live-track state. A cover change updates all of these atomically and increments `evidence_revision` so clients invalidate thumbnails.
-2. **Maintain a bounded shortlist during the episode.** Evaluate at most one eligible candidate per second and retain only the best three timestamps/metadata records. Score the actual incident subject: visible area, confidence, distance from frame edges, sharpness, exposure, and scene context. Reject missing, near-uniform gray/black, grossly corrupted, or substantially clipped frames. Do not reject a useful night image merely because it is dark.
-3. **Extract full-resolution images from existing main recordings.** A bounded background job waits for the relevant recording segment to become readable, then extracts around the shortlisted timestamps. This avoids a permanent second inference pipeline or raw-frame copying on every stream. Keep a maximum of three candidates per event and a small system-wide extraction concurrency limit. Cancel obsolete work; retry incomplete recording segments within a bounded deadline.
-4. **Verify alignment before cropping.** Main/substream field-of-view compatibility must be confirmed. Use recording timestamps to account for stream delay and check nearby frames when necessary. Matching field of view alone does not prove time alignment. If a subject cannot be located reliably in the main image, use a full-scene main image without projected boxes, or retain the exact live evidence for the subject crop. Never present an upscaled substream as high-resolution evidence.
-5. **Promote the best valid cover.** A clear subject view outranks a higher-confidence but blank, blurred, occluded, or poorly timed image. Keep the previous valid cover until replacement succeeds. Use the full-resolution original for zoom, a context-preserving crop for the incident card, and separately sized thumbnails for grids. Preserve the other shortlisted frames in Evidence.
+## Historical reprocessing
 
-## Defaults to test
+`scripts/reprocess-native-evidence.py --config config.json --hours 2 --report /tmp/native-evidence-report.json` selects native events in an explicit two-hour window and records per-event results. It samples up to twelve timestamps across each saved track history, reads recorded live/main frames, and applies the same verification and promotion rules. It does not create new events or reconstruct discarded track history. Missing recordings and unverified subjects are reported without replacing the old cover.
 
-- Candidate interval: 1 second; shortlist: 3 frames; initial selection horizon: 15 seconds, with later replacement only for a materially better view.
-- Background extraction concurrency: 2 jobs system-wide; bounded queue with per-event coalescing.
-- Full-resolution original retained; 1280-pixel focus rendition and display-sized thumbnails generated from that original.
-- Diagnostic reasons: frame missing, recording pending, uniform image, blur, subject clipped, alignment unverified, and candidate promoted.
+## Alignment and replay
 
-## Acceptance checks
+The prior ORB calibration implementation remains shared and tested. Native cover selection uses it per image pair; this does not certify main-stream replay alignment globally. Tracks mode uses recorded live/substream footage unless compatibility is explicitly known. Replay windows include all saved track timestamps, and bounded history compaction preserves the beginning and end of new long episodes rather than retaining only the latest 150 observations.
 
-Walk-by, approach/departure, stationary person, parked vehicle with passing person, night/IR, reconnect, missing recording, and cropped main/substream views. Verify image/box timestamp pairing, no blank cover promotion, no incorrect subject crop, cache refresh after promotion, bounded work under simultaneous incidents, and no inference FPS regression. Compare chosen covers with the available evidence by inspection.
+## Validation and limits
 
-This document proposes the imagery implementation; the current integration fixes do not yet implement high-resolution extraction or automatic cover selection.
+Regression coverage checks uniform-image rejection, registration, explicit subject verification, atomic cover/history preservation, archived-file retention, and bounded history. Browser coverage plays a 24-second incident through a 10-second recording boundary with track overlays.
+
+Visual inspection remains necessary: spatial registration alone accepted an empty background in an initial pilot, so native main-image detection is mandatory. This is conservative selection, not guaranteed recovery: missing recordings, truncated historical tracks, large timing offsets, or failed registration can leave an event without an upgraded cover. The verifier adds bounded CPU work and one lazily loaded native CPU model; GPU live inference metrics do not include this offline verification work.

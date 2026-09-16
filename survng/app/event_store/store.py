@@ -1615,7 +1615,7 @@ class EventStore(
             "batch_saturated": len(rows) >= bounded_limit,
         }
 
-    def _delete_snapshot_if_unreferenced(self, raw_path: str) -> None:
+    def _delete_snapshot_if_unreferenced(self, raw_path: str, *, preserve_archive: bool = False) -> None:
         """Remove a replaced snapshot only after every durable reference moved."""
         portable = portable_media_path(self.storage_dir, raw_path)
         if not portable:
@@ -1625,10 +1625,11 @@ class EventStore(
                 """
                 select exists(select 1 from events where snapshot_path = ?)
                     or exists(select 1 from motion_audits where snapshot_path = ?)
+                    or (? and exists(select 1 from event_source_observations where snapshot_path = ?))
                     or exists(select 1 from event_cover_requirements where state='pending'
                         and deadline_epoch > unixepoch() and json_extract(payload_json, '$.snapshot_path') = ?)
                 """,
-                (portable, portable, portable),
+                (portable, portable, preserve_archive, portable, portable),
             ).fetchone()[0])
             if not referenced:
                 has_faces = conn.execute(
@@ -1656,6 +1657,34 @@ class EventStore(
             path.unlink(missing_ok=True)
         except (FileNotFoundError, PermissionError, OSError, RuntimeError, ValueError):
             return
+
+    def promote_native_evidence(self, event_id, snapshot_path, objects, assets, score):
+        """Commit a verified image and its own boxes without touching live tracks."""
+        portable = portable_media_path(self.storage_dir, snapshot_path)
+        stale = []
+        updated = None
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
+            if row is not None and not snapshot_deletion_claimed(conn, self.storage_dir, portable):
+                existing = json.loads(row["objects_json"] or "[]")
+                previous_score = max((float(x.get("native_cover_score", -1)) for x in existing if x.get("native_cover_verified")), default=-1)
+                if score > previous_score + 0.05:
+                    old_assets = conn.execute("select distinct snapshot_path from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,)).fetchall()
+                    stale = [str(x["snapshot_path"]) for x in old_assets if x["snapshot_path"]]
+                    conn.execute("delete from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,))
+                    for path, observations in assets:
+                        self._archive_observations(conn, event_id, observations, portable_media_path(self.storage_dir, path))
+                    identities = {(x.get("label"), x.get("track_id")) for x in objects}
+                    retained = [dict(x, snapshot_visible=False) for x in existing if x.get("label") and (x.get("label"), x.get("track_id")) not in identities]
+                    metadata = [x for x in existing if not x.get("label")]
+                    conn.execute("update events set snapshot_path=?,snapshot_size_bytes=?,objects_json=? where id=?", (portable, self._snapshot_file_size(portable), json.dumps([*objects,*retained,*metadata]),event_id))
+                    updated = self._finish_evidence_commit(conn,event_id,row,reason="native_cover_selected",cover_satisfied=True)
+        if updated is None:
+            stale.extend(portable_media_path(self.storage_dir, path) for path, _ in assets)
+        for path in stale:
+            self._delete_snapshot_if_unreferenced(path, preserve_archive=True)
+        return dict(updated) if updated is not None else None
 
     def update_object_tracking(
         self,

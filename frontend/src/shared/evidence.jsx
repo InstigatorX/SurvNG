@@ -51,10 +51,15 @@ export function incidentClipWindow(event, before, after) {
   const anchor = eventEpoch(event);
   const children = event?.events || [];
   const childEpochs = children.map(eventEpoch).filter(Number.isFinite);
-  const explicitStart = Number(event?.start_epoch);
-  const explicitEnd = Number(event?.last_epoch);
-  const start = Number.isFinite(explicitStart) ? explicitStart : childEpochs.length ? Math.min(...childEpochs) : anchor;
-  const end = Number.isFinite(explicitEnd) ? explicitEnd : childEpochs.length ? Math.max(...childEpochs) : anchor;
+  const finiteEpoch = (value) => value == null || value === "" ? null : Number.isFinite(Number(value)) ? Number(value) : Number.isFinite(Date.parse(value)) ? Date.parse(value) / 1000 : null;
+  const trackEpochs = [event, ...children].flatMap((item) => {
+    const tracking = item?.object_tracking;
+    return [finiteEpoch(tracking?.updated_at), ...(tracking?.tracks || []).flatMap((track) => [finiteEpoch(track.first_seen), finiteEpoch(track.last_seen), ...(track.box_history || []).map((sample) => finiteEpoch(sample[0]))])];
+  }).filter((value) => Number.isFinite(value) && value > 0);
+  const starts = [anchor, finiteEpoch(event?.start_epoch), ...childEpochs, ...trackEpochs].filter(Number.isFinite);
+  const ends = [anchor, finiteEpoch(event?.last_epoch), ...childEpochs, ...trackEpochs].filter(Number.isFinite);
+  const start = starts.length ? Math.min(...starts) : anchor;
+  const end = ends.length ? Math.max(...ends) : anchor;
   return {
     before: Math.max(0, before + (Number.isFinite(anchor) && Number.isFinite(start) ? anchor - start : 0)),
     after: Math.max(0, after + (Number.isFinite(anchor) && Number.isFinite(end) ? end - anchor : 0)),

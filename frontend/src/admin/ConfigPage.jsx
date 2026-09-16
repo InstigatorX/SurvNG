@@ -604,8 +604,6 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
           </div>
         </section>
 
-        <section className="telemetry-section"><h3>Native camera activity</h3>{shownCameras.map((camera) => <div key={camera.id}><h4>{camera.name || camera.id}</h4><RuntimeStatus status={camera} /></div>)}</section>
-
         <section className="telemetry-section">
           <div className="telemetry-section-head"><div><h3>Events by hour{selected ? ` · ${selected.name}` : ""}</h3></div></div>
           <div className="telemetry-hourly" aria-label="Events per hour">
@@ -621,8 +619,6 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
           </div>
           <div className="telemetry-legend"><span><i /> Events</span><span><i className="objects" /> Object incidents</span></div>
         </section>
-
-
 
         <section className="telemetry-section">
           <div className="telemetry-section-head"><div><h3>Camera reliability{selected ? ` · ${selected.name}` : ""}</h3></div></div>
@@ -651,6 +647,8 @@ export function TelemetryViewer({ data, cameraId, timeZone }) {
             <TelemetryTrend title="Application memory · 7 days" history={memoryLong} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "SurvNG", className: "process-memory" }, { key: "worker_rss_bytes", label: "AI workers", className: "secondary" }]} />
           </div>
         </section> : null}
+
+        <section className="telemetry-section"><h3>Native camera activity</h3><div className="telemetry-camera-grid native-camera-grid">{shownCameras.map((camera) => <article className="telemetry-camera-card" key={camera.id}><h4>{camera.name || camera.id}</h4><RuntimeStatus status={camera} /></article>)}</div></section>
 
         <div className={`telemetry-activity-grid${selected ? " camera-only" : ""}`}>
           <section className="telemetry-section">

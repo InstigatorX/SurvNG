@@ -33,7 +33,9 @@ class NativeCaptureBinding:
 
 class NativeCameraWorker:
     def __init__(self, camera, storage_dir, *, config, capture_backend, events,
-                 publish, image_writer, media_storage=None):
+                 publish, image_writer, media_storage=None, evidence_service=None):
+        self.evidence_service = evidence_service
+        self._last_evidence_offer = 0.0
         self.camera = camera
         self.config = config
         self.runtime_state = CameraRuntimeState()
@@ -61,11 +63,22 @@ class NativeCameraWorker:
             media_storage=media_storage, jpeg_provider=self.capture.latest_jpeg,
         )
         self.activity = NativeActivity(camera, config, events, publish, self._evidence)
+        self.activity.offer_evidence = self._offer_evidence
 
     def _remember(self, frame):
         if frame.source == "live":
             with self._frames_lock:
                 self._frames.append(frame)
+
+    def _offer_evidence(self, observation, epoch, event_id, objects):
+        if self.evidence_service is None or epoch - self._last_evidence_offer < 1:
+            return
+        self._last_evidence_offer = epoch
+        with self._frames_lock:
+            frame = next((frame for frame in reversed(self._frames)
+                          if observation.matches_frame(frame.source_pts, frame.source_session)), None)
+        if frame is not None:
+            self.evidence_service.offer(event_id, epoch, frame.image, objects, (observation.width, observation.height))
 
     def _evidence(self, observation, epoch):
         with self._frames_lock:

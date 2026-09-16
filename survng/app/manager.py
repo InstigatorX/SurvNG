@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .native_evidence import NativeEvidenceService
 from .native_camera import NativeCameraWorker as CameraWorker
 from .camera_capture import CaptureOpenLimiter
 from .dlstreamer_capture import (
@@ -295,6 +296,7 @@ class AppManager:
         # Compatibility handle for media APIs and camera dependencies. Shared
         # lifecycle/reconfiguration ownership lives in ``self.recording``.
         self.recorder = self.recording.recorder
+        self.native_evidence = NativeEvidenceService(config, self.events, self.recorder, self.image_writer, self.media_storage, self.publish_event)
         self.go2rtc = Go2RtcAdapter()
         # Camera startup pacing is an internal safety policy. Keep live
         # DL Streamer admission and the startup coordinator on the same cap.
@@ -473,7 +475,7 @@ class AppManager:
             camera, self.storage_dir, config=self.config.detector,
             capture_backend=self.capture_backend, events=self.events,
             publish=self.publish_event, image_writer=self.image_writer,
-            media_storage=self.media_storage,
+            media_storage=self.media_storage, evidence_service=self.native_evidence,
         )
 
     def _unique_cameras(self):
@@ -554,6 +556,8 @@ class AppManager:
                 self.mqtt.start()
                 self.mqtt.set_server_lifecycle("starting")
                 self.runtime_monitor.start()
+                if getattr(self, "native_evidence", None) is not None:
+                    self.native_evidence.start()
                 self._startup_timings["mqtt_seconds"] = round(
                     time.monotonic() - phase_started,
                     3,
@@ -694,6 +698,8 @@ class AppManager:
                 for failure in error.failures
             )
 
+        if getattr(self, "native_evidence", None) is not None:
+            attempt("native evidence", self.native_evidence.stop)
         capture_backend = getattr(self, "capture_backend", None)
         if capture_backend is not None:
             attempt("GStreamer capture supervisor", capture_backend.close)
@@ -1130,6 +1136,8 @@ class AppManager:
         camera_id = str(payload.get("camera_id") or "")
         if not camera_id:
             return
+        if event_type == "object_tracking" and payload.get("state") != "active" and getattr(self, "native_evidence", None) is not None:
+            self.native_evidence.enqueue(int(payload.get("event_id") or 0))
         if event_type == "incident_update":
             event_id = int(payload.get("event_id") or 0)
             event = self.events.get(event_id) if event_id else None
@@ -1159,7 +1167,7 @@ class AppManager:
             }
         self.mqtt.publish(f"camera/{camera_id}/{event_type}", payload)
         self.state_events.publish(event_type, payload)
-        if event_type == "object_tracking" and payload.get("state") != "active":
+        if event_type == "object_tracking" and payload.get("state") != "active" and getattr(self, "native_evidence", None) is not None:
             if payload.get("cover_promoted") and payload.get("event_id"):
                 event_id = int(payload["event_id"])
                 event = self.events.get(event_id)

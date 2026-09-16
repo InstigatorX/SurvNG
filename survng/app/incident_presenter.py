@@ -108,6 +108,8 @@ def _event_row(row: dict) -> dict:
 def _best_incident_event(events: list[dict]) -> dict:
     object_events = [event for event in events if event.get("has_objects")]
     candidates = object_events or events
+    with_images = [event for event in candidates if event.get("has_snapshot") or event.get("snapshot_path")]
+    candidates = with_images or candidates
 
     def score(
         event: dict,

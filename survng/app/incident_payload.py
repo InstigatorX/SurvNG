@@ -62,12 +62,13 @@ class IncidentPayloadBuilder:
         first = events[0]
         last = events[-1]
 
-        def representative_score(event: dict[str, Any]) -> tuple[int, float, int, int]:
+        def representative_score(event: dict[str, Any]) -> tuple[int, float, int, float, int]:
             objects = cls._event_objects(event)
             return (
+                int(bool(event.get("snapshot_path"))),
+                max((float(item.get("native_cover_score") or 0) for item in objects), default=0.0),
                 int(bool(objects)),
                 max((float(item.get("confidence") or 0) for item in objects), default=0.0),
-                int(bool(event.get("snapshot_path"))),
                 int(event.get("id") or 0),
             )
 

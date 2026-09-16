@@ -22,6 +22,16 @@ def iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
 
 
+def compact_history(samples, limit=1024):
+    """Bound memory while preserving the entire episode, including its start."""
+    if len(samples) <= limit:
+        return samples
+    # Preserve recent detail and thin older samples, rather than sliding away
+    # the beginning of a long incident.
+    split = len(samples) // 2
+    return samples[:split:2] + samples[split:]
+
+
 class NativeActivity:
     def __init__(self, camera, config, events, publish: Callable, snapshot: Callable):
         self.camera, self.config = camera, config
@@ -34,6 +44,7 @@ class NativeActivity:
         self.last_fresh = 0.0
         self.last_activity = 0.0
         self.last_persist = 0.0
+        self.offer_evidence = None
         self.event_id = None
         self.tracks = {}
         self._episode_tracks = {}
@@ -173,6 +184,8 @@ class NativeActivity:
                 self.persist("active", now=now)
             elif now - self.last_persist >= 1.0:
                 self.persist("active", now=now)
+            if self.event_id is not None and self.offer_evidence is not None:
+                self.offer_evidence(observation, epoch, self.event_id, self._objects(confirmed))
         self.tick(now=now)
 
     @staticmethod
@@ -197,7 +210,7 @@ class NativeActivity:
         stored.update(first_seen=previous["first_seen"] if previous else iso(epoch),
                       observations=previous["observations"] + 1 if previous else 1,
                       max_confidence=max(previous["max_confidence"], track["confidence"]) if previous else track["confidence"],
-                      box_history=box_history[-150:], trajectory=trajectory[-150:])
+                      box_history=compact_history(box_history), trajectory=compact_history(trajectory))
         self._episode_tracks[key] = stored
 
     def persist(self, state: str, *, now: float):
