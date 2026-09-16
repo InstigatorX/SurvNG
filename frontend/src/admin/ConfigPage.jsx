@@ -4300,7 +4300,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
         </div>
       ) : null}
 
-      {section === "detection" ? <NativeDetectionSettings detector={config.detector || {}} updateConfig={updateConfig} modelClasses={eventConfirmationClasses} /> : null}
+      {section === "detection" ? <NativeDetectionSettings detector={config.detector || {}} updateConfig={updateConfig} modelClasses={eventConfirmationClasses} section={detectionSection} onSectionChange={setDetectionSection} /> : null}
 
     </div>
   );

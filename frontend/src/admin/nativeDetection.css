@@ -1,0 +1,153 @@
+/* Detection uses the same flush subsection bar and inset cards as Cameras. */
+.settings-grid .general-settings-content.detection-settings-content {
+  display: block;
+  padding: 0;
+}
+
+.native-detection-workspace {
+  min-width: 0;
+}
+
+.native-detection-workspace .subsection-workspace-content {
+  display: grid;
+  gap: 16px;
+  padding: var(--admin-panel-inset, 16px);
+}
+
+.native-settings-intro {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.native-settings-intro h3,
+.native-settings-card h3,
+.native-settings-card p {
+  margin: 0;
+}
+
+.native-settings-intro p,
+.native-settings-card header p {
+  margin: 5px 0 0;
+}
+
+.native-settings-intro p,
+.native-settings-intro > span,
+.native-settings-card p,
+.native-settings-card small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.native-settings-intro > span {
+  flex-shrink: 0;
+}
+
+.native-settings-panes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 16px;
+}
+
+.native-settings-panes[hidden] {
+  display: none;
+}
+
+.native-detection-workspace .native-settings-card {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.native-settings-card .form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.native-settings-card label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.native-settings-card label.compact-toggle,
+.native-settings-card label.check-field {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+}
+
+.native-settings-card input[type="checkbox"] {
+  width: auto;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.native-settings-card details,
+.native-settings-card fieldset {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0;
+}
+
+.native-settings-card details > :not(summary) {
+  margin-top: 12px;
+}
+
+.native-settings-card summary,
+.native-settings-card legend {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.native-settings-card summary {
+  cursor: pointer;
+}
+
+.native-settings-card fieldset p {
+  margin-bottom: 10px;
+}
+
+.native-class-list {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+}
+
+.native-class-list > .form-grid + .form-grid {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+.native-settings-card .tracking-class-picker {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+@media (max-width: 1000px) {
+  .native-settings-panes { grid-template-columns: minmax(0, 1fr); }
+  .native-settings-intro { flex-direction: column; }
+}
+
+@media (max-width: 540px) {
+  .native-settings-card .form-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.settings-grid .native-settings-card input[type="checkbox"] {
+  min-height: 0;
+}
+
+.native-settings-card .form-grid > button {
+  align-self: end;
+}
