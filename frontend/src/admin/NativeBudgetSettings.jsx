@@ -22,7 +22,7 @@ export default function NativeBudgetSettings({ values={}, defaults={}, overrides
     <small>Confirmation gets a minimum active hold even with zero cooldown. Larger approach padding wakes earlier. Brief appearances can still be missed between idle checks.</small>
     <details><summary>Native motion wake-up (gvamotiondetect)</summary>
       {toggle('motion_enabled','Motion wake-up enabled')}
-      <p>Motion wakes inference; it cannot create or extend incidents. Raise motion/pixel thresholds, confirmation frames, or minimum area to reduce foliage and lighting triggers. Higher persistence delays wake-up.</p>
+      <p>Motion wakes inference; it cannot create or extend incidents. Use “Exclude from motion wake-up” in zone settings to suppress movement in selected areas. Raise motion/pixel thresholds, confirmation frames, or minimum area to reduce foliage and lighting triggers. Higher persistence delays wake-up.</p>
       {fields(true)}
     </details>
   </section>;

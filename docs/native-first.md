@@ -346,8 +346,22 @@ receives NV12 and retains VAMemory on the VA path; Python handles metadata only.
 Motion metadata is removed before object inference/tracking so it cannot become
 object evidence. Foliage and lighting may require higher thresholds/persistence.
 
+Zone settings provide **Exclude from motion wake-up**, independent of object
+behavior. Enabled exclusion polygons subtract from motion eligibility after
+incident-zone approach padding; they cannot be overridden by that padding.
+Only remaining eligible area can wake inference, including when a motion rectangle
+crosses an exclusion boundary. Existing `exclude_from_ema` values are retained as
+the compatible persisted key. This filters motion metadata, not video pixels;
+recording, object inference, and object-based wake-ups are unchanged. A detector
+rectangle can extend beyond the actual moving pixels, so tight exclusions may
+need a margin.
+
 The owner-only status snapshot reports each camera's budget mode, target rates,
-cooldown, admitted/skipped inputs, and wake counters. `gstreamer-spatial-check.py
+cooldown, admitted/skipped inputs, and wake counters. `excluded_motion_regions`
+counts otherwise-relevant motion rectangles fully suppressed by exclusions, once
+per rectangle per sampled frame; partial exclusions that still permit a wake do
+not increment it. Counters reset when the native pipeline is rebuilt.
+`gstreamer-spatial-check.py
 --budget` verifies native admission, idle full-frame coordinates, motion wake-up,
 empty-result provenance, and mixed adaptive/fixed streams. `--va` also exercises
 native motion followed by GPU ROI inference while retaining VAMemory.

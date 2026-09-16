@@ -159,7 +159,8 @@ class DetectionZone(BaseModel):
     min_depth_m: float | None = Field(default=None, ge=0.01, le=500.0)
     max_depth_m: float | None = Field(default=None, ge=0.01, le=500.0)
     behavior: Literal["incident", "ignore", "none"] = "incident"
-    exclude_from_ema: bool = False
+    # Persisted legacy key retained so existing motion exclusion zones migrate unchanged.
+    exclude_from_ema: bool = Field(default=False, description="Exclude this zone from native motion wake-up")
     notifications_enabled: bool = True
     trigger: Literal["bottom_center"] = "bottom_center"
 

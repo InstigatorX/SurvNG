@@ -5,6 +5,8 @@ from collections import Counter
 import math
 import threading
 
+from survng.motion_regions import MotionRegions
+
 BUDGETS = {}  # Owned by native graph lifetime; gvapython adapters borrow entries.
 MOTION_PROPERTIES = ('block_size', 'motion_threshold', 'min_persistence', 'max_miss',
                      'iou_threshold', 'smooth_alpha', 'confirm_frames', 'pixel_diff_threshold', 'min_rel_area')
@@ -54,6 +56,9 @@ class NativeBudget:
         self.config = plan['budget']
         self.zones = [z for z in plan.get('zones', []) if z.get('enabled', True)
                       and z.get('behavior', 'incident') == 'incident' and len(z.get('points', [])) >= 3]
+        exclusions = [z for z in plan.get('zones', []) if z.get('enabled', True)
+                      and z.get('exclude_from_ema', False) and len(z.get('points', [])) >= 3]
+        self.motion_regions = MotionRegions(self.zones, exclusions, self.config['approach_padding']) if exclusions else None
         self.lock = threading.RLock()
         self.counts = Counter()
         self.latest_pts = None
@@ -85,6 +90,17 @@ class NativeBudget:
         self.active_until = max(self.active_until or pts, pts + hold)
         self.counts[reason] += 1
 
+    def motion_relevant(self, rectangles):
+        relevant = False
+        for rect in rectangles:
+            if not self.relevant(rect):
+                continue
+            if self.motion_regions is not None and not self.motion_regions.allows(rect):
+                self.counts['excluded_motion_regions'] += 1
+            else:
+                relevant = True
+        return relevant
+
     def select(self, pts, motion=()):
         with self.lock:
             if not math.isfinite(pts) or pts < 0:
@@ -94,7 +110,7 @@ class NativeBudget:
                 self.active_until = None
                 self.wake(pts, 'startup')
             self.latest_pts = pts
-            if any(self.relevant(rect) for rect in motion):
+            if self.motion_relevant(motion):
                 self.wake(pts, 'motion_wakes')
             mode = 'active' if pts <= self.active_until else 'idle'
             if mode != self.mode:

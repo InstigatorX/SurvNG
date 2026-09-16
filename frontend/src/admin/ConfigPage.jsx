@@ -2787,6 +2787,8 @@ export function ZoneEditor({ camera, classOptions = [], onChange }) {
                 <label className="zone-field-name">Name<input value={selectedZone.name || ""} onChange={(event) => replaceZone(selectedIndex, { name: event.target.value })} /></label>
                 <label className="zone-field-color">Color<input className="zone-color-input" type="color" value={selectedZone.color || "#22c55e"} onChange={(event) => replaceZone(selectedIndex, { color: event.target.value })} /></label>
                 <label className="zone-field-behavior">Behavior<select value={selectedZone.behavior || "incident"} onChange={(event) => replaceZone(selectedIndex, { behavior: event.target.value })}><option value="incident">Incident</option><option value="ignore">Ignore</option><option value="none">No object effect</option></select></label>
+                <label className="check-field"><input type="checkbox" checked={selectedZone.exclude_from_ema ?? false} onChange={(event) => replaceZone(selectedIndex, { exclude_from_ema: event.target.checked })} /> Exclude from motion wake-up</label>
+                <small>Movement inside this zone won’t wake up or keep fast AI checking active. Object detection and recording are unaffected.</small>
                 <div className="zone-class-field">
                   <span>Object Classes</span>
                   <details className={`zone-class-dropdown${selectedZone.behavior === "none" ? " disabled" : ""}`}>
