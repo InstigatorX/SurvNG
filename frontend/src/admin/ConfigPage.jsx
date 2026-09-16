@@ -2485,6 +2485,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                               <input id={`sub-stream-${selectedCamera.id}`} value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} />
                             </div>
                           </div>
+                          <label>H.264 decoder compliance<select value={selectedCamera.h264_decoder_compliance ?? "auto"} onChange={(event) => updateCamera(selectedCamera.id, ["h264_decoder_compliance"], event.target.value)}>
+                            <option value="auto">Auto (default)</option>
+                            <option value="strict">Strict</option>
+                            <option value="normal">Normal</option>
+                            <option value="flexible">Flexible</option>
+                          </select><small>Applies to supported native H.264 decoders for this camera’s live and main streams. Flexible can reduce buffering but may affect frame ordering on some streams.</small></label>
                         </section>
                       </div>
                       <label className="check-field"><input type="checkbox" checked={selectedCamera.native_same_field_of_view || false} onChange={(event) => updateCamera(selectedCamera.id, ["native_same_field_of_view"], event.target.checked)} /> Main and live streams show the same field of view</label>

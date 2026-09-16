@@ -547,6 +547,7 @@ class CameraConfig(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
     video_backend: str = "url"
+    h264_decoder_compliance: Literal["auto", "strict", "normal", "flexible"] = "auto"
     stream_url: str = Field(max_length=4096)
     live_stream_url: str | None = Field(default=None, max_length=4096)
     live_view: CameraLiveViewConfig = Field(default_factory=CameraLiveViewConfig)

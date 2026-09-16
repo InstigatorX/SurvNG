@@ -19,10 +19,12 @@ from survng import dlstreamer_live as live
     ("va", False, "live", False),
     ("va", True, "live", True),
 ])
+@pytest.mark.parametrize("compliance", ["auto", "strict", "normal", "flexible"])
 def test_host_consumers_download_after_rate_limit_without_breaking_detection(
-    monkeypatch, decoder, detect, role, test_source,
+    monkeypatch, decoder, detect, role, test_source, compliance,
 ):
     elements, links = {}, []
+    callbacks = {}
 
     class Element:
         def __init__(self, factory, name):
@@ -52,7 +54,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert contexts == ([shared_context] if shared_context is not None else [])
 
     pipeline = SimpleNamespace(
-        add=add, connect=lambda *args: None, set_context=contexts.append,
+        add=add, connect=lambda signal, callback: callbacks.update({signal: callback}), set_context=contexts.append,
         get_bus=lambda: None, set_state=lambda state: 0,
         get_by_name=lambda name: elements.get(name),
     )
@@ -80,7 +82,16 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         TYPE_DETECTIONS=2, TYPE_STATUS=3, install_signals=False,
         test_source=test_source, source_role=role,
         va_context=shared_context,
+        h264_decoder_compliance=compliance,
     )
+    native_properties = {}
+    native_decoder = SimpleNamespace(
+        get_factory=lambda: SimpleNamespace(get_name=lambda: "vah264dec"),
+        find_property=lambda name: name == "compliance",
+        set_property=lambda name, value: native_properties.update({name: value}),
+    )
+    callbacks["deep-element-added"](pipeline, None, native_decoder)
+    assert native_properties == {"compliance": live.H264_DECODER_COMPLIANCE[compliance]}
     va = decoder == "va" and detect and not test_source
     expected = "vapostproc" if va else "videoconvert"
     assert elements["qualifier-gray"].factory == "videoconvert"
@@ -140,16 +151,16 @@ def test_supervisor_retains_one_context_across_live_main_and_reconnect(monkeypat
         return shared_context
 
     def pump(gst, args, **kwargs):
-        received.append((kwargs["stream_id"], kwargs["source_role"], kwargs["va_context"]))
+        received.append((kwargs["stream_id"], kwargs["source_role"], kwargs["va_context"], kwargs["h264_decoder_compliance"]))
         assert kwargs["stop_event"].wait(2), "supervisor must join its workers"
 
     monkeypatch.setattr(live, "_create_shared_va_context", create)
     monkeypatch.setattr(live, "_pump_pipeline", pump)
     commands = (
         b'{"op":"add","stream_id":"live","url":"rtsp://fixture.invalid/live"}\n'
-        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main"}\n'
+        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main","h264_decoder_compliance":"flexible"}\n'
         b'{"op":"remove","stream_id":"main"}\n'
-        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main"}\n'
+        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main","h264_decoder_compliance":"flexible"}\n'
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(commands)))
     args = live._parser().parse_args(["--decoder", "va"])
@@ -161,9 +172,9 @@ def test_supervisor_retains_one_context_across_live_main_and_reconnect(monkeypat
     assert created == ([shared_context] if detect else [])
     expected_context = shared_context if detect else None
     assert sorted(received) == [
-        ("live", "live", expected_context),
-        ("main", "main", expected_context),
-        ("main", "main", expected_context),
+        ("live", "live", expected_context, "auto"),
+        ("main", "main", expected_context, "flexible"),
+        ("main", "main", expected_context, "flexible"),
     ]
 
 

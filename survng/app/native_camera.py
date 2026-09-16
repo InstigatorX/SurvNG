@@ -18,13 +18,15 @@ LOGGER = logging.getLogger(__name__)
 
 class NativeCaptureBinding:
     """Per-camera admission preference on the shared native process."""
-    def __init__(self, backend, enabled):
+    def __init__(self, backend, enabled, compliance=lambda: "auto"):
         self.backend, self.enabled = backend, enabled
+        self.compliance = compliance
         self.startup_timeout_ms = backend.startup_timeout_ms
 
     def create_handle(self):
         handle = self.backend.create_handle()
         handle.detection_enabled = bool(self.enabled())
+        handle.h264_decoder_compliance = self.compliance()
         return handle
 
     def open(self, *args, **kwargs):
@@ -52,7 +54,8 @@ class NativeCameraWorker:
         self._last_error = ""
         self.capture = CameraCaptureService(
             camera_id=camera.id, source_url=camera.source_url, backend=NativeCaptureBinding(
-                capture_backend, lambda: self.config.enabled and self.runtime_state.detection_enabled),
+                capture_backend, lambda: self.config.enabled and self.runtime_state.detection_enabled,
+                lambda: self.camera.h264_decoder_compliance),
             frame_observer=self._remember, frame_width=lambda: 640,
             initial_open_timeout_ms=capture_backend.startup_timeout_ms,
         )

@@ -354,6 +354,16 @@ def _require_detection_plugin(Gst) -> None:
         raise RuntimeError("required GStreamer element is unavailable: gvadetect")
 
 
+H264_DECODER_COMPLIANCE = {"auto": 0, "strict": 1, "normal": 2, "flexible": 3}
+
+
+def _configure_h264_decoder(element, compliance: str) -> None:
+    factory = element.get_factory()
+    if (factory is not None and "h264" in factory.get_name()
+            and element.find_property("compliance") is not None):
+        element.set_property("compliance", H264_DECODER_COMPLIANCE[compliance])
+
+
 def _make_live_source(Gst, *, test_source: bool):
     if test_source:
         return _element(Gst, "videotestsrc", "source"), "videotestsrc"
@@ -747,7 +757,7 @@ def _run_supervisor(
         with workers_lock:
             workers.pop(stream_id, None)
 
-    def start_stream(stream_id: str, url: str, source_role: str = "live", frame_width: int = qualifier_width, detection_enabled: bool = True) -> None:
+    def start_stream(stream_id: str, url: str, source_role: str = "live", frame_width: int = qualifier_width, detection_enabled: bool = True, h264_decoder_compliance: str = "auto") -> None:
         stop_stream(stream_id)
         event = threading.Event()
 
@@ -759,6 +769,7 @@ def _run_supervisor(
                     url=url,
                     stream_id=stream_id,
                     detect=detect and detection_enabled and source_role == "live",
+                    h264_decoder_compliance=h264_decoder_compliance,
                     model_path=model_path,
                     instance_id=instance_id,
                     rate=rate if source_role == "live" else _frame_rate(args.main_fps),
@@ -826,6 +837,9 @@ def _run_supervisor(
                 if source_role not in {"main", "live"}:
                     raise ValueError("invalid capture source role")
                 frame_width = _qualifier_width(command.get("frame_width", qualifier_width))
+                compliance = command.get("h264_decoder_compliance", "auto")
+                if not isinstance(compliance, str) or compliance not in H264_DECODER_COMPLIANCE:
+                    raise ValueError("invalid H.264 decoder compliance")
             except (TypeError, ValueError) as exc:
                 _write(
                     stdout,
@@ -837,7 +851,7 @@ def _run_supervisor(
                     lock=stdout_lock,
                 )
                 continue
-            start_stream(stream_id, url, source_role, frame_width, command.get("detection_enabled") is not False)
+            start_stream(stream_id, url, source_role, frame_width, command.get("detection_enabled") is not False, compliance)
     finally:
         request_stop()
         with workers_lock:
@@ -880,7 +894,10 @@ def _pump_pipeline(
     test_source: bool | None = None,
     source_role: str = "live",
     va_context=None,
+    h264_decoder_compliance: str = "auto",
 ) -> int:
+    if h264_decoder_compliance not in H264_DECODER_COMPLIANCE:
+        raise ValueError("invalid H.264 decoder compliance")
     use_test_source = args.test_source if test_source is None else test_source
     pipeline = Gst.Pipeline.new(_pipeline_name(stream_id))
     if pipeline is None:
@@ -1221,6 +1238,7 @@ def _pump_pipeline(
     decoder_elements: set[str] = set()
 
     def remember_element(_pipeline, _sub_bin, element) -> None:
+        _configure_h264_decoder(element, h264_decoder_compliance)
         factory = element.get_factory()
         if factory is None:
             return
@@ -1338,6 +1356,7 @@ def _pump_pipeline(
                             "hardware_decoder_selected": any(
                                 name.startswith("va") for name in selected
                             ),
+                            "h264_decoder_compliance": h264_decoder_compliance,
                             "preprocess_backend": preprocess,
                             "decoded_memory": _negotiated_memory(tee),
                             "detection_memory": _negotiated_memory(detector),
