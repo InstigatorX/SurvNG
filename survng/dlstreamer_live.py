@@ -405,13 +405,24 @@ def _link_tee(Gst, tee, sink) -> None:
         )
 
 
+def _gva_object_label(item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    detection = item.get("detection") if isinstance(item.get("detection"), dict) else item
+    return str(detection.get("label") or item.get("label") or "").strip()
+
+
 def _normalize_gva_objects(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    from survng.native_spatial import ROI_LABEL
+
     objects: list[dict[str, Any]] = []
     for item in payload.get("objects") or ():
         if not isinstance(item, dict):
             continue
         detection = item.get("detection") if isinstance(item.get("detection"), dict) else item
-        label = str(detection.get("label") or item.get("label") or "").strip()
+        label = _gva_object_label(item)
+        if label == ROI_LABEL:
+            continue
         try:
             confidence = float(detection.get("confidence", item.get("confidence", 0.0)))
         except (TypeError, ValueError):
@@ -534,7 +545,10 @@ class _NativeInferenceEvidence:
             if not self.identity_valid:
                 result = ("unknown", [])
             elif fresh:
+                from survng.native_spatial import ROI_LABEL
                 for region in video_frame_type(buffer, caps=caps).regions():
+                    if region.label() == ROI_LABEL:
+                        continue
                     rect = region.rect()
                     objects.append({
                         "label": region.label(), "confidence": region.confidence(),
@@ -558,6 +572,79 @@ class _NativeInferenceEvidence:
     def pop(self, pts):
         with self.lock:
             return self.results.pop(pts, ("unknown", []))
+
+
+class _NativeReidEvidence:
+    """Verify that gvainference attached tracker-compatible MARS embeddings."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.person_regions = 0
+        self.valid = 0
+        self.missing = 0
+        self.last_missing_tensors: list[dict[str, object]] = []
+
+    @staticmethod
+    def _tracker_compatible(tensor) -> tuple[bool, dict[str, object]]:
+        name = str(tensor.name() or "")
+        layer_name = str(tensor.layer_name() or "")
+        try:
+            data = tensor.data()
+            size = int(data.size) if data is not None else 0
+        except Exception:
+            size = 0
+        compatible_name = (
+            ("output" in layer_name and "inference_layer_name:output" in name)
+            or ("features" in layer_name and "inference_layer_name:features" in name)
+        )
+        return size == 128 and compatible_name, {
+            "name": name, "layer_name": layer_name, "size": size,
+        }
+
+    def observe(self, buffer, caps, video_frame_type) -> None:
+        person_regions = valid = missing = 0
+        last_missing: list[dict[str, object]] = []
+        for region in video_frame_type(buffer, caps=caps).regions():
+            if region.label().strip().lower() != "person":
+                continue
+            person_regions += 1
+            tensors = []
+            found = False
+            for tensor in region.tensors():
+                compatible, descriptor = self._tracker_compatible(tensor)
+                tensors.append(descriptor)
+                found = found or compatible
+            if found:
+                valid += 1
+            else:
+                missing += 1
+                last_missing = tensors[:8]
+        with self.lock:
+            self.person_regions += person_regions
+            self.valid += valid
+            self.missing += missing
+            if last_missing:
+                self.last_missing_tensors = last_missing
+
+    def status(self) -> dict[str, object]:
+        with self.lock:
+            person_regions = self.person_regions
+            valid = self.valid
+            missing = self.missing
+            tensors = list(self.last_missing_tensors)
+        if person_regions == 0:
+            health = "waiting_for_person"
+        elif missing:
+            health = "missing_features"
+        else:
+            health = "healthy"
+        return {
+            "native_reid_feature_health": health,
+            "native_reid_person_regions": person_regions,
+            "native_reid_features_valid": valid,
+            "native_reid_features_missing": missing,
+            "native_reid_last_missing_tensors": tensors,
+        }
 
 
 def _filter_tracking_regions(buffer, caps, video_frame_type, allowed_classes):
@@ -608,8 +695,10 @@ def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gs
     objects = payload.get("objects", [])
     if not isinstance(objects, list):
         raise ValueError("invalid inference objects")
+    from survng.native_spatial import ROI_LABEL
+    expected_objects = [item for item in objects if _gva_object_label(item) != ROI_LABEL]
     normalized = _normalize_gva_objects(payload)
-    if len(normalized) != len(objects):
+    if len(normalized) != len(expected_objects):
         raise ValueError("incomplete inference metadata")
     if spatial_plan is not None:
         for obj in normalized:
@@ -1092,6 +1181,8 @@ def _pump_pipeline(
     native_tracker = None
     reid_queue = None
     reid = None
+    reid_output_queue = None
+    reid_evidence = None
     reid_preprocess = ""
     reid_instance_id = ""
     analytics = None
@@ -1163,18 +1254,24 @@ def _pump_pipeline(
             # Python reference that otherwise makes metadata read-only.
             with GST_PAD_PROBE_INFO_BUFFER(info) as buffer:
                 if buffer is not None:
-                    try:
-                        _filter_tracking_regions(buffer, pad.get_current_caps(), video_frame_type, allowed_classes)
-                    except Exception as exc:
-                        native_evidence.invalid += 1
-                        # A dropped detector output loses the inference-interval
-                        # phase. Fail closed until the watchdog recreates capture.
-                        native_evidence.identity_valid = False
-                        with native_evidence.lock:
-                            native_evidence.results.clear()
-                        if native_evidence.invalid == 1 or native_evidence.invalid % 100 == 0:
-                            print(f"survng-dls tracking class metadata filter failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-                        return Gst.PadProbeReturn.DROP
+                    # Deep SORT must see the original gvadetect ROI metadata.
+                    # Rebuilding those regions before gvainference strips the
+                    # metadata attachment identity used for per-ROI raw tensors.
+                    # gvainference/object-class and gvatrack/object_class perform
+                    # the person filtering without mutating detector metadata.
+                    if args.native_tracking != "deep-sort":
+                        try:
+                            _filter_tracking_regions(buffer, pad.get_current_caps(), video_frame_type, allowed_classes)
+                        except Exception as exc:
+                            native_evidence.invalid += 1
+                            # A dropped detector output loses the inference-interval
+                            # phase. Fail closed until the watchdog recreates capture.
+                            native_evidence.identity_valid = False
+                            with native_evidence.lock:
+                                native_evidence.results.clear()
+                            if native_evidence.invalid == 1 or native_evidence.invalid % 100 == 0:
+                                print(f"survng-dls tracking class metadata filter failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                            return Gst.PadProbeReturn.DROP
                     native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)
                     if budget is not None:
                         with native_evidence.lock:
@@ -1260,6 +1357,26 @@ def _pump_pipeline(
             reid_instance_id = model_instance_id(args.reid_model, args.reid_device)
             reid.set_property("model-instance-id", reid_instance_id)
             reid.set_property("scheduling-policy", "throughput")
+            # Intel's reference Deep SORT graph places a queue after the ReID
+            # element. Keep association off the inference streaming thread and
+            # preserve the fully-attached ROI tensor metadata at this boundary.
+            reid_output_queue = _element(Gst, "queue", "reid-output-queue")
+            reid_output_queue.set_property("max-size-buffers", 2)
+            reid_output_queue.set_property("max-size-bytes", 0)
+            reid_output_queue.set_property("max-size-time", 0)
+            reid_evidence = _NativeReidEvidence()
+
+            def capture_reid_evidence(pad, info):
+                with GST_PAD_PROBE_INFO_BUFFER(info) as buffer:
+                    if buffer is not None:
+                        try:
+                            reid_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)
+                        except Exception as exc:
+                            if reid_evidence.missing == 0:
+                                print(f"survng-dls ReID tensor inspection failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                return Gst.PadProbeReturn.OK
+
+            reid.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, capture_reid_evidence)
         detect_output_queue = _element(Gst, "queue", "detect-output-queue")
         detect_output_queue.set_property("max-size-buffers", 1)
         detect_output_queue.set_property("max-size-bytes", 0)
@@ -1332,8 +1449,8 @@ def _pump_pipeline(
             roi_input.set_property("kwarg", json.dumps({"plan": spatial_plan, "interval": detector_interval, "budget_key": budget_key}))
             elements.append(roi_input)
         elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])
-        if reid_queue is not None and reid is not None:
-            elements.extend([reid_queue, reid])
+        if reid_queue is not None and reid is not None and reid_output_queue is not None:
+            elements.extend([reid_queue, reid, reid_output_queue])
         if native_tracker is not None:
             elements.append(native_tracker)
         if preprocess.startswith("va"):
@@ -1404,10 +1521,11 @@ def _pump_pipeline(
             if not left.link(right):
                 raise RuntimeError(f"could not link native detection input: {left.get_name()} to {right.get_name()}")
         tracked_source = detector
-        if reid_queue is not None and reid is not None:
-            if not detector.link(reid_queue) or not reid_queue.link(reid):
+        if reid_queue is not None and reid is not None and reid_output_queue is not None:
+            if (not detector.link(reid_queue) or not reid_queue.link(reid)
+                    or not reid.link(reid_output_queue)):
                 raise RuntimeError("could not link Deep SORT ReID inference")
-            tracked_source = reid
+            tracked_source = reid_output_queue
         if native_tracker is not None:
             if not tracked_source.link(native_tracker):
                 raise RuntimeError("could not link gvatrack")
@@ -1620,6 +1738,7 @@ def _pump_pipeline(
                             "native_reid_preprocess_backend": reid_preprocess if reid is not None else None,
                             "native_reid_model_instance_id": reid_instance_id if reid is not None else None,
                             "native_reid_memory": _negotiated_memory(reid) if reid is not None else None,
+                            **(reid_evidence.status() if reid_evidence is not None else {}),
                             "native_zone_revision": spatial_plan.get("revision") if spatial_plan and detect else None,
                             "native_budget": budget.status() if budget is not None else {"mode": "disabled"},
                             "native_roi_enabled": bool(spatial_plan and spatial_plan.get("roi", {}).get("enabled") and detect),
