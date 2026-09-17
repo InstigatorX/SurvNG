@@ -11,7 +11,7 @@ from survng.app.event_store import EventStore
 from survng.app.image_storage import DurableImageWriter
 from survng.app.media_storage import MediaStorageRegistry
 from survng.app.native_activity import compact_history
-from survng.app.native_evidence import Candidate, NativeEvidenceService, image_quality, shortlist
+from survng.app.native_evidence import Candidate, NativeEvidenceService, calibration_epochs, image_quality, shortlist
 from survng.app.stream_alignment import estimate_stream_alignment
 
 
@@ -251,7 +251,7 @@ def test_disabled_validation_retains_substream_for_unusable_or_unaligned_main(tm
         assert events.get(event['id'])['snapshot_path'] == event['snapshot_path']
 
 
-def test_optional_calibration_failure_does_not_block_disabled_mode_promotion(tmp_path):
+def test_optional_calibration_failure_keeps_substream_when_timing_unverified(tmp_path):
     from survng.app.config import CameraConfig
     service, events, event, image, obj, tracking = fixture(tmp_path)
     service.config.detector.native.verification_enabled = False
@@ -259,10 +259,14 @@ def test_optional_calibration_failure_does_not_block_disabled_mode_promotion(tmp
     tracking.update(state='complete', native_session='test-session')
     events.update_object_tracking(event['id'], tracking)
     service.read_frame = Mock(return_value=cv2.resize(image,(1280,720)))
+    service.match_main = Mock(side_effect=AssertionError('unaligned same-FOV main must not be promoted'))
     service.verifier.detect = Mock(side_effect=RuntimeError('unavailable'))
-    assert service.process(event['id'], [Candidate(100,image,[obj],5), Candidate(101,image,[obj],5)])['status'] == 'promoted'
+    result = service.process(event['id'], [Candidate(100,image,[obj],5), Candidate(101,image,[obj],5)])
+    assert result['status'] == 'no_usable_candidate'
     service.verifier.detect.assert_called_once()
+    service.match_main.assert_not_called()
     assert service.counts['calibration_unavailable'] == 1
+    assert events.get(event['id'])['snapshot_path'] == event['snapshot_path']
 
 
 def test_verification_projection_survives_changed_object_appearance(tmp_path):
@@ -278,3 +282,92 @@ def test_verification_projection_survives_changed_object_appearance(tmp_path):
     assert 'native_cover_verified' not in projected[0]
     unrelated = np.random.default_rng(19).integers(0, 256, main.shape, dtype=np.uint8)
     assert service.project_main(candidate, unrelated) == []
+
+
+def test_calibration_epochs_are_bounded_and_independent_from_cover_shortlist():
+    history = [[100 + index * 0.5, 10 + index, 20, 40 + index, 80] for index in range(20)]
+    tracking = {'tracks': [{'box_history': history}]}
+    epochs = calibration_epochs(tracking)
+    assert len(epochs) == 9
+    assert epochs[0] == 100
+    assert epochs[-1] == 109.5
+    assert epochs[-1] - epochs[0] >= 3
+    covers = shortlist([Candidate(epoch, None, [], 1000 - epoch) for epoch in epochs])
+    assert len(covers) == 3
+    assert len(epochs) > len(covers)
+
+
+def test_same_fov_calibration_uses_full_track_history_before_cover_promotion(tmp_path, monkeypatch):
+    from survng.app.config import CameraConfig
+
+    service, events, event, image, obj, tracking = fixture(tmp_path)
+    service.config.detector.native.verification_enabled = False
+    service.config.cameras = [CameraConfig(
+        id='test', name='Test', stream_url='rtsp://unused.invalid', native_same_field_of_view=True
+    )]
+    tracking.update(state='complete', native_session='test-session')
+    tracking['tracks'][0].update(
+        label='person',
+        box_history=[
+            [100 + index * 0.5, 100 + index * 4, 80, 240 + index * 4, 300]
+            for index in range(9)
+        ],
+    )
+    events.update_object_tracking(event['id'], tracking)
+    main = cv2.resize(image, (1280, 720))
+    service.read_frame = Mock(return_value=main)
+    service.match_main = Mock(side_effect=AssertionError('aligned same-FOV path must not template-match'))
+    service.verifier.detect = Mock(return_value=[
+        dict(obj, box={key: value * 2 for key, value in obj['box'].items()})
+    ])
+    observed = {}
+
+    def fake_alignment(active_tracking, observations):
+        observed['count'] = len(observations)
+        observed['span'] = observations[-1]['epoch'] - observations[0]['epoch']
+        assert active_tracking['native_session'] == 'test-session'
+        return {
+            'source': 'main',
+            'verified': True,
+            'offset_seconds': 0.4,
+            'mean_iou': 0.9,
+            'baseline_iou': 0.5,
+            'observations': len(observations),
+            'method': 'test',
+        }
+
+    monkeypatch.setattr('survng.app.native_evidence.estimate_replay_alignment', fake_alignment)
+    result = service.process(event['id'], [Candidate(100, image, [obj], 5)])
+    assert result['status'] == 'promoted'
+    assert observed['count'] >= 5
+    assert observed['span'] >= 3
+    service.match_main.assert_not_called()
+    stored = json.loads(events.get(event['id'])['objects_json'])
+    cover = next(item for item in stored if item.get('label'))
+    assert cover['native_alignment']['method'] == 'same_fov_timestamp_aligned'
+    assert cover['native_alignment']['recording_offset_seconds'] == 0.4
+
+
+def test_same_fov_unverified_timing_never_promotes_projected_main_without_verification(tmp_path):
+    from survng.app.config import CameraConfig
+
+    service, events, event, image, obj, tracking = fixture(tmp_path)
+    service.config.detector.native.verification_enabled = False
+    service.config.cameras = [CameraConfig(
+        id='test', name='Test', stream_url='rtsp://unused.invalid', native_same_field_of_view=True
+    )]
+    tracking.update(state='complete', native_session='test-session')
+    tracking['tracks'][0]['label'] = 'person'
+    events.update_object_tracking(event['id'], tracking)
+    service.read_frame = Mock(return_value=cv2.resize(image, (1280, 720)))
+    service.match_main = Mock(side_effect=AssertionError('unaligned same-FOV main must not be projected'))
+    service.verifier.detect = Mock(return_value=[
+        dict(obj, box={key: value * 2 for key, value in obj['box'].items()})
+    ])
+
+    result = service.process(event['id'], [Candidate(100, image, [obj], 5)])
+
+    assert result['status'] == 'no_usable_candidate'
+    service.match_main.assert_not_called()
+    assert events.get(event['id'])['snapshot_path'] == event['snapshot_path']
+    assert service.counts['replay_alignment_unverified'] == 1
