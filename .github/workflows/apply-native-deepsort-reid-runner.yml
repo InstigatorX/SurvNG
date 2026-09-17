@@ -1,0 +1,75 @@
+name: Run native Deep SORT ReID fix
+
+on:
+  push:
+    branches:
+      - experiment/native-first-deepsort-fix
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Extract and apply staged fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/apply-native-deepsort-reid-fix.yml').read_text()
+          marker = "      - name: Apply Deep SORT metadata fix\n        shell: bash\n        run: |\n"
+          start = source.index(marker) + len(marker)
+          end = source.index("\n      - name: Build frontend static assets", start)
+          block = source[start:end]
+          lines = []
+          for line in block.splitlines():
+              if line.startswith('          '):
+                  line = line[10:]
+              lines.append(line)
+          Path('/tmp/apply-native-deepsort-reid.sh').write_text('\n'.join(lines) + '\n')
+          PY
+          bash /tmp/apply-native-deepsort-reid.sh
+
+      - name: Build frontend static assets
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+
+      - name: Install Python test dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+
+      - name: Validate focused native tracking tests
+        run: |
+          ./scripts/run-tests.sh -q \
+            tests/test_native_deepsort.py \
+            tests/test_dlstreamer_capture.py \
+            tests/test_native_first.py
+          git diff --check
+          python3 -m py_compile survng/dlstreamer_live.py survng/native_deepsort.py
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm \
+            .github/workflows/apply-native-deepsort-reid-fix.yml \
+            .github/workflows/apply-native-deepsort-reid-runner.yml
+          git add \
+            survng/native_deepsort.py \
+            survng/dlstreamer_live.py \
+            tests/test_native_deepsort.py \
+            docs/investigations/native-deepsort.md
+          git commit -m "fix(native): preserve MARS ReID metadata for Deep SORT"
+          git push origin HEAD:experiment/native-first-deepsort-fix
