@@ -1,0 +1,393 @@
+name: Apply native Deep SORT experiment
+
+on:
+  push:
+    branches:
+      - experiment/native-first-deepsort-build
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'chore: stage native Deep SORT experiment'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply focused Deep SORT integration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          def replace_once(path, old, new):
+              path = Path(path)
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {count}")
+              path.write_text(text.replace(old, new, 1))
+
+          # Pure-stdlib plan resolver so both the app process and isolated
+          # /usr/bin/python3 DL Streamer child can share the tracking contract.
+          Path('survng/native_deepsort.py').write_text(dedent('''\
+          from __future__ import annotations
+
+          from dataclasses import dataclass
+
+
+          DEEP_SORT_IMPLEMENTATIONS = frozenset({"dlstreamer_deep_sort", "deep-sort"})
+          DEFAULT_DEEP_SORT_CONFIG = (
+              "max_iou_distance=0.7,max_age=30,n_init=3,"
+              "max_cosine_distance=0.2,nn_budget=100"
+          )
+
+
+          @dataclass(frozen=True, slots=True)
+          class NativeTrackingPlan:
+              mode: str
+              tracking_classes: tuple[str, ...] | None
+              reid_model_path: str = ""
+              reid_device: str = "CPU"
+              deep_sort_config: str = DEFAULT_DEEP_SORT_CONFIG
+
+
+          def _tracking_classes(native) -> tuple[str, ...] | None:
+              values = getattr(native, "tracking_classes", None)
+              if values is None:
+                  return None
+              normalized = tuple(
+                  dict.fromkeys(
+                      str(value).strip().lower()
+                      for value in values
+                      if str(value).strip()
+                  )
+              )
+              return normalized
+
+
+          def resolve_native_tracking(detector) -> NativeTrackingPlan:
+              """Map existing detector.tracking settings onto the native GStreamer tracker.
+
+              Deep SORT is intentionally an opt-in, person-only experiment. The default
+              native-first behavior remains short-term-imageless and keeps its existing
+              tracking-class filter unchanged.
+              """
+              native = detector.native
+              tracking = detector.tracking
+              classes = _tracking_classes(native)
+              implementation = str(getattr(tracking, "implementation", "")).strip().lower()
+              if implementation not in DEEP_SORT_IMPLEMENTATIONS:
+                  return NativeTrackingPlan(
+                      mode="short-term-imageless",
+                      tracking_classes=classes,
+                  )
+
+              if not bool(getattr(tracking, "reid_enabled", False)):
+                  raise ValueError(
+                      "DL Streamer Deep SORT requires detector.tracking.reid_enabled=true"
+                  )
+              model_path = str(getattr(tracking, "reid_model_path", "") or "").strip()
+              if not model_path:
+                  raise ValueError(
+                      "DL Streamer Deep SORT requires detector.tracking.reid_model_path"
+                  )
+              if int(getattr(native, "inference_interval", 1)) != 1:
+                  raise ValueError(
+                      "DL Streamer Deep SORT requires detector.native.inference_interval=1"
+                  )
+              if classes is not None and classes != ("person",):
+                  raise ValueError(
+                      "DL Streamer Deep SORT experiment is person-only; "
+                      "detector.native.tracking_classes must be ['person'] or omitted"
+                  )
+              resolve_device = getattr(tracking, "resolved_reid_device", None)
+              if callable(resolve_device):
+                  device = str(resolve_device()).strip().upper() or "CPU"
+              else:
+                  device = str(getattr(tracking, "reid_device", "CPU") or "CPU").strip().upper()
+              return NativeTrackingPlan(
+                  mode="deep-sort",
+                  tracking_classes=("person",),
+                  reid_model_path=model_path,
+                  reid_device=device or "CPU",
+              )
+          '''))
+
+          # Manager: resolve the plan once, validate early, and pass it into the
+          # isolated capture command without changing the default tracker.
+          replace_once(
+              'survng/app/manager.py',
+              'from .native_runtime import NativeRuntime as InferenceLifecycle\nfrom .config_application import live_detection_threshold\n',
+              'from .native_runtime import NativeRuntime as InferenceLifecycle\nfrom .config_application import live_detection_threshold\nfrom survng.native_deepsort import resolve_native_tracking\n',
+          )
+          replace_once(
+              'survng/app/manager.py',
+              '    if config.detector.enabled and not config.detector.resolved_model_path():\n        raise ValueError("native detection is enabled but detector.model_path is empty")\n    validate_media_storage_configuration(config)\n',
+              '    if config.detector.enabled and not config.detector.resolved_model_path():\n        raise ValueError("native detection is enabled but detector.model_path is empty")\n    if config.detector.enabled:\n        resolve_native_tracking(config.detector)\n    validate_media_storage_configuration(config)\n',
+          )
+          replace_once(
+              'survng/app/manager.py',
+              '        detector = config.detector\n        self.capture_backend = DlStreamerCaptureBackend(\n',
+              '        detector = config.detector\n        native_tracking = resolve_native_tracking(detector)\n        self.capture_backend = DlStreamerCaptureBackend(\n',
+          )
+          replace_once(
+              'survng/app/manager.py',
+              '                native_tracking="short-term-imageless",\n                tracking_classes=None if detector.native.tracking_classes is None else tuple(detector.native.tracking_classes),\n',
+              '                native_tracking=native_tracking.mode,\n                tracking_classes=native_tracking.tracking_classes,\n                reid_model_path=native_tracking.reid_model_path,\n                reid_device=native_tracking.reid_device,\n                deep_sort_config=native_tracking.deep_sort_config,\n',
+          )
+
+          # Capture command: carry the MARS/Deep SORT contract into the native child.
+          replace_once(
+              'survng/app/dlstreamer_capture.py',
+              'from survng.dlstreamer_live import STREAM_STOP_TIMEOUT_SECONDS, model_instance_id\n',
+              'from survng.dlstreamer_live import STREAM_STOP_TIMEOUT_SECONDS, model_instance_id\nfrom survng.native_deepsort import DEFAULT_DEEP_SORT_CONFIG\n',
+          )
+          replace_once(
+              'survng/app/dlstreamer_capture.py',
+              '    native_tracking: str = "off"\n    tracking_classes: tuple[str, ...] | None = None\n',
+              '    native_tracking: str = "off"\n    tracking_classes: tuple[str, ...] | None = None\n    reid_model_path: str = ""\n    reid_device: str = "CPU"\n    deep_sort_config: str = DEFAULT_DEEP_SORT_CONFIG\n',
+          )
+          replace_once(
+              'survng/app/dlstreamer_capture.py',
+              '        if self.options.native_tracking not in {"off", "short-term-imageless"}:\n            raise ValueError("native_tracking must be off or short-term-imageless")\n',
+              '        if self.options.native_tracking not in {"off", "short-term-imageless", "deep-sort"}:\n            raise ValueError("native_tracking must be off, short-term-imageless, or deep-sort")\n        if self.options.native_tracking == "deep-sort":\n            if not self.options.reid_model_path.strip():\n                raise ValueError("deep-sort requires a ReID model path")\n            if self.options.tracking_classes != ("person",):\n                raise ValueError("deep-sort experiment requires person-only tracking")\n',
+          )
+          replace_once(
+              'survng/app/dlstreamer_capture.py',
+              '            command.extend(["--native-tracking", self.options.native_tracking])\n            if self.options.tracking_classes is not None:\n',
+              '            command.extend(["--native-tracking", self.options.native_tracking])\n            if self.options.native_tracking == "deep-sort":\n                command.extend(["--reid-model", self.options.reid_model_path.strip()])\n                command.extend(["--reid-device", self.options.reid_device or "CPU"])\n                command.extend(["--deep-sort-config", self.options.deep_sort_config])\n            if self.options.tracking_classes is not None:\n',
+          )
+
+          # Native status should report the actual tracker instead of a hard-coded value.
+          replace_once(
+              'survng/app/native_runtime.py',
+              'from .semantic_search import DisabledSemanticSearch\n',
+              'from .semantic_search import DisabledSemanticSearch\nfrom survng.native_deepsort import resolve_native_tracking\n',
+          )
+          replace_once(
+              'survng/app/native_runtime.py',
+              '"effective_inference_fps": self.config.live_sample_fps / self.config.native.inference_interval, "tracking": "short-term-imageless",\n',
+              '"effective_inference_fps": self.config.live_sample_fps / self.config.native.inference_interval, "tracking": resolve_native_tracking(self.config).mode,\n',
+          )
+
+          # DL Streamer child parser and validation.
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '        choices=("off", "short-term-imageless"),\n        default="off",\n        help="optional DL Streamer ROI tracking between detector frames",\n    )\n    parser.add_argument("--tracking-classes", type=_tracking_classes_argument, default=None,\n',
+              '        choices=("off", "short-term-imageless", "deep-sort"),\n        default="off",\n        help="optional DL Streamer ROI tracking between detector frames",\n    )\n    parser.add_argument("--reid-model", default="", help="OpenVINO person ReID IR XML for Deep SORT")\n    parser.add_argument("--reid-device", default="CPU", help="OpenVINO device for Deep SORT ReID inference")\n    parser.add_argument("--deep-sort-config", default="max_iou_distance=0.7,max_age=30,n_init=3,max_cosine_distance=0.2,nn_budget=100")\n    parser.add_argument("--tracking-classes", type=_tracking_classes_argument, default=None,\n',
+          )
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '    if not 1 <= args.inference_interval <= 5:\n        raise ValueError("inference interval must be between 1 and 5")\n    instance_id = (\n',
+              '    if not 1 <= args.inference_interval <= 5:\n        raise ValueError("inference interval must be between 1 and 5")\n    if args.native_tracking == "deep-sort":\n        if args.tracking_classes is None:\n            args.tracking_classes = ["person"]\n        elif args.tracking_classes != ["person"]:\n            raise ValueError("Deep SORT experiment requires --tracking-classes [\\"person\\"]")\n        reid_model = Path(args.reid_model).expanduser() if args.reid_model else None\n        if reid_model is None or not reid_model.is_file():\n            raise RuntimeError("Deep SORT requested but ReID model file is unavailable")\n        args.reid_model = str(reid_model)\n    instance_id = (\n',
+          )
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '    detect_output_queue = None\n    native_tracker = None\n    analytics = None\n',
+              '    detect_output_queue = None\n    native_tracker = None\n    reid_queue = None\n    reid = None\n    reid_preprocess = ""\n    reid_instance_id = ""\n    analytics = None\n',
+          )
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '        elif args.labels_list:\n            detector.set_property("labels", args.labels_list)\n        detect_output_queue = _element(Gst, "queue", "detect-output-queue")\n',
+              '        elif args.labels_list:\n            detector.set_property("labels", args.labels_list)\n        if args.native_tracking == "deep-sort":\n            if detector_interval != 1:\n                raise InferencePipelineError("Deep SORT requires detector inference interval 1")\n            if not _factory_available(Gst, "gvainference"):\n                raise InferencePipelineError("Deep SORT requested but gvainference is unavailable")\n            reid_queue = _element(Gst, "queue", "reid-queue")\n            reid_queue.set_property("max-size-buffers", 2)\n            reid_queue.set_property("max-size-bytes", 0)\n            reid_queue.set_property("max-size-time", 0)\n            reid = _element(Gst, "gvainference", "native-reid")\n            reid.set_property("model", args.reid_model)\n            reid.set_property("device", args.reid_device)\n            reid.set_property("inference-region", 1)\n            reid.set_property("object-class", "person")\n            reid.set_property("inference-interval", 1)\n            reid.set_property("batch-size", 1)\n            reid.set_property("nireq", 2)\n            reid.set_property("no-block", False)\n            reid_preprocess = "opencv"\n            if args.decoder == "va" and not use_test_source:\n                reid_preprocess = "va-surface-sharing" if "GPU" in args.reid_device.upper() else "va"\n            reid.set_property("pre-process-backend", reid_preprocess)\n            reid_instance_id = model_instance_id(args.reid_model, args.reid_device)\n            reid.set_property("model-instance-id", reid_instance_id)\n            reid.set_property("scheduling-policy", "throughput")\n        detect_output_queue = _element(Gst, "queue", "detect-output-queue")\n',
+          )
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '            native_tracker = _element(Gst, "gvatrack", "native-track")\n            native_tracker.set_property("tracking-type", args.native_tracking)\n',
+              '            native_tracker = _element(Gst, "gvatrack", "native-track")\n            native_tracker.set_property("tracking-type", args.native_tracking)\n            if args.native_tracking == "deep-sort":\n                native_tracker.set_property("device", "CPU")\n                native_tracker.set_property("deepsort-trck-cfg", args.deep_sort_config)\n',
+          )
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '        elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])\n        if native_tracker is not None:\n',
+              '        elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])\n        if reid_queue is not None and reid is not None:\n            elements.extend([reid_queue, reid])\n        if native_tracker is not None:\n',
+          )
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '        tracked_source = detector\n        if native_tracker is not None:\n            if not detector.link(native_tracker):\n                raise RuntimeError("could not link gvatrack")\n            tracked_source = native_tracker\n',
+              '        tracked_source = detector\n        if reid_queue is not None and reid is not None:\n            if not detector.link(reid_queue) or not reid_queue.link(reid):\n                raise RuntimeError("could not link Deep SORT ReID inference")\n            tracked_source = reid\n        if native_tracker is not None:\n            if not tracked_source.link(native_tracker):\n                raise RuntimeError("could not link gvatrack")\n            tracked_source = native_tracker\n',
+          )
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '                        (detector is not None and message.src == detector)\n                        or (native_tracker is not None and message.src == native_tracker)\n',
+              '                        (detector is not None and message.src == detector)\n                        or (reid is not None and message.src == reid)\n                        or (native_tracker is not None and message.src == native_tracker)\n',
+          )
+          replace_once(
+              'survng/dlstreamer_live.py',
+              '                            "native_tracking": args.native_tracking if detect else "off",\n                            "native_tracking_classes": getattr(args, "tracking_classes", None) if detect else None,\n',
+              '                            "native_tracking": args.native_tracking if detect else "off",\n                            "native_tracking_classes": getattr(args, "tracking_classes", None) if detect else None,\n                            "native_reid_enabled": bool(reid is not None),\n                            "native_reid_model": Path(args.reid_model).name if reid is not None else None,\n                            "native_reid_device": args.reid_device if reid is not None else None,\n                            "native_reid_preprocess_backend": reid_preprocess if reid is not None else None,\n                            "native_reid_model_instance_id": reid_instance_id if reid is not None else None,\n                            "native_reid_memory": _negotiated_memory(reid) if reid is not None else None,\n',
+          )
+
+          Path('tests/test_native_deepsort.py').write_text(dedent('''\
+          from types import SimpleNamespace
+
+          import pytest
+
+          from survng.app.camera_capture import CaptureOpenLimiter
+          from survng.app.dlstreamer_capture import DlStreamerCaptureBackend, DlStreamerCaptureOptions
+          from survng.dlstreamer_live import _parser
+          from survng.native_deepsort import DEFAULT_DEEP_SORT_CONFIG, resolve_native_tracking
+
+
+          def detector(*, implementation="survng_hybrid", enabled=False, path="", interval=1, classes=None, device="GPU"):
+              tracking = SimpleNamespace(
+                  implementation=implementation,
+                  reid_enabled=enabled,
+                  reid_model_path=path,
+                  reid_device=device,
+                  resolved_reid_device=lambda: device,
+              )
+              native = SimpleNamespace(
+                  inference_interval=interval,
+                  tracking_classes=classes,
+              )
+              return SimpleNamespace(tracking=tracking, native=native)
+
+
+          def test_default_native_tracking_remains_imageless():
+              plan = resolve_native_tracking(detector(classes=["person", "car"]))
+              assert plan.mode == "short-term-imageless"
+              assert plan.tracking_classes == ("person", "car")
+              assert plan.reid_model_path == ""
+
+
+          def test_deep_sort_resolves_person_reid_plan():
+              plan = resolve_native_tracking(detector(
+                  implementation="dlstreamer_deep_sort",
+                  enabled=True,
+                  path="/models/mars_small128_fp32.xml",
+                  classes=None,
+              ))
+              assert plan.mode == "deep-sort"
+              assert plan.tracking_classes == ("person",)
+              assert plan.reid_model_path.endswith("mars_small128_fp32.xml")
+              assert plan.reid_device == "GPU"
+              assert "max_cosine_distance=0.2" in plan.deep_sort_config
+
+
+          @pytest.mark.parametrize(
+              "kwargs, message",
+              [
+                  ({"implementation": "deep-sort", "enabled": False, "path": "/m.xml"}, "reid_enabled"),
+                  ({"implementation": "deep-sort", "enabled": True, "path": ""}, "reid_model_path"),
+                  ({"implementation": "deep-sort", "enabled": True, "path": "/m.xml", "interval": 2}, "inference_interval"),
+                  ({"implementation": "deep-sort", "enabled": True, "path": "/m.xml", "classes": ["person", "car"]}, "person-only"),
+              ],
+          )
+          def test_deep_sort_rejects_unsafe_configuration(kwargs, message):
+              with pytest.raises(ValueError, match=message):
+                  resolve_native_tracking(detector(**kwargs))
+
+
+          def test_capture_command_passes_deep_sort_reid_contract():
+              backend = DlStreamerCaptureBackend(
+                  CaptureOpenLimiter(1),
+                  DlStreamerCaptureOptions(
+                      model_path="/models/yolo.xml",
+                      detect_enabled=True,
+                      native_tracking="deep-sort",
+                      tracking_classes=("person",),
+                      reid_model_path="/models/mars_small128_fp32.xml",
+                      reid_device="GPU",
+                      deep_sort_config=DEFAULT_DEEP_SORT_CONFIG,
+                  ),
+              )
+              command = backend.command()
+              assert command[command.index("--native-tracking") + 1] == "deep-sort"
+              assert command[command.index("--reid-model") + 1].endswith("mars_small128_fp32.xml")
+              assert command[command.index("--reid-device") + 1] == "GPU"
+              assert command[command.index("--tracking-classes") + 1] == '["person"]'
+              assert command[command.index("--deep-sort-config") + 1] == DEFAULT_DEEP_SORT_CONFIG
+
+
+          def test_child_parser_accepts_deep_sort_arguments():
+              args = _parser().parse_args([
+                  "--native-tracking", "deep-sort",
+                  "--reid-model", "/models/mars.xml",
+                  "--reid-device", "GPU",
+                  "--tracking-classes", '["person"]',
+              ])
+              assert args.native_tracking == "deep-sort"
+              assert args.reid_model == "/models/mars.xml"
+              assert args.reid_device == "GPU"
+              assert args.tracking_classes == ["person"]
+          '''))
+
+          Path('docs/investigations/native-deepsort.md').write_text(dedent('''\
+          # Native DL Streamer Deep SORT experiment
+
+          `experiment/native-first` keeps `gvatrack tracking-type=short-term-imageless`
+          as the default. Deep SORT is an opt-in, person-only experiment that inserts a
+          MARS appearance embedding stage in the existing GStreamer metadata path:
+
+          ```text
+          gvadetect -> gvainference(MARS, person ROI) -> gvatrack(deep-sort) -> gvaanalytics
+          ```
+
+          Configure the existing tracking fields:
+
+          ```json
+          {
+            "detector": {
+              "native": {
+                "inference_interval": 1,
+                "tracking_classes": ["person"]
+              },
+              "tracking": {
+                "implementation": "dlstreamer_deep_sort",
+                "reid_enabled": true,
+                "reid_model_path": "/root/dlstreamer_models/public/mars-small128/mars_small128_fp32.xml",
+                "reid_device": "GPU"
+              }
+            }
+          }
+          ```
+
+          `tracking_classes` may be omitted in Deep SORT mode; SurvNG then constrains
+          the native tracker to `person`. Other class combinations are rejected so a
+          person-trained MARS model is never silently used for vehicles or animals.
+
+          Initial Deep SORT parameters deliberately match the DL Streamer 2026.2
+          baseline: `max_iou_distance=0.7,max_age=30,n_init=3,`
+          `max_cosine_distance=0.2,nn_budget=100`.
+
+          The adaptive inference budget remains ahead of `gvadetect`; Deep SORT still
+          requires `detector.native.inference_interval=1` for every frame admitted to
+          the detector. The ReID model is shared across supervisor streams through a
+          stable `model-instance-id`.
+
+          The existing authoritative-fresh-detection provenance check remains strict.
+          If Deep SORT changes detector ROI geometry, `native_evidence_invalid` will
+          expose it rather than silently promoting tracker predictions as detections.
+          '''))
+          PY
+
+      - name: Validate focused native tracking tests
+        shell: bash
+        run: |
+          ./scripts/run-tests.sh -q \
+            tests/test_native_deepsort.py \
+            tests/test_dlstreamer_capture.py \
+            tests/test_native_first.py
+          git diff --check
+
+      - name: Commit experiment
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-native-deepsort-experiment.yml
+          git add \
+            survng/native_deepsort.py \
+            survng/app/manager.py \
+            survng/app/dlstreamer_capture.py \
+            survng/app/native_runtime.py \
+            survng/dlstreamer_live.py \
+            tests/test_native_deepsort.py \
+            docs/investigations/native-deepsort.md
+          git commit -m "feat(native): add experimental Deep SORT ReID tracking"
+          git push origin HEAD:experiment/native-first-deepsort-build
