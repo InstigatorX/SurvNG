@@ -9,6 +9,7 @@ from .face_store import FaceStore
 from .inference_runtime.process import load_detector_labels
 from .inference_runtime.types import InferenceUnavailable
 from .semantic_search import DisabledSemanticSearch
+from survng.native_deepsort import resolve_native_tracking
 
 
 class UnavailableEnrichment:
@@ -51,7 +52,7 @@ class NativeDetectorStatus:
                 "batch_size": self.config.native.batch_size,
                 "tracking_classes": self.config.native.tracking_classes,
                 "inference_interval": self.config.native.inference_interval,
-                "effective_inference_fps": self.config.live_sample_fps / self.config.native.inference_interval, "tracking": "short-term-imageless",
+                "effective_inference_fps": self.config.live_sample_fps / self.config.native.inference_interval, "tracking": resolve_native_tracking(self.config).mode,
                 "native_cameras": cameras, "healthy_cameras": healthy, "active_cameras": len(expected),
                 "degraded": bool(expected and healthy < len(expected)),
                 "python_inference_workers": 0, "model_path": self.config.resolved_model_path()}
