@@ -786,7 +786,9 @@ def _pump_pipeline(
         source.connect("source-setup", configure_rtsp)
 
     tee = _element(Gst, "tee", "branches")
-    color_frames = source_role == "main" or not detect
+    # Missing/late native metadata falls back to inference on these exact
+    # pixels. Keep color evidence even while the VA detection branch is on.
+    color_frames = True
     va_memory = detect and args.decoder == "va" and not use_test_source
     frame_queue = _element(Gst, "queue", "frame-queue")
     frame_queue.set_property("max-size-buffers", 1)
@@ -796,13 +798,13 @@ def _pump_pipeline(
     # The tee carries VA surfaces when detection uses VA preprocessing. CPU
     # consumers need an explicit download boundary; software videoconvert
     # cannot negotiate that transition. Drop frames BEFORE the VA conversion
-    # and resize on the GPU before mapping the small EMA frame into host RAM.
+    # and resize on the GPU before mapping the small evidence frame into host RAM.
     frame_converters = []
     if va_memory:
         download = _element(Gst, "vapostproc", "qualifier-download")
         download_caps = _element(Gst, "capsfilter", "qualifier-host-caps")
         # Intel advertises GRAY8 VPP output on some devices that drop every
-        # frame converting to it. Download scaled NV12, then extract luma on
+        # frame converting to it. Download scaled NV12, then convert to BGR on
         # the CPU. Explicit square pixels preserve geometry when scaling.
         download_caps.set_property("caps", Gst.Caps.from_string(
             f"video/x-raw,format=NV12,width={qualifier_width},pixel-aspect-ratio=1/1"

@@ -771,8 +771,9 @@ class ObjectTrackingConfig(BaseModel):
 
 class DetectorConfig(BaseModel):
     enabled: bool = False
-    # Retained for native continuous-inference integrations; production capture
-    # is frames-only and qualification schedules inference in the shared pool.
+    # Roll back to demand-driven object inference without disabling detection.
+    native_live_detection: bool = True
+    # Native detection cadence; every selected sample is inferred.
     live_sample_fps: float = Field(default=5.0, ge=0.5, le=10.0)
     backend: Literal["openvino", "coreml"] = "openvino"
     object_worker_count: int = Field(default=2, ge=1, le=4)
