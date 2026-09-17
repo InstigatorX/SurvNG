@@ -5,8 +5,9 @@ from dataclasses import dataclass
 
 DEEP_SORT_IMPLEMENTATIONS = frozenset({"dlstreamer_deep_sort", "deep-sort"})
 DEFAULT_DEEP_SORT_CONFIG = (
-    "max_iou_distance=0.7,max_age=30,n_init=3,"
-    "max_cosine_distance=0.2,nn_budget=100"
+    "max_iou_distance=0.7,max_age=60,n_init=3,"
+    "max_cosine_distance=0.3,nn_budget=100,"
+    "object_class=person,reid_max_age=30"
 )
 
 

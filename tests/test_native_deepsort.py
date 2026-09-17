@@ -4,7 +4,7 @@ import pytest
 
 from survng.app.camera_capture import CaptureOpenLimiter
 from survng.app.dlstreamer_capture import DlStreamerCaptureBackend, DlStreamerCaptureOptions
-from survng.dlstreamer_live import _parser
+from survng.dlstreamer_live import _NativeInferenceEvidence, _NativeReidEvidence, _parser
 from survng.native_deepsort import DEFAULT_DEEP_SORT_CONFIG, resolve_native_tracking
 
 
@@ -41,7 +41,10 @@ def test_deep_sort_resolves_person_reid_plan():
     assert plan.tracking_classes == ("person",)
     assert plan.reid_model_path.endswith("mars_small128_fp32.xml")
     assert plan.reid_device == "GPU"
-    assert "max_cosine_distance=0.2" in plan.deep_sort_config
+    assert "max_age=60" in plan.deep_sort_config
+    assert "max_cosine_distance=0.3" in plan.deep_sort_config
+    assert "object_class=person" in plan.deep_sort_config
+    assert "reid_max_age=30" in plan.deep_sort_config
 
 
 @pytest.mark.parametrize(
@@ -90,3 +93,87 @@ def test_child_parser_accepts_deep_sort_arguments():
     assert args.reid_model == "/models/mars.xml"
     assert args.reid_device == "GPU"
     assert args.tracking_classes == ["person"]
+
+
+class _FakeTensor:
+    def __init__(self, *, name="inference_layer_name:output", layer="output", size=128):
+        self._name = name
+        self._layer = layer
+        self._data = SimpleNamespace(size=size)
+
+    def name(self):
+        return self._name
+
+    def layer_name(self):
+        return self._layer
+
+    def data(self):
+        return self._data
+
+
+class _FakeRegion:
+    def __init__(self, label, tensors=()):
+        self._label = label
+        self._tensors = list(tensors)
+
+    def label(self):
+        return self._label
+
+    def tensors(self):
+        return list(self._tensors)
+
+    def confidence(self):
+        return 0.9
+
+    def rect(self):
+        return SimpleNamespace(x=1, y=2, w=3, h=4)
+
+
+class _FakeFrame:
+    def __init__(self, _buffer, *, caps=None, regions=()):
+        del _buffer, caps
+        self._regions = list(regions)
+
+    def regions(self):
+        return list(self._regions)
+
+
+def _frame_type(regions):
+    return lambda buffer, caps=None: _FakeFrame(buffer, caps=caps, regions=regions)
+
+
+def test_reid_evidence_accepts_tracker_compatible_128d_tensor():
+    evidence = _NativeReidEvidence()
+    evidence.observe(object(), object(), _frame_type([
+        _FakeRegion("person", [_FakeTensor()]),
+    ]))
+    status = evidence.status()
+    assert status["native_reid_feature_health"] == "healthy"
+    assert status["native_reid_features_valid"] == 1
+    assert status["native_reid_features_missing"] == 0
+
+
+def test_reid_evidence_surfaces_missing_or_misnamed_tensor():
+    evidence = _NativeReidEvidence()
+    evidence.observe(object(), object(), _frame_type([
+        _FakeRegion("person", [_FakeTensor(name="classification_layer_name:embedding", layer="embedding")]),
+    ]))
+    status = evidence.status()
+    assert status["native_reid_feature_health"] == "missing_features"
+    assert status["native_reid_features_valid"] == 0
+    assert status["native_reid_features_missing"] == 1
+    assert status["native_reid_last_missing_tensors"][0]["size"] == 128
+
+
+def test_native_evidence_ignores_spatial_inference_roi():
+    from survng.native_spatial import ROI_LABEL
+
+    evidence = _NativeInferenceEvidence(1, tracking=True)
+    buffer = SimpleNamespace(pts=1)
+    evidence.observe(buffer, object(), _frame_type([
+        _FakeRegion(ROI_LABEL),
+        _FakeRegion("person"),
+    ]))
+    provenance, objects = evidence.pop(1)
+    assert provenance == "native_fresh_detection"
+    assert [item["label"] for item in objects] == ["person"]

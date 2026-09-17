@@ -43,3 +43,8 @@ stable `model-instance-id`.
 The existing authoritative-fresh-detection provenance check remains strict.
 If Deep SORT changes detector ROI geometry, `native_evidence_invalid` will
 expose it rather than silently promoting tracker predictions as detections.
+
+
+## Live ReID metadata correction
+
+Live diagnostics on 2026-09-17 showed every Deep SORT person detection falling back to a 128-dimensional zero vector: `No feature tensor found ... using zero feature (motion-only tracking)`. The native-first detector probe had been rebuilding ROI metadata before `gvainference`, which breaks the metadata attachment identity needed by the per-ROI raw ReID tensor. Deep SORT now preserves the original `gvadetect` ROIs, relies on `object-class=person` / `object_class=person` for person filtering, adds the reference queue after `gvainference`, and reports valid/missing tracker-compatible 128D MARS tensors in live pipeline status.
