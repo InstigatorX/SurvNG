@@ -1,0 +1,65 @@
+name: Run native Deep SORT staging
+
+on:
+  push:
+    branches:
+      - experiment/native-first-deepsort-build
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract and apply staged integration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('.github/workflows/apply-native-deepsort-experiment.yml').read_text()
+          marker = "      - name: Apply focused Deep SORT integration\n        shell: bash\n        run: |\n"
+          start = source.index(marker) + len(marker)
+          end = source.index("\n      - name: Validate focused native tracking tests", start)
+          block = source[start:end]
+          lines = []
+          for line in block.splitlines():
+              if line.startswith('          '):
+                  line = line[10:]
+              lines.append(line)
+          Path('/tmp/apply-native-deepsort.sh').write_text('\n'.join(lines) + '\n')
+          PY
+          bash /tmp/apply-native-deepsort.sh
+
+      - name: Validate focused native tracking tests
+        shell: bash
+        run: |
+          ./scripts/run-tests.sh -q \
+            tests/test_native_deepsort.py \
+            tests/test_dlstreamer_capture.py \
+            tests/test_native_first.py
+          git diff --check
+
+      - name: Commit experiment
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm \
+            .github/workflows/apply-native-deepsort-experiment.yml \
+            .github/workflows/apply-native-deepsort-runner.yml
+          git add \
+            survng/native_deepsort.py \
+            survng/app/manager.py \
+            survng/app/dlstreamer_capture.py \
+            survng/app/native_runtime.py \
+            survng/dlstreamer_live.py \
+            tests/test_native_deepsort.py \
+            docs/investigations/native-deepsort.md
+          git commit -m "feat(native): add experimental Deep SORT ReID tracking"
+          git push origin HEAD:experiment/native-first-deepsort-build
