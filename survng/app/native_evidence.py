@@ -300,6 +300,45 @@ class NativeEvidenceService:
             projected.append(obj)
         return projected
 
+    def same_fov_main(self, candidate, main, frame_epoch, replay_offset):
+        """Map native boxes onto a timestamp-aligned same-FOV main frame.
+
+        Same-FOV is an explicit camera invariant, so once replay timing is
+        verified there is no reason to re-register pixels or template-match the
+        subject. Preserve normalized geometry and scale only for raster size.
+        """
+        lh, lw = candidate.image.shape[:2]
+        mh, mw = main.shape[:2]
+        if not lw or not lh or not mw or not mh:
+            return []
+        scaled = []
+        for obj in resize_objects(candidate.objects, (lw, lh), (mw, mh)):
+            box = obj.get("box") or {}
+            values = [box.get(k) for k in ("x1", "y1", "x2", "y2")]
+            if (
+                any(not isinstance(value, (int, float)) for value in values)
+                or not 0 <= values[0] < values[2] <= mw
+                or not 0 <= values[1] < values[3] <= mh
+            ):
+                continue
+            obj.update(
+                frame_source="recorded_main",
+                frame_captured_at_epoch=frame_epoch,
+                snapshot_visible=True,
+                native_alignment={
+                    "method": "same_fov_timestamp_aligned",
+                    "scale_x": 1.0,
+                    "scale_y": 1.0,
+                    "offset_x": 0.0,
+                    "offset_y": 0.0,
+                    "pixel_scale_x": mw / lw,
+                    "pixel_scale_y": mh / lh,
+                    "recording_offset_seconds": replay_offset,
+                },
+            )
+            scaled.append(obj)
+        return scaled
+
     def match_main(self, candidate, main):
         alignment = estimate_stream_alignment(candidate.image, main)
         if alignment is None:
@@ -358,6 +397,16 @@ class NativeEvidenceService:
             candidates, pending = self.recorded_candidates(event, tracking)
         best = None
         camera = next((camera for camera in self.config.cameras if camera.id == event["camera_id"]), None)
+        recording_alignment = tracking.get("recording_alignment") or {}
+        replay_offset = recording_alignment.get("offset_seconds")
+        same_fov_aligned = bool(
+            camera
+            and camera.native_same_field_of_view
+            and recording_alignment.get("source") == "main"
+            and recording_alignment.get("verified") is True
+            and isinstance(replay_offset, (int, float))
+            and -3 < float(replay_offset) < 3
+        )
         calibrate = bool(camera and camera.native_same_field_of_view and tracking.get("state") == "complete"
                          and tracking.get("native_session")
                          and not tracking.get("recording_alignment", {}).get("verified")
@@ -368,11 +417,16 @@ class NativeEvidenceService:
         for candidate in candidates[:12]:
             if self._closed:
                 break
-            main = self.read_frame(event["camera_id"], candidate.epoch, "main")
+            main_epoch = candidate.epoch - float(replay_offset) if same_fov_aligned else candidate.epoch
+            main = self.read_frame(event["camera_id"], main_epoch, "main")
             if main is None:
                 pending = True
                 continue
-            objects = self.match_main(candidate, main)
+            objects = (
+                self.same_fov_main(candidate, main, main_epoch, float(replay_offset))
+                if same_fov_aligned
+                else self.match_main(candidate, main)
+            )
             self.verifier.config = self.config.detector
             detections = []
             if (require_verification and objects) or (calibrate and not calibration_unavailable):
@@ -447,6 +501,13 @@ class NativeEvidenceService:
                     self.counts["replay_aligned"] += 1
                     self.publish("incident_update", {"camera_id": event["camera_id"], "event_id": event_id,
                                                     "evidence_revision": aligned["evidence_revision"]})
+                    # The first pass established the clock relationship. Throw
+                    # away its unaligned cover candidates and immediately rerun
+                    # against the exact timestamp-aligned main frames.
+                    for path, _ in assets:
+                        Path(path).unlink(missing_ok=True)
+                    assets.clear()
+                    return self._process(event_id, candidates, assets)
         if not best:
             return {"event_id":event_id,"status":"recording_pending" if pending else "no_verified_candidate" if require_verification else "no_usable_candidate"}
         score, path, objects, width, height = best

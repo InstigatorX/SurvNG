@@ -186,6 +186,61 @@ def test_disabled_validation_promotes_aligned_main_without_detector_and_keeps_be
     assert events.get(event['id'])['snapshot_path'] == updated['snapshot_path']
 
 
+def _assert_same_fov_replay_offset(tmp_path, offset):
+    from survng.app.config import CameraConfig
+
+    service, events, event, image, obj, tracking = fixture(tmp_path)
+    service.config.detector.native.verification_enabled = False
+    service.config.cameras = [
+        CameraConfig(
+            id='test',
+            name='Test',
+            stream_url='rtsp://unused.invalid',
+            native_same_field_of_view=True,
+        )
+    ]
+    tracking.update(
+        state='complete',
+        native_session='test-session',
+        recording_alignment={
+            'source': 'main',
+            'verified': True,
+            'offset_seconds': offset,
+            'mean_iou': 0.9,
+        },
+    )
+    events.update_object_tracking(event['id'], tracking)
+    service.read_frame = Mock(return_value=cv2.resize(image, (1280, 720)))
+    service.match_main = Mock(side_effect=AssertionError('same-FOV path must not register/template-match'))
+    service.verifier.detect = Mock(side_effect=AssertionError('disabled validation must not infer again'))
+
+    result = service.process(event['id'], [Candidate(100, image, [obj], 5)])
+
+    assert result['status'] == 'promoted'
+    service.match_main.assert_not_called()
+    service.verifier.detect.assert_not_called()
+    _, requested_epoch, source = service.read_frame.call_args.args
+    assert source == 'main'
+    assert abs(requested_epoch - (100 - offset)) < 1e-9
+    stored = json.loads(events.get(event['id'])['objects_json'])
+    cover = next(o for o in stored if o.get('label'))
+    assert cover['detection_frame_width'] == 1280
+    assert cover['detection_frame_height'] == 720
+    assert abs(cover['box']['x1'] - 200) < 1e-9
+    assert abs(cover['box']['y1'] - 160) < 1e-9
+    assert abs(cover['frame_captured_at_epoch'] - (100 - offset)) < 1e-9
+    assert cover['native_alignment']['method'] == 'same_fov_timestamp_aligned'
+    assert cover['native_alignment']['recording_offset_seconds'] == offset
+
+
+def test_same_fov_positive_replay_offset_scales_exact_box(tmp_path):
+    _assert_same_fov_replay_offset(tmp_path, 0.4)
+
+
+def test_same_fov_negative_replay_offset_scales_exact_box(tmp_path):
+    _assert_same_fov_replay_offset(tmp_path, -0.4)
+
+
 def test_disabled_validation_retains_substream_for_unusable_or_unaligned_main(tmp_path):
     service, events, event, image, obj, _ = fixture(tmp_path)
     service.config.detector.native.verification_enabled = False
