@@ -36,6 +36,13 @@ jobs:
           PY
           bash /tmp/apply-native-deepsort.sh
 
+      - name: Install Python test dependencies
+        shell: bash
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+
       - name: Validate focused native tracking tests
         shell: bash
         run: |
