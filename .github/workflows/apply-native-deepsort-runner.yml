@@ -15,6 +15,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Extract and apply staged integration
         shell: bash
@@ -35,6 +38,12 @@ jobs:
           Path('/tmp/apply-native-deepsort.sh').write_text('\n'.join(lines) + '\n')
           PY
           bash /tmp/apply-native-deepsort.sh
+
+      - name: Build frontend static assets
+        shell: bash
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
 
       - name: Install Python test dependencies
         shell: bash
