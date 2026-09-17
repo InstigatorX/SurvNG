@@ -1,0 +1,239 @@
+name: Apply native Deep SORT ReID fix
+
+on:
+  push:
+    branches:
+      - experiment/native-first-deepsort-fix
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Apply Deep SORT metadata fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              path = Path(path)
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {count}")
+              path.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "survng/native_deepsort.py",
+              '''DEFAULT_DEEP_SORT_CONFIG = (\n    "max_iou_distance=0.7,max_age=30,n_init=3,"\n    "max_cosine_distance=0.2,nn_budget=100"\n)''',
+              '''DEFAULT_DEEP_SORT_CONFIG = (\n    "max_iou_distance=0.7,max_age=60,n_init=3,"\n    "max_cosine_distance=0.3,nn_budget=100,"\n    "object_class=person,reid_max_age=30"\n)''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''def _normalize_gva_objects(payload: dict[str, Any]) -> list[dict[str, Any]]:\n    objects: list[dict[str, Any]] = []\n    for item in payload.get("objects") or ():\n        if not isinstance(item, dict):\n            continue\n        detection = item.get("detection") if isinstance(item.get("detection"), dict) else item\n        label = str(detection.get("label") or item.get("label") or "").strip()''',
+              '''def _gva_object_label(item: object) -> str:\n    if not isinstance(item, dict):\n        return ""\n    detection = item.get("detection") if isinstance(item.get("detection"), dict) else item\n    return str(detection.get("label") or item.get("label") or "").strip()\n\n\ndef _normalize_gva_objects(payload: dict[str, Any]) -> list[dict[str, Any]]:\n    from survng.native_spatial import ROI_LABEL\n\n    objects: list[dict[str, Any]] = []\n    for item in payload.get("objects") or ():\n        if not isinstance(item, dict):\n            continue\n        detection = item.get("detection") if isinstance(item.get("detection"), dict) else item\n        label = _gva_object_label(item)\n        if label == ROI_LABEL:\n            continue''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''            elif fresh:\n                for region in video_frame_type(buffer, caps=caps).regions():\n                    rect = region.rect()\n                    objects.append({\n                        "label": region.label(), "confidence": region.confidence(),\n                        "box": {"x1": rect.x, "y1": rect.y,\n                                "x2": rect.x + rect.w, "y2": rect.y + rect.h},\n                    })''',
+              '''            elif fresh:\n                from survng.native_spatial import ROI_LABEL\n                for region in video_frame_type(buffer, caps=caps).regions():\n                    if region.label() == ROI_LABEL:\n                        continue\n                    rect = region.rect()\n                    objects.append({\n                        "label": region.label(), "confidence": region.confidence(),\n                        "box": {"x1": rect.x, "y1": rect.y,\n                                "x2": rect.x + rect.w, "y2": rect.y + rect.h},\n                    })''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''    def pop(self, pts):\n        with self.lock:\n            return self.results.pop(pts, ("unknown", []))\n\n\ndef _filter_tracking_regions''',
+              '''    def pop(self, pts):\n        with self.lock:\n            return self.results.pop(pts, ("unknown", []))\n\n\nclass _NativeReidEvidence:\n    """Verify that gvainference attached tracker-compatible MARS embeddings."""\n\n    def __init__(self) -> None:\n        self.lock = threading.Lock()\n        self.person_regions = 0\n        self.valid = 0\n        self.missing = 0\n        self.last_missing_tensors: list[dict[str, object]] = []\n\n    @staticmethod\n    def _tracker_compatible(tensor) -> tuple[bool, dict[str, object]]:\n        name = str(tensor.name() or "")\n        layer_name = str(tensor.layer_name() or "")\n        try:\n            data = tensor.data()\n            size = int(data.size) if data is not None else 0\n        except Exception:\n            size = 0\n        compatible_name = (\n            ("output" in layer_name and "inference_layer_name:output" in name)\n            or ("features" in layer_name and "inference_layer_name:features" in name)\n        )\n        return size == 128 and compatible_name, {\n            "name": name, "layer_name": layer_name, "size": size,\n        }\n\n    def observe(self, buffer, caps, video_frame_type) -> None:\n        person_regions = valid = missing = 0\n        last_missing: list[dict[str, object]] = []\n        for region in video_frame_type(buffer, caps=caps).regions():\n            if region.label().strip().lower() != "person":\n                continue\n            person_regions += 1\n            tensors = []\n            found = False\n            for tensor in region.tensors():\n                compatible, descriptor = self._tracker_compatible(tensor)\n                tensors.append(descriptor)\n                found = found or compatible\n            if found:\n                valid += 1\n            else:\n                missing += 1\n                last_missing = tensors[:8]\n        with self.lock:\n            self.person_regions += person_regions\n            self.valid += valid\n            self.missing += missing\n            if last_missing:\n                self.last_missing_tensors = last_missing\n\n    def status(self) -> dict[str, object]:\n        with self.lock:\n            person_regions = self.person_regions\n            valid = self.valid\n            missing = self.missing\n            tensors = list(self.last_missing_tensors)\n        if person_regions == 0:\n            health = "waiting_for_person"\n        elif missing:\n            health = "missing_features"\n        else:\n            health = "healthy"\n        return {\n            "native_reid_feature_health": health,\n            "native_reid_person_regions": person_regions,\n            "native_reid_features_valid": valid,\n            "native_reid_features_missing": missing,\n            "native_reid_last_missing_tensors": tensors,\n        }\n\n\ndef _filter_tracking_regions''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''    normalized = _normalize_gva_objects(payload)\n    if len(normalized) != len(objects):\n        raise ValueError("incomplete inference metadata")''',
+              '''    from survng.native_spatial import ROI_LABEL\n    expected_objects = [item for item in objects if _gva_object_label(item) != ROI_LABEL]\n    normalized = _normalize_gva_objects(payload)\n    if len(normalized) != len(expected_objects):\n        raise ValueError("incomplete inference metadata")''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''    reid_queue = None\n    reid = None\n    reid_preprocess = ""\n    reid_instance_id = ""''',
+              '''    reid_queue = None\n    reid = None\n    reid_output_queue = None\n    reid_evidence = None\n    reid_preprocess = ""\n    reid_instance_id = ""''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''                    try:\n                        _filter_tracking_regions(buffer, pad.get_current_caps(), video_frame_type, allowed_classes)\n                    except Exception as exc:\n                        native_evidence.invalid += 1\n                        # A dropped detector output loses the inference-interval\n                        # phase. Fail closed until the watchdog recreates capture.\n                        native_evidence.identity_valid = False\n                        with native_evidence.lock:\n                            native_evidence.results.clear()\n                        if native_evidence.invalid == 1 or native_evidence.invalid % 100 == 0:\n                            print(f"survng-dls tracking class metadata filter failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)\n                        return Gst.PadProbeReturn.DROP\n                    native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)''',
+              '''                    # Deep SORT must see the original gvadetect ROI metadata.\n                    # Rebuilding those regions before gvainference strips the\n                    # metadata attachment identity used for per-ROI raw tensors.\n                    # gvainference/object-class and gvatrack/object_class perform\n                    # the person filtering without mutating detector metadata.\n                    if args.native_tracking != "deep-sort":\n                        try:\n                            _filter_tracking_regions(buffer, pad.get_current_caps(), video_frame_type, allowed_classes)\n                        except Exception as exc:\n                            native_evidence.invalid += 1\n                            # A dropped detector output loses the inference-interval\n                            # phase. Fail closed until the watchdog recreates capture.\n                            native_evidence.identity_valid = False\n                            with native_evidence.lock:\n                                native_evidence.results.clear()\n                            if native_evidence.invalid == 1 or native_evidence.invalid % 100 == 0:\n                                print(f"survng-dls tracking class metadata filter failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)\n                            return Gst.PadProbeReturn.DROP\n                    native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''            reid.set_property("model-instance-id", reid_instance_id)\n            reid.set_property("scheduling-policy", "throughput")\n        detect_output_queue = _element(Gst, "queue", "detect-output-queue")''',
+              '''            reid.set_property("model-instance-id", reid_instance_id)\n            reid.set_property("scheduling-policy", "throughput")\n            # Intel's reference Deep SORT graph places a queue after the ReID\n            # element. Keep association off the inference streaming thread and\n            # preserve the fully-attached ROI tensor metadata at this boundary.\n            reid_output_queue = _element(Gst, "queue", "reid-output-queue")\n            reid_output_queue.set_property("max-size-buffers", 2)\n            reid_output_queue.set_property("max-size-bytes", 0)\n            reid_output_queue.set_property("max-size-time", 0)\n            reid_evidence = _NativeReidEvidence()\n\n            def capture_reid_evidence(pad, info):\n                with GST_PAD_PROBE_INFO_BUFFER(info) as buffer:\n                    if buffer is not None:\n                        try:\n                            reid_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)\n                        except Exception as exc:\n                            if reid_evidence.missing == 0:\n                                print(f"survng-dls ReID tensor inspection failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)\n                return Gst.PadProbeReturn.OK\n\n            reid.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, capture_reid_evidence)\n        detect_output_queue = _element(Gst, "queue", "detect-output-queue")''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''        if reid_queue is not None and reid is not None:\n            elements.extend([reid_queue, reid])''',
+              '''        if reid_queue is not None and reid is not None and reid_output_queue is not None:\n            elements.extend([reid_queue, reid, reid_output_queue])''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''        if reid_queue is not None and reid is not None:\n            if not detector.link(reid_queue) or not reid_queue.link(reid):\n                raise RuntimeError("could not link Deep SORT ReID inference")\n            tracked_source = reid''',
+              '''        if reid_queue is not None and reid is not None and reid_output_queue is not None:\n            if (not detector.link(reid_queue) or not reid_queue.link(reid)\n                    or not reid.link(reid_output_queue)):\n                raise RuntimeError("could not link Deep SORT ReID inference")\n            tracked_source = reid_output_queue''',
+          )
+
+          replace_once(
+              "survng/dlstreamer_live.py",
+              '''                            "native_reid_memory": _negotiated_memory(reid) if reid is not None else None,\n                            "native_zone_revision": spatial_plan.get("revision") if spatial_plan and detect else None,''',
+              '''                            "native_reid_memory": _negotiated_memory(reid) if reid is not None else None,\n                            **(reid_evidence.status() if reid_evidence is not None else {}),\n                            "native_zone_revision": spatial_plan.get("revision") if spatial_plan and detect else None,''',
+          )
+
+          replace_once(
+              "tests/test_native_deepsort.py",
+              '''from survng.dlstreamer_live import _parser''',
+              '''from survng.dlstreamer_live import _NativeInferenceEvidence, _NativeReidEvidence, _parser''',
+          )
+          replace_once(
+              "tests/test_native_deepsort.py",
+              '''    assert "max_cosine_distance=0.2" in plan.deep_sort_config''',
+              '''    assert "max_age=60" in plan.deep_sort_config\n    assert "max_cosine_distance=0.3" in plan.deep_sort_config\n    assert "object_class=person" in plan.deep_sort_config\n    assert "reid_max_age=30" in plan.deep_sort_config''',
+          )
+
+          append = r'''
+
+class _FakeTensor:
+    def __init__(self, *, name="inference_layer_name:output", layer="output", size=128):
+        self._name = name
+        self._layer = layer
+        self._data = SimpleNamespace(size=size)
+
+    def name(self):
+        return self._name
+
+    def layer_name(self):
+        return self._layer
+
+    def data(self):
+        return self._data
+
+
+class _FakeRegion:
+    def __init__(self, label, tensors=()):
+        self._label = label
+        self._tensors = list(tensors)
+
+    def label(self):
+        return self._label
+
+    def tensors(self):
+        return list(self._tensors)
+
+    def confidence(self):
+        return 0.9
+
+    def rect(self):
+        return SimpleNamespace(x=1, y=2, w=3, h=4)
+
+
+class _FakeFrame:
+    def __init__(self, _buffer, *, caps=None, regions=()):
+        del _buffer, caps
+        self._regions = list(regions)
+
+    def regions(self):
+        return list(self._regions)
+
+
+def _frame_type(regions):
+    return lambda buffer, caps=None: _FakeFrame(buffer, caps=caps, regions=regions)
+
+
+def test_reid_evidence_accepts_tracker_compatible_128d_tensor():
+    evidence = _NativeReidEvidence()
+    evidence.observe(object(), object(), _frame_type([
+        _FakeRegion("person", [_FakeTensor()]),
+    ]))
+    status = evidence.status()
+    assert status["native_reid_feature_health"] == "healthy"
+    assert status["native_reid_features_valid"] == 1
+    assert status["native_reid_features_missing"] == 0
+
+
+def test_reid_evidence_surfaces_missing_or_misnamed_tensor():
+    evidence = _NativeReidEvidence()
+    evidence.observe(object(), object(), _frame_type([
+        _FakeRegion("person", [_FakeTensor(name="classification_layer_name:embedding", layer="embedding")]),
+    ]))
+    status = evidence.status()
+    assert status["native_reid_feature_health"] == "missing_features"
+    assert status["native_reid_features_valid"] == 0
+    assert status["native_reid_features_missing"] == 1
+    assert status["native_reid_last_missing_tensors"][0]["size"] == 128
+
+
+def test_native_evidence_ignores_spatial_inference_roi():
+    from survng.native_spatial import ROI_LABEL
+
+    evidence = _NativeInferenceEvidence(1, tracking=True)
+    buffer = SimpleNamespace(pts=1)
+    evidence.observe(buffer, object(), _frame_type([
+        _FakeRegion(ROI_LABEL),
+        _FakeRegion("person"),
+    ]))
+    provenance, objects = evidence.pop(1)
+    assert provenance == "native_fresh_detection"
+    assert [item["label"] for item in objects] == ["person"]
+'''
+          path = Path("tests/test_native_deepsort.py")
+          path.write_text(path.read_text() + append)
+
+          doc = Path("docs/investigations/native-deepsort.md")
+          text = doc.read_text()
+          text += '''\n\n## Live ReID metadata correction\n\nLive diagnostics on 2026-09-17 showed every Deep SORT person detection falling back to a 128-dimensional zero vector: `No feature tensor found ... using zero feature (motion-only tracking)`. The native-first detector probe had been rebuilding ROI metadata before `gvainference`, which breaks the metadata attachment identity needed by the per-ROI raw ReID tensor. Deep SORT now preserves the original `gvadetect` ROIs, relies on `object-class=person` / `object_class=person` for person filtering, adds the reference queue after `gvainference`, and reports valid/missing tracker-compatible 128D MARS tensors in live pipeline status.\n'''
+          doc.write_text(text)
+          PY
+
+      - name: Build frontend static assets
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+
+      - name: Install Python test dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+
+      - name: Validate focused native tracking tests
+        run: |
+          ./scripts/run-tests.sh -q \
+            tests/test_native_deepsort.py \
+            tests/test_dlstreamer_capture.py \
+            tests/test_native_first.py
+          git diff --check
+          python3 -m py_compile survng/dlstreamer_live.py survng/native_deepsort.py
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-native-deepsort-reid-fix.yml
+          git add \
+            survng/native_deepsort.py \
+            survng/dlstreamer_live.py \
+            tests/test_native_deepsort.py \
+            docs/investigations/native-deepsort.md
+          git commit -m "fix(native): preserve MARS ReID metadata for Deep SORT"
+          git push origin HEAD:experiment/native-first-deepsort-fix
