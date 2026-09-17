@@ -40,6 +40,7 @@ from .events import EventStore
 from .go2rtc import Go2RtcAdapter
 from .native_runtime import NativeRuntime as InferenceLifecycle
 from .config_application import live_detection_threshold
+from survng.native_deepsort import resolve_native_tracking
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .identity_projection import apply_event_identity
@@ -250,6 +251,8 @@ def validate_manager_configuration(config: AppConfig) -> None:
         raise ValueError("native detection requires an OpenVINO model for gvadetect")
     if config.detector.enabled and not config.detector.resolved_model_path():
         raise ValueError("native detection is enabled but detector.model_path is empty")
+    if config.detector.enabled:
+        resolve_native_tracking(config.detector)
     validate_media_storage_configuration(config)
 
 
@@ -304,6 +307,7 @@ class AppManager:
             CAMERA_STARTUP_MAX_CONCURRENCY
         )
         detector = config.detector
+        native_tracking = resolve_native_tracking(detector)
         self.capture_backend = DlStreamerCaptureBackend(
             self._capture_open_limiter,
             DlStreamerCaptureOptions(
@@ -318,8 +322,11 @@ class AppManager:
                 inference_interval=detector.native.inference_interval,
                 inference_requests=detector.native.inference_requests,
                 inference_streams=detector.native.inference_streams,
-                native_tracking="short-term-imageless",
-                tracking_classes=None if detector.native.tracking_classes is None else tuple(detector.native.tracking_classes),
+                native_tracking=native_tracking.mode,
+                tracking_classes=native_tracking.tracking_classes,
+                reid_model_path=native_tracking.reid_model_path,
+                reid_device=native_tracking.reid_device,
+                deep_sort_config=native_tracking.deep_sort_config,
                 labels_path=detector.labels_path,
                 labels=tuple(detector.labels),
                 confidence_threshold=live_detection_threshold(config),

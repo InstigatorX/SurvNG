@@ -74,10 +74,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--native-tracking",
-        choices=("off", "short-term-imageless"),
+        choices=("off", "short-term-imageless", "deep-sort"),
         default="off",
         help="optional DL Streamer ROI tracking between detector frames",
     )
+    parser.add_argument("--reid-model", default="", help="OpenVINO person ReID IR XML for Deep SORT")
+    parser.add_argument("--reid-device", default="CPU", help="OpenVINO device for Deep SORT ReID inference")
+    parser.add_argument("--deep-sort-config", default="max_iou_distance=0.7,max_age=30,n_init=3,max_cosine_distance=0.2,nn_budget=100")
     parser.add_argument("--tracking-classes", type=_tracking_classes_argument, default=None,
                         help="JSON array of classes admitted to gvatrack; omitted means all, [] means none")
     parser.add_argument("--batch-size", type=int, default=1, choices=range(1, 5),
@@ -697,6 +700,15 @@ def _run(argv: list[str] | None, resources: ExitStack, *, output=None) -> int:
         raise ValueError("detection threshold must be between 0 and 1")
     if not 1 <= args.inference_interval <= 5:
         raise ValueError("inference interval must be between 1 and 5")
+    if args.native_tracking == "deep-sort":
+        if args.tracking_classes is None:
+            args.tracking_classes = ["person"]
+        elif args.tracking_classes != ["person"]:
+            raise ValueError("Deep SORT experiment requires --tracking-classes [\"person\"]")
+        reid_model = Path(args.reid_model).expanduser() if args.reid_model else None
+        if reid_model is None or not reid_model.is_file():
+            raise RuntimeError("Deep SORT requested but ReID model file is unavailable")
+        args.reid_model = str(reid_model)
     instance_id = (
         model_instance_id(str(model_path or ""), args.device, args.model_instance_id)
         if detect
@@ -1078,6 +1090,10 @@ def _pump_pipeline(
     detector = None
     detect_output_queue = None
     native_tracker = None
+    reid_queue = None
+    reid = None
+    reid_preprocess = ""
+    reid_instance_id = ""
     analytics = None
     roi_input = None
     roi_enabled = False
@@ -1219,6 +1235,31 @@ def _pump_pipeline(
             detector.set_property("labels-file", args.labels)
         elif args.labels_list:
             detector.set_property("labels", args.labels_list)
+        if args.native_tracking == "deep-sort":
+            if detector_interval != 1:
+                raise InferencePipelineError("Deep SORT requires detector inference interval 1")
+            if not _factory_available(Gst, "gvainference"):
+                raise InferencePipelineError("Deep SORT requested but gvainference is unavailable")
+            reid_queue = _element(Gst, "queue", "reid-queue")
+            reid_queue.set_property("max-size-buffers", 2)
+            reid_queue.set_property("max-size-bytes", 0)
+            reid_queue.set_property("max-size-time", 0)
+            reid = _element(Gst, "gvainference", "native-reid")
+            reid.set_property("model", args.reid_model)
+            reid.set_property("device", args.reid_device)
+            reid.set_property("inference-region", 1)
+            reid.set_property("object-class", "person")
+            reid.set_property("inference-interval", 1)
+            reid.set_property("batch-size", 1)
+            reid.set_property("nireq", 2)
+            reid.set_property("no-block", False)
+            reid_preprocess = "opencv"
+            if args.decoder == "va" and not use_test_source:
+                reid_preprocess = "va-surface-sharing" if "GPU" in args.reid_device.upper() else "va"
+            reid.set_property("pre-process-backend", reid_preprocess)
+            reid_instance_id = model_instance_id(args.reid_model, args.reid_device)
+            reid.set_property("model-instance-id", reid_instance_id)
+            reid.set_property("scheduling-policy", "throughput")
         detect_output_queue = _element(Gst, "queue", "detect-output-queue")
         detect_output_queue.set_property("max-size-buffers", 1)
         detect_output_queue.set_property("max-size-bytes", 0)
@@ -1231,6 +1272,9 @@ def _pump_pipeline(
                 )
             native_tracker = _element(Gst, "gvatrack", "native-track")
             native_tracker.set_property("tracking-type", args.native_tracking)
+            if args.native_tracking == "deep-sort":
+                native_tracker.set_property("device", "CPU")
+                native_tracker.set_property("deepsort-trck-cfg", args.deep_sort_config)
         if spatial_plan is not None:
             analytics = _element(Gst, "gvaanalytics", "zone-analytics")
             analytics.set_property("evaluation-point", 1)
@@ -1288,6 +1332,8 @@ def _pump_pipeline(
             roi_input.set_property("kwarg", json.dumps({"plan": spatial_plan, "interval": detector_interval, "budget_key": budget_key}))
             elements.append(roi_input)
         elements.extend([detect_queue, detect_rate_el, detect_rate_caps, detector, detect_output_queue])
+        if reid_queue is not None and reid is not None:
+            elements.extend([reid_queue, reid])
         if native_tracker is not None:
             elements.append(native_tracker)
         if preprocess.startswith("va"):
@@ -1358,8 +1404,12 @@ def _pump_pipeline(
             if not left.link(right):
                 raise RuntimeError(f"could not link native detection input: {left.get_name()} to {right.get_name()}")
         tracked_source = detector
+        if reid_queue is not None and reid is not None:
+            if not detector.link(reid_queue) or not reid_queue.link(reid):
+                raise RuntimeError("could not link Deep SORT ReID inference")
+            tracked_source = reid
         if native_tracker is not None:
-            if not detector.link(native_tracker):
+            if not tracked_source.link(native_tracker):
                 raise RuntimeError("could not link gvatrack")
             tracked_source = native_tracker
         if analytics is not None:
@@ -1460,6 +1510,7 @@ def _pump_pipeline(
                     error = redact_diagnostic_text(error)
                     if (
                         (detector is not None and message.src == detector)
+                        or (reid is not None and message.src == reid)
                         or (native_tracker is not None and message.src == native_tracker)
                     ):
                         raise InferencePipelineError(error)
@@ -1563,6 +1614,12 @@ def _pump_pipeline(
                             ),
                             "native_tracking": args.native_tracking if detect else "off",
                             "native_tracking_classes": getattr(args, "tracking_classes", None) if detect else None,
+                            "native_reid_enabled": bool(reid is not None),
+                            "native_reid_model": Path(args.reid_model).name if reid is not None else None,
+                            "native_reid_device": args.reid_device if reid is not None else None,
+                            "native_reid_preprocess_backend": reid_preprocess if reid is not None else None,
+                            "native_reid_model_instance_id": reid_instance_id if reid is not None else None,
+                            "native_reid_memory": _negotiated_memory(reid) if reid is not None else None,
                             "native_zone_revision": spatial_plan.get("revision") if spatial_plan and detect else None,
                             "native_budget": budget.status() if budget is not None else {"mode": "disabled"},
                             "native_roi_enabled": bool(spatial_plan and spatial_plan.get("roi", {}).get("enabled") and detect),
