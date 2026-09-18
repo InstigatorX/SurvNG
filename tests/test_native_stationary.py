@@ -62,11 +62,11 @@ def test_moving_vehicle_parks_completes_and_departure_starts_new_episode(activit
     assert stored["box_history"][0][0] >= 1030
 
 
-def test_person_presence_is_not_suppressed_or_polluted_by_parked_car(activity):
+def test_moving_person_is_not_suppressed_or_polluted_by_parked_car(activity):
     for seq in range(1, 61):
         feed(activity, seq, seq / 5, [obj()])
     for seq in range(61, 81):
-        feed(activity, seq, seq / 5, [obj(), obj("person", native_id=8)])
+        feed(activity, seq, seq / 5, [obj(), obj("person", x=10 + (seq - 60) * 2, native_id=8)])
     assert activity.event_id == 1
     assert {t["label"] for t in activity.events.update_object_tracking.call_args.args[1]["tracks"]} == {"person"}
     for seq in range(81, 121):
@@ -99,6 +99,38 @@ def test_suppression_can_be_disabled(activity):
     feed(activity, 1, .2, [obj()])
     feed(activity, 2, .4, [obj()])
     assert activity.event_id == 1
+
+
+def test_stationary_person_tree_jitter_is_suppressed(activity):
+    tree_boxes = [
+        {"x1": 490, "y1": 263, "x2": 508, "y2": 307},
+        {"x1": 489, "y1": 264, "x2": 509, "y2": 307},
+        {"x1": 490, "y1": 263, "x2": 509, "y2": 306},
+        {"x1": 490, "y1": 264, "x2": 508, "y2": 307},
+        {"x1": 489, "y1": 263, "x2": 509, "y2": 307},
+    ]
+    for seq in range(1, 76):
+        detected = obj("person", native_id=8)
+        detected["box"] = tree_boxes[(seq - 1) % len(tree_boxes)]
+        feed(activity, seq, seq / 5, [detected])
+    activity.events.add_event.assert_not_called()
+    track = activity.tracks[(8, "person")]
+    assert track["motion_state"] == "stationary"
+    assert track["motion_extent"] <= activity.config.native.stationary.stationary_threshold
+
+
+def test_small_person_translation_still_becomes_moving():
+    motion = NativeMotion()
+    policy = NativeStationaryConfig()
+    states = []
+    for i in range(12):
+        detected = {"x1": 490 + i * 2, "y1": 263, "x2": 508 + i * 2, "y2": 307}
+        states.append(motion.update(detected, i * .2, policy, 2))
+    assert "moving" in states
+
+
+def test_stationary_policy_includes_people_by_default():
+    assert "person" in NativeStationaryConfig().labels
 
 
 def test_whole_window_detects_out_and_back_and_scales_with_box():
