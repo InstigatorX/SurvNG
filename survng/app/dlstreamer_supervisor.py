@@ -215,7 +215,7 @@ class _SharedLiveProcess:
         command: list[str],
         *,
         read_timeout_ms: int,
-        inference_stall_seconds: float = self._inference_stall_seconds,
+        inference_stall_seconds: float = DLSTREAMER_INFERENCE_STALL_SECONDS,
     ) -> None:
         del read_timeout_ms
         self._command = command
