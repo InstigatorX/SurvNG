@@ -535,6 +535,8 @@ class NativeEvidenceService:
                         event["camera_id"],
                         candidate,
                         priority="cover",
+                        frame_reader=self.read_frame,
+                        projector=self.project_main,
                     )
                 except Exception as exc:
                     failures["main_verification_unavailable"] += 1
