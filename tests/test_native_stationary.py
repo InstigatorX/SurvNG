@@ -68,7 +68,9 @@ def test_moving_person_is_not_suppressed_or_polluted_by_parked_car(activity):
     for seq in range(61, 81):
         feed(activity, seq, seq / 5, [obj(), obj("person", x=10 + (seq - 60) * 2, native_id=8)])
     assert activity.event_id == 1
-    assert {t["label"] for t in activity.events.update_native_incident_state.call_args.args[1]["tracks"]} == {"person"}
+    tracks = activity.events.update_native_incident_state.call_args.args[1]["tracks"]
+    assert {t["label"] for t in tracks} == {"person", "car"}
+    assert next(t for t in tracks if t["label"] == "car")["activity_eligible"] is False
     for seq in range(81, 121):
         feed(activity, seq, seq / 5, [obj()])
     assert activity.event_id is None
