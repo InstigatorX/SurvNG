@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import OrderedDict, deque
 from contextlib import ExitStack
+from copy import deepcopy
 import json
 import math
 import os
@@ -678,7 +679,8 @@ def _filter_tracking_regions(buffer, caps, video_frame_type, allowed_classes):
 
 
 def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gst_second: int,
-                        clock_time_none: int, native_result=None, spatial_plan=None):
+                        clock_time_none: int, native_result=None, spatial_plan=None,
+                        tracking_classes=None):
     """Read GstGVAJSONMeta; mapping a video buffer yields pixels, not JSON."""
     from survng.app.live_detections import DetectionSnapshot
     buffer = sample.get_buffer()
@@ -718,7 +720,26 @@ def _detection_metadata(sample, video_frame_type, *, inference_sequence: int, gs
             obj["detection_provenance"] = "native_fresh_detection"
             remaining.remove(matches[0])
     if remaining:
-        raise ValueError("tracker metadata lost authoritative detector ROIs")
+        selected = (
+            None if tracking_classes is None
+            else {str(label).strip().lower() for label in tracking_classes}
+        )
+        # Missing downstream metadata is fatal for a class that was supposed
+        # to traverse gvatrack. Detector classes intentionally excluded from
+        # tracking are still authoritative fresh context and must reach the
+        # object registry without inventing a tracker ID.
+        lost_tracked = [
+            item for item in remaining
+            if selected is None
+            or str(item.get("label") or "").strip().lower() in selected
+        ]
+        if lost_tracked:
+            raise ValueError("tracker metadata lost authoritative detector ROIs")
+        for item in remaining:
+            context = deepcopy(item)
+            context.pop("native_track_id", None)
+            context["detection_provenance"] = "native_fresh_detection"
+            normalized.append(context)
     snapshot = {
         "schema_version": 1,
         "provenance": provenance,
@@ -1254,6 +1275,12 @@ def _pump_pipeline(
             # Python reference that otherwise makes metadata read-only.
             with GST_PAD_PROBE_INFO_BUFFER(info) as buffer:
                 if buffer is not None:
+                    # Capture the detector result before any tracker-class
+                    # filtering. The object registry describes scene contents;
+                    # tracking_classes controls activity/tracker work only.
+                    native_evidence.observe(
+                        buffer, pad.get_current_caps(), video_frame_type
+                    )
                     # Deep SORT must see the original gvadetect ROI metadata.
                     # Rebuilding those regions before gvainference strips the
                     # metadata attachment identity used for per-ROI raw tensors.
@@ -1264,15 +1291,12 @@ def _pump_pipeline(
                             _filter_tracking_regions(buffer, pad.get_current_caps(), video_frame_type, allowed_classes)
                         except Exception as exc:
                             native_evidence.invalid += 1
-                            # A dropped detector output loses the inference-interval
-                            # phase. Fail closed until the watchdog recreates capture.
                             native_evidence.identity_valid = False
                             with native_evidence.lock:
                                 native_evidence.results.clear()
                             if native_evidence.invalid == 1 or native_evidence.invalid % 100 == 0:
                                 print(f"survng-dls tracking class metadata filter failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                             return Gst.PadProbeReturn.DROP
-                    native_evidence.observe(buffer, pad.get_current_caps(), video_frame_type)
                     if budget is not None:
                         with native_evidence.lock:
                             provenance, objects = native_evidence.results.get(buffer.pts, ("unknown", []))
@@ -1647,6 +1671,7 @@ def _pump_pipeline(
                             gst_second=Gst.SECOND, clock_time_none=Gst.CLOCK_TIME_NONE,
                             native_result=native_evidence.pop(meta_sample.get_buffer().pts),
                             spatial_plan=spatial_plan,
+                            tracking_classes=allowed_classes,
                         )
                     except Exception:
                         # Malformed metadata must leave video available for

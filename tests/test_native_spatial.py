@@ -72,6 +72,24 @@ def test_native_membership_preserves_incident_policy(label, confidence, x, y, na
     assert actual == expected
 
 
+def test_untracked_context_falls_back_to_python_zone_geometry():
+    c = camera()
+    obj = {
+        "label": "person",
+        "confidence": .9,
+        "box": {"x1": 25, "x2": 35, "y1": 50, "y2": 60},
+    }
+    from copy import deepcopy
+    expected = apply_detection_zones(
+        c, [deepcopy(obj)], 100, 100, .5, True, {}
+    )
+    actual = apply_detection_zones(
+        c, [deepcopy(obj)], 100, 100, .5, True, {},
+        native_membership=True,
+    )
+    assert actual == expected
+
+
 def test_native_membership_replaces_polygon_work_away_from_edges(monkeypatch):
     c = camera()
     obj = {"label": "person", "confidence": .9, "box": {"x1": 25, "x2": 35, "y1": 50, "y2": 60}, "native_zone_ids": ["0"]}
