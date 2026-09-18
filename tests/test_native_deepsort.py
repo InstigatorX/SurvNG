@@ -3,24 +3,31 @@ from types import SimpleNamespace
 import pytest
 
 from survng.app.camera_capture import CaptureOpenLimiter
+from survng.app.config import DetectorConfig
 from survng.app.dlstreamer_capture import DlStreamerCaptureBackend, DlStreamerCaptureOptions
 from survng.dlstreamer_live import _NativeInferenceEvidence, _NativeReidEvidence, _parser
 from survng.native_deepsort import DEFAULT_DEEP_SORT_CONFIG, resolve_native_tracking
 
 
-def detector(*, implementation="survng_hybrid", enabled=False, path="", interval=1, classes=None, device="GPU"):
+def detector(*, implementation="short-term-imageless", enabled=False, path="", interval=1, classes=None, device="GPU"):
     tracking = SimpleNamespace(
-        implementation=implementation,
+        mode=(
+            "deep-sort"
+            if implementation in {"deep-sort", "dlstreamer_deep_sort"}
+            else "short-term-imageless"
+        ),
         reid_enabled=enabled,
         reid_model_path=path,
         reid_device=device,
+        deep_sort_config=DEFAULT_DEEP_SORT_CONFIG,
         resolved_reid_device=lambda: device,
     )
     native = SimpleNamespace(
         inference_interval=interval,
         tracking_classes=classes,
+        tracking=tracking,
     )
-    return SimpleNamespace(tracking=tracking, native=native)
+    return SimpleNamespace(native=native)
 
 
 def test_default_native_tracking_remains_imageless():
@@ -59,6 +66,35 @@ def test_deep_sort_resolves_person_reid_plan():
 def test_deep_sort_rejects_unsafe_configuration(kwargs, message):
     with pytest.raises(ValueError, match=message):
         resolve_native_tracking(detector(**kwargs))
+
+
+def test_legacy_deep_sort_config_migrates_into_native_namespace():
+    config = DetectorConfig.model_validate({
+        "native": {"inference_interval": 1},
+        "tracking": {
+            "implementation": "deep-sort",
+            "reid_enabled": True,
+            "reid_model_path": "/models/mars.xml",
+            "reid_device": "GPU",
+        },
+    })
+    assert config.native.tracking.mode == "deep-sort"
+    assert config.native.tracking.reid_model_path == "/models/mars.xml"
+    assert resolve_native_tracking(config).mode == "deep-sort"
+
+
+def test_explicit_native_tracking_wins_over_legacy_settings():
+    config = DetectorConfig.model_validate({
+        "native": {
+            "tracking": {"mode": "short-term-imageless"},
+        },
+        "tracking": {
+            "implementation": "deep-sort",
+            "reid_enabled": True,
+            "reid_model_path": "/models/legacy.xml",
+        },
+    })
+    assert resolve_native_tracking(config).mode == "short-term-imageless"
 
 
 def test_capture_command_passes_deep_sort_reid_contract():
