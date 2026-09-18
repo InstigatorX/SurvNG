@@ -1724,6 +1724,8 @@ class EventStore(
         event_id: int,
         tracking: dict[str, Any],
         tracked_objects: list[dict[str, Any]] | None = None,
+        *,
+        replace_objects: bool = False,
     ) -> dict[str, Any] | None:
         """Atomically replace tracking metadata without losing concurrent event data."""
         with self._lock, self._connect() as conn:
@@ -1749,7 +1751,63 @@ class EventStore(
                 for item in objects
                 if not (isinstance(item, dict) and item.get("status") == "object_tracking")
             ]
-            if tracked_objects and not had_tracking:
+            if tracked_objects and replace_objects:
+                existing_labels = [
+                    item for item in objects
+                    if isinstance(item, dict) and item.get("label")
+                ]
+                metadata = [
+                    item for item in objects
+                    if not (isinstance(item, dict) and item.get("label"))
+                ]
+                by_track = {
+                    item.get("track_id"): item
+                    for item in existing_labels
+                    if item.get("track_id") is not None
+                }
+                matched = set()
+                presentation_fields = {
+                    "box", "mask_polygon", "confidence",
+                    "detection_frame_width", "detection_frame_height",
+                    "snapshot_visible", "snapshot_source", "snapshot_captured_at",
+                    "snapshot_detection_confidence", "frame_source",
+                    "frame_captured_at_epoch", "native_alignment",
+                    "native_cover_verified", "box_provenance", "verification",
+                    "native_cover_score", "snapshot_quality_score",
+                    "snapshot_subject_area_ratio", "snapshot_edge_clearance_ratio",
+                    "snapshot_primary_subject", "temporal_sample_offset_seconds",
+                }
+                merged = []
+                for incoming in tracked_objects:
+                    if not isinstance(incoming, dict) or not incoming.get("label"):
+                        continue
+                    item = dict(incoming)
+                    if isinstance(incoming.get("box"), dict):
+                        item["box"] = dict(incoming["box"])
+                    existing = by_track.get(incoming.get("track_id"))
+                    if existing is None:
+                        existing = next((
+                            candidate for candidate in existing_labels
+                            if candidate.get("label") == incoming.get("label")
+                            and candidate.get("native_track_id") == incoming.get("native_track_id")
+                            and candidate.get("native_track_id") is not None
+                        ), None)
+                    if existing is not None:
+                        matched.add(id(existing))
+                        if existing.get("snapshot_visible") is not False:
+                            for field in presentation_fields:
+                                if field in existing:
+                                    item[field] = existing[field]
+                    else:
+                        item["snapshot_visible"] = False
+                    merged.append(item)
+                merged.extend(
+                    dict(item, snapshot_visible=False)
+                    for item in existing_labels
+                    if id(item) not in matched
+                )
+                objects = [*merged, *metadata]
+            elif tracked_objects and not had_tracking:
                 assignments = {
                     (
                         str(item.get("label") or ""),

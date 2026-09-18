@@ -57,6 +57,13 @@ class NativeActivity:
         self.event_id = None
         self.tracks = {}
         self._episode_tracks = {}
+        # Incident inventory is deliberately separate from activity admission.
+        # All temporally credible fresh detections can describe an incident;
+        # zones/stationary policy only decide whether activity starts/continues.
+        self.inventory_tracks = {}
+        self._episode_inventory = {}
+        self._inventory_seen = set()
+        self._next_inventory_id = 1
         self.counts = Counter()
         self.last_motion_at = ""
         self.health = "waiting_for_metadata"
@@ -112,6 +119,7 @@ class NativeActivity:
             self.config.require_incident_zone, self.config.event_class_confidence_thresholds,
             native_membership=self.native_zones,
         )
+        self._inventory_seen = self._update_inventory(objects, now=now, epoch=epoch)
         eligible = [obj for obj in objects
                     if obj.get("detection_provenance") == "native_fresh_detection"
                     and obj.get("incident_eligible")
@@ -137,14 +145,17 @@ class NativeActivity:
                 if len(self.tracks) >= self.config.native.maximum_tracks:
                     self.counts["track_capacity_drops"] += 1
                     continue
-                track = {"track_id": self._next_track_id,
+                inventory = self.inventory_tracks.get(("native", native_id, obj["label"]))
+                track_id = inventory["track_id"] if inventory is not None else self._next_track_id
+                if inventory is None:
+                    self._next_track_id += 1
+                track = {"track_id": track_id,
                          "native_track_id": native_id,
                          "native_identity": f"{self.camera.id}/{self.session}/{self.identity_epoch}/{native_id}",
                          "label": obj["label"], "first_seen": iso(epoch),
                          "observations": 0, "consecutive": 0, "last_monotonic": now,
                          "box_history": [], "trajectory": [], "_motion": NativeMotion()}
                 self.tracks[key] = track
-                self._next_track_id += 1
             if now - track["last_monotonic"] > max(self.config.native.maximum_observation_age_seconds, 3 / self.fresh_detection_fps):
                 track["consecutive"] = 0
             track.update(last_monotonic=now, last_seen=iso(epoch),
@@ -168,6 +179,13 @@ class NativeActivity:
             ) if applies else "presence")
             track["motion_extent"] = round(track["_motion"].extent, 4) if applies else None
             track["activity_eligible"] = track["motion_state"] in {"moving", "presence"}
+            inventory = self.inventory_tracks.get(("native", native_id, obj["label"]))
+            if inventory is not None:
+                inventory.update(
+                    motion_state=track["motion_state"],
+                    motion_extent=track["motion_extent"],
+                    activity_eligible=track["activity_eligible"],
+                )
             if applies and track["motion_state"] != previous_motion:
                 self.counts[f"{track['motion_state']}_transitions"] += 1
             if applies and not track["activity_eligible"]:
@@ -188,6 +206,190 @@ class NativeActivity:
         if confirmed:
             self._activate(confirmed, observation, epoch, now)
         self.tick(now=now)
+
+    @staticmethod
+    def _inventory_association_score(previous, current):
+        def coords(item):
+            box = item.get("box") or {}
+            try:
+                values = tuple(float(box[key]) for key in ("x1", "y1", "x2", "y2"))
+            except (KeyError, TypeError, ValueError):
+                return None
+            if values[2] <= values[0] or values[3] <= values[1]:
+                return None
+            return values
+        before, after = coords(previous), coords(current)
+        if before is None or after is None:
+            return None
+        ax1, ay1, ax2, ay2 = before
+        bx1, by1, bx2, by2 = after
+        overlap = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+        union = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - overlap
+        iou = overlap / union if union > 0 else 0.0
+        if iou >= .15:
+            return 2.0 + iou
+        acx, acy = (ax1+ax2)/2, (ay1+ay2)/2
+        bcx, bcy = (bx1+bx2)/2, (by1+by2)/2
+        scale = max(1.0, ((ax2-ax1)**2 + (ay2-ay1)**2) ** .5,
+                    ((bx2-bx1)**2 + (by2-by1)**2) ** .5)
+        distance = ((acx-bcx)**2 + (acy-bcy)**2) ** .5 / scale
+        return 1.0 - distance/.65 if distance <= .65 else None
+
+    def _inventory_key(self, obj, used):
+        label = str(obj.get("label") or "").strip()
+        native_id = obj.get("native_track_id")
+        if type(native_id) is int and native_id >= 0:
+            return ("native", native_id, label)
+        scored = []
+        for key, track in self.inventory_tracks.items():
+            if key in used or key[0] != "inventory" or track.get("label") != label:
+                continue
+            score = self._inventory_association_score(track, obj)
+            if score is not None:
+                scored.append((score, key))
+        if scored:
+            return max(scored)[1]
+        key = ("inventory", self._next_inventory_id, label)
+        self._next_inventory_id += 1
+        return key
+
+    def _update_inventory(self, objects, *, now, epoch):
+        ttl = max(self.config.native.activity_timeout_seconds,
+                  (self.config.native.batch_size + .5) / self.fresh_detection_fps)
+        for key, track in list(self.inventory_tracks.items()):
+            if now - track["last_monotonic"] >= ttl:
+                del self.inventory_tracks[key]
+        seen = set()
+        for obj in objects:
+            if obj.get("detection_provenance") != "native_fresh_detection":
+                continue
+            label = str(obj.get("label") or "").strip()
+            box = obj.get("box")
+            if not label or not isinstance(box, dict):
+                continue
+            key = self._inventory_key(obj, seen)
+            if key in seen:
+                self.counts["duplicate_inventory_object"] += 1
+                continue
+            seen.add(key)
+            track = self.inventory_tracks.get(key)
+            if track is None:
+                if len(self.inventory_tracks) >= self.config.native.maximum_tracks:
+                    self.counts["inventory_capacity_drops"] += 1
+                    continue
+                track = {
+                    "track_id": self._next_track_id,
+                    "native_track_id": obj.get("native_track_id"),
+                    "native_identity": (
+                        f"{self.camera.id}/{self.session}/{self.identity_epoch}/{obj.get('native_track_id')}"
+                        if type(obj.get("native_track_id")) is int
+                        else f"{self.camera.id}/{self.session}/{self.identity_epoch}/inventory-{key[1]}"
+                    ),
+                    "label": label,
+                    "first_seen": iso(epoch),
+                    "observations": 0,
+                    "consecutive": 0,
+                    "last_monotonic": now,
+                    "box_history": [],
+                    "trajectory": [],
+                    "motion_state": "context",
+                    "motion_extent": None,
+                    "activity_eligible": False,
+                }
+                self.inventory_tracks[key] = track
+                self._next_track_id += 1
+            if now - track["last_monotonic"] > max(
+                self.config.native.maximum_observation_age_seconds,
+                3 / self.fresh_detection_fps,
+            ):
+                track["consecutive"] = 0
+            track.update(
+                last_monotonic=now,
+                last_seen=iso(epoch),
+                box=deepcopy(box),
+                confidence=float(obj.get("confidence") or 0.0),
+                zones=deepcopy(obj.get("zones", [])),
+                incident_eligible=bool(obj.get("incident_eligible")),
+                zone_eligible=bool(obj.get("zone_eligible")),
+                confidence_eligible=obj.get("confidence_eligible"),
+                zone_admission_reason=obj.get("zone_admission_reason"),
+                spatial_zones=deepcopy(obj.get("spatial_zones", [])),
+                detection_frame_width=self.dimensions[0],
+                detection_frame_height=self.dimensions[1],
+            )
+            track["observations"] += 1
+            track["consecutive"] += 1
+            required = self.config.event_class_confirmation_frames.get(
+                label, self.config.event_confirmation_frames
+            )
+            track["state"] = "confirmed" if track["consecutive"] >= required else "tentative"
+            track["confirmed"] = track.get("confirmed", False) or track["state"] == "confirmed"
+            track["max_confidence"] = max(track.get("max_confidence", 0.0), track["confidence"])
+            track["box_history"].append([epoch, box["x1"], box["y1"], box["x2"], box["y2"]])
+            track["trajectory"].append([epoch, (box["x1"]+box["x2"])/2, (box["y1"]+box["y2"])/2])
+            del track["box_history"][:-150]
+            del track["trajectory"][:-150]
+            if self.event_id is not None and track["state"] == "confirmed":
+                self._record_inventory_track(track, epoch)
+        for key, track in self.inventory_tracks.items():
+            if key not in seen:
+                track["consecutive"] = 0
+        return seen
+
+    def _record_inventory_track(self, track, epoch):
+        key = track["track_id"]
+        previous = self._episode_inventory.get(key)
+        stored = {k: deepcopy(v) for k, v in track.items()
+                  if k not in {"last_monotonic", "consecutive", "box_history", "trajectory"}}
+        history = previous["box_history"] if previous else []
+        trajectory = previous["trajectory"] if previous else []
+        point = deepcopy(track["box_history"][-1])
+        if not history or history[-1][0] != point[0]:
+            history.append(point)
+            trajectory.append(deepcopy(track["trajectory"][-1]))
+        stored.update(
+            first_seen=previous["first_seen"] if previous else track["first_seen"],
+            observations=(previous["observations"] + 1 if previous else 1),
+            max_confidence=max(previous["max_confidence"], track["confidence"]) if previous else track["confidence"],
+            box_history=compact_history(history),
+            trajectory=compact_history(trajectory),
+        )
+        self._episode_inventory[key] = stored
+
+    def _capture_inventory(self, now):
+        freshness = max(self.config.native.maximum_observation_age_seconds,
+                        3 / self.fresh_detection_fps)
+        for key in self._inventory_seen:
+            track = self.inventory_tracks.get(key)
+            if (track is not None and track.get("state") == "confirmed"
+                    and track["last_monotonic"] >= now - freshness):
+                self._record_inventory_track(track, datetime.fromisoformat(track["last_seen"]).timestamp())
+
+    def _incident_objects(self, *, visible_track_ids=None, cover=None):
+        objects = self._objects(self._episode_inventory.values())
+        if visible_track_ids is not None:
+            visible = set(visible_track_ids)
+            for item in objects:
+                item["snapshot_visible"] = item.get("track_id") in visible
+        if cover is not None:
+            cover = deepcopy(cover)
+            match = next((item for item in objects
+                          if item.get("track_id") == cover.get("track_id")), None)
+            if match is None:
+                match = next((item for item in objects
+                              if item.get("label") == cover.get("label")
+                              and item.get("native_track_id") == cover.get("native_track_id")), None)
+            for item in objects:
+                item["snapshot_visible"] = False
+            if match is not None:
+                match.update(cover)
+                match["snapshot_visible"] = True
+                match["verification"] = {"status": "confirmed", "source": "main_crop"}
+            else:
+                cover["snapshot_visible"] = True
+                cover["verification"] = {"status": "confirmed", "source": "main_crop"}
+                objects.insert(0, cover)
+        return objects
 
     def _gate(self, confirmed, observation, epoch, now):
         allowed = []
@@ -258,15 +460,22 @@ class NativeActivity:
                            cover=result.get('cover'))
 
     def _activate(self, confirmed, observation, epoch, now, cover=None):
+        self._capture_inventory(now)
         for track in confirmed:
             self._record_activity_track(track, epoch)
         self.last_activity = max(self.last_activity, now)
         self.last_motion_at = max(self.last_motion_at, iso(epoch))
         if self.event_id is None:
-            stored = self._objects(self._episode_tracks.values())
+            visible_ids = {
+                self.inventory_tracks[key]["track_id"]
+                for key in self._inventory_seen
+                if key in self.inventory_tracks
+                and self.inventory_tracks[key].get("state") == "confirmed"
+            }
+            stored = self._incident_objects(visible_track_ids=visible_ids)
             path = self.verified_snapshot(cover) if cover is not None else self.snapshot(observation, epoch)
             if cover is not None:
-                stored = [dict(cover[1], verification={"status": "confirmed", "source": "main_crop"})]
+                stored = self._incident_objects(cover=cover[1])
             event = self.events.add_event(
                 camera_id=self.camera.id, kind="motion", topic="native/object-presence",
                 message="Confirmed native object presence", created_at=min((t["first_seen"] for t in self._episode_tracks.values()), default=iso(epoch)) if cover is not None else iso(epoch),
@@ -325,7 +534,16 @@ class NativeActivity:
                    "frame_width": self.dimensions[0], "frame_height": self.dimensions[1],
                    "source": "live", "native_session": self.session,
                    "recording_overlay_compatible": self.camera.native_same_field_of_view or self.camera.live_url() == self.camera.stream_url}
-        self.events.update_object_tracking(self.event_id, payload, self._objects(self._episode_tracks.values()))
+        payload["inventory_tracks"] = [
+            {k: deepcopy(v) for k, v in track.items() if k not in {"box_history", "trajectory"}}
+            for track in self._episode_inventory.values()
+        ]
+        self.events.update_object_tracking(
+            self.event_id,
+            payload,
+            self._incident_objects(),
+            replace_objects=True,
+        )
         self.publish("object_tracking", {"camera_id": self.camera.id, "event_id": self.event_id, **payload})
         if state == "active":
             self.publish("incident", {"camera_id": self.camera.id, "event_id": self.event_id,
@@ -372,12 +590,16 @@ class NativeActivity:
         self.persist(reason, now=now)
         self.event_id = None
         self._episode_tracks.clear()
+        self._episode_inventory.clear()
         if reason != "complete":
             if self.admission is not None:
                 for token in self._verification_pending:
                     self.admission.cancel(token)
             self._verification_pending.clear()
             self.tracks.clear()
+            self.inventory_tracks.clear()
+            self._inventory_seen.clear()
+            self._next_inventory_id = 1
             self._next_track_id = 1
         self.last_activity = 0.0
 
@@ -391,4 +613,5 @@ class NativeActivity:
                 "motion_states": dict(Counter(track.get("motion_state", "uncertain") for track in self.tracks.values())),
                 "verification_pending": len(self._verification_pending),
                 "verification_recent": list(self._verification_recent),
+                "inventory_count": len(self.inventory_tracks),
                 "tracks": self._objects(self.tracks.values()), "counters": dict(self.counts)}
