@@ -1,0 +1,48 @@
+name: Native cover regression
+on:
+  push:
+    branches:
+      - experiment/native-first-cover-fix
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22'
+      - name: Apply scoped native cover changes
+        run: python scripts/stage_native_cover_fix.py
+      - name: Build static assets for route tests
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+      - name: Install test dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+      - name: Validate native cover regressions
+        env:
+          SURVNG_TEST_TIMEOUT_SECONDS: '180'
+        run: |
+          scripts/run-tests.sh -q tests/test_native_evidence.py tests/test_native_cover_fallback.py tests/test_native_replay_alignment.py tests/test_native_admission.py tests/test_native_first.py
+          python -m py_compile survng/app/native_evidence.py survng/app/native_routes.py survng/app/event_store/store.py
+          git diff --check
+      - name: Commit tested changes without staging helpers
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout 40a9f68efd3afdac3d79580e1b740d03a900a6fb -- .github/workflows/ci.yml
+          git rm .github/workflows/native-cover-fix.yml scripts/stage_native_cover_fix.py
+          git add survng/app/native_evidence.py survng/app/native_routes.py survng/app/event_store/store.py tests/test_native_evidence.py tests/test_native_cover_fallback.py
+          git diff --cached --check
+          git commit -m 'fix(native): preserve live candidates and verify main-frame cover fallback'
+          git push origin HEAD:experiment/native-first-cover-fix
