@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import OrderedDict, deque
 from contextlib import ExitStack
+from copy import deepcopy
 import json
 import math
 import os
