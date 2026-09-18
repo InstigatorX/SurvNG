@@ -53,11 +53,11 @@ def test_moving_vehicle_parks_completes_and_departure_starts_new_episode(activit
     assert activity.event_id is None
     assert activity.events.add_event.call_count == 1
     assert activity.tracks[(7, "car")]["motion_state"] == "stationary"
-    assert activity.events.update_object_tracking.call_args.args[1]["state"] == "complete"
+    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "complete"
     for seq in range(151, 161):
         feed(activity, seq, seq / 5, [obj(x=30 + seq - 150)])
     assert activity.event_id == 2
-    stored = activity.events.update_object_tracking.call_args.args[1]["tracks"][0]
+    stored = activity.events.update_native_incident_state.call_args.args[1]["tracks"][0]
     assert stored["first_seen"] >= "1970-01-01T00:17:10"
     assert stored["box_history"][0][0] >= 1030
 
@@ -68,7 +68,7 @@ def test_moving_person_is_not_suppressed_or_polluted_by_parked_car(activity):
     for seq in range(61, 81):
         feed(activity, seq, seq / 5, [obj(), obj("person", x=10 + (seq - 60) * 2, native_id=8)])
     assert activity.event_id == 1
-    assert {t["label"] for t in activity.events.update_object_tracking.call_args.args[1]["tracks"]} == {"person"}
+    assert {t["label"] for t in activity.events.update_native_incident_state.call_args.args[1]["tracks"]} == {"person"}
     for seq in range(81, 121):
         feed(activity, seq, seq / 5, [obj()])
     assert activity.event_id is None
