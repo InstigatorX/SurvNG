@@ -146,4 +146,6 @@ class NativeRuntime:
         raise ValueError("native model/device changes require a capture reload")
 
     def reconfigure_semantic_search(self, config):
-        raise ValueError("semantic inference is unavailable in the native-first runtime")
+        # Semantic inference remains disabled, but configuration can be stored
+        # without manufacturing a retired inference-role restart.
+        self.semantic_search.config = config.model_copy(deep=True)
