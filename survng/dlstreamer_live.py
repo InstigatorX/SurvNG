@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from collections import OrderedDict, deque
+from collections import deque
 from contextlib import ExitStack
-from copy import deepcopy
 import json
 import math
 import os
@@ -16,7 +15,7 @@ import threading
 import time
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TextIO
 from urllib.parse import urlsplit
 
 from survng.openvino_config import GPU_COMPILATION_NUM_THREADS
