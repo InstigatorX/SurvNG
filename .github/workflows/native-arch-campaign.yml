@@ -1,0 +1,28 @@
+name: Native architecture campaign
+
+on:
+  push:
+    branches:
+      - experiment/native-first-arch-campaign
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+      - name: Native architecture regressions
+        env:
+          SURVNG_TEST_TIMEOUT_SECONDS: "300"
+        run: |
+          mkdir -p survng/static
+          ./scripts/run-tests.sh -q             tests/test_native_first.py             tests/test_native_inventory.py             tests/test_native_stationary.py             tests/test_native_admission.py             tests/test_native_evidence.py             tests/test_native_replay_alignment.py             tests/test_native_spatial.py             tests/test_native_deepsort.py             tests/test_dlstreamer_capture.py             tests/test_dlstreamer_protocol.py             tests/test_config_reload.py             tests/test_manager_lifecycle.py
+          python -m py_compile             survng/app/native_activity.py             survng/app/native_objects.py             survng/app/native_admission.py             survng/app/native_evidence.py             survng/app/native_camera.py             survng/app/native_runtime.py             survng/app/event_store/store.py             survng/dlstreamer_live.py             survng/app/dlstreamer_capture.py             survng/app/config_application.py
+          git diff --check
