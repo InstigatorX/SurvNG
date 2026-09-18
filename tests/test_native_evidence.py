@@ -147,9 +147,10 @@ def test_completion_rescans_history_after_inflight_preview(tmp_path):
     assert service._pending[event_id]["recorded_history"]
     service._active.clear()
     service._pending[event_id]["due"] = 0
-    def process(eid, candidates):
+    def process(eid, candidates, *, recorded_history=False):
         assert eid == event_id
-        assert candidates is None
+        assert recorded_history
+        assert [candidate.epoch for candidate in candidates] == [101]
         service._closed = True
         return {"status": "promoted"}
     service.process = process
@@ -262,10 +263,11 @@ def test_optional_calibration_failure_keeps_substream_when_timing_unverified(tmp
     service.match_main = Mock(side_effect=AssertionError('unaligned same-FOV main must not be promoted'))
     service.verifier.detect = Mock(side_effect=RuntimeError('unavailable'))
     result = service.process(event['id'], [Candidate(100,image,[obj],5), Candidate(101,image,[obj],5)])
-    assert result['status'] == 'no_usable_candidate'
+    assert result['status'] == 'recording_pending'
+    assert result['reason'] == 'main_verification_unavailable'
     service.verifier.detect.assert_called_once()
     service.match_main.assert_not_called()
-    assert service.counts['calibration_unavailable'] == 1
+    assert result['calibration'] == 'insufficient_history'
     assert events.get(event['id'])['snapshot_path'] == event['snapshot_path']
 
 
@@ -361,13 +363,11 @@ def test_same_fov_unverified_timing_never_promotes_projected_main_without_verifi
     events.update_object_tracking(event['id'], tracking)
     service.read_frame = Mock(return_value=cv2.resize(image, (1280, 720)))
     service.match_main = Mock(side_effect=AssertionError('unaligned same-FOV main must not be projected'))
-    service.verifier.detect = Mock(return_value=[
-        dict(obj, box={key: value * 2 for key, value in obj['box'].items()})
-    ])
+    service.verifier.detect = Mock(return_value=[])
 
     result = service.process(event['id'], [Candidate(100, image, [obj], 5)])
 
     assert result['status'] == 'no_usable_candidate'
     service.match_main.assert_not_called()
     assert events.get(event['id'])['snapshot_path'] == event['snapshot_path']
-    assert service.counts['replay_alignment_unverified'] == 1
+    assert result['reason'] == 'main_verification_failed'

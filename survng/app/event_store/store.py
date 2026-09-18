@@ -1658,17 +1658,23 @@ class EventStore(
         except (FileNotFoundError, PermissionError, OSError, RuntimeError, ValueError):
             return
 
-    def promote_native_evidence(self, event_id, snapshot_path, objects, assets, score):
+    def promote_native_evidence(self, event_id, snapshot_path, objects, assets, score, *, diagnostics=None):
         """Commit a selected image and aligned boxes without touching live tracks."""
         portable = portable_media_path(self.storage_dir, snapshot_path)
         stale = []
+        if diagnostics is not None:
+            diagnostics["reason"] = "event_missing"
         updated = None
         with self._lock, self._connect() as conn:
             conn.execute("begin immediate")
             row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
+            if row is not None and diagnostics is not None:
+                diagnostics["reason"] = "snapshot_deletion_pending"
             if row is not None and not snapshot_deletion_claimed(conn, self.storage_dir, portable):
                 existing = json.loads(row["objects_json"] or "[]")
                 previous_score = max((float(x.get("native_cover_score", -1)) for x in existing if x.get("native_cover_score") is not None and x.get("snapshot_visible") is not False), default=-1)
+                if diagnostics is not None:
+                    diagnostics["reason"] = "better_cover_retained"
                 if score > previous_score + 0.05:
                     old_assets = conn.execute("select distinct snapshot_path from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,)).fetchall()
                     stale = [str(x["snapshot_path"]) for x in old_assets if x["snapshot_path"]]
@@ -1679,6 +1685,8 @@ class EventStore(
                     retained = [dict(x, snapshot_visible=False) for x in existing if x.get("label") and (x.get("label"), x.get("track_id")) not in identities]
                     metadata = [x for x in existing if not x.get("label")]
                     conn.execute("update events set snapshot_path=?,snapshot_size_bytes=?,objects_json=? where id=?", (portable, self._snapshot_file_size(portable), json.dumps([*objects,*retained,*metadata]),event_id))
+                    if diagnostics is not None:
+                        diagnostics["reason"] = "promoted"
                     updated = self._finish_evidence_commit(conn,event_id,row,reason="native_cover_selected",cover_satisfied=True)
         if updated is None:
             stale.extend(portable_media_path(self.storage_dir, path) for path, _ in assets)
