@@ -308,6 +308,7 @@ class NativeMainFrameVerifier:
                 else "unverified"
             ),
             "vote": vote,
+            "votes": [vote],
             "checks": [{"epoch": candidate.epoch, "votes": frame_votes}],
             "reason": "main_crop_verification",
         }
