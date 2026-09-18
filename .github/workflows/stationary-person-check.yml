@@ -21,6 +21,7 @@ jobs:
           .venv/bin/pip install -r requirements.txt pytest anyio httpx2
       - name: Focused native stationary regression
         run: |
+          mkdir -p survng/static
           ./scripts/run-tests.sh -q             tests/test_native_stationary.py             tests/test_native_first.py             tests/test_config.py             tests/test_native_admission.py             tests/test_native_spatial.py
           git diff --check
           python -m py_compile survng/app/native_motion.py survng/app/config.py
