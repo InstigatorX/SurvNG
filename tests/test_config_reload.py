@@ -608,6 +608,37 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertFalse(result["camera_workers_restarted"])
         self.assertEqual(effective.cameras[0].live_view.live.focal_x, 72)
 
+    def test_native_runtime_treats_legacy_tracking_depth_motion_as_compatibility_only(self) -> None:
+        active = Mock()
+        active.native_first = True
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.tracking.lost_timeout_seconds = 4.0
+        incoming.detector.depth.max_distance_m = 90.0
+        incoming.motion_qualification.visual_backup_min_score = 0.77
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_object_tracking.assert_not_called()
+        active.reconfigure_inference.assert_not_called()
+        active.reconfigure_motion.assert_not_called()
+        assert set(result["compatibility_only"]) == {
+            "legacy_tracking",
+            "legacy_depth",
+            "legacy_motion",
+        }
+        assert result["apply_mode"] == "unchanged"
+        assert effective.detector.tracking.lost_timeout_seconds == 4.0
+
+
     def test_detector_policy_change_hot_applies_without_restarting_cameras(self) -> None:
         active = Mock()
         current = AppConfig()

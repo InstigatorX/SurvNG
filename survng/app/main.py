@@ -793,7 +793,14 @@ def apply_config_update(
     with MANAGER_RELOAD_LOCK:
         current = config
         previous_ffmpeg_path = current.ffmpeg_path
-        if manager_owned_config(current) != manager_owned_config(effective):
+        native_first = getattr(get_manager(), "native_first", False) is True
+        if manager_owned_config(
+            current,
+            native_first=native_first,
+        ) != manager_owned_config(
+            effective,
+            native_first=native_first,
+        ):
             if effective.ffmpeg_path != previous_ffmpeg_path:
                 _recording_media_runtime.clear_hardware_probe_caches()
             applied = reload_manager(effective, assign_ids=False, persist=persist)
