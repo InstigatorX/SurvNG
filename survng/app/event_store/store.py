@@ -6,6 +6,7 @@ import math
 import os
 import sqlite3
 import threading
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
