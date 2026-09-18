@@ -1719,13 +1719,122 @@ class EventStore(
             updated = self._finish_evidence_commit(conn, event_id, row, reason="native_replay_aligned")
         return dict(updated) if updated is not None else None
 
+    @staticmethod
+    def _merge_native_inventory_objects(
+        existing_objects: list[dict[str, Any]],
+        inventory_objects: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Merge native inventory without moving presentation evidence off its raster."""
+        existing_labels = [
+            item for item in existing_objects
+            if isinstance(item, dict) and item.get("label")
+        ]
+        metadata = [
+            item for item in existing_objects
+            if not (isinstance(item, dict) and item.get("label"))
+            and not (
+                isinstance(item, dict)
+                and item.get("status") == "object_tracking"
+            )
+        ]
+        by_track = {
+            item.get("track_id"): item
+            for item in existing_labels
+            if item.get("track_id") is not None
+        }
+        by_identity = {
+            str(item.get("native_identity")): item
+            for item in existing_labels
+            if item.get("native_identity")
+        }
+        matched = set()
+        presentation_fields = {
+            "box", "mask_polygon", "confidence",
+            "detection_frame_width", "detection_frame_height",
+            "snapshot_visible", "snapshot_source", "snapshot_captured_at",
+            "snapshot_detection_confidence", "frame_source",
+            "frame_captured_at_epoch", "native_alignment",
+            "native_cover_verified", "box_provenance", "verification",
+            "native_cover_score", "snapshot_quality_score",
+            "snapshot_subject_area_ratio", "snapshot_edge_clearance_ratio",
+            "snapshot_primary_subject", "temporal_sample_offset_seconds",
+        }
+        merged = []
+        for incoming in inventory_objects:
+            if not isinstance(incoming, dict) or not incoming.get("label"):
+                continue
+            item = deepcopy(incoming)
+            existing = by_track.get(incoming.get("track_id"))
+            if existing is None and incoming.get("native_identity"):
+                existing = by_identity.get(str(incoming["native_identity"]))
+            if existing is not None:
+                matched.add(id(existing))
+                if existing.get("snapshot_visible") is not False:
+                    for field in presentation_fields:
+                        if field in existing:
+                            item[field] = deepcopy(existing[field])
+            else:
+                # The current event snapshot predates this object's confirmed
+                # appearance. Retain the object but never draw it on old pixels.
+                item["snapshot_visible"] = False
+            merged.append(item)
+        merged.extend(
+            dict(item, snapshot_visible=False)
+            for item in existing_labels
+            if id(item) not in matched
+        )
+        return [*merged, *metadata]
+
+    def update_native_incident_state(
+        self,
+        event_id: int,
+        tracking: dict[str, Any],
+        inventory_objects: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Atomically persist native tracking metadata and incident inventory.
+
+        Admission evidence and cover presentation remain independent: inventory
+        updates can add context objects, but only matching objects inherit the
+        current snapshot's presentation coordinates.
+        """
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute(
+                "select * from events where id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                existing = json.loads(str(row["objects_json"] or "[]"))
+            except (TypeError, ValueError):
+                existing = []
+            if not isinstance(existing, list):
+                existing = []
+            objects = self._merge_native_inventory_objects(
+                existing,
+                inventory_objects,
+            )
+            objects.append(
+                {"status": "object_tracking", "object_tracking": tracking}
+            )
+            conn.execute(
+                "update events set objects_json = ? where id = ?",
+                (json.dumps(objects, separators=(",", ":")), event_id),
+            )
+            updated = self._finish_evidence_commit(
+                conn,
+                event_id,
+                row,
+                reason="tracking_updated",
+            )
+        return dict(updated) if updated is not None else None
+
     def update_object_tracking(
         self,
         event_id: int,
         tracking: dict[str, Any],
         tracked_objects: list[dict[str, Any]] | None = None,
-        *,
-        replace_objects: bool = False,
     ) -> dict[str, Any] | None:
         """Atomically replace tracking metadata without losing concurrent event data."""
         with self._lock, self._connect() as conn:
@@ -1749,69 +1858,20 @@ class EventStore(
             objects = [
                 item
                 for item in objects
-                if not (isinstance(item, dict) and item.get("status") == "object_tracking")
-            ]
-            if tracked_objects and replace_objects:
-                existing_labels = [
-                    item for item in objects
-                    if isinstance(item, dict) and item.get("label")
-                ]
-                metadata = [
-                    item for item in objects
-                    if not (isinstance(item, dict) and item.get("label"))
-                ]
-                by_track = {
-                    item.get("track_id"): item
-                    for item in existing_labels
-                    if item.get("track_id") is not None
-                }
-                matched = set()
-                presentation_fields = {
-                    "box", "mask_polygon", "confidence",
-                    "detection_frame_width", "detection_frame_height",
-                    "snapshot_visible", "snapshot_source", "snapshot_captured_at",
-                    "snapshot_detection_confidence", "frame_source",
-                    "frame_captured_at_epoch", "native_alignment",
-                    "native_cover_verified", "box_provenance", "verification",
-                    "native_cover_score", "snapshot_quality_score",
-                    "snapshot_subject_area_ratio", "snapshot_edge_clearance_ratio",
-                    "snapshot_primary_subject", "temporal_sample_offset_seconds",
-                }
-                merged = []
-                for incoming in tracked_objects:
-                    if not isinstance(incoming, dict) or not incoming.get("label"):
-                        continue
-                    item = dict(incoming)
-                    if isinstance(incoming.get("box"), dict):
-                        item["box"] = dict(incoming["box"])
-                    existing = by_track.get(incoming.get("track_id"))
-                    if existing is None:
-                        existing = next((
-                            candidate for candidate in existing_labels
-                            if candidate.get("label") == incoming.get("label")
-                            and candidate.get("native_track_id") == incoming.get("native_track_id")
-                            and candidate.get("native_track_id") is not None
-                        ), None)
-                    if existing is not None:
-                        matched.add(id(existing))
-                        if existing.get("snapshot_visible") is not False:
-                            for field in presentation_fields:
-                                if field in existing:
-                                    item[field] = existing[field]
-                    else:
-                        item["snapshot_visible"] = False
-                    merged.append(item)
-                merged.extend(
-                    dict(item, snapshot_visible=False)
-                    for item in existing_labels
-                    if id(item) not in matched
+                if not (
+                    isinstance(item, dict)
+                    and item.get("status") == "object_tracking"
                 )
-                objects = [*merged, *metadata]
-            elif tracked_objects and not had_tracking:
+            ]
+            if tracked_objects and not had_tracking:
                 assignments = {
                     (
                         str(item.get("label") or ""),
-                        json.dumps(item.get("box"), sort_keys=True, separators=(",", ":")),
+                        json.dumps(
+                            item.get("box"),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                     ): item
                     for item in tracked_objects
                     if item.get("track_id") is not None
@@ -1819,21 +1879,38 @@ class EventStore(
                 for item in objects:
                     if not isinstance(item, dict) or not item.get("label"):
                         continue
-                    assigned = assignments.get((
-                        str(item.get("label") or ""),
-                        json.dumps(item.get("box"), sort_keys=True, separators=(",", ":")),
-                    ))
+                    assigned = assignments.get(
+                        (
+                            str(item.get("label") or ""),
+                            json.dumps(
+                                item.get("box"),
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        )
+                    )
                     if assigned is not None:
                         item["track_id"] = assigned["track_id"]
                         item["track_state"] = assigned.get("track_state")
-                        item["track_observations"] = assigned.get("track_observations")
-            objects.append({"status": "object_tracking", "object_tracking": tracking})
-            objects_json = json.dumps(objects, separators=(",", ":"))
+                        item["track_observations"] = assigned.get(
+                            "track_observations"
+                        )
+            objects.append(
+                {"status": "object_tracking", "object_tracking": tracking}
+            )
             conn.execute(
                 "update events set objects_json = ? where id = ?",
-                (objects_json, event_id),
+                (
+                    json.dumps(objects, separators=(",", ":")),
+                    event_id,
+                ),
             )
-            updated = self._finish_evidence_commit(conn, event_id, row, reason="tracking_updated")
+            updated = self._finish_evidence_commit(
+                conn,
+                event_id,
+                row,
+                reason="tracking_updated",
+            )
         return dict(updated) if updated is not None else None
 
     def for_camera_range(
