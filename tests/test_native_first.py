@@ -55,13 +55,13 @@ def test_effective_fps_tracks_live_policy_changes_without_stale_cache(activity):
 def test_episode_history_updates_do_not_mutate_published_snapshots(activity):
     feed(activity, 1)
     feed(activity, 2)
-    published = activity.events.update_object_tracking.call_args.args[1]
+    published = activity.events.update_native_incident_state.call_args.args[1]
     history = published['tracks'][0]['box_history']
     original = [list(point) for point in history]
     for sequence in range(3, 50):
         feed(activity, sequence, received=100+sequence/5)
     assert history == original
-    assert len(activity._episode_tracks[(7, 'person')]['box_history']) > len(history)
+    assert len(activity.inventory.tracking_tracks()[0]['box_history']) > len(history)
 
 
 def test_predictions_cannot_create_or_extend_activity(activity):
@@ -92,7 +92,7 @@ def test_empty_fresh_result_ends_presence(activity):
         feed(activity, sequence, objects=[], received=100 + sequence / 5)
     assert activity.event_id is None
     assert activity.health == "healthy"
-    assert activity.events.update_object_tracking.call_args.args[1]["state"] == "complete"
+    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "complete"
 
 
 
@@ -108,7 +108,7 @@ def test_completion_timer_between_fresh_frames_waits_for_evidence(activity):
     # The next fresh empty frame covers the inactivity deadline.
     activity.consume(observation(27, objects=[], received=105.6), now=105.6, epoch=1005.6)
     assert activity.event_id is None
-    assert activity.events.update_object_tracking.call_args.args[1]["state"] == "complete"
+    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "complete"
 
 
 def test_completion_wait_still_detects_metadata_loss(activity):
@@ -121,7 +121,7 @@ def test_completion_wait_still_detects_metadata_loss(activity):
     activity.tick(now=107.3)
     assert activity.event_id is None
     assert activity.health == "metadata_stale"
-    assert activity.events.update_object_tracking.call_args.args[1]["state"] == "metadata_lost"
+    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "metadata_lost"
 
 def test_reconnect_restarts_confirmation_and_qualifies_identity(activity):
     feed(activity, 1)
@@ -140,7 +140,7 @@ def test_missing_metadata_reports_health_and_settles(activity):
     activity.tick(now=107)
     assert activity.health == "metadata_stale"
     assert activity.event_id is None
-    assert activity.events.update_object_tracking.call_args.args[1]["state"] == "metadata_lost"
+    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "metadata_lost"
 
 
 @pytest.mark.parametrize("change", [{"native_track_id": None}, {"native_track_id": True}, {"confidence": .01}])
@@ -347,11 +347,11 @@ def test_native_zones_filter_admission_and_main_overlay_requires_known_geometry(
     activity.camera.zones = []
     feed(activity, 3)
     feed(activity, 4)
-    payload = activity.events.update_object_tracking.call_args.args[1]
+    payload = activity.events.update_native_incident_state.call_args.args[1]
     assert payload["recording_overlay_compatible"] is False
     activity.camera.native_same_field_of_view = True
     activity.persist("active", now=102)
-    assert activity.events.update_object_tracking.call_args.args[1]["recording_overlay_compatible"] is True
+    assert activity.events.update_native_incident_state.call_args.args[1]["recording_overlay_compatible"] is True
 
 
 def test_zone_threshold_lowering_rebuilds_native_graph():
@@ -463,7 +463,7 @@ def test_sparse_fresh_frames_preserve_confirmation_and_health(activity):
     activity.tick(now=120)
     assert activity.health == "healthy"
     assert activity.event_id == 1
-    tracking = activity.events.update_object_tracking.call_args.args[1]
+    tracking = activity.events.update_native_incident_state.call_args.args[1]
     assert tracking["sample_fps"] == 0.1
     activity.tick(now=126)
     assert activity.health == "metadata_stale"
