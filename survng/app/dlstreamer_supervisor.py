@@ -210,9 +210,19 @@ class _StreamInbox:
 class _SharedLiveProcess:
     """One survng-dls supervisor hosting every live camera pipeline."""
 
-    def __init__(self, command: list[str], *, read_timeout_ms: int) -> None:
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        read_timeout_ms: int,
+        inference_stall_seconds: float = self._inference_stall_seconds,
+    ) -> None:
         del read_timeout_ms
         self._command = command
+        self._inference_stall_seconds = max(
+            0.001,
+            float(inference_stall_seconds),
+        )
         self._lock = threading.Lock()
         self._command_lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
@@ -407,7 +417,7 @@ class _SharedLiveProcess:
             # Startup/resume grace alone is not evidence of pool progress.
             if (
                 inbox.last_inference_at is not None
-                and now - inbox.last_inference_at <= DLSTREAMER_INFERENCE_STALL_SECONDS
+                and now - inbox.last_inference_at <= self._inference_stall_seconds
             ):
                 return
             if inbox.inference_started_at is None:
@@ -425,7 +435,7 @@ class _SharedLiveProcess:
                 # continuous video. Give its first resumed frame the normal
                 # bounded inference budget without inventing result progress.
                 progress = max(progress, inbox.video_resumed_at)
-            if now - progress > DLSTREAMER_INFERENCE_STALL_SECONDS:
+            if now - progress > self._inference_stall_seconds:
                 stalled = True
         # Grace for a newly added/resumed stream must not keep an already
         # stalled, continuously active pool alive indefinitely through churn.
