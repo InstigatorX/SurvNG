@@ -111,7 +111,10 @@ def test_incident_inventory_keeps_confirmed_context_objects_without_using_them_f
     # Identity/history is owned by the registry, not duplicated by activity.
     assert not hasattr(activity, "inventory_tracks")
     assert not hasattr(activity, "_episode_tracks")
-    assert len(activity.registry.tracks) == 3
+    assert len(activity.inventory.tracking_tracks()) == 3
+    # The one-frame bird may remain tentative in the live registry, but it is
+    # not promoted into the incident inventory.
+    assert len(activity.registry.tracks) == 4
 
 
 def test_registry_uses_one_identity_when_native_label_changes_with_same_id():
