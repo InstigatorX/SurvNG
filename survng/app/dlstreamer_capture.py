@@ -538,6 +538,7 @@ class DlStreamerCaptureBackend:
                 self._shared = _SharedLiveProcess(
                     self.command(),
                     read_timeout_ms=self.options.read_timeout_ms,
+                    inference_stall_seconds=DLSTREAMER_INFERENCE_STALL_SECONDS,
                 )
                 self._shared.start()
             shared = self._shared
