@@ -22,7 +22,8 @@ def activity():
     events = Mock()
     events.add_event.side_effect = [{"id": 1}, {"id": 2}, {"id": 3}]
     return NativeActivity(CameraConfig(id="front", name="Front", stream_url="rtsp://example.test/live"),
-                          DetectorConfig(enabled=True), events, Mock(), Mock(return_value=""))
+                          DetectorConfig(enabled=True, native={"stationary": {"labels": []}}),
+                          events, Mock(), Mock(return_value=""))
 
 
 def feed(activity, sequence, **kwargs):
@@ -189,7 +190,8 @@ def test_native_event_persists_replay_and_notification_duration(tmp_path):
     from survng.app.incident_utils import event_end_epoch
     events = EventStore(tmp_path)
     activity = NativeActivity(CameraConfig(id="front", name="Front", stream_url="rtsp://example.test/live"),
-                              DetectorConfig(enabled=True), events, Mock(), Mock(return_value=""))
+                              DetectorConfig(enabled=True, native={"stationary": {"labels": []}}),
+                              events, Mock(), Mock(return_value=""))
     feed(activity, 1)
     feed(activity, 2)
     for sequence in range(3, 18):

@@ -825,7 +825,7 @@ class ObjectTrackingConfig(BaseModel):
 
 class NativeStationaryConfig(BaseModel):
     enabled: bool = True
-    labels: list[str] = Field(default_factory=lambda: ["car", "truck", "bus", "van", "suv", "motorcycle"], max_length=64)
+    labels: list[str] = Field(default_factory=lambda: ["person", "car", "truck", "bus", "van", "suv", "motorcycle"], max_length=64)
     stationary_seconds: float = Field(default=8.0, ge=1.0, le=120.0)
     window_seconds: float = Field(default=2.0, ge=0.5, le=10.0)
     moving_threshold: float = Field(default=0.15, ge=0.01, le=2.0)
