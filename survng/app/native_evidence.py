@@ -5,7 +5,7 @@ CPU detector confirms the subject in the full-resolution recording before promot
 """
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -142,6 +142,7 @@ class NativeEvidenceService:
         self._threads = []
         self._closed = False
         self.counts = Counter()
+        self.recent = deque(maxlen=32)
         self.verifier = NativeEvidenceVerifier(config.detector)
         from .native_admission import NativeAdmission
         self.admission = NativeAdmission(self)
@@ -171,7 +172,10 @@ class NativeEvidenceService:
 
     def status(self):
         with self._condition:
-            return {"queued": len(self._pending), "active": len(self._active), "counters": dict(self.counts), "admission": self.admission.status()}
+            return {"queued": sum(job["due"] != float("inf") for job in self._pending.values()),
+                    "retained": sum(job["due"] == float("inf") for job in self._pending.values()),
+                    "active": len(self._active), "counters": dict(self.counts),
+                    "recent": list(self.recent), "admission": self.admission.status()}
 
     def offer(self, event_id, epoch, frame, objects, size):
         # Called at most once a second by the native camera worker. Pixel work
@@ -198,6 +202,10 @@ class NativeEvidenceService:
                 return
             job = self._pending.setdefault(event_id, {"due": time.monotonic()+20, "deadline": time.monotonic()+120, "candidates": []})
             job["candidates"] = shortlist([*job["candidates"], candidate])
+            job["version"] = job.get("version", 0) + 1
+            job["due"] = min(job["due"], time.monotonic()+20)
+            if not job.get("recorded_history"):
+                job["deadline"] = time.monotonic()+120
             self._condition.notify_all()
 
     def enqueue(self, event_id):
@@ -210,6 +218,8 @@ class NativeEvidenceService:
             # Preserve completion during preview processing; rescan all tracks.
             job = self._pending.setdefault(event_id, {"due": time.monotonic()+15, "deadline": time.monotonic()+120, "candidates": []})
             job["recorded_history"] = True
+            job["version"] = job.get("version", 0) + 1
+            job["due"] = min(job["due"], time.monotonic()+15)
             job["deadline"] = time.monotonic()+120
             self._condition.notify_all()
 
@@ -218,28 +228,58 @@ class NativeEvidenceService:
             with self._condition:
                 if self._closed:
                     return
-                due = [(key, job) for key, job in self._pending.items() if key not in self._active and job["due"] <= time.monotonic()]
+                now = time.monotonic()
+                for key, cached in list(self._pending.items()):
+                    if key not in self._active and cached["due"] == float("inf") and cached["deadline"] <= now:
+                        del self._pending[key]
+                        self.counts["retained_expired"] += 1
+                due = [(key, job) for key, job in self._pending.items()
+                       if key not in self._active and job["due"] <= now]
                 if not due:
                     self._condition.wait(1)
                     continue
                 event_id, job = min(due, key=lambda item: item[1]["due"])
-                self._pending.pop(event_id)
+                # Keep a single job owner while it runs. Completion/new frames may
+                # update it concurrently, but cannot discard the retained shortlist.
+                version = job.get("version", 0)
+                candidates = list(job["candidates"])
+                recorded_history = bool(job.get("recorded_history"))
+                job["due"] = float("inf")
                 self._active.add(event_id)
             try:
-                result = self.process(event_id, None if job.get("recorded_history") else job["candidates"])
-                self.counts[result["status"]] += 1
-                if result["status"] == "recording_pending" and time.monotonic() < job["deadline"]:
-                    with self._condition:
-                        job["due"] = time.monotonic()+10
-                        self._pending.setdefault(event_id, job)
-            except Exception:
-                if self._closed:
-                    return
-                self.counts["failed"] += 1
-                LOGGER.exception("Native evidence failed for event %s", event_id)
+                result = self.process(event_id, candidates, recorded_history=recorded_history)
+            except Exception as exc:
+                result = {"event_id": event_id, "status": "failed", "reason": "processing_error",
+                          "error_type": type(exc).__name__}
+                if not self._closed:
+                    LOGGER.exception("Native evidence failed for event %s", event_id)
+                    self._record_result(result)
             finally:
                 with self._condition:
                     self._active.discard(event_id)
+            self.counts[result["status"]] += 1
+            exhausted = False
+            with self._condition:
+                if self._closed or self._pending.get(event_id) is not job:
+                    continue
+                changed = job.get("version", 0) != version
+                retry = result["status"] in {"recording_pending", "failed"}
+                if retry and time.monotonic() < job["deadline"]:
+                    job["due"] = min(job["due"], time.monotonic()+10)
+                elif changed:
+                    # enqueue/offer already set the next due time and kept the
+                    # terminal rescan flag. Never overwrite newer work with a retry.
+                    continue
+                elif recorded_history or result["status"] in {"event_missing", "not_native"}:
+                    self._pending.pop(event_id)
+                    exhausted = retry
+                else:
+                    # A preview may succeed before completion. Retain its three
+                    # exact live images, bounded by queue capacity and idle expiry.
+                    job["due"] = float("inf")
+                    exhausted = retry
+            if exhausted:
+                self._record_result(dict(result, retry_exhausted=True))
 
     def read_frame(self, camera_id, epoch, source, maximum_width=0):
         row = self.recorder.recording_at(camera_id, epoch, source=source)
@@ -257,7 +297,7 @@ class NativeEvidenceService:
             return None
         return cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
 
-    def recorded_candidates(self, event, tracking):
+    def recorded_candidates(self, event, tracking, retained=()):
         # Replay metadata nominates a bounded set of timestamps. Native pixels
         # are unavailable for old incidents, so use recorded live evidence.
         width, height = tracking.get("frame_width", 0), tracking.get("frame_height", 0)
@@ -275,6 +315,8 @@ class NativeEvidenceService:
         candidates = []
         missing = False
         for epoch in epochs:
+            if any(abs(epoch - candidate.epoch) < 0.5 for candidate in retained):
+                continue
             if self._closed:
                 break
             objects = []
@@ -424,16 +466,31 @@ class NativeEvidenceService:
             matched.append(obj)
         return matched
 
-    def process(self, event_id, candidates=None):
+    def _record_result(self, result):
+        summary = {"source": "native_cover", "recorded_at_epoch": time.time(), **result}
+        try:
+            if result["status"] not in {"event_missing", "not_native"} and self.events.get(result["event_id"]):
+                self.events.record_evidence_attempt(result["event_id"], summary)
+        except Exception as exc:
+            self.counts["diagnostics_failed"] += 1
+            LOGGER.warning("Native cover diagnostics unavailable for event %s (%s)",
+                           result["event_id"], type(exc).__name__)
+        with self._condition:
+            self.recent.append(summary)
+
+
+    def process(self, event_id, candidates=None, *, recorded_history=False):
         assets = []
         try:
-            return self._process(event_id, candidates, assets)
+            result = self._process(event_id, candidates, assets, recorded_history=recorded_history)
+            self._record_result(result)
+            return result
         finally:
             # Durable references protect every successfully archived image.
             for path, _ in assets:
                 self.events._delete_snapshot_if_unreferenced(path, preserve_archive=True)
 
-    def _process(self, event_id, candidates, assets):
+    def _process(self, event_id, candidates, assets, *, recorded_history=False):
         event = self.events.get(event_id)
         if not event:
             return {"event_id": event_id, "status": "event_missing"}
@@ -441,8 +498,20 @@ class NativeEvidenceService:
         if tracking.get("implementation") != "gvatrack":
             return {"event_id": event_id, "status": "not_native"}
         pending = False
+        retained = list(candidates or [])
+        if recorded_history or not retained:
+            recorded, pending = self.recorded_candidates(event, tracking, retained)
+            candidates = [*retained, *recorded]
+        else:
+            candidates = retained
+        # Cover selection is bounded and independent of calibration history.
+        candidates = shortlist(candidates)
+        details = {"retained_live_candidates": len(retained),
+                   "cover_candidates": len(candidates), "reasons": {}}
+        failures = Counter()
         if not candidates:
-            candidates, pending = self.recorded_candidates(event, tracking)
+            return {"event_id": event_id, "status": "recording_pending" if pending else "no_usable_candidate",
+                    "reason": "live_recording_unavailable" if pending else "no_cover_candidate", **details}
         best = None
         camera = next((camera for camera in self.config.cameras if camera.id == event["camera_id"]), None)
         same_fov = bool(camera and camera.native_same_field_of_view)
@@ -470,14 +539,18 @@ class NativeEvidenceService:
         # small for trajectory calibration. Calibrate from the full persisted
         # track history instead, then rerun cover promotion at the corrected
         # main-stream timestamp.
+        epochs = calibration_epochs(tracking) if calibrate else []
+        details["calibration"] = "verified" if same_fov_aligned else "unverified"
+        if calibrate and (len(epochs) < 5 or epochs[-1] - epochs[0] < 3):
+            details["calibration"] = "insufficient_history"
+            calibrate = False
         if calibrate:
             try:
                 timing_observations, calibration_pending = self.replay_calibration_observations(
                     event, tracking
                 )
             except Exception as exc:
-                if require_verification:
-                    raise
+                details["calibration"] = "unavailable"
                 self.counts["calibration_unavailable"] += 1
                 LOGGER.warning(
                     "Native replay calibration unavailable for event %s (%s)",
@@ -501,86 +574,111 @@ class NativeEvidenceService:
                                 "evidence_revision": aligned["evidence_revision"],
                             },
                         )
-                        return self._process(event_id, candidates, assets)
+                        return self._process(event_id, candidates, assets, recorded_history=False)
 
-        # Without main/live clock alignment, projected same-FOV boxes can be
-        # geometrically perfect but temporally wrong. When main verification
-        # is disabled, retain the existing correctly annotated live/substream
-        # evidence rather than publish a confident-looking misplaced box.
-        if same_fov and not same_fov_aligned and not require_verification:
-            waiting = pending or tracking.get("state") != "complete"
-            self.counts[
-                "replay_alignment_pending" if waiting else "replay_alignment_unverified"
-            ] += 1
-            return {
-                "event_id": event_id,
-                "status": "recording_pending" if waiting else "no_usable_candidate",
-            }
-
-        for candidate in candidates[:12]:
+        frame_verification = same_fov and not same_fov_aligned
+        for candidate in candidates:
             if self._closed:
                 break
-            main_epoch = (
-                candidate.epoch - float(replay_offset)
-                if same_fov_aligned
-                else candidate.epoch
-            )
-            main = self.read_frame(event["camera_id"], main_epoch, "main")
-            if main is None:
-                pending = True
-                continue
-            objects = (
-                self.same_fov_main(candidate, main, main_epoch, float(replay_offset))
-                if same_fov_aligned
-                else self.match_main(candidate, main)
-            )
-            self.verifier.config = self.config.detector
-            detections = []
-            if require_verification and objects:
-                detections = self.verifier.detect(main)
-            if require_verification:
-                verified = []
-                for obj in objects:
-                    expected = obj["box"]
-                    matching = []
-                    for detected in detections:
-                        threshold = self.config.detector.event_class_confidence_thresholds.get(
-                            obj["label"], self.config.detector.confidence_threshold
-                        )
-                        if (
-                            detected.get("label") != obj["label"]
-                            or detected.get("confidence", 0) < threshold
-                        ):
-                            continue
-                        actual = detected.get("box") or {}
-                        if (
-                            all(k in actual for k in ("x1", "y1", "x2", "y2"))
-                            and matches_object_extent(expected, actual)
-                        ):
-                            matching.append(detected)
-                    if matching:
-                        actual = max(matching, key=lambda x: x.get("confidence", 0))
-                        obj.update(
-                            box=actual["box"],
-                            confidence=actual["confidence"],
-                            native_cover_verified=True,
-                            box_provenance="detected_in_main",
-                            verification={"status": "confirmed", "source": "main"},
-                        )
-                        verified.append(obj)
-                objects = verified
+            if frame_verification:
+                # A still-image check is not recording-clock calibration. Use
+                # only a box detected on the returned main image, never a
+                # projected box or another timestamp's annotation.
+                self.verifier.config = self.config.detector
+                try:
+                    checked = self.admission.verify(event["camera_id"], [candidate])
+                except Exception as exc:
+                    failures["main_verification_unavailable"] += 1
+                    pending = True
+                    LOGGER.warning("Native cover verification unavailable for event %s (%s)",
+                                   event_id, type(exc).__name__)
+                    break
+                cover = checked.get("cover") if checked.get("status") == "confirmed" else None
+                if cover is None:
+                    votes = [vote for check in checked.get("checks", []) for vote in check.get("votes", [])]
+                    if "unavailable" in votes or "unavailable" in checked.get("votes", []):
+                        pending = True
+                        failures["main_recording_unavailable"] += 1
+                    else:
+                        failures["main_verification_failed"] += 1
+                    continue
+                main, detected, main_epoch = cover
+                objects = [deepcopy(detected)]
+                objects[0].pop("mask_polygon", None)
+                objects[0].update(
+                    frame_source="recorded_main", frame_captured_at_epoch=main_epoch,
+                    detection_frame_width=main.shape[1], detection_frame_height=main.shape[0],
+                    snapshot_visible=True, native_cover_verified=True,
+                    box_provenance="detected_in_main",
+                    verification={"status": "confirmed", "source": "main"},
+                    native_alignment={"method": "main_frame_verified", "nomination_epoch": candidate.epoch,
+                                      "sample_offset_seconds": main_epoch - candidate.epoch},
+                )
             else:
-                for obj in objects:
-                    obj.update(
-                        native_cover_verified=False,
-                        box_provenance="projected_from_substream",
-                        verification={"status": "confirmed", "source": "substream"},
-                    )
+                main_epoch = (
+                    candidate.epoch - float(replay_offset)
+                    if same_fov_aligned
+                    else candidate.epoch
+                )
+                main = self.read_frame(event["camera_id"], main_epoch, "main")
+                if main is None:
+                    pending = True
+                    failures["main_recording_unavailable"] += 1
+                    continue
+                objects = (
+                    self.same_fov_main(candidate, main, main_epoch, float(replay_offset))
+                    if same_fov_aligned
+                    else self.match_main(candidate, main)
+                )
+                self.verifier.config = self.config.detector
+                detections = []
+                if require_verification and objects:
+                    detections = self.verifier.detect(main)
+                if require_verification:
+                    verified = []
+                    for obj in objects:
+                        expected = obj["box"]
+                        matching = []
+                        for detected in detections:
+                            threshold = self.config.detector.event_class_confidence_thresholds.get(
+                                obj["label"], self.config.detector.confidence_threshold
+                            )
+                            if (
+                                detected.get("label") != obj["label"]
+                                or detected.get("confidence", 0) < threshold
+                            ):
+                                continue
+                            actual = detected.get("box") or {}
+                            if (
+                                all(k in actual for k in ("x1", "y1", "x2", "y2"))
+                                and matches_object_extent(expected, actual)
+                            ):
+                                matching.append(detected)
+                        if matching:
+                            actual = max(matching, key=lambda x: x.get("confidence", 0))
+                            obj.update(
+                                box=actual["box"],
+                                confidence=actual["confidence"],
+                                native_cover_verified=True,
+                                box_provenance="detected_in_main",
+                                verification={"status": "confirmed", "source": "main"},
+                            )
+                            verified.append(obj)
+                    objects = verified
+                else:
+                    for obj in objects:
+                        obj.update(
+                            native_cover_verified=False,
+                            box_provenance="projected_from_substream",
+                            verification={"status": "confirmed", "source": "substream"},
+                        )
             score = candidate_score(main, objects)
             if score is None:
                 self.counts["main_rejected"] += 1
+                failures["image_quality_rejected"] += 1
                 continue
             if main.shape[0] * main.shape[1] <= candidate.image.shape[0] * candidate.image.shape[1]:
+                failures["main_not_higher_resolution"] += 1
                 continue
             for obj in objects:
                 obj["native_cover_score"] = score
@@ -612,6 +710,8 @@ class NativeEvidenceService:
                 directory, f"native-{event_id}-{uuid.uuid4().hex}", main
             )
             if output_path is None:
+                failures["image_write_failed"] += 1
+                pending = True
                 continue
             assets.append((str(output_path), objects))
             if len(assets) > 3:
@@ -620,8 +720,15 @@ class NativeEvidenceService:
                 Path(lowest[0]).unlink(missing_ok=True)
             if best is None or score > best[0]:
                 best = (score, str(output_path), objects, main.shape[1], main.shape[0])
+        details["reasons"] = dict(failures)
         if not best:
+            reason = next((name for name in ("main_verification_unavailable", "image_write_failed",
+                                           "main_recording_unavailable", "main_verification_failed",
+                                           "image_quality_rejected", "main_not_higher_resolution")
+                           if failures[name]), "no_usable_candidate")
             return {
+                **details,
+                "reason": reason,
                 "event_id": event_id,
                 "status": (
                     "recording_pending"
@@ -632,8 +739,9 @@ class NativeEvidenceService:
                 ),
             }
         score, output_path, objects, width, height = best
+        adoption = {}
         result = self.events.promote_native_evidence(
-            event_id, output_path, objects, assets, score
+            event_id, output_path, objects, assets, score, diagnostics=adoption
         )
         if result:
             self.publish(
@@ -646,7 +754,11 @@ class NativeEvidenceService:
             )
         return {
             "event_id": event_id,
-            "status": "promoted" if result else "kept_better_cover",
+            "status": ("promoted" if result else "kept_better_cover"
+                       if adoption.get("reason") == "better_cover_retained" else "recording_pending"),
+            "reason": (objects[0].get("native_alignment", {}).get("method", "verified_main")
+                       if result else adoption.get("reason", "cover_not_adopted")),
+            **details,
             "width": width,
             "height": height,
             "candidates": len(assets),
