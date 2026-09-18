@@ -40,7 +40,7 @@ def test_no_event_or_notification_before_verification_and_retains_departed_objec
     kwargs = a.events.add_event.call_args.kwargs
     assert kwargs['snapshot_path'] == 'main.webp'
     assert kwargs['created_at'].startswith('1970-01-01T00:16:40.')
-    histories = [call.args[1] for call in a.events.update_object_tracking.call_args_list]
+    histories = [call.args[1] for call in a.events.update_native_incident_state.call_args_list]
     assert len(histories[0]['tracks'][0]['box_history']) == 7
     assert histories[-1]['state'] == 'complete'
     assert a.counts['verification_confirmed'] == 1
@@ -254,11 +254,11 @@ def test_delayed_verified_id_change_continues_one_incident():
     a.tick(now=116)
     assert a.event_id == 1  # Await the adjacent track even after activity timeout.
     assert a.events.add_event.call_count == 1
-    assert [t['native_track_id'] for t in a._episode_tracks.values()] == [9]
+    assert [t['native_track_id'] for t in a.inventory.tracking_tracks()] == [9]
     results[second] = {'status': 'confirmed'}
     a.tick(now=117)
     assert a.events.add_event.call_count == 1
-    final = a.events.update_object_tracking.call_args.args[1]
+    final = a.events.update_native_incident_state.call_args.args[1]
     assert final['state'] == 'complete'
     assert [t['native_track_id'] for t in final['tracks']] == [9, 10]
     assert final['tracks'][0]['first_seen'] < final['tracks'][1]['first_seen']
@@ -280,7 +280,7 @@ def test_failed_pending_continuation_closes_without_extending_confirmed_history(
         results[second] = {'status': status}
         a.tick(now=117)
     assert a.events.add_event.call_count == 1
-    final = a.events.update_object_tracking.call_args.args[1]
+    final = a.events.update_native_incident_state.call_args.args[1]
     assert [t['native_track_id'] for t in final['tracks']] == [9]
     assert a.event_id is None
 
@@ -296,7 +296,7 @@ def test_later_verification_result_waits_for_earlier_activity():
     results[first] = {'status': 'confirmed'}
     a.tick(now=117)
     assert a.events.add_event.call_count == 1
-    final = a.events.update_object_tracking.call_args.args[1]
+    final = a.events.update_native_incident_state.call_args.args[1]
     assert [t['native_track_id'] for t in final['tracks']] == [9, 10]
 
 
@@ -307,7 +307,7 @@ def test_separated_activity_stays_separate_even_when_results_arrive_together():
     a.admission.poll.side_effect = lambda token: results.pop(token, None)
     a.tick(now=125)
     assert a.events.add_event.call_count == 2
-    completed = [call.args[1] for call in a.events.update_object_tracking.call_args_list
+    completed = [call.args[1] for call in a.events.update_native_incident_state.call_args_list
                  if call.args[1]['state'] == 'complete']
     assert [[t['native_track_id'] for t in episode['tracks']] for episode in completed] == [[9], [10]]
 
@@ -326,7 +326,7 @@ def test_renewed_candidate_cannot_hold_an_inactive_incident_forever():
     a.tick(now=252)
     assert a.event_id is None
     assert second in a._verification_pending
-    final = a.events.update_object_tracking.call_args.args[1]
+    final = a.events.update_native_incident_state.call_args.args[1]
     assert final['state'] == 'complete'
     assert [t['native_track_id'] for t in final['tracks']] == [9]
 
