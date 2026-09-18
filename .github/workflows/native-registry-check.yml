@@ -1,0 +1,28 @@
+name: Native registry check
+
+on:
+  push:
+    branches:
+      - experiment/native-first-registry
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+      - name: Run native registry regressions
+        env:
+          SURVNG_TEST_TIMEOUT_SECONDS: "240"
+        run: |
+          mkdir -p survng/static
+          ./scripts/run-tests.sh -q             tests/test_native_inventory.py             tests/test_native_first.py             tests/test_native_stationary.py             tests/test_native_admission.py             tests/test_native_evidence.py             tests/test_native_replay_alignment.py             tests/test_object_tracking.py
+          python -m py_compile             survng/app/native_objects.py             survng/app/native_activity.py             survng/app/event_store/store.py
+          git diff --check
