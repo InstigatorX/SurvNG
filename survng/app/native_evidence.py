@@ -7,12 +7,10 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import datetime
 import json
 import logging
 from pathlib import Path
-import subprocess
 import threading
 import time
 import uuid
@@ -21,7 +19,13 @@ import cv2
 import numpy as np
 
 from .stream_alignment import estimate_stream_alignment
-from .native_evidence_verifier import NativeEvidenceVerifier
+from .native_evidence_common import (
+    Candidate,
+    image_quality as _common_image_quality,
+    matches_object_extent,
+    resize_objects,
+)
+from .native_main_frame import NativeMainFrameVerifier
 from .native_replay_alignment import estimate_replay_alignment
 
 LOGGER = logging.getLogger(__name__)
@@ -36,24 +40,8 @@ def event_tracking(event):
 
 
 def image_quality(image):
-    """Reject uniform/corrupt-looking frames without rejecting night exposure."""
-    if image is None or image.size == 0:
-        return None
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    small = cv2.resize(gray, (min(320, gray.shape[1]), min(180, gray.shape[0])))
-    spread = float(np.percentile(small, 98) - np.percentile(small, 2))
-    sharp = float(cv2.Laplacian(small, cv2.CV_32F).var())
-    if spread < 10 or sharp < 2:
-        return None
-    return min(sharp, 500) / 500 + min(spread, 100) / 100
-
-
-@dataclass
-class Candidate:
-    epoch: float
-    image: object
-    objects: list
-    score: float
+    """Compatibility wrapper used by cover scoring and existing diagnostics."""
+    return _common_image_quality(image)
 
 
 def candidate_score(image, objects):
@@ -80,24 +68,6 @@ def candidate_score(image, objects):
         clearance = min(x1/width, y1/height, (width-x2)/width, (height-y2)/height)
         scores.append(float(obj.get("confidence") or 0) + min(area*8, 2) + crop_quality + min(clearance*10, 0.5))
     return quality + max(scores) if scores else None
-
-
-def matches_object_extent(expected, actual):
-    """A same-class fragment is not confirmation of the nominated object."""
-    intersection = max(0, min(expected['x2'], actual['x2'])-max(expected['x1'], actual['x1'])) * max(0, min(expected['y2'], actual['y2'])-max(expected['y1'], actual['y1']))
-    area = lambda b: max(1, (b['x2']-b['x1'])*(b['y2']-b['y1']))
-    return intersection/area(actual) >= .5 and intersection/(area(actual)+area(expected)-intersection) >= .3
-
-
-def resize_objects(objects, from_size, to_size):
-    fw, fh = from_size
-    tw, th = to_size
-    result = deepcopy(objects)
-    for obj in result:
-        box = obj.get("box") or {}
-        obj["box"] = {k: float(box.get(k, 0)) * (tw/fw if k.startswith("x") else th/fh) for k in ("x1", "y1", "x2", "y2")}
-        obj.update(detection_frame_width=tw, detection_frame_height=th)
-    return result
 
 
 def shortlist(candidates, limit=3):
@@ -143,9 +113,16 @@ class NativeEvidenceService:
         self._closed = False
         self.counts = Counter()
         self.recent = deque(maxlen=32)
-        self.verifier = NativeEvidenceVerifier(config.detector)
+        self.main_frames = NativeMainFrameVerifier(
+            lambda: self.config,
+            recorder,
+            self.counts,
+        )
+        # Compatibility handle for diagnostics/tests; scheduling and config
+        # ownership live in NativeMainFrameVerifier.
+        self.verifier = self.main_frames.detector
         from .native_admission import NativeAdmission
-        self.admission = NativeAdmission(self)
+        self.admission = NativeAdmission(self.main_frames)
 
     def start(self):
         with self._condition:
@@ -162,11 +139,11 @@ class NativeEvidenceService:
             self._closed = True
             self._pending.clear()
             self._condition.notify_all()
-        self.verifier.request_stop()
+        self.main_frames.request_stop()
         self.admission.stop()
         for thread in self._threads:
             thread.join(timeout=35)
-        self.verifier.close()
+        self.main_frames.close()
         if any(thread.is_alive() for thread in self._threads):
             raise RuntimeError("native evidence workers did not stop")
 
@@ -282,20 +259,12 @@ class NativeEvidenceService:
                 self._record_result(dict(result, retry_exhausted=True))
 
     def read_frame(self, camera_id, epoch, source, maximum_width=0):
-        row = self.recorder.recording_at(camera_id, epoch, source=source)
-        if not row:
-            return None
-        command = [self.config.ffmpeg_path, "-nostdin", "-v", "error", "-threads", "1", "-ss", str(max(0, epoch-float(row["start_epoch"]))), "-i", str(row["path"]), "-frames:v", "1", "-an", "-sn"]
-        if maximum_width:
-            command += ["-vf", f"scale='min({maximum_width},iw)':-2"]
-        # This is local IPC, not an archived image. BMP preserves BGR pixels
-        # without PNG compression/decompression on every verification sample.
-        command += ["-threads", "1", "-f", "image2pipe", "-c:v", "bmp", "-pix_fmt", "bgr24", "pipe:1"]
-        result = subprocess.run(command, capture_output=True, timeout=12)
-        if result.returncode or not result.stdout:
-            self.counts["decode_failed"] += 1
-            return None
-        return cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
+        return self.main_frames.read_frame(
+            camera_id,
+            epoch,
+            source,
+            maximum_width=maximum_width,
+        )
 
     def recorded_candidates(self, event, tracking, retained=()):
         # Replay metadata nominates a bounded set of timestamps. Native pixels
@@ -346,7 +315,6 @@ class NativeEvidenceService:
             return [], False
         observations = []
         pending = False
-        self.verifier.config = self.config.detector
         for epoch in calibration_epochs(tracking):
             if self._closed:
                 break
@@ -354,7 +322,7 @@ class NativeEvidenceService:
             if main is None:
                 pending = True
                 continue
-            detections = self.verifier.detect(main)
+            detections = self.main_frames.detect(main, priority="cover")
             observations.append({
                 "epoch": epoch,
                 "objects": resize_objects(
@@ -366,29 +334,7 @@ class NativeEvidenceService:
         return observations, pending
 
     def project_main(self, candidate, main):
-        """Locate verification crops using scene geometry, not object appearance."""
-        alignment = estimate_stream_alignment(candidate.image, main)
-        if alignment is None:
-            return []
-        sx, sy, ox, oy = alignment
-        if not (0.25 < sx < 4 and 0.25 < sy < 4 and abs(ox) < 1 and abs(oy) < 1):
-            return []
-        lh, lw = candidate.image.shape[:2]
-        mh, mw = main.shape[:2]
-        projected = []
-        for original in candidate.objects:
-            box = original['box']
-            values = [(box['x1']/lw*sx+ox)*mw, (box['y1']/lh*sy+oy)*mh,
-                      (box['x2']/lw*sx+ox)*mw, (box['y2']/lh*sy+oy)*mh]
-            if not (0 <= values[0] < values[2] <= mw and 0 <= values[1] < values[3] <= mh):
-                continue
-            obj = deepcopy(original)
-            obj.update(box=dict(zip(('x1', 'y1', 'x2', 'y2'), values)),
-                       detection_frame_width=mw, detection_frame_height=mh, frame_source='recorded_main',
-                       frame_captured_at_epoch=candidate.epoch, snapshot_visible=True,
-                       native_alignment={'scale_x': sx, 'scale_y': sy, 'offset_x': ox, 'offset_y': oy})
-            projected.append(obj)
-        return projected
+        return self.main_frames.project_main(candidate, main)
 
     def same_fov_main(self, candidate, main, frame_epoch, replay_offset):
         """Map native boxes onto a timestamp-aligned same-FOV main frame.
@@ -584,9 +530,12 @@ class NativeEvidenceService:
                 # A still-image check is not recording-clock calibration. Use
                 # only a box detected on the returned main image, never a
                 # projected box or another timestamp's annotation.
-                self.verifier.config = self.config.detector
                 try:
-                    checked = self.admission.verify(event["camera_id"], [candidate])
+                    checked = self.main_frames.verify_candidate(
+                        event["camera_id"],
+                        candidate,
+                        priority="cover",
+                    )
                 except Exception as exc:
                     failures["main_verification_unavailable"] += 1
                     pending = True
@@ -630,10 +579,9 @@ class NativeEvidenceService:
                     if same_fov_aligned
                     else self.match_main(candidate, main)
                 )
-                self.verifier.config = self.config.detector
                 detections = []
                 if require_verification and objects:
-                    detections = self.verifier.detect(main)
+                    detections = self.main_frames.detect(main, priority="cover")
                 if require_verification:
                     verified = []
                     for obj in objects:
