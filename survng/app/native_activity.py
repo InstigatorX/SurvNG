@@ -412,10 +412,20 @@ class NativeActivity:
         seed=None,
     ):
         if self.event_id is None:
-            # Episode inventory begins at activity onset. Objects already
-            # present are captured at this frame, but stale pre-incident history
-            # does not leak into a new incident.
-            self.inventory.begin(epoch, 0)
+            # Episode inventory begins at activity onset. A delayed admission
+            # result retains the nominated object's original first observation,
+            # but ordinary reactivation never imports stale history from a
+            # previous completed incident.
+            trigger_epoch = epoch
+            if seed is not None:
+                try:
+                    trigger_epoch = min(
+                        trigger_epoch,
+                        datetime.fromisoformat(seed[0]["first_seen"]).timestamp(),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    pass
+            self.inventory.begin(trigger_epoch, 0)
         if seed is not None:
             self.inventory.record(seed[0], seed[1])
         for key in confirmed_keys:
