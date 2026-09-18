@@ -142,11 +142,17 @@ class NativeActivity:
                 if zone.enabled and len(zone.points) >= 3
             }
             if observation.zone_revision != revision or any(
-                obj.get("native_zone_revision") != revision
-                or not isinstance(obj.get("native_zone_ids"), list)
-                or any(
-                    not isinstance(zone_id, str) or zone_id not in valid_ids
-                    for zone_id in obj["native_zone_ids"]
+                (
+                    type(obj.get("native_track_id")) is int
+                    and obj.get("native_track_id") >= 0
+                )
+                and (
+                    obj.get("native_zone_revision") != revision
+                    or not isinstance(obj.get("native_zone_ids"), list)
+                    or any(
+                        not isinstance(zone_id, str) or zone_id not in valid_ids
+                        for zone_id in obj.get("native_zone_ids", [])
+                    )
                 )
                 for obj in observation.objects
             ):
