@@ -103,11 +103,11 @@ def test_suppression_can_be_disabled(activity):
 
 def test_stationary_person_tree_jitter_is_suppressed(activity):
     tree_boxes = [
-        {"x1": 490, "y1": 263, "x2": 508, "y2": 307},
-        {"x1": 489, "y1": 264, "x2": 509, "y2": 307},
-        {"x1": 490, "y1": 263, "x2": 509, "y2": 306},
-        {"x1": 490, "y1": 264, "x2": 508, "y2": 307},
-        {"x1": 489, "y1": 263, "x2": 509, "y2": 307},
+        {"x1": 40, "y1": 20, "x2": 58, "y2": 64},
+        {"x1": 39, "y1": 21, "x2": 59, "y2": 64},
+        {"x1": 40, "y1": 20, "x2": 59, "y2": 63},
+        {"x1": 40, "y1": 21, "x2": 58, "y2": 64},
+        {"x1": 39, "y1": 20, "x2": 59, "y2": 64},
     ]
     for seq in range(1, 76):
         detected = obj("person", native_id=8)
