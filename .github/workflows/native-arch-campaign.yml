@@ -6,28 +6,49 @@ on:
       - experiment/native-first-arch-campaign
 
 jobs:
-  focused:
+  full-regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.12"
-      - name: Install dependencies
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "22"
+      - name: Build frontend assets
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+      - name: Install Python and media dependencies
         run: |
           python -m venv .venv
           .venv/bin/pip install -r requirements.txt pytest anyio httpx2
-      - name: Native architecture regressions
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-libav ffmpeg
+      - name: Run full regression suite
         env:
-          SURVNG_TEST_TIMEOUT_SECONDS: "300"
+          SURVNG_TEST_TIMEOUT_SECONDS: "900"
         run: |
-          mkdir -p survng/static
-          ./scripts/run-tests.sh -q             tests/test_native_first.py             tests/test_native_inventory.py             tests/test_native_stationary.py             tests/test_native_admission.py             tests/test_native_evidence.py             tests/test_native_replay_alignment.py             tests/test_native_spatial.py             tests/test_native_deepsort.py             tests/test_dlstreamer_capture.py             tests/test_dlstreamer_protocol.py             tests/test_config_reload.py             tests/test_manager_lifecycle.py
-          python -m py_compile             survng/app/native_activity.py             survng/app/native_objects.py             survng/app/native_admission.py             survng/app/native_evidence.py             survng/app/native_camera.py             survng/app/native_runtime.py             survng/app/event_store/store.py             survng/dlstreamer_live.py             survng/app/dlstreamer_capture.py             survng/app/config_application.py \
+          ./scripts/run-tests.sh -q
+          python -m py_compile \
+            survng/app/native_activity.py \
+            survng/app/native_objects.py \
+            survng/app/native_admission.py \
+            survng/app/native_evidence.py \
             survng/app/native_evidence_common.py \
             survng/app/native_main_frame.py \
             survng/app/native_event_projection.py \
+            survng/app/native_camera.py \
+            survng/app/native_runtime.py \
+            survng/app/event_store/store.py \
+            survng/app/config_application.py \
+            survng/dlstreamer_live.py \
             survng/native_pipeline/metadata.py \
+            survng/app/dlstreamer_capture.py \
             survng/app/dlstreamer_supervisor.py
           git diff --check
