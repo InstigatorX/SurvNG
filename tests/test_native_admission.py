@@ -1,6 +1,7 @@
 from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import Mock
+import time
 import numpy as np
 import pytest
 
@@ -8,7 +9,7 @@ from survng.app.config import AppConfig, CameraConfig, DetectorConfig
 from survng.app.native_activity import NativeActivity
 from survng.app.native_admission import NativeAdmission, context_crop
 from survng.app.native_evidence import Candidate
-from survng.app.native_main_frame import NativeMainFrameVerifier
+from survng.app.native_main_frame import NativeMainFrameVerifier, _VerifierScheduler
 from survng.app.live_detections import DetectionSnapshot
 
 
@@ -123,6 +124,41 @@ def test_verifier_requires_multiple_clear_views_and_spatial_match():
     evidence.project_main.return_value=[]
     assert service.verify('front',samples)['status']=='unverified'
     assert crop.shape[0] >= 192 and crop.shape[1] >=192
+
+
+def test_admission_waiter_preempts_cover_waiter():
+    import threading
+    scheduler = _VerifierScheduler()
+    order = []
+    cover_started = threading.Event()
+    admission_started = threading.Event()
+
+    def cover():
+        cover_started.set()
+        with scheduler.lease("cover"):
+            order.append("cover")
+
+    def admission():
+        admission_started.set()
+        with scheduler.lease("admission"):
+            order.append("admission")
+
+    with scheduler.lease("cover"):
+        cover_thread = threading.Thread(target=cover)
+        admission_thread = threading.Thread(target=admission)
+        cover_thread.start()
+        assert cover_started.wait(1)
+        admission_thread.start()
+        assert admission_started.wait(1)
+        with scheduler._condition:
+            deadline = time.monotonic() + 1
+            while scheduler._admission_waiters < 1 and time.monotonic() < deadline:
+                scheduler._condition.wait(.01)
+            assert scheduler._admission_waiters == 1
+
+    admission_thread.join(1)
+    cover_thread.join(1)
+    assert order == ["admission", "cover"]
 
 
 def test_queue_is_bounded_and_cancel_discards_inflight_result():
