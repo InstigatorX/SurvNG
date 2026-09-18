@@ -15,6 +15,10 @@ from ..durable_payload import durable_json_dumps
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry
+from ..native_event_projection import (
+    merge_cover_objects,
+    merge_inventory_objects,
+)
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
@@ -1682,10 +1686,16 @@ class EventStore(
                     conn.execute("delete from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,))
                     for path, observations in assets:
                         self._archive_observations(conn, event_id, observations, portable_media_path(self.storage_dir, path))
-                    identities = {(x.get("label"), x.get("track_id")) for x in objects}
-                    retained = [dict(x, snapshot_visible=False) for x in existing if x.get("label") and (x.get("label"), x.get("track_id")) not in identities]
-                    metadata = [x for x in existing if not x.get("label")]
-                    conn.execute("update events set snapshot_path=?,snapshot_size_bytes=?,objects_json=? where id=?", (portable, self._snapshot_file_size(portable), json.dumps([*objects,*retained,*metadata]),event_id))
+                    projected = merge_cover_objects(existing, objects)
+                    conn.execute(
+                        "update events set snapshot_path=?,snapshot_size_bytes=?,objects_json=? where id=?",
+                        (
+                            portable,
+                            self._snapshot_file_size(portable),
+                            json.dumps(projected),
+                            event_id,
+                        ),
+                    )
                     if diagnostics is not None:
                         diagnostics["reason"] = "promoted"
                     updated = self._finish_evidence_commit(conn,event_id,row,reason="native_cover_selected",cover_satisfied=True)
@@ -1725,66 +1735,7 @@ class EventStore(
         existing_objects: list[dict[str, Any]],
         inventory_objects: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Merge native inventory without moving presentation evidence off its raster."""
-        existing_labels = [
-            item for item in existing_objects
-            if isinstance(item, dict) and item.get("label")
-        ]
-        metadata = [
-            item for item in existing_objects
-            if not (isinstance(item, dict) and item.get("label"))
-            and not (
-                isinstance(item, dict)
-                and item.get("status") == "object_tracking"
-            )
-        ]
-        by_track = {
-            item.get("track_id"): item
-            for item in existing_labels
-            if item.get("track_id") is not None
-        }
-        by_identity = {
-            str(item.get("native_identity")): item
-            for item in existing_labels
-            if item.get("native_identity")
-        }
-        matched = set()
-        presentation_fields = {
-            "box", "mask_polygon", "confidence",
-            "detection_frame_width", "detection_frame_height",
-            "snapshot_visible", "snapshot_source", "snapshot_captured_at",
-            "snapshot_detection_confidence", "frame_source",
-            "frame_captured_at_epoch", "native_alignment",
-            "native_cover_verified", "box_provenance", "verification",
-            "native_cover_score", "snapshot_quality_score",
-            "snapshot_subject_area_ratio", "snapshot_edge_clearance_ratio",
-            "snapshot_primary_subject", "temporal_sample_offset_seconds",
-        }
-        merged = []
-        for incoming in inventory_objects:
-            if not isinstance(incoming, dict) or not incoming.get("label"):
-                continue
-            item = deepcopy(incoming)
-            existing = by_track.get(incoming.get("track_id"))
-            if existing is None and incoming.get("native_identity"):
-                existing = by_identity.get(str(incoming["native_identity"]))
-            if existing is not None:
-                matched.add(id(existing))
-                if existing.get("snapshot_visible") is not False:
-                    for field in presentation_fields:
-                        if field in existing:
-                            item[field] = deepcopy(existing[field])
-            else:
-                # The current event snapshot predates this object's confirmed
-                # appearance. Retain the object but never draw it on old pixels.
-                item["snapshot_visible"] = False
-            merged.append(item)
-        merged.extend(
-            dict(item, snapshot_visible=False)
-            for item in existing_labels
-            if id(item) not in matched
-        )
-        return [*merged, *metadata]
+        return merge_inventory_objects(existing_objects, inventory_objects)
 
     def update_native_incident_state(
         self,
@@ -1812,7 +1763,7 @@ class EventStore(
                 existing = []
             if not isinstance(existing, list):
                 existing = []
-            objects = self._merge_native_inventory_objects(
+            objects = merge_inventory_objects(
                 existing,
                 inventory_objects,
             )
