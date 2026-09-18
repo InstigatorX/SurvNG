@@ -184,8 +184,9 @@ class NativeMainFrameVerifier:
         *,
         priority,
         cancelled,
+        projector=None,
     ):
-        aligned = self.project_main(candidate, main)
+        aligned = (projector or self.project_main)(candidate, main)
         if not aligned:
             return "unaligned", None
         obj = aligned[0]
@@ -254,6 +255,8 @@ class NativeMainFrameVerifier:
         *,
         priority="cover",
         cancelled=None,
+        frame_reader=None,
+        projector=None,
     ):
         frame_votes = []
         cover = None
@@ -261,7 +264,11 @@ class NativeMainFrameVerifier:
             if cancelled is not None and cancelled.is_set():
                 return {"status": "unverified", "reason": "stopped"}
             frame_epoch = candidate.epoch + offset
-            main = self.read_frame(camera_id, frame_epoch, "main")
+            main = (frame_reader or self.read_frame)(
+                camera_id,
+                frame_epoch,
+                "main",
+            )
             if cancelled is not None and cancelled.is_set():
                 return {"status": "unverified", "reason": "stopped"}
             if (
@@ -278,6 +285,7 @@ class NativeMainFrameVerifier:
                     frame_epoch,
                     priority=priority,
                     cancelled=cancelled,
+                    projector=projector,
                 )
             if vote == "stopped":
                 return {"status": "unverified", "reason": "stopped"}
