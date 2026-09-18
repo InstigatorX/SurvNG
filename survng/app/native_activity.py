@@ -196,6 +196,12 @@ class NativeActivity:
             track = self.registry.get(key)
             if track is None or not track.get("incident_eligible"):
                 continue
+            native_id = track.get("native_track_id")
+            if type(native_id) is not int or native_id < 0:
+                # Fallback association is inventory-only context. Activity
+                # admission still requires authoritative native tracker identity.
+                self.counts["missing_track_id"] += 1
+                continue
             label = str(track.get("label") or "").strip().lower()
             selected = self.config.native.tracking_classes
             if selected is not None and label not in selected:
@@ -292,6 +298,7 @@ class NativeActivity:
                 activity=activity,
                 observation=observation,
                 epoch=epoch,
+                source_monotonic=track["last_monotonic"],
             )
             self.nominate(
                 token,
@@ -354,7 +361,7 @@ class NativeActivity:
                 [],
                 pending["observation"],
                 pending["epoch"],
-                track.get("last_monotonic", now),
+                pending["source_monotonic"],
                 cover=result.get("cover"),
                 seed=(track, pending["activity"]),
             )
@@ -405,10 +412,10 @@ class NativeActivity:
         seed=None,
     ):
         if self.event_id is None:
-            self.inventory.begin(
-                epoch,
-                self.config.native.activity_timeout_seconds,
-            )
+            # Episode inventory begins at activity onset. Objects already
+            # present are captured at this frame, but stale pre-incident history
+            # does not leak into a new incident.
+            self.inventory.begin(epoch, 0)
         if seed is not None:
             self.inventory.record(seed[0], seed[1])
         for key in confirmed_keys:
