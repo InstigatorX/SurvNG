@@ -823,6 +823,50 @@ class ObjectTrackingConfig(BaseModel):
         return auxiliary_openvino_device(self.vehicle_reid_device)
 
 
+class NativeTrackingConfig(BaseModel):
+    """Native GStreamer tracking and optional Deep SORT appearance inference."""
+
+    mode: Literal["short-term-imageless", "deep-sort"] = "short-term-imageless"
+    reid_enabled: bool = False
+    reid_model_path: str = Field(default="", max_length=4096)
+    reid_device: str = Field(default="CPU", min_length=1, max_length=64)
+    deep_sort_config: str = Field(
+        default=(
+            "max_iou_distance=0.7,max_age=60,n_init=3,"
+            "max_cosine_distance=0.3,nn_budget=100,"
+            "object_class=person,reid_max_age=30"
+        ),
+        min_length=1,
+        max_length=4096,
+    )
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_mode(cls, value: object) -> str:
+        mode = str(value or "short-term-imageless").strip().lower()
+        if mode in {"dlstreamer_deep_sort", "deep_sort", "deepsort"}:
+            return "deep-sort"
+        if mode in {"survng_hybrid", "short-term", "short_term_imageless"}:
+            return "short-term-imageless"
+        return mode
+
+    @model_validator(mode="after")
+    def validate_reid(self):
+        if self.mode == "deep-sort":
+            if not self.reid_enabled:
+                raise ValueError(
+                    "native Deep SORT requires native.tracking.reid_enabled=true"
+                )
+            if not self.reid_model_path.strip():
+                raise ValueError(
+                    "native Deep SORT requires native.tracking.reid_model_path"
+                )
+        return self
+
+    def resolved_reid_device(self) -> str:
+        return auxiliary_openvino_device(self.reid_device)
+
+
 class NativeStationaryConfig(BaseModel):
     enabled: bool = True
     labels: list[str] = Field(default_factory=lambda: ["person", "car", "truck", "bus", "van", "suv", "motorcycle"], max_length=64)
@@ -842,6 +886,7 @@ class NativeStationaryConfig(BaseModel):
 class NativeActivityConfig(BaseModel):
     """Native observation freshness and presence episode policy."""
     tracking_classes: list[str] | None = Field(default=None, max_length=256)
+    tracking: NativeTrackingConfig = Field(default_factory=NativeTrackingConfig)
     stationary: NativeStationaryConfig = Field(default_factory=NativeStationaryConfig)
     budget: NativeBudgetConfig = Field(default_factory=NativeBudgetConfig)
     verification_enabled: bool = True
@@ -947,6 +992,39 @@ class DetectorConfig(BaseModel):
     labels: list[str] = Field(default_factory=list)
     depth: DepthConfig = Field(default_factory=DepthConfig)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_native_tracking(cls, value: object):
+        """Import old Deep SORT settings once; native runtime never reads them."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        native = dict(data.get("native") or {})
+        if "tracking" not in native:
+            legacy = data.get("tracking")
+            if isinstance(legacy, dict):
+                implementation = str(
+                    legacy.get("implementation") or ""
+                ).strip().lower()
+                if implementation in {
+                    "deep-sort",
+                    "dlstreamer_deep_sort",
+                    "deep_sort",
+                    "deepsort",
+                }:
+                    native["tracking"] = {
+                        "mode": "deep-sort",
+                        "reid_enabled": bool(legacy.get("reid_enabled")),
+                        "reid_model_path": str(
+                            legacy.get("reid_model_path") or ""
+                        ),
+                        "reid_device": str(
+                            legacy.get("reid_device") or "CPU"
+                        ),
+                    }
+                    data["native"] = native
+        return data
 
     @staticmethod
     def _normalize_refinement_stages(
