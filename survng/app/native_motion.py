@@ -64,14 +64,17 @@ class NativeMotion:
             abs(current[1] - self.anchor[1]),
         ) / scale
 
+        # Size evidence uses the same characteristic object scale as center
+        # translation. This avoids amplifying one-pixel detector jitter on the
+        # narrow dimension of a small, tall box (for example a distant person).
         scale_spread = max(
-            (columns[2][-1 - trim] - columns[2][trim]) / width,
-            (columns[3][-1 - trim] - columns[3][trim]) / height,
-        )
+            columns[2][-1 - trim] - columns[2][trim],
+            columns[3][-1 - trim] - columns[3][trim],
+        ) / scale
         scale_drift = max(
-            abs(current[2] - self.anchor[2]) / width,
-            abs(current[3] - self.anchor[3]) / height,
-        )
+            abs(current[2] - self.anchor[2]),
+            abs(current[3] - self.anchor[3]),
+        ) / scale
         meaningful_scale_spread = max(
             0.0, scale_spread - policy.stationary_threshold
         )

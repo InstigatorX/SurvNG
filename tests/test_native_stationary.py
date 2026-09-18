@@ -133,6 +133,23 @@ def test_stationary_policy_includes_people_by_default():
     assert "person" in NativeStationaryConfig().labels
 
 
+def test_scale_change_without_translation_still_becomes_moving():
+    motion = NativeMotion()
+    policy = NativeStationaryConfig()
+    states = []
+    for i in range(12):
+        width = 18 + i * 1.5
+        height = 44 + i * 3
+        detected = {
+            "x1": 500 - width / 2,
+            "y1": 300 - height / 2,
+            "x2": 500 + width / 2,
+            "y2": 300 + height / 2,
+        }
+        states.append(motion.update(detected, i * .2, policy, 2))
+    assert "moving" in states
+
+
 def test_whole_window_detects_out_and_back_and_scales_with_box():
     for scale in (1, 10):
         motion = NativeMotion()
