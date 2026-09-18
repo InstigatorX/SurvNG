@@ -50,6 +50,14 @@ def resolve_native_tracking(detector) -> NativeTrackingPlan:
             tracking_classes=classes,
         )
 
+    if not tracking.reid_enabled:
+        raise ValueError(
+            "DL Streamer Deep SORT requires detector.native.tracking.reid_enabled=true"
+        )
+    if not tracking.reid_model_path.strip():
+        raise ValueError(
+            "DL Streamer Deep SORT requires detector.native.tracking.reid_model_path"
+        )
     if int(native.inference_interval) != 1:
         raise ValueError(
             "DL Streamer Deep SORT requires detector.native.inference_interval=1"
