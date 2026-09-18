@@ -61,7 +61,7 @@ class NativeActivity:
         """Compatibility/status view of objects participating in activity policy."""
         result = {}
         for key in self._activity_states:
-            obj = self._activity_object(key)
+            obj = self._activity_object(key, include_history=False)
             if obj is None:
                 continue
             native_id = obj.get("native_track_id")
