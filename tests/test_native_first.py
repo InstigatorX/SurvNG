@@ -64,6 +64,15 @@ def test_episode_history_updates_do_not_mutate_published_snapshots(activity):
     assert len(activity.inventory.tracking_tracks()[0]['box_history']) > len(history)
 
 
+def test_terminal_lifecycle_uses_canonical_state_and_reason(activity):
+    feed(activity, 1)
+    feed(activity, 2)
+    activity.finish("metadata_lost", now=101)
+    payload = activity.events.update_native_incident_state.call_args.args[1]
+    assert payload["state"] == "interrupted"
+    assert payload["completion_reason"] == "metadata_lost"
+
+
 def test_predictions_cannot_create_or_extend_activity(activity):
     feed(activity, 1, provenance="native_tracked_prediction")
     assert activity.tracks == {}
@@ -121,7 +130,7 @@ def test_completion_wait_still_detects_metadata_loss(activity):
     activity.tick(now=107.3)
     assert activity.event_id is None
     assert activity.health == "metadata_stale"
-    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "metadata_lost"
+    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "interrupted"
 
 def test_reconnect_restarts_confirmation_and_qualifies_identity(activity):
     feed(activity, 1)
@@ -140,7 +149,7 @@ def test_missing_metadata_reports_health_and_settles(activity):
     activity.tick(now=107)
     assert activity.health == "metadata_stale"
     assert activity.event_id is None
-    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "metadata_lost"
+    assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "interrupted"
 
 
 @pytest.mark.parametrize("change", [{"native_track_id": None}, {"native_track_id": True}, {"confidence": .01}])

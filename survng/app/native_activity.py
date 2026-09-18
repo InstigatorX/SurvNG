@@ -21,6 +21,28 @@ from .zones import apply_detection_zones
 from survng.native_spatial import spatial_plan
 
 
+_INTERRUPTED_REASONS = frozenset({
+    "metadata_lost",
+    "stream_reset",
+    "geometry_changed",
+    "zones_changed",
+    "policy_changed",
+    "stopped",
+})
+
+
+def terminal_state(reason: str) -> tuple[str, str]:
+    """Map lifecycle causes onto a small durable state vocabulary."""
+    normalized = str(reason or "").strip().lower()
+    if normalized in {"complete", "inactivity"}:
+        return "complete", "inactivity"
+    if normalized == "failed":
+        return "failed", "failed"
+    if normalized in _INTERRUPTED_REASONS:
+        return "interrupted", normalized
+    return "interrupted", normalized or "unknown"
+
+
 class NativeActivity:
     def __init__(self, camera, config, events, publish: Callable, snapshot: Callable, *, native_zones=False):
         self.camera, self.config = camera, config
@@ -512,7 +534,13 @@ class NativeActivity:
                     evidence_objects,
                 )
 
-    def persist(self, state: str, *, now: float):
+    def persist(
+        self,
+        state: str,
+        *,
+        now: float,
+        completion_reason: str = "",
+    ):
         if self.event_id is None:
             return
         tracks = self.inventory.tracking_tracks()
@@ -531,6 +559,8 @@ class NativeActivity:
                 or self.camera.live_url() == self.camera.stream_url
             ),
         }
+        if state != "active":
+            payload["completion_reason"] = completion_reason or "unknown"
         self.events.update_native_incident_state(
             self.event_id,
             payload,
@@ -619,10 +649,15 @@ class NativeActivity:
                 self.finish("complete", now=now)
 
     def finish(self, reason: str, *, now: float):
-        self.persist(reason, now=now)
+        state, completion_reason = terminal_state(reason)
+        self.persist(
+            state,
+            now=now,
+            completion_reason=completion_reason,
+        )
         self.event_id = None
         self.inventory.clear()
-        if reason != "complete":
+        if state != "complete":
             if self.admission is not None:
                 for token in self._verification_pending:
                     self.admission.cancel(token)
