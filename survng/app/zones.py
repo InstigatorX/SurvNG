@@ -54,6 +54,12 @@ def _point_in_polygon(x: float, y: float, zone: DetectionZone) -> bool:
 
 
 def _native_zone_contains(detected, index, x, y, zone, width, height):
+    # Objects intentionally excluded from native tracking do not traverse
+    # gvaanalytics. Fall back to the same polygon geometry in Python rather
+    # than dropping them from incident context.
+    native_ids = detected.get("native_zone_ids")
+    if not isinstance(native_ids, list):
+        return _point_in_polygon(x, y, zone)
     # Native polygons and bottom-center use integer pixels. Preserve inclusive
     # boundaries and subpixel geometry only within the rounding error band.
     px, py = x * width, y * height
@@ -66,7 +72,7 @@ def _native_zone_contains(detected, index, x, y, zone, width, height):
         if math.hypot(px-ax-t*dx, py-ay-t*dy) <= 2.0:
             return _point_in_polygon(x, y, zone)
         previous = current
-    return str(index) in detected["native_zone_ids"]
+    return str(index) in native_ids
 
 
 def class_confidence_threshold(
