@@ -5,16 +5,13 @@ from __future__ import annotations
 import atexit
 import json
 import logging
-import math
 import os
-import queue
 import select
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable
