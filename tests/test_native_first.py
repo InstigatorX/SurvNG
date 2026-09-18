@@ -336,6 +336,60 @@ def test_post_tracker_metadata_keeps_fresh_identity_separate_from_prediction():
     assert result["objects"][1]["detection_provenance"] == "native_tracked_prediction"
 
 
+def test_tracking_class_filter_preserves_untracked_fresh_context():
+    import json
+    from types import SimpleNamespace
+    from survng.dlstreamer_live import _detection_metadata
+
+    fresh = [
+        {
+            "label": "person",
+            "confidence": .9,
+            "box": {"x1": 10, "y1": 10, "x2": 30, "y2": 80},
+        },
+        {
+            "label": "car",
+            "confidence": .85,
+            "box": {"x1": 50, "y1": 20, "x2": 90, "y2": 60},
+        },
+    ]
+    post_tracker = {"objects": [
+        {
+            "id": 7,
+            "x": 10,
+            "y": 10,
+            "w": 20,
+            "h": 70,
+            "detection": {"label": "person", "confidence": .9},
+        },
+    ]}
+    structure = SimpleNamespace(get_value=lambda name: 100)
+    caps = SimpleNamespace(get_structure=lambda index: structure)
+    sample = SimpleNamespace(
+        get_buffer=lambda: SimpleNamespace(pts=200000000),
+        get_caps=lambda: caps,
+    )
+    video_frame = lambda *args, **kwargs: SimpleNamespace(
+        messages=lambda: [json.dumps(post_tracker)]
+    )
+
+    result = _detection_metadata(
+        sample,
+        video_frame,
+        inference_sequence=1,
+        gst_second=1000000000,
+        clock_time_none=-1,
+        native_result=("native_fresh_detection", fresh),
+        tracking_classes={"person"},
+    )
+
+    by_label = {item["label"]: item for item in result["objects"]}
+    assert by_label["person"]["native_track_id"] == 7
+    assert by_label["person"]["detection_provenance"] == "native_fresh_detection"
+    assert "native_track_id" not in by_label["car"]
+    assert by_label["car"]["detection_provenance"] == "native_fresh_detection"
+
+
 def test_native_zones_filter_admission_and_main_overlay_requires_known_geometry(activity):
     from survng.app.config import DetectionZone
     activity.camera.live_stream_url = "rtsp://example.test/cropped"
