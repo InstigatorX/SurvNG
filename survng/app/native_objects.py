@@ -297,11 +297,10 @@ class NativeIncidentInventory:
             point for point in result.get("trajectory", [])
             if point and point[0] >= self.started_epoch
         ]
+        result["box_history"] = history
+        result["trajectory"] = trajectory
         if history:
-            result["box_history"] = history
             result["first_seen"] = iso(history[0][0])
-        if trajectory:
-            result["trajectory"] = trajectory
         return result
 
     def record(self, track, activity=None):
@@ -323,6 +322,14 @@ class NativeIncidentInventory:
             stored["max_confidence"] = max(
                 float(previous.get("max_confidence") or 0.0),
                 float(stored.get("max_confidence") or stored.get("confidence") or 0.0),
+            )
+            stored["observations"] = int(previous.get("observations") or 0) + int(
+                stored.get("last_seen") != previous.get("last_seen")
+            )
+        else:
+            stored["observations"] = max(
+                1,
+                len(stored.get("box_history") or []),
             )
         self._tracks[track_id] = stored
         return True
