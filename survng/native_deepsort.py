@@ -42,41 +42,27 @@ def resolve_native_tracking(detector) -> NativeTrackingPlan:
     tracking-class filter unchanged.
     """
     native = detector.native
-    tracking = detector.tracking
+    tracking = native.tracking
     classes = _tracking_classes(native)
-    implementation = str(getattr(tracking, "implementation", "")).strip().lower()
-    if implementation not in DEEP_SORT_IMPLEMENTATIONS:
+    if tracking.mode != "deep-sort":
         return NativeTrackingPlan(
             mode="short-term-imageless",
             tracking_classes=classes,
         )
 
-    if not bool(getattr(tracking, "reid_enabled", False)):
-        raise ValueError(
-            "DL Streamer Deep SORT requires detector.tracking.reid_enabled=true"
-        )
-    model_path = str(getattr(tracking, "reid_model_path", "") or "").strip()
-    if not model_path:
-        raise ValueError(
-            "DL Streamer Deep SORT requires detector.tracking.reid_model_path"
-        )
-    if int(getattr(native, "inference_interval", 1)) != 1:
+    if int(native.inference_interval) != 1:
         raise ValueError(
             "DL Streamer Deep SORT requires detector.native.inference_interval=1"
         )
     if classes is not None and classes != ("person",):
         raise ValueError(
-            "DL Streamer Deep SORT experiment is person-only; "
+            "DL Streamer Deep SORT is person-only; "
             "detector.native.tracking_classes must be ['person'] or omitted"
         )
-    resolve_device = getattr(tracking, "resolved_reid_device", None)
-    if callable(resolve_device):
-        device = str(resolve_device()).strip().upper() or "CPU"
-    else:
-        device = str(getattr(tracking, "reid_device", "CPU") or "CPU").strip().upper()
     return NativeTrackingPlan(
         mode="deep-sort",
         tracking_classes=("person",),
-        reid_model_path=model_path,
-        reid_device=device or "CPU",
+        reid_model_path=tracking.reid_model_path.strip(),
+        reid_device=tracking.resolved_reid_device().strip().upper() or "CPU",
+        deep_sort_config=tracking.deep_sort_config,
     )
