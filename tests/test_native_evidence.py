@@ -116,7 +116,7 @@ def test_recorded_frame_uses_lossless_uncompressed_ipc(tmp_path, monkeypatch):
     encoded = cv2.imencode('.bmp', image)[1].tobytes()
     from types import SimpleNamespace
     run = Mock(return_value=SimpleNamespace(returncode=0, stdout=encoded))
-    monkeypatch.setattr('survng.app.native_evidence.subprocess.run', run)
+    monkeypatch.setattr('survng.app.native_main_frame.subprocess.run', run)
     actual = service.read_frame('test', 100, 'main')
     assert np.array_equal(actual, image)
     command = run.call_args.args[0]

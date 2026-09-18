@@ -1,29 +1,20 @@
 """Bounded asynchronous main-recording verification before incident creation."""
 from collections import Counter, deque
-from copy import deepcopy
 import logging
 import threading
 import time
 
-from .native_evidence import Candidate, image_quality, resize_objects, matches_object_extent as matches
+from .native_evidence_common import Candidate, resize_objects
+from .native_main_frame import context_crop
 
 LOGGER = logging.getLogger(__name__)
 
 
-def context_crop(main, box):
-    """Keep context and native pixels; never upscale an object for verification."""
-    h, w = main.shape[:2]
-    x1, y1, x2, y2 = (box[k] for k in ('x1', 'y1', 'x2', 'y2'))
-    side = max(192, 3 * max(x2-x1, y2-y1))
-    cx, cy = (x1+x2)/2, (y1+y2)/2
-    left, top = max(0, int(cx-side/2)), max(0, int(cy-side/2))
-    right, bottom = min(w, int(cx+side/2)), min(h, int(cy+side/2))
-    return main[top:bottom, left:right].copy(), left, top
-
-
 class NativeAdmission:
-    def __init__(self, evidence):
-        self.evidence = evidence
+    """Own nomination/retry/decision policy, not frame verification mechanics."""
+
+    def __init__(self, main_frames):
+        self.main_frames = main_frames
         self.condition = threading.Condition()
         self.jobs = {}
         self.results = {}
@@ -33,21 +24,25 @@ class NativeAdmission:
         self.thread = None
 
     def start(self):
-        self.thread = threading.Thread(target=self._run, name='native-admission', daemon=True)
+        self.thread = threading.Thread(
+            target=self._run,
+            name="native-admission",
+            daemon=True,
+        )
         self.thread.start()
 
     def stop(self):
         with self.condition:
             self.closed = True
             for job in self.jobs.values():
-                job['cancelled'].set()
+                job["cancelled"].set()
             self.jobs.clear()
             self.results.clear()
             self.condition.notify_all()
         if self.thread:
             self.thread.join(55)
             if self.thread.is_alive():
-                raise RuntimeError('native admission worker did not stop')
+                raise RuntimeError("native admission worker did not stop")
 
     def offer(self, token, camera_id, epoch, frame, obj, size):
         with self.condition:
@@ -56,24 +51,33 @@ class NativeAdmission:
             job = self.jobs.get(token)
             if job is None:
                 if len(self.jobs) + len(self.results) >= 32:
-                    return  # Caller expires this as unverified, never as rejection.
-                job = self.jobs[token] = {'camera_id': camera_id, 'samples': [], 'due': time.monotonic()+15,
-                                         'deadline': time.monotonic()+90, 'cancelled': threading.Event()}
-                self.counts['nominated'] += 1
-            samples = job['samples']
-            if (frame is not None and (not samples or epoch > samples[-1].epoch)
-                    and all(abs(epoch-c.epoch) >= .4 for c in samples)):
-                h, w = frame.shape[:2]
-                # Capture publishes immutable allocations. Multiple objects in
-                # one frame can retain those pixels instead of duplicating them.
+                    return
+                job = self.jobs[token] = {
+                    "camera_id": camera_id,
+                    "samples": [],
+                    "due": time.monotonic() + 15,
+                    "deadline": time.monotonic() + 90,
+                    "cancelled": threading.Event(),
+                }
+                self.counts["nominated"] += 1
+            samples = job["samples"]
+            if (
+                frame is not None
+                and (not samples or epoch > samples[-1].epoch)
+                and all(abs(epoch - candidate.epoch) >= .4 for candidate in samples)
+            ):
+                height, width = frame.shape[:2]
                 image = frame if not frame.flags.writeable else frame.copy()
                 image.setflags(write=False)
-                candidate = Candidate(epoch, image, resize_objects([obj], size, (w,h)), 0)
+                candidate = Candidate(
+                    epoch,
+                    image,
+                    resize_objects([obj], size, (width, height)),
+                    0,
+                )
                 if len(samples) < 3:
                     samples.append(candidate)
                 else:
-                    # Keep early evidence plus a recent view. Freezing all
-                    # three at entry misses later, unobstructed confirmation.
                     samples[-1] = candidate
             self.condition.notify_all()
 
@@ -85,82 +89,55 @@ class NativeAdmission:
         with self.condition:
             job = self.jobs.pop(token, None)
             if job is not None:
-                job['cancelled'].set()
+                job["cancelled"].set()
             self.results.pop(token, None)
 
     def status(self):
         with self.condition:
-            return {'pending': len(self.jobs), 'counters': dict(self.counts), 'recent': list(self.recent)}
-
-    def _verify_frame(self, camera_id, candidate, main, frame_epoch, cancelled):
-        aligned = self.evidence.project_main(candidate, main)
-        if not aligned:
-            return 'unaligned', None
-        obj = aligned[0]
-        crop, left, top = context_crop(main, obj['box'])
-        if image_quality(crop) is None:
-            return 'unclear', None
-        if self.closed or (cancelled is not None and cancelled.is_set()):
-            return 'stopped', None
-        detected = self.evidence.verifier.detect(crop)
-        relevant = []
-        nearby = False
-        for item in detected:
-            if item['label'] != obj['label']:
-                continue
-            item = deepcopy(item)
-            item['box'] = {k: v+(left if k.startswith('x') else top) for k,v in item['box'].items()}
-            a, b = obj['box'], item['box']
-            nearby |= min(a['x2'], b['x2']) > max(a['x1'], b['x1']) and min(a['y2'], b['y2']) > max(a['y1'], b['y1'])
-            if matches(obj['box'], item['box']):
-                relevant.append(item)
-        config = self.evidence.config.detector
-        threshold = config.event_class_confidence_thresholds.get(obj['label'], config.confidence_threshold)
-        # Preserve a lower explicit zone threshold already used for nomination.
-        camera = next(c for c in self.evidence.config.cameras if c.id == camera_id)
-        thresholds = [z.confidence_threshold for z in camera.zones if z.name in obj.get('zones', []) and z.confidence_threshold is not None]
-        threshold = min([threshold, *thresholds])
-        accepted = [d for d in relevant if d['confidence'] >= threshold]
-        if accepted:
-            actual = max(accepted, key=lambda d: d['confidence'])
-            cover = dict(obj, box=actual['box'], confidence=actual['confidence'], native_cover_verified=True,
-                         frame_captured_at_epoch=frame_epoch)
-            return 'confirmed', (main, cover, frame_epoch)
-        return ('ambiguous' if nearby else 'negative'), None
+            return {
+                "pending": len(self.jobs),
+                "counters": dict(self.counts),
+                "recent": list(self.recent),
+            }
 
     def verify(self, camera_id, samples, *, cancelled=None):
-        votes, checks, best = [], [], None
+        votes = []
+        checks = []
+        best = None
         for candidate in samples[:3]:
-            frame_votes = []
-            for offset in (0., .5, -.5, 1., -1.):
-                if self.closed or (cancelled is not None and cancelled.is_set()):
-                    return {'status': 'unverified', 'reason': 'stopped'}
-                frame_epoch = candidate.epoch + offset
-                main = self.evidence.read_frame(camera_id, frame_epoch, 'main')
-                if self.closed or (cancelled is not None and cancelled.is_set()):
-                    return {'status': 'unverified', 'reason': 'stopped'}
-                if main is None or main.shape[0]*main.shape[1] <= candidate.image.shape[0]*candidate.image.shape[1]:
-                    vote, cover = 'unavailable', None
-                else:
-                    vote, cover = self._verify_frame(camera_id, candidate, main, frame_epoch, cancelled)
-                if vote == 'stopped':
-                    return {'status': 'unverified', 'reason': 'stopped'}
-                frame_votes.append(vote)
-                if vote == 'confirmed':
-                    best = cover
-                    break
-            # Nearby timestamps are alternative views of one nomination, not
-            # independent votes. An unclear/missing view cannot prove absence.
-            vote = next((v for v in ('confirmed', 'ambiguous', 'unaligned', 'unavailable', 'unclear')
-                         if v in frame_votes), 'negative')
+            if self.closed or (cancelled is not None and cancelled.is_set()):
+                return {"status": "unverified", "reason": "stopped"}
+            if self.main_frames is None:
+                raise RuntimeError("main-frame verifier is unavailable")
+            result = self.main_frames.verify_candidate(
+                camera_id,
+                candidate,
+                priority="admission",
+                cancelled=cancelled,
+            )
+            if result.get("reason") == "stopped":
+                return {"status": "unverified", "reason": "stopped"}
+            vote = str(result.get("vote") or "unavailable")
             votes.append(vote)
-            checks.append({'epoch': candidate.epoch, 'votes': frame_votes})
-            if best is not None:
+            checks.extend(result.get("checks") or [])
+            if result.get("status") == "confirmed":
+                best = result.get("cover")
                 break
-        status = 'confirmed' if best is not None else 'rejected' if votes.count('negative') >= 3 else 'unverified'
-        result = {'status': status, 'votes': votes, 'checks': checks, 'reason': 'main_crop_verification'}
+        status = (
+            "confirmed"
+            if best is not None
+            else "rejected"
+            if votes.count("negative") >= 3
+            else "unverified"
+        )
+        result = {
+            "status": status,
+            "votes": votes,
+            "checks": checks,
+            "reason": "main_crop_verification",
+        }
         if best is not None:
-            result['cover'] = best
+            result["cover"] = best
         return result
 
     def _run(self):
@@ -168,27 +145,62 @@ class NativeAdmission:
             with self.condition:
                 if self.closed:
                     return
-                ready = [(token, job) for token,job in self.jobs.items() if job['due'] <= time.monotonic()]
+                ready = [
+                    (token, job)
+                    for token, job in self.jobs.items()
+                    if job["due"] <= time.monotonic()
+                ]
                 if not ready:
                     self.condition.wait(1)
                     continue
-                token, job = min(ready, key=lambda pair: pair[1]['due'])
-                samples = list(job['samples'])
-                job['due'] = time.monotonic()+10
+                token, job = min(ready, key=lambda pair: pair[1]["due"])
+                samples = list(job["samples"])
+                job["due"] = time.monotonic() + 10
             try:
-                result = self.verify(job['camera_id'], samples, cancelled=job['cancelled'])
+                result = self.verify(
+                    job["camera_id"],
+                    samples,
+                    cancelled=job["cancelled"],
+                )
             except Exception as exc:
-                result = {'status': 'unverified', 'reason': type(exc).__name__}
-                LOGGER.warning('Native admission verification unavailable for %s (%s)', job['camera_id'], type(exc).__name__)
+                result = {
+                    "status": "unverified",
+                    "reason": type(exc).__name__,
+                }
+                LOGGER.warning(
+                    "Native admission verification unavailable for %s (%s)",
+                    job["camera_id"],
+                    type(exc).__name__,
+                )
             with self.condition:
                 if self.jobs.get(token) is not job or self.closed:
-                    continue  # Camera/session/policy canceled while verification ran.
-                if (result['status'] != 'confirmed' and time.monotonic() < job['deadline']
-                        and [s.epoch for s in samples] != [s.epoch for s in job['samples']]):
-                    continue  # Evaluate a newer view before finalizing failure.
-                if result['status'] == 'unverified' and (not result.get('votes') or any(v in {'unavailable', 'unaligned'} for v in result['votes'])) and time.monotonic() < job['deadline']:
+                    continue
+                if (
+                    result["status"] != "confirmed"
+                    and time.monotonic() < job["deadline"]
+                    and [sample.epoch for sample in samples]
+                    != [sample.epoch for sample in job["samples"]]
+                ):
+                    continue
+                if (
+                    result["status"] == "unverified"
+                    and (
+                        not result.get("votes")
+                        or any(
+                            vote in {"unavailable", "unaligned"}
+                            for vote in result["votes"]
+                        )
+                    )
+                    and time.monotonic() < job["deadline"]
+                ):
                     continue
                 self.jobs.pop(token)
                 self.results[token] = result
-                self.counts[result['status']] += 1
-                self.recent.append({'camera_id': job['camera_id'], 'status': result['status'], 'reason': result['reason']})
+                self.counts[result["status"]] += 1
+                self.recent.append(
+                    {
+                        "camera_id": job["camera_id"],
+                        "status": result["status"],
+                        "reason": result["reason"],
+                    }
+                )
