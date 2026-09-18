@@ -6,23 +6,31 @@ on:
       - experiment/native-first-registry
 
 jobs:
-  focused:
+  full-python:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.12"
-      - name: Install dependencies
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "22"
+      - name: Build frontend assets
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+      - name: Install test dependencies
         run: |
           python -m venv .venv
           .venv/bin/pip install -r requirements.txt pytest anyio httpx2
-      - name: Run native registry regressions
+          sudo apt-get update
+          sudo apt-get install -y             python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0             gstreamer1.0-plugins-base gstreamer1.0-plugins-good             gstreamer1.0-plugins-bad gstreamer1.0-libav ffmpeg
+      - name: Run full Python regression suite
         env:
-          SURVNG_TEST_TIMEOUT_SECONDS: "240"
+          SURVNG_TEST_TIMEOUT_SECONDS: "900"
         run: |
-          mkdir -p survng/static
-          ./scripts/run-tests.sh -q             tests/test_native_inventory.py             tests/test_native_first.py             tests/test_native_stationary.py             tests/test_native_admission.py             tests/test_native_evidence.py             tests/test_native_replay_alignment.py             tests/test_object_tracking.py
-          python -m py_compile             survng/app/native_objects.py             survng/app/native_activity.py             survng/app/event_store/store.py
+          ./scripts/run-tests.sh -q
+          python -m py_compile             survng/app/native_objects.py             survng/app/native_activity.py             survng/app/event_store/store.py             survng/app/zones.py             survng/dlstreamer_live.py
           git diff --check
