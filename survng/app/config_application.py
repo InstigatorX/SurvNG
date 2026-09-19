@@ -16,9 +16,17 @@ HOT_CONFIG_FIELDS = frozenset({"main_evidence", "weather", "base_path", "event_c
 # The configured FFmpeg binary also owns live capture and reloads the manager.
 # Acceleration remains recorder/refinement-only and can be applied in place.
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
+NATIVE_DETECTOR_HOT_POLICY_FIELDS = frozenset({
+    "confidence_threshold",
+    "event_candidate_confidence_threshold",
+    "event_confirmation_frames",
+    "event_class_confirmation_frames",
+    "event_class_confidence_thresholds",
+    "require_incident_zone",
+})
 DETECTOR_HOT_POLICY_FIELDS = frozenset({"confidence_threshold", "event_candidate_confidence_threshold", "event_confirmation_frames", "event_class_confirmation_frames", "event_class_confidence_thresholds", "event_refinement_stages", "event_route_refinement_stages", "event_refinement_retry_seconds", "event_refinement_settle_seconds", "event_refinement_retry_interval_seconds", "event_representative_refinement_timeout_seconds", "object_activity_attribution", "require_incident_zone", "max_concurrent_refinements", "recorded_adaptive_sampling", "recorded_decode_max_processes", "face_max_observations", "face_detection_threshold", "face_enrich_max_people", "face_match_threshold", "face_unknown_cluster_threshold", "face_auto_identify_enabled", "face_auto_identify_threshold", "face_auto_identify_margin", "face_min_size", "face_max_references"})
 TRACKING_SESSION_FIELDS = frozenset({"enabled", "implementation", "excluded_labels", "sample_fps", "adaptive_sampling_enabled", "stable_sample_fps", "adaptive_stable_frames", "max_catchup_frames_per_tick", "persist_interval_seconds", "max_session_seconds", "lost_timeout_seconds", "min_confirmations", "low_confidence_threshold", "match_iou_threshold", "match_center_distance_ratio", "max_active_cameras", "adaptive_burst_enabled", "burst_max_active_cameras", "capacity_wait_seconds", "deferred_reid_enabled", "deferred_reid_delay_seconds", "deferred_reid_min_crop_pixels", "deferred_reid_rate_per_minute", "related_sequence_window_seconds", "camera_transition_routes", "max_tracks_per_session", "reid_max_age_seconds", "reid_max_embeddings_per_frame", "reid_refresh_interval_frames", "reid_match_threshold", "vehicle_reid_match_threshold", "vehicle_reid_labels"})
-DETECTOR_CAPTURE_FIELDS = frozenset({"live_sample_fps"})
+DETECTOR_CAPTURE_FIELDS = frozenset({"live_sample_fps", "native"})
 CAPTURE_TRACKING_FIELDS = frozenset({"sample_fps"})
 DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({"enabled", "backend", "object_worker_count", "model_path", "model_xml", "model_output_format", "model_input_layout", "coreml_model_path", "labels_path", "device", "nms_threshold", "warmup_enabled", "labels"})
 DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({"enabled", "backend", "model_path", "model_xml", "model_output_format", "model_input_layout", "coreml_model_path", "labels_path", "nms_threshold", "labels"})
@@ -59,7 +67,11 @@ def _without_fields(value: dict, fields: frozenset[str]) -> dict:
     return {key: item for key, item in value.items() if key not in fields}
 
 
-def manager_owned_config(config: AppConfig) -> dict:
+def manager_owned_config(
+    config: AppConfig,
+    *,
+    native_first: bool = False,
+) -> dict:
     payload = config.model_dump(mode="json")
     # GStreamer owns a shared child graph in addition to the OpenVINO workers.
     # A targeted worker restart cannot change that graph. Rebuild the manager
@@ -68,13 +80,17 @@ def manager_owned_config(config: AppConfig) -> dict:
         "detector": {name: getattr(config.detector, name) for name in (
             "enabled", "backend", "model_path", "model_xml", "labels_path", "labels", "device", "nms_threshold",
         )},
-        "sample_fps": config.motion_qualification.sample_fps,
-        "frame_width": config.motion_qualification.frame_width,
+        "sample_fps": config.detector.live_sample_fps,
+        "frame_width": 0,
         "detection_fps": config.detector.live_sample_fps,
-        "tracking_enabled": config.detector.tracking.enabled,
-        "tracking_fps": config.detector.tracking.sample_fps,
+        "tracking_enabled": config.detector.enabled,
+        "tracking_fps": config.detector.live_sample_fps,
         "threshold": live_detection_threshold(config),
     }
+    from .config import effective_native_budget
+    if any(effective_native_budget(camera, config.detector).enabled for camera in config.cameras):
+        payload["gstreamer_capture"]["budget_admission"] = {name: getattr(config.detector, name) for name in (
+            "confidence_threshold", "event_class_confidence_thresholds", "event_confirmation_frames", "event_class_confirmation_frames")}
     for field in HOT_CONFIG_FIELDS | RECORDER_CONFIG_FIELDS:
         payload.pop(field, None)
     for camera in payload.get("cameras", []):
@@ -83,8 +99,8 @@ def manager_owned_config(config: AppConfig) -> dict:
         camera.pop("retention", None)
         camera.pop("live_view", None)
         camera.pop("object_activity_attribution", None)
-        camera.pop("motion_qualification", None)
-    payload.pop("motion_qualification", None)
+        # Native workers do not hot-apply motion pipeline settings.
+    # A structural reload absorbs retired motion settings without running EMA.
     payload["detector"] = _without_fields(payload.get("detector", {}), DETECTOR_HOT_POLICY_FIELDS | DETECTOR_OBJECT_ENGINE_FIELDS | DETECTOR_FACE_ENGINE_FIELDS | DETECTOR_SHARED_ENGINE_FIELDS)
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
@@ -96,15 +112,25 @@ def manager_owned_config(config: AppConfig) -> dict:
     depth = payload["detector"].get("depth")
     if isinstance(depth, dict):
         payload["detector"]["depth"] = _without_fields(depth, DEPTH_HOT_POLICY_FIELDS)
+    if native_first:
+        # Native-first has no EMA, Python tracking sessions, depth worker, or
+        # legacy inference-role topology. These settings remain loadable for
+        # historical tooling but are not runtime ownership boundaries.
+        payload.pop("motion_qualification", None)
+        for camera in payload.get("cameras", []):
+            camera.pop("motion_qualification", None)
+        detector_payload = payload.get("detector")
+        if isinstance(detector_payload, dict):
+            detector_payload.pop("tracking", None)
+            detector_payload.pop("depth", None)
     return payload
 
 
 def live_detection_threshold(config: AppConfig) -> float:
-    """Do not discard candidates needed by class/zone policy or ByteTrack."""
+    """Retain candidates required by native class/zone admission policy."""
     return min(
         config.detector.confidence_threshold,
         config.detector.event_candidate_confidence_threshold,
-        config.detector.tracking.low_confidence_threshold,
         *config.detector.event_class_confidence_thresholds.values(),
         *(zone.confidence_threshold for camera in config.cameras for zone in camera.zones
           if zone.enabled and zone.confidence_threshold is not None),
@@ -222,8 +248,146 @@ class TargetedConfigApplication:
     def normalize(self, config: AppConfig, *, assign_ids: bool) -> AppConfig:
         return normalize_config(config.model_copy(deep=True), assign_ids=assign_ids)
 
+    def _apply_native_locked(
+        self,
+        current: AppConfig,
+        incoming: AppConfig,
+        runtime: ConfigurableRuntime,
+        *,
+        persist: bool,
+    ) -> tuple[AppConfig, dict[str, object]]:
+        changes = hot_config_changes(current, incoming)
+        mqtt_changed = current.mqtt != incoming.mqtt
+        recorder_changes = [
+            field
+            for field in sorted(RECORDER_CONFIG_FIELDS)
+            if getattr(current, field) != getattr(incoming, field)
+        ]
+        retention_changed = "retention" in changes
+        image_changed = "image_storage" in changes
+        semantic_changed = "semantic_search" in changes
+        policy_changed = any(
+            getattr(current.detector, field) != getattr(incoming.detector, field)
+            for field in NATIVE_DETECTOR_HOT_POLICY_FIELDS
+        )
+        compatibility_only = []
+        if current.detector.tracking != incoming.detector.tracking:
+            compatibility_only.append("legacy_tracking")
+        if current.detector.depth != incoming.detector.depth:
+            compatibility_only.append("legacy_depth")
+        if current.motion_qualification != incoming.motion_qualification or {
+            camera.id: camera.motion_qualification for camera in current.cameras
+        } != {
+            camera.id: camera.motion_qualification for camera in incoming.cameras
+        }:
+            compatibility_only.append("legacy_motion")
+
+        if recorder_changes and (exports := self._active_exports()):
+            kinds = sorted({str(job.get("kind") or "media") for job in exports})
+            raise self._storage_error([f"media {'/'.join(kinds)} export"])
+        if persist:
+            self._save(incoming, assign_ids=False)
+        runtime.config = incoming
+        applied: list[str] = []
+        steps = [
+            (
+                "main_evidence" in changes,
+                "main_evidence",
+                lambda config: runtime.reconfigure_main_evidence(config),
+                lambda config: runtime.reconfigure_main_evidence(config),
+            ),
+            (
+                bool(recorder_changes),
+                "recorders",
+                lambda config: runtime.reconfigure_recorders(config),
+                lambda config: runtime.reconfigure_recorders(config),
+            ),
+            (
+                mqtt_changed,
+                "mqtt",
+                lambda config: runtime.reconfigure_mqtt(config.mqtt),
+                lambda config: runtime.reconfigure_mqtt(config.mqtt),
+            ),
+            (
+                retention_changed,
+                "retention",
+                runtime.reconfigure_recording_retention,
+                runtime.reconfigure_recording_retention,
+            ),
+            (
+                image_changed,
+                "image_storage",
+                lambda config: runtime.reconfigure_image_storage(config.image_storage),
+                lambda config: runtime.reconfigure_image_storage(config.image_storage),
+            ),
+            (
+                semantic_changed,
+                "semantic_search",
+                lambda config: runtime.reconfigure_semantic_search(config.semantic_search),
+                lambda config: runtime.reconfigure_semantic_search(config.semantic_search),
+            ),
+            (
+                policy_changed,
+                "policy",
+                runtime.reconfigure_detector_policy,
+                runtime.reconfigure_detector_policy,
+            ),
+        ]
+        try:
+            for changed, name, forward, _rollback in steps:
+                if changed:
+                    applied.append(name)
+                    forward(incoming)
+        except BaseException:
+            runtime.config = current
+            for changed, name, _forward, rollback in reversed(steps):
+                if changed and name in applied:
+                    try:
+                        rollback(current)
+                    except Exception:
+                        LOGGER.exception(
+                            "failed to roll back %s configuration",
+                            name,
+                        )
+            if persist:
+                try:
+                    self._save(current, assign_ids=False)
+                except Exception:
+                    LOGGER.exception(
+                        "failed to restore persisted configuration after targeted apply failure"
+                    )
+            raise
+
+        restarted = [
+            name
+            for name, changed in (
+                ("recorders", bool(recorder_changes)),
+                ("mqtt", mqtt_changed),
+                ("semantic_search", semantic_changed),
+            )
+            if changed
+        ]
+        hot = changes + recorder_changes + (
+            ["detector_policy"] if policy_changed else []
+        )
+        return incoming, {
+            "apply_mode": "targeted" if restarted else "hot" if hot else "unchanged",
+            "camera_workers_restarted": False,
+            "camera_ids_restarted": [],
+            "subsystems_restarted": restarted,
+            "hot_updated": hot,
+            "compatibility_only": compatibility_only,
+        }
+
     def apply(self, current: AppConfig, incoming: AppConfig, runtime: ConfigurableRuntime, *, persist: bool) -> tuple[AppConfig, dict[str, object]]:
         with self._lock:
+            if getattr(runtime, "native_first", False) is True:
+                return self._apply_native_locked(
+                    current,
+                    incoming,
+                    runtime,
+                    persist=persist,
+                )
             changes = hot_config_changes(current, incoming)
             mqtt_changed = current.mqtt != incoming.mqtt
             recorder_changes = [field for field in sorted(RECORDER_CONFIG_FIELDS) if getattr(current, field) != getattr(incoming, field)]

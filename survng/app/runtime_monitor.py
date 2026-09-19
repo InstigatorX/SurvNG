@@ -141,6 +141,9 @@ class OperationalTelemetryCollector:
             raw_frame_age = status.get("last_frame_age_seconds")
             frame_age = _finite_float(raw_frame_age)
             fresh = raw_frame_age is None or (frame_age is not None and frame_age <= 5.0)
+            native = status.get("native_activity") or {}
+            pipeline = status.get("live_pipeline") or {}
+            native_healthy = native.get("health") == "healthy" and bool(status.get("detection_enabled")) and expected and fresh
             cameras.append(
                 CameraTelemetryBucket(
                     sampled_at=sampled_at,
@@ -149,6 +152,9 @@ class OperationalTelemetryCollector:
                     available=float(expected and bool(status.get("connected")) and fresh),
                     live_fps=float(live.get("fps") or 0.0),
                     main_fps=float(main.get("fps") or 0.0),
+                    detection_fps=(_finite_float(native.get("effective_fresh_fps")) if native_healthy else 0.0) if native else None,
+                    detector_latency_ms=_finite_float(pipeline.get("native_detector_average_ms")) if native_healthy else None,
+                    detector_p95_ms=_finite_float(pipeline.get("native_detector_p95_ms")) if native_healthy else None,
                     **deltas,
                 )
             )

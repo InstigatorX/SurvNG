@@ -7,9 +7,10 @@ inference with no objects. No image allocations or model calls belong here.
 from __future__ import annotations
 
 import math
+import time
 from collections import Counter, deque
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -21,6 +22,15 @@ class DetectionSnapshot:
     height: int
     objects: tuple[dict[str, Any], ...]
     session: str = ""
+    provenance: str = "unknown"
+    received_monotonic: float = field(default_factory=time.monotonic)
+    zone_revision: str = ""
+
+    def matches_frame(self, pts: float, session: str) -> bool:
+        # PTS is transported as seconds; allow only floating-point rounding,
+        # never a detector-cadence window that could identify a different frame.
+        return bool(session and self.session == session and math.isfinite(pts)
+                    and abs(self.source_pts - pts) <= 1e-9)
 
     @classmethod
     def parse(cls, payload: dict[str, Any], *, session: str = "") -> DetectionSnapshot:
@@ -48,8 +58,11 @@ class DetectionSnapshot:
             x1, y1, x2, y2 = values
             if x2 <= x1 or y2 <= y1 or not 0 <= confidence <= 1:
                 raise ValueError("invalid detection geometry or confidence")
+        provenance = payload.get("provenance", "unknown")
+        if provenance not in ("unknown", "native_fresh_detection", "native_tracked_prediction"):
+            raise ValueError("invalid detection provenance")
         return cls(float(pts), payload["inference_sequence"], payload["width"], payload["height"],
-                   tuple(deepcopy(objects)), session)
+                   tuple(deepcopy(objects)), session, provenance, zone_revision=str(payload.get("zone_revision", "")))
 
     def scaled_objects(self, width: int, height: int) -> list[dict[str, Any]]:
         if width <= 0 or height <= 0:
@@ -57,6 +70,7 @@ class DetectionSnapshot:
         result = []
         for raw in self.objects:
             obj = deepcopy(raw)
+            obj.setdefault("detection_provenance", self.provenance)
             box = obj["box"]
             for key in ("x1", "x2"):
                 box[key] = max(0.0, min(float(width), box[key] * width / self.width))
@@ -92,9 +106,11 @@ class DetectionHistory:
             return
         self.snapshots.append(snapshot)
         self.counts["snapshots"] += 1
+        self.counts["native_detection_snapshots"] += snapshot.provenance == "native_fresh_detection"
+        self.counts["native_tracker_predictions"] += snapshot.provenance == "native_tracked_prediction"
         self.counts["empty_snapshots"] += not snapshot.objects
 
-    def match(self, *, pts: float, session: str, detect_fps: float) -> DetectionSnapshot | None:
+    def match(self, *, pts: float, session: str, detect_fps: float, exact: bool = False) -> DetectionSnapshot | None:
         if not session or session != self.session:
             self.counts["wrong_session"] += 1
             return None
@@ -106,6 +122,9 @@ class DetectionHistory:
         snapshot = next((item for item in reversed(self.snapshots) if item.source_pts <= pts), None)
         if snapshot is None:
             self.counts["unmatched"] += 1
+            return None
+        if exact and not snapshot.matches_frame(pts, session):
+            self.counts["native_detection_stale"] += 1
             return None
         if pts - snapshot.source_pts > tolerance:
             self.counts["stale"] += 1

@@ -37,17 +37,15 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+      - name: Install native media regression dependencies
+        run: |
+          sudo -n apt-get update
+          sudo -n apt-get install -y python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav ffmpeg
       - name: Run Python regression suite
         env:
           SURVNG_TEST_TIMEOUT_SECONDS: "600"
         run: |
           scripts/run-tests.sh -q
-      - name: Install optional CPU tracking test runtime
-        run: |
-          .venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          .venv/bin/pip install -r requirements-ultralytics-tracking.txt
-      - name: Run native replacement adapter tests
-        run: scripts/run-tests.sh tests/test_ultralytics_replacement_adapters.py
       - name: Run frontend unit tests
         run: node frontend/tests/run-tests.mjs unit
       - name: Post-job cleanup
@@ -66,4 +64,4 @@ jobs:
             --cap-drop ALL --security-opt no-new-privileges \
             --entrypoint /bin/bash -v "$PWD:/work:ro" -w /work \
             intel/dlstreamer:2026.2.0-ubuntu24@sha256:3848efe52c047cf6b5961eb070deaf9eca53bd5328f0d819fbb68ad56c65fb19 \
-            -lc 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$PYTHONPATH python3 scripts/gstreamer-smoke.py'
+            -lc 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$PYTHONPATH python3 scripts/gstreamer-smoke.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$PYTHONPATH python3 scripts/gstreamer-spatial-check.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$PYTHONPATH python3 scripts/gstreamer-spatial-check.py --budget && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work:$PYTHONPATH python3 scripts/gstreamer-spatial-check.py --verify-crops'

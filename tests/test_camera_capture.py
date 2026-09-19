@@ -239,6 +239,63 @@ def test_latest_copy_does_not_hold_capture_lock_during_image_copy() -> None:
     assert status["frame_copy_bytes"] == slow.nbytes
 
 
+def test_read_only_latest_borrows_pixels_and_preserves_stale_boundary():
+    now = [100.0]
+    service = _service(monotonic_clock=lambda: now[0], stale_seconds=10)
+    service._stop.clear()
+    image = np.ones((10, 20, 3), np.uint8)
+    service._publish_frame("live", image, source_pts=12, source_session="current")
+    frame = service.latest("live", copy=False)
+    assert frame.image is image
+    assert not frame.image.flags.writeable
+    assert frame.source_pts == 12 and frame.source_session == "current"
+    with pytest.raises(ValueError):
+        frame.image[:] = 0
+    service._publish_frame("live", np.zeros_like(image))
+    assert frame.image.all()  # Retaining a borrowed frame survives publication.
+    assert service.status()["capture_stats"]["live"]["frame_copy_count"] == 0
+    now[0] = 111
+    assert service.latest("live", copy=False) is None
+
+
+def test_native_observation_cursor_keeps_history_for_other_consumers():
+    service = _service()
+    history = service._detection_history["live"]
+    history.reset("one")
+    first = DetectionSnapshot(1, 1, 2, 2, (), "one")
+    second = DetectionSnapshot(2, 2, 2, 2, (), "one")
+    history.add(first)
+    history.add(second)
+    assert service.native_observations(after_session="one", after_sequence=1) == (second,)
+    assert service.native_observations(after_session="one", after_sequence=2) == ()
+    assert service.native_observations() == (first, second)
+    history.reset("two")
+    replacement = DetectionSnapshot(0, 1, 2, 2, (), "two")
+    history.add(replacement)
+    assert service.native_observations(after_session="one", after_sequence=2) == (replacement,)
+
+
+def test_preview_decoding_is_lazy_cached_and_invalidated(monkeypatch):
+    service = _service()
+    service._stop.clear()
+    service._publish_frame("live", np.zeros((8, 12, 3), np.uint8))
+    jpeg = cv2.imencode('.jpg', np.ones((8, 12, 3), np.uint8))[1].tobytes()
+    from unittest.mock import Mock
+    decode = Mock(wraps=cv2.imdecode)
+    monkeypatch.setattr(cv2, 'imdecode', decode)
+    handle = SimpleNamespace(pop_jpeg=lambda: jpeg)
+    service._store_preview("live", handle)
+    assert service.latest_jpeg("live") == jpeg
+    decode.assert_not_called()
+    preview = service.latest_preview_image("live")
+    assert preview is not None and not preview.flags.writeable
+    assert service.latest_preview_image("live") is preview
+    assert decode.call_count == 1
+    service._store_preview("live", handle)
+    service.latest_preview_image("live")
+    assert decode.call_count == 2
+
+
 def test_main_source_is_lazy_and_expires_after_demand_lease() -> None:
     backend = FakeBackend([[np.ones((10, 20, 3), dtype=np.uint8)]])
     service = _service(backend, main_idle_seconds=0.04)

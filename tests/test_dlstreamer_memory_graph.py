@@ -19,10 +19,15 @@ from survng import dlstreamer_live as live
     ("va", False, "live", False),
     ("va", True, "live", True),
 ])
+@pytest.mark.parametrize("compliance", ["auto", "strict", "normal", "flexible"])
+@pytest.mark.parametrize("spatial", [False, True])
+@pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("frame_width", [320, 0])
 def test_host_consumers_download_after_rate_limit_without_breaking_detection(
-    monkeypatch, decoder, detect, role, test_source,
+    monkeypatch, decoder, detect, role, test_source, compliance, spatial, adaptive, frame_width,
 ):
     elements, links = {}, []
+    callbacks = {}
 
     class Element:
         def __init__(self, factory, name):
@@ -39,6 +44,15 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
             links.append((self.name, other.name))
             return True
 
+        def get_static_pad(self, name):
+            return SimpleNamespace(add_probe=lambda *args: 1)
+
+        def set_locked_state(self, locked):
+            self.locked = locked
+
+        def set_state(self, state):
+            return 0
+
         def get_name(self):
             return self.name
 
@@ -49,34 +63,66 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert contexts == ([shared_context] if shared_context is not None else [])
 
     pipeline = SimpleNamespace(
-        add=add, connect=lambda *args: None, set_context=contexts.append,
+        add=add, connect=lambda signal, callback: callbacks.update({signal: callback}), set_context=contexts.append,
         get_bus=lambda: None, set_state=lambda state: 0,
         get_by_name=lambda name: elements.get(name),
     )
     gst = SimpleNamespace(
         Pipeline=SimpleNamespace(new=lambda name: pipeline),
         Caps=SimpleNamespace(from_string=lambda text: text),
-        State=SimpleNamespace(PLAYING=1, NULL=0),
+        PadProbeType=SimpleNamespace(BUFFER=1),
+        State=SimpleNamespace(PLAYING=1, NULL=0, READY=2),
         StateChangeReturn=SimpleNamespace(FAILURE=-1),
     )
     monkeypatch.setitem(sys.modules, "gstgva", SimpleNamespace(VideoFrame=object))
+    monkeypatch.setitem(sys.modules, "gstgva.util", SimpleNamespace(GST_PAD_PROBE_INFO_BUFFER=object))
     monkeypatch.setattr(live, "_element", lambda gst, factory, name: Element(factory, name))
     monkeypatch.setattr(live, "_factory_available", lambda gst, name: True)
     monkeypatch.setattr(live, "_make_live_source", lambda gst, **kwargs: (Element("source", "source"), "source"))
     monkeypatch.setattr(live, "_link_tee", lambda gst, tee, target: tee.link(target))
     stop = threading.Event()
     stop.set()  # Construct/link the real graph, but do not enter its native loop.
-    args = live._parser().parse_args(["--decoder", decoder])
+    args = live._parser().parse_args(["--decoder", decoder, "--native-tracking", "short-term-imageless"])
+    from survng.app.config import NativeBudgetConfig
+    plan = {"zones": [], "revision": "test", "roi": {"enabled": spatial},
+            "budget": NativeBudgetConfig(enabled=adaptive, motion_threshold=.23, min_persistence=4).model_dump()}
     live._pump_pipeline(
         gst, args, url="rtsp://fixture.invalid/video", stream_id="test",
         detect=detect, model_path=Path("fixture.xml"), instance_id="fixture",
-        rate=Fraction(5), detect_rate=Fraction(5, 2), qualifier_width=320,
+        rate=Fraction(5), detect_rate=Fraction(5, 2), qualifier_width=frame_width,
         jpeg_rate=Fraction(1), open_timeout=3, stdout=None, stdout_lock=None,
         stop_event=stop, encode_frame=None, encode_jpeg=None, encode_json=None,
         TYPE_DETECTIONS=2, TYPE_STATUS=3, install_signals=False,
         test_source=test_source, source_role=role,
         va_context=shared_context,
+        h264_decoder_compliance=compliance,
+        spatial_plan=plan if spatial or adaptive else None,
     )
+    if detect and (spatial or adaptive):
+        assert elements["inference-region"].factory == "gvapython"
+        assert elements["detect"].properties["inference-region"] == 1
+        assert elements["detect"].properties["model-instance-id"].endswith("-roi")
+        assert ("inference-region", "detect") in links
+        assert ("native-track", "zone-analytics") in links
+        assert ("zone-analytics", "detect-output-queue") in links
+    if detect and adaptive:
+        assert elements['budget-motion'].factory == 'gvamotiondetect'
+        assert elements['budget-motion'].properties['motion-threshold'] == .23
+        assert elements['budget-motion'].properties['min-persistence'] == 4
+        assert elements['detect'].properties['inference-interval'] == 1
+        assert ('budget-motion', 'budget-gate') in links
+        assert ('budget-gate', 'inference-region') in links
+        assert elements['motion-caps'].properties['caps'].endswith(',format=NV12')
+    else:
+        assert 'budget-gate' not in elements
+    native_properties = {}
+    native_decoder = SimpleNamespace(
+        get_factory=lambda: SimpleNamespace(get_name=lambda: "vah264dec"),
+        find_property=lambda name: name == "compliance",
+        set_property=lambda name, value: native_properties.update({name: value}),
+    )
+    callbacks["deep-element-added"](pipeline, None, native_decoder)
+    assert native_properties == {"compliance": live.H264_DECODER_COMPLIANCE[compliance]}
     va = decoder == "va" and detect and not test_source
     expected = "vapostproc" if va else "videoconvert"
     assert elements["qualifier-gray"].factory == "videoconvert"
@@ -90,27 +136,33 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     assert elements["jpeg-caps"].properties["caps"] == "video/x-raw,format=I420,framerate=1/1"
     if va:
         assert elements["qualifier-download"].factory == "vapostproc"
-        assert elements["qualifier-host-caps"].properties["caps"] == "video/x-raw,format=NV12,width=320,pixel-aspect-ratio=1/1"
+        assert elements["qualifier-download"].properties["disable-passthrough"] is True
+        assert elements["qualifier-host-caps"].properties["caps"] == "video/x-raw,format=NV12" + (",width=320,pixel-aspect-ratio=1/1" if frame_width else "")
         assert ("qualifier-download", "qualifier-host-caps") in links
         assert ("qualifier-host-caps", "qualifier-gray") in links
         assert "qualifier-scale" not in elements  # resize before the host download
         assert ("qualifier-gray", "frame-caps") in links
-        assert "width=320" in elements["frame-caps"].properties["caps"]
+        assert ("width=320" in elements["frame-caps"].properties["caps"]) == bool(frame_width)
         assert elements["detect"].properties["pre-process-backend"] == "va-surface-sharing"
         assert elements["detect"].properties["pre-process-config"] == "VAAPI_THREAD_POOL_SIZE=1"
-        assert elements["detect-rate-caps"].properties["caps"] == "video/x-raw(memory:VAMemory),framerate=5/2"
-        assert ("detect-va-memory", "detect") in links
-    else:
+        assert elements["detect-rate-caps"].properties["caps"] == "video/x-raw(memory:VAMemory),framerate=" + ("5/1" if adaptive else "5/2")
+        assert ("detect-va-memory", "motion-convert" if adaptive else "inference-region" if spatial else "detect") in links
+    elif frame_width:
         assert elements["qualifier-scale"].factory == "videoscale"
+    else:
+        assert "qualifier-scale" not in elements
     if not detect:
         assert "format=BGR," in elements["frame-caps"].properties["caps"]
         assert "detect" not in elements
     else:
         assert elements["detect"].properties["ie-config"] == (
-            "PERFORMANCE_HINT=LATENCY,NUM_STREAMS=1,COMPILATION_NUM_THREADS=1"
+            "PERFORMANCE_HINT=THROUGHPUT,NUM_STREAMS=2,ALLOW_AUTO_BATCHING=NO,COMPILATION_NUM_THREADS=1"
         )
         assert elements["meta-sink"].properties["async"] is False
-        assert elements["detect"].properties["nireq"] == 1
+        assert elements["detect"].properties["nireq"] == 4
+        assert ("detect", "native-track") in links
+        assert ("zone-analytics" if spatial or adaptive else "native-track", "detect-output-queue") in links
+        assert ("detect-output-queue", "detect-meta") in links
         assert elements["detect"].properties["scheduling-policy"] == "throughput"
 
 
@@ -133,16 +185,16 @@ def test_supervisor_retains_one_context_across_live_main_and_reconnect(monkeypat
         return shared_context
 
     def pump(gst, args, **kwargs):
-        received.append((kwargs["stream_id"], kwargs["source_role"], kwargs["va_context"]))
+        received.append((kwargs["stream_id"], kwargs["source_role"], kwargs["va_context"], kwargs["h264_decoder_compliance"]))
         assert kwargs["stop_event"].wait(2), "supervisor must join its workers"
 
     monkeypatch.setattr(live, "_create_shared_va_context", create)
     monkeypatch.setattr(live, "_pump_pipeline", pump)
     commands = (
         b'{"op":"add","stream_id":"live","url":"rtsp://fixture.invalid/live"}\n'
-        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main"}\n'
+        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main","h264_decoder_compliance":"flexible"}\n'
         b'{"op":"remove","stream_id":"main"}\n'
-        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main"}\n'
+        b'{"op":"add","stream_id":"main","source_role":"main","url":"rtsp://fixture.invalid/main","h264_decoder_compliance":"flexible"}\n'
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(commands)))
     args = live._parser().parse_args(["--decoder", "va"])
@@ -154,9 +206,9 @@ def test_supervisor_retains_one_context_across_live_main_and_reconnect(monkeypat
     assert created == ([shared_context] if detect else [])
     expected_context = shared_context if detect else None
     assert sorted(received) == [
-        ("live", "live", expected_context),
-        ("main", "main", expected_context),
-        ("main", "main", expected_context),
+        ("live", "live", expected_context, "auto"),
+        ("main", "main", expected_context, "flexible"),
+        ("main", "main", expected_context, "flexible"),
     ]
 
 
@@ -176,6 +228,7 @@ def test_shared_context_uses_decoder_device_and_releases_probe(monkeypatch, disp
 
     gst = SimpleNamespace(
         ElementFactory=SimpleNamespace(make=make, find=lambda name: object() if name == decoder_factory else None),
+        PadProbeType=SimpleNamespace(BUFFER=1),
         State=SimpleNamespace(READY=1, NULL=0),
         StateChangeReturn=SimpleNamespace(FAILURE=-1),
         Context=SimpleNamespace(new=lambda name, persistent: context),

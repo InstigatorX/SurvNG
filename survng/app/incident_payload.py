@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
-from .incident_utils import event_epoch, stable_incident_id, stable_incident_key
+from .incident_utils import event_epoch, event_end_epoch, stable_incident_id, stable_incident_key
 
 
 class IncidentPayloadBuilder:
@@ -19,6 +20,11 @@ class IncidentPayloadBuilder:
                 raw = []
         if not isinstance(raw, list):
             return []
+        native = next((item.get("object_tracking", {}) for item in raw
+                       if isinstance(item, dict) and item.get("status") == "object_tracking"), {})
+        if native.get("implementation") == "gvatrack":
+            raw = [dict(track, confidence=track.get("max_confidence", track.get("confidence", 0)))
+                   for track in native.get("tracks", []) if track.get("confirmed")]
         detected: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict) or not item.get("label") or item.get("incident_eligible") is False or item.get("provisional_detection") is True:
@@ -56,12 +62,13 @@ class IncidentPayloadBuilder:
         first = events[0]
         last = events[-1]
 
-        def representative_score(event: dict[str, Any]) -> tuple[int, float, int, int]:
+        def representative_score(event: dict[str, Any]) -> tuple[int, float, int, float, int]:
             objects = cls._event_objects(event)
             return (
+                int(bool(event.get("snapshot_path"))),
+                max((float(item.get("native_cover_score") or 0) for item in objects), default=0.0),
                 int(bool(objects)),
                 max((float(item.get("confidence") or 0) for item in objects), default=0.0),
-                int(bool(event.get("snapshot_path"))),
                 int(event.get("id") or 0),
             )
 
@@ -181,8 +188,8 @@ class IncidentPayloadBuilder:
             "camera_id": pending["camera_id"],
             "camera_name": pending["camera_name"],
             "started_at": first.get("created_at"),
-            "ended_at": last.get("created_at"),
-            "duration_seconds": round(max(0.0, event_epoch(last) - event_epoch(first)), 3),
+            "ended_at": datetime.fromtimestamp(max(map(event_end_epoch, events)), timezone.utc).isoformat(),
+            "duration_seconds": round(max(0.0, max(map(event_end_epoch, events)) - event_epoch(first)), 3),
             "event_count": len(events),
             "event_ids": [int(event.get("id") or 0) for event in events],
             "object_event_count": sum(bool(cls._event_objects(event)) for event in events),

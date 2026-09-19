@@ -46,6 +46,7 @@ def _event_row(row: dict) -> dict:
         or "camera"
     ).lower()
     event["trigger_source"] = (
+        "native" if raw_trigger_source == "native/object-presence" else
         "ema"
         if raw_trigger_source in {"adaptive", "visual_backup", "adaptive/visual_backup"}
         else "camera"
@@ -107,6 +108,8 @@ def _event_row(row: dict) -> dict:
 def _best_incident_event(events: list[dict]) -> dict:
     object_events = [event for event in events if event.get("has_objects")]
     candidates = object_events or events
+    with_images = [event for event in candidates if event.get("has_snapshot") or event.get("snapshot_path")]
+    candidates = with_images or candidates
 
     def score(
         event: dict,
@@ -234,6 +237,20 @@ def _incident_event_payload(event: dict) -> dict:
     ]
     payload["object_tracking"] = event.get("object_tracking")
     return payload
+
+
+def apply_native_replay_geometry(incident: dict, cameras: dict) -> None:
+    """Apply an explicit camera geometry confirmation to historical playback.
+
+    A stored False meant unverified, not a measured FOV mismatch. Project the
+    current confirmation into responses without rewriting archived track data.
+    """
+    for item in [incident, *incident.get("events", [])]:
+        camera = cameras.get(str(item.get("camera_id") or incident.get("camera_id") or ""))
+        tracking = item.get("object_tracking")
+        if (getattr(camera, "native_same_field_of_view", False) is True
+                and isinstance(tracking, dict) and tracking.get("implementation") == "gvatrack"):
+            item["object_tracking"] = {**tracking, "recording_overlay_compatible": True}
 
 
 def _incident_list_payload(incident: dict) -> dict:

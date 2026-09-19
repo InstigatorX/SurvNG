@@ -429,13 +429,16 @@ class CameraCaptureService:
             return None
         return self.latest(source)
 
-    def latest(self, source: str) -> CapturedFrame | None:
+    def latest(self, source: str, *, copy: bool = True) -> CapturedFrame | None:
+        """Return fresh pixels; read-only consumers may borrow the published frame."""
         source = self._normalize_source(source)
         now = self._monotonic_clock()
         with self._lock:
             frame = self._frames.get(source)
             if frame is None or now - frame.captured_at_monotonic > self.stale_seconds:
                 return None
+        if not copy:
+            return frame
         # Published frames are immutable, so retaining the frame reference is
         # safe while the potentially large writable copy happens without
         # blocking capture publication or lifecycle/status access.
@@ -865,7 +868,7 @@ class CameraCaptureService:
         return {**history.status(), "lag_seconds": lag}
 
     def matched_snapshot(
-        self, source: str, *, source_pts: float, generation: int, source_session: str
+        self, source: str, *, source_pts: float, generation: int, source_session: str, exact: bool = False
     ) -> DetectionSnapshot | None:
         """Match only current-session evidence; missing is distinct from empty."""
         source = self._normalize_source(source)
@@ -874,8 +877,15 @@ class CameraCaptureService:
                 return None
             self._harvest_detection_snapshots_locked(source)
             return self._detection_history[source].match(
-                pts=source_pts, session=source_session, detect_fps=self._detect_fps(source)
+                pts=source_pts, session=source_session, detect_fps=self._detect_fps(source), exact=exact
             )
+
+    def native_observations(self, *, after_session: str = "", after_sequence: int = 0) -> tuple[DetectionSnapshot, ...]:
+        """Bounded metadata stream; independent of pixel frame delivery."""
+        with self._lock:
+            self._harvest_detection_snapshots_locked("live")
+            return tuple(snapshot for snapshot in self._detection_history["live"].snapshots
+                         if snapshot.session != after_session or snapshot.inference_sequence > after_sequence)
 
     def latest_jpeg(self, source: str = "live") -> bytes | None:
         source = self._normalize_source(source)
@@ -898,13 +908,25 @@ class CameraCaptureService:
         with self._lock:
             frame = self._frames.get(source)
             preview = self._preview.get(source)
+            jpeg = self._jpegs.get(source)
             if (
                 frame is None
                 or now - frame.captured_at_monotonic > self.stale_seconds
                 or now - self._preview_received_at.get(source, float("-inf")) > self.stale_seconds
             ):
                 return None
-            return preview
+            if preview is not None or not jpeg:
+                return preview
+        # Most native consumers use the encoded JPEG directly or native BGR
+        # evidence. Decode only when a caller actually requests preview pixels.
+        decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if decoded is None:
+            return None
+        decoded.setflags(write=False)
+        with self._lock:
+            if self._jpegs.get(source) is jpeg:
+                self._preview[source] = decoded
+        return decoded
 
     def _store_preview(self, source: str, handle: CaptureHandle) -> None:
         pop = getattr(handle, "pop_jpeg", None)
@@ -916,13 +938,9 @@ class CameraCaptureService:
             return
         if not isinstance(jpeg, (bytes, bytearray)) or not jpeg:
             return
-        decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if decoded is None:
-            return
-        decoded.setflags(write=False)
         with self._lock:
             self._jpegs[source] = bytes(jpeg)
-            self._preview[source] = decoded
+            self._preview.pop(source, None)
             self._preview_received_at[source] = self._monotonic_clock()
 
     def _store_sidecar_state(self, source: str, handle: CaptureHandle) -> None:

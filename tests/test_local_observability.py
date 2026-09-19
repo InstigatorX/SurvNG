@@ -374,3 +374,24 @@ def test_ffmpeg_and_observer_share_private_runtime_across_restarts(tmp_path: Pat
             assert not server.socket_path.exists()
 
     asyncio.run(exercise())
+
+
+def test_native_verification_diagnostics_are_bounded_and_allowlisted():
+    manager = _manager()
+    tracking = manager.statuses.return_value[0]['object_tracking']
+    tracking['verification_recent'] = [{
+        'label': 'person', 'status': 'unverified', 'reason': 'main_crop_verification',
+        'epoch': 100, 'votes': ['ambiguous'] * 20,
+        'checks': [{'epoch': 100, 'votes': ['negative', 'rtsp://secret'] * 10,
+                    'image': 'must-not-leak'}] * 20,
+        'private': 'must-not-leak',
+    }] * 20
+    status = build_runtime_status(AppConfig(), manager, instance_id='one', uptime_seconds=10, stopping=False)
+    recent = status['cameras'][0]['native']['verification_recent']
+    assert len(recent) == 16
+    assert recent[0]['epoch'] == 100
+    assert len(recent[0]['votes']) == 3
+    assert len(recent[0]['checks']) == 3
+    assert recent[0]['checks'][0]['votes'] == ['negative', None, 'negative', None, 'negative']
+    assert 'secret' not in json.dumps(recent)
+    assert 'must-not-leak' not in json.dumps(recent)

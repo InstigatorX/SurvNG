@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +68,42 @@ def event_epoch(event: dict[str, Any]) -> float:
     return parsed.timestamp()
 
 
+def event_end_epoch(event: dict[str, Any]) -> float:
+    """Native presence events span the observed track lifetime."""
+    start = event_epoch(event)
+    raw = event.get("objects")
+    if raw is None:
+        try:
+            raw = json.loads(str(event.get("objects_json") or "[]"))
+        except (TypeError, ValueError):
+            raw = []
+    tracking = event.get("object_tracking")
+    if not isinstance(tracking, dict):
+        tracking = next((item.get("object_tracking") for item in raw or []
+                         if isinstance(item, dict) and item.get("status") == "object_tracking"), {})
+    if not isinstance(tracking, dict) or tracking.get("implementation") != "gvatrack":
+        return start
+    try:
+        return max(start, datetime.fromisoformat(str(tracking.get("updated_at"))).timestamp())
+    except (TypeError, ValueError):
+        return start
+
+
+def native_presence_event(event: dict[str, Any]) -> bool:
+    if event.get("topic") == "native/object-presence":
+        return True
+    tracking = event.get("object_tracking")
+    if isinstance(tracking, dict) and tracking.get("implementation") == "gvatrack":
+        return True
+    raw = event.get("objects")
+    if raw is None:
+        try:
+            raw = json.loads(str(event.get("objects_json") or "[]"))
+        except (TypeError, ValueError):
+            raw = []
+    return isinstance(raw, list) and any(isinstance(item, dict) and item.get("native_identity") for item in raw)
+
+
 def incident_event_groups(
     rows: list[dict[str, Any]],
     gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
@@ -81,12 +118,22 @@ def incident_event_groups(
         current: list[dict[str, Any]] = []
         current_end = 0.0
         for event in ordered:
+            # A native event already represents an entire presence episode.
+            # Gap-grouping adjacent episodes would disagree with completion
+            # notifications and erase the reconnect boundary in the incident UI.
+            if native_presence_event(event):
+                if current:
+                    groups.append((camera_id, current))
+                    current = []
+                groups.append((camera_id, [event]))
+                current_end = 0.0
+                continue
             created_epoch = event_epoch(event)
             if current and created_epoch - current_end > gap_seconds:
                 groups.append((camera_id, current))
                 current = []
             current.append(event)
-            current_end = created_epoch
+            current_end = max(current_end, event_end_epoch(event))
         if current:
             groups.append((camera_id, current))
 

@@ -43,10 +43,6 @@ from .camera_api_routes import (
     CameraApiDependencies,
     create_camera_api_router,
 )
-from .detection_routes import (
-    DetectionRouteDependencies,
-    create_detection_router,
-)
 from .face_routes import (
     FaceRouteDependencies,
     create_face_router,
@@ -84,11 +80,9 @@ from .semantic_routes import (
     SemanticRouteDependencies,
     create_semantic_router,
 )
-from .object_tracking import ultralytics_fasttrack_dependency_status
 from .operations_routes import OperationsRouteDependencies, create_operations_router
 from .support_bundle import SupportBundleDependencies, create_support_bundle_router
 from .product_update import ProductUpdateService
-from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .system_telemetry import (
     SystemTelemetryDependencies,
     SystemTelemetryService,
@@ -129,7 +123,6 @@ AI_ACTIVE_OPERATIONS: dict[str, int] = {}
 AI_SHUTDOWN_DRAIN_SECONDS = 30.0
 MANAGER_ACCESS_DRAIN_SECONDS = 15.0
 FACE_OBSERVATION_SYNC_STOP_SECONDS = 5.0
-TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 INCIDENT_QUERIES = IncidentQueryService()
@@ -800,7 +793,14 @@ def apply_config_update(
     with MANAGER_RELOAD_LOCK:
         current = config
         previous_ffmpeg_path = current.ffmpeg_path
-        if manager_owned_config(current) != manager_owned_config(effective):
+        native_first = getattr(get_manager(), "native_first", False) is True
+        if manager_owned_config(
+            current,
+            native_first=native_first,
+        ) != manager_owned_config(
+            effective,
+            native_first=native_first,
+        ):
             if effective.ffmpeg_path != previous_ffmpeg_path:
                 _recording_media_runtime.clear_hardware_probe_caches()
             applied = reload_manager(effective, assign_ids=False, persist=persist)
@@ -1303,46 +1303,16 @@ webrtc_signaling = _camera_api_route_bundle.handlers["webrtc_signaling"]
 mse_stream = _camera_api_route_bundle.handlers["mse_stream"]
 start_camera = _camera_api_route_bundle.handlers["start_camera"]
 stop_camera = _camera_api_route_bundle.handlers["stop_camera"]
-motion_test = _camera_api_route_bundle.handlers["motion_test"]
-motion_debug_status = _camera_api_route_bundle.handlers["motion_debug_status"]
-set_motion_debug = _camera_api_route_bundle.handlers["set_motion_debug"]
-motion_debug_image = _camera_api_route_bundle.handlers["motion_debug_image"]
 start_recording = _camera_api_route_bundle.handlers["start_recording"]
 stop_recording = _camera_api_route_bundle.handlers["stop_recording"]
 set_camera_recording = _camera_api_route_bundle.handlers["set_camera_recording"]
 set_camera_detection = _camera_api_route_bundle.handlers["set_camera_detection"]
 
 
-_detection_route_bundle = create_detection_router(
-    DetectionRouteDependencies(
-        get_manager=get_manager,
-        get_config=lambda: config,
-        manager_lock=MANAGER_RELOAD_LOCK,
-        get_comparison_limiter=lambda: TRACKING_COMPARISON_LIMITER,
-        ensure_event_clip=lambda *args, **kwargs: (
-            _recording_media_runtime._ensure_event_clip(*args, **kwargs)
-        ),
-        dependency_status=lambda: ultralytics_fasttrack_dependency_status(),
-        comparison_runner=lambda *args, **kwargs: TrackingComparisonRunner(
-            *args, **kwargs
-        ),
-        sample_video_frames=lambda *args, **kwargs: sampled_video_frames(
-            *args, **kwargs
-        ),
-        manager_access=MANAGER_ACCESS,
-    )
-)
-app.include_router(_detection_route_bundle.router)
-
-detect_event_snapshot = _detection_route_bundle.handlers["detect_event_snapshot"]
-tracking_comparison_history = _detection_route_bundle.handlers[
-    "tracking_comparison_history"
-]
-update_tracking_comparison_verdict = _detection_route_bundle.handlers[
-    "update_tracking_comparison_verdict"
-]
-compare_event_tracking = _detection_route_bundle.handlers["compare_event_tracking"]
-detect_debug_frame = _detection_route_bundle.handlers["detect_debug_frame"]
+# Native live metadata is the only detector endpoint. No replay comparison or
+# upload/manual-inference routes are registered in this build.
+from .native_routes import create_native_router
+app.include_router(create_native_router(get_manager))
 
 
 _appearance_route_bundle = create_appearance_router(

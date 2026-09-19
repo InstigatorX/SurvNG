@@ -28,6 +28,8 @@ export function defaultCamera(cameras, seed = {}) {
       live_days: seed.retention?.live_days ?? null,
     },
     require_incident_zone: seed.require_incident_zone ?? null,
+    native_budget: structuredClone(seed.native_budget || {}),
+    native_roi: structuredClone(seed.native_roi || { enabled: false, zone_names: [], padding: 0.15, full_frame_interval: 5 }),
     object_activity_attribution: seed.object_activity_attribution || "inherit",
     motion_qualification: {
       ...defaultCameraMotionQualification(),

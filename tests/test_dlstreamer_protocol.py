@@ -119,6 +119,24 @@ def test_stream_prefixed_messages_round_trip() -> None:
     assert stream_id == "gate-live"
     assert decode_frame_payload(inner)[4] == pixels
 
+
+def test_frame_header_decoding_can_borrow_the_payload():
+    encoded = encode_frame(width=2, height=2, sequence=1, pts=.1,
+                           pixels=b'abcd', stream_id='camera')
+    reader = MessageReader()
+    reader.feed(encoded)
+    _, payload = reader.pop()
+    stream, inner = decode_stream_payload(memoryview(payload))
+    assert stream == 'camera'
+    pixels = decode_frame_payload(inner)[4]
+    assert isinstance(pixels, memoryview)
+    assert pixels.obj is payload
+    assert pixels == b'abcd'
+    # The returned allocation does not borrow the reader's mutable buffer.
+    reader.feed(encoded)
+    reader.pop()
+    assert pixels == b'abcd'
+
     status = encode_json(TYPE_STATUS, {"ok": True}, stream_id="cam-2")
     reader.feed(status)
     _type, payload = reader.pop() or (0, b"")

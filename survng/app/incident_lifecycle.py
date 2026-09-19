@@ -16,6 +16,7 @@ from .incident_payload import IncidentPayloadBuilder
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
     event_epoch,
+    event_end_epoch,
     stable_incident_id,
 )
 
@@ -68,6 +69,17 @@ class IncidentLifecycle(IncidentPayloadBuilder):
             group = self._groups.get(incident_id)
             return deepcopy(group["payload"]) if group else None
 
+    def complete_event(self, event_id: int) -> None:
+        """Native activity owns explicit completion; timers remain recovery."""
+        with self._lock:
+            for key, group in self._groups.items():
+                if event_id in group["events"] and group["payload"]["state"] != "complete":
+                    self._emit(key, group, "complete")
+                    timer = self._timers.pop(key, None)
+                    if timer:
+                        timer.cancel()
+                    return
+
     def _save(self) -> None:
         if self._path is None:
             return
@@ -113,7 +125,7 @@ class IncidentLifecycle(IncidentPayloadBuilder):
             snapshot_url=payload["snapshot_url"] if image_available else None,
             initial_event_id=previous.get("initial_event_id") or payload["representative_event_id"],
             initial_image_available=previous.get("initial_image_available", image_available),
-            trigger_source=str(representative.get("trigger_source") or ""),
+            trigger_source=str(representative.get("trigger_source") or ("native" if representative.get("topic") == "native/object-presence" else "")),
         )
         payload["changed_fields"] = [
             name for name in ("state", "classes", "objects", "zones", "identities", "summary", "representative_event_id")
@@ -158,7 +170,7 @@ class IncidentLifecycle(IncidentPayloadBuilder):
                     match = None
             if match is None:
                 group = {"camera_id": camera_id, "camera_name": camera_name or camera_id,
-                         "base_path": base_path, "events": {}, "last_epoch": event_epoch(event)}
+                         "base_path": base_path, "events": {}, "last_epoch": event_end_epoch(event)}
                 key = stable_incident_id(camera_id, event_id)
                 state = "new"
             else:
@@ -172,7 +184,7 @@ class IncidentLifecycle(IncidentPayloadBuilder):
             group["events"][event_id] = deepcopy(event)
             group["camera_name"] = camera_name or camera_id
             group["base_path"] = base_path
-            group["last_epoch"] = max(group["last_epoch"], event_epoch(event))
+            group["last_epoch"] = max(group["last_epoch"], event_end_epoch(event))
             # Refinements do not extend the activity window.
             if allow_new or "settle_at" not in group:
                 group["settle_at"] = time.time() + DEFAULT_INCIDENT_GAP_SECONDS

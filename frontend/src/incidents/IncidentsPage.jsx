@@ -59,6 +59,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const incidentLoadedQueryRef = useRef("");
   const incidentEventRefreshTimer = useRef(null);
   const incidentEvidenceRefreshSequence = useRef(0);
+  const incidentEvidenceRefreshRef = useRef(null);
   const {
     incidentDetailCacheRef,
     incidentDetails,
@@ -306,27 +307,33 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   function refreshIncidentEvidence() {
     const sequence = ++incidentEvidenceRefreshSequence.current;
     incidentDetailCacheRef.current.clear();
-    setIncidentDetails({});
     setIncidentRefreshToken((value) => value + 1);
-    // Overlays and linked/related previews retain their own detail objects.
-    // Reconcile those too, while a request failure keeps existing evidence visible.
+    // Keep displayed evidence while revalidating. Falling back to compact rows
+    // removes tracks and resets the player during polling/SSE refreshes.
     const selections = [
+      [focusedSummary, null],
       [selectedEvent, setSelectedEvent],
       [linkedIncidentDetail, setLinkedIncidentDetail],
       [relatedPreviewIncident, setRelatedPreviewIncident],
     ];
+    const retainedQueries = new Set(selections.map(([selection]) => incidentDetailQuery(selection)).filter(Boolean));
+    setIncidentDetails((current) => Object.fromEntries(
+      Object.entries(current).filter(([query]) => retainedQueries.has(query)),
+    ));
     for (const [selection, setSelection] of selections) {
       const query = incidentDetailQuery(selection);
       if (!query) continue;
       incidentDetailCacheRef.current.load(query).then((detail) => {
         if (sequence !== incidentEvidenceRefreshSequence.current) return;
         setIncidentDetails((current) => ({ ...current, [query]: detail }));
-        setSelection((current) => incidentDetailQuery(current) === query ? detail : current);
+        setSelection?.((current) => incidentDetailQuery(current) === query ? detail : current);
       }).catch(() => {
         // SSE reconnect or the fallback poll retries without hiding the selection.
       });
     }
   }
+
+  incidentEvidenceRefreshRef.current = refreshIncidentEvidence;
 
   async function runSemanticIncidentSearch(event, requestedQuery = semanticIncidentQuery) {
     event?.preventDefault();
@@ -435,7 +442,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     incidentEventRefreshTimer.current = window.setTimeout(
       () => {
         incidentEventRefreshTimer.current = null;
-        refreshIncidentEvidence();
+        incidentEvidenceRefreshRef.current();
       },
       1000,
     );

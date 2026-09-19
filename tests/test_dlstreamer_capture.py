@@ -827,3 +827,52 @@ def test_system_python_live_main_redacts_errors_without_pydantic(supervisor) -> 
     kind, payload = reader.pop()
     assert kind == (TYPE_FATAL if supervisor else TYPE_STATUS)
     assert decode_json_payload(payload)["ok"] is False
+
+
+def test_periodic_native_status_preserves_receiver_error_count():
+    from survng.app.dlstreamer_protocol import encode_stream_payload
+    import json
+    shared = _SharedLiveProcess([], read_timeout_ms=1000)
+    shared._inboxes["test"] = _StreamInbox()
+    shared._inboxes["test"].status["invalid_detection_snapshots"] = 3
+    payload = json.dumps({"ok": True, "detect": True}).encode()
+    shared._dispatch(TYPE_STATUS, encode_stream_payload("test", payload))
+    assert shared._inboxes["test"].status["invalid_detection_snapshots"] == 3
+    handle = DlStreamerCaptureHandle(read_timeout_ms=1000)
+    handle._status["invalid_detection_snapshots"] = 2
+    handle._apply_message(TYPE_STATUS, payload)
+    assert handle._status["invalid_detection_snapshots"] == 2
+
+
+@pytest.mark.parametrize("batch", [1, 2, 4])
+def test_explicit_batch_reaches_native_command(batch):
+    backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(
+        detect_enabled=True, model_path="/models/yolo.xml", batch_size=batch,
+    ))
+    command = backend.command()
+    assert command[command.index("--batch-size") + 1] == str(batch)
+
+
+@pytest.mark.parametrize("selection", [None, (), ("person", "car")])
+def test_tracking_class_command_roundtrip(selection):
+    backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(detect_enabled=True, model_path="/models/test.xml", tracking_classes=selection))
+    command = backend.command()
+    parsed = _parser().parse_args(command[3:])
+    assert parsed.tracking_classes == (None if selection is None else list(selection))
+
+
+@pytest.mark.parametrize("value", ['"person"', '{}', '[3]', '[""]', 'null'])
+def test_tracking_class_cli_rejects_invalid_selection(value):
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["--tracking-classes", value])
+
+
+def test_native_evidence_width_survives_command_and_handle_validation():
+    from survng.dlstreamer_live import _qualifier_width
+    backend = DlStreamerCaptureBackend(CaptureOpenLimiter(1), DlStreamerCaptureOptions(frame_width=0))
+    command = backend.command()
+    assert command[command.index('--frame-width')+1] == '0'
+    handle = DlStreamerCaptureHandle(read_timeout_ms=1000)
+    handle.set_frame_width(0)
+    assert handle.frame_width == _qualifier_width(0) == 0
+    assert _qualifier_width(2000) == 960  # Explicit resized consumers keep their limit.

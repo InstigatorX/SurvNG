@@ -14,6 +14,7 @@ from urllib.parse import unquote_plus, urlsplit, urlunsplit
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from .config_application import live_detection_threshold
 from .config import ApiScope, ApiTokenConfig, AppConfig, CameraConfig, DetectionZone, camera_by_id, remove_camera, slugify_camera_id
 from .security import hash_api_token, redact_secret_text
 
@@ -459,6 +460,12 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             previous_zones = [zone.model_dump(mode="json") for zone in (previous.zones if previous else [])]
             camera.zones = zones
             next_payload = [zone.model_dump(mode="json") for zone in zones]
+            if live_detection_threshold(next_config) < live_detection_threshold(current):
+                # Native postprocessing cannot recover ROIs discarded by the
+                # graph's old threshold. Rebuild through the transaction owner.
+                _effective, result = deps.apply_config(next_config, assign_ids=False)
+                return {"ok": True, "camera_id": camera.id, "zones": next_payload,
+                        "workers_restarted": bool(result.get("camera_workers_restarted"))}
             try:
                 runtime.update_camera_zones(camera_id, zones, previous_zones)
                 deps.save_config(next_config, assign_ids=False)

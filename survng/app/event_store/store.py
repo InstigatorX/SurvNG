@@ -6,6 +6,7 @@ import math
 import os
 import sqlite3
 import threading
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,14 @@ from ..durable_payload import durable_json_dumps
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry
+from ..native_event_projection import (
+    merge_cover_objects,
+    merge_inventory_objects,
+)
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
 from .motion_intelligence import EventStoreMotionIntelligenceMixin
-from .tracking import EventStoreTrackingMixin
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +31,6 @@ class EventStore(
     EventStoreEvidenceMixin,
     EventStoreJobsMixin,
     EventStoreCalibrationMixin,
-    EventStoreTrackingMixin,
     EventStoreMotionIntelligenceMixin,
 ):
     SNAPSHOT_SIZE_WRITE_BATCH = 50
@@ -40,17 +43,6 @@ class EventStore(
     # every camera, so an uncapped window can materialize enough of the table to
     # exhaust the recorder it shares a process with.
     MAX_COMPACT_WINDOW_ROWS = 50_000
-    TRACKING_COMPARISON_HISTORY_PER_CAMERA = 100
-    TRACKING_COMPARISON_VERDICTS = {
-        "survng_hybrid_candidate",
-        "ultralytics_tracktrack",
-        "survng_hybrid",
-        "ultralytics_botsort",
-        "ultralytics_deepocsort",
-        "ultralytics_fasttrack",
-        "inconclusive",
-    }
-
     def __init__(
         self,
         storage_dir: Path,
@@ -1628,7 +1620,7 @@ class EventStore(
             "batch_saturated": len(rows) >= bounded_limit,
         }
 
-    def _delete_snapshot_if_unreferenced(self, raw_path: str) -> None:
+    def _delete_snapshot_if_unreferenced(self, raw_path: str, *, preserve_archive: bool = False) -> None:
         """Remove a replaced snapshot only after every durable reference moved."""
         portable = portable_media_path(self.storage_dir, raw_path)
         if not portable:
@@ -1638,10 +1630,11 @@ class EventStore(
                 """
                 select exists(select 1 from events where snapshot_path = ?)
                     or exists(select 1 from motion_audits where snapshot_path = ?)
+                    or (? and exists(select 1 from event_source_observations where snapshot_path = ?))
                     or exists(select 1 from event_cover_requirements where state='pending'
                         and deadline_epoch > unixepoch() and json_extract(payload_json, '$.snapshot_path') = ?)
                 """,
-                (portable, portable, portable),
+                (portable, portable, preserve_archive, portable, portable),
             ).fetchone()[0])
             if not referenced:
                 has_faces = conn.execute(
@@ -1669,6 +1662,125 @@ class EventStore(
             path.unlink(missing_ok=True)
         except (FileNotFoundError, PermissionError, OSError, RuntimeError, ValueError):
             return
+
+    def promote_native_evidence(self, event_id, snapshot_path, objects, assets, score, *, diagnostics=None):
+        """Commit a selected image and aligned boxes without touching live tracks."""
+        portable = portable_media_path(self.storage_dir, snapshot_path)
+        stale = []
+        if diagnostics is not None:
+            diagnostics["reason"] = "event_missing"
+        updated = None
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
+            if row is not None and diagnostics is not None:
+                diagnostics["reason"] = "snapshot_deletion_pending"
+            if row is not None and not snapshot_deletion_claimed(conn, self.storage_dir, portable):
+                existing = json.loads(row["objects_json"] or "[]")
+                previous_score = max((float(x.get("native_cover_score", -1)) for x in existing if x.get("native_cover_score") is not None and x.get("snapshot_visible") is not False), default=-1)
+                if diagnostics is not None:
+                    diagnostics["reason"] = "better_cover_retained"
+                if score > previous_score + 0.05:
+                    old_assets = conn.execute("select distinct snapshot_path from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,)).fetchall()
+                    stale = [str(x["snapshot_path"]) for x in old_assets if x["snapshot_path"]]
+                    conn.execute("delete from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,))
+                    for path, observations in assets:
+                        self._archive_observations(conn, event_id, observations, portable_media_path(self.storage_dir, path))
+                    projected = merge_cover_objects(existing, objects)
+                    conn.execute(
+                        "update events set snapshot_path=?,snapshot_size_bytes=?,objects_json=? where id=?",
+                        (
+                            portable,
+                            self._snapshot_file_size(portable),
+                            json.dumps(projected),
+                            event_id,
+                        ),
+                    )
+                    if diagnostics is not None:
+                        diagnostics["reason"] = "promoted"
+                    updated = self._finish_evidence_commit(conn,event_id,row,reason="native_cover_selected",cover_satisfied=True)
+        if updated is None:
+            stale.extend(portable_media_path(self.storage_dir, path) for path, _ in assets)
+        for path in stale:
+            self._delete_snapshot_if_unreferenced(path, preserve_archive=True)
+        return dict(updated) if updated is not None else None
+
+    def update_native_replay_alignment(self, event_id, session, alignment):
+        """Attach verified timing to a completed native episode without replacing tracks."""
+        offset = alignment.get("offset_seconds")
+        if (not session or alignment.get("source") != "main" or alignment.get("verified") is not True
+                or not isinstance(offset, (int, float)) or not -3 < offset < 3):
+            raise ValueError("invalid native replay alignment")
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute("select * from events where id=?", (event_id,)).fetchone()
+            if row is None:
+                return None
+            objects = json.loads(row["objects_json"] or "[]")
+            tracking = next((item.get("object_tracking") for item in reversed(objects)
+                             if item.get("status") == "object_tracking"), None)
+            if (not tracking or tracking.get("implementation") != "gvatrack"
+                    or tracking.get("state") != "complete" or tracking.get("native_session") != session):
+                return None
+            previous = tracking.get("recording_alignment") or {}
+            if previous.get("mean_iou", -1) >= alignment.get("mean_iou", 0):
+                return None
+            tracking["recording_alignment"] = alignment
+            conn.execute("update events set objects_json=? where id=?", (json.dumps(objects), event_id))
+            updated = self._finish_evidence_commit(conn, event_id, row, reason="native_replay_aligned")
+        return dict(updated) if updated is not None else None
+
+    @staticmethod
+    def _merge_native_inventory_objects(
+        existing_objects: list[dict[str, Any]],
+        inventory_objects: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return merge_inventory_objects(existing_objects, inventory_objects)
+
+    def update_native_incident_state(
+        self,
+        event_id: int,
+        tracking: dict[str, Any],
+        inventory_objects: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Atomically persist native tracking metadata and incident inventory.
+
+        Admission evidence and cover presentation remain independent: inventory
+        updates can add context objects, but only matching objects inherit the
+        current snapshot's presentation coordinates.
+        """
+        with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute(
+                "select * from events where id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                existing = json.loads(str(row["objects_json"] or "[]"))
+            except (TypeError, ValueError):
+                existing = []
+            if not isinstance(existing, list):
+                existing = []
+            objects = merge_inventory_objects(
+                existing,
+                inventory_objects,
+            )
+            objects.append(
+                {"status": "object_tracking", "object_tracking": tracking}
+            )
+            conn.execute(
+                "update events set objects_json = ? where id = ?",
+                (json.dumps(objects, separators=(",", ":")), event_id),
+            )
+            updated = self._finish_evidence_commit(
+                conn,
+                event_id,
+                row,
+                reason="tracking_updated",
+            )
+        return dict(updated) if updated is not None else None
 
     def update_object_tracking(
         self,
@@ -1698,13 +1810,20 @@ class EventStore(
             objects = [
                 item
                 for item in objects
-                if not (isinstance(item, dict) and item.get("status") == "object_tracking")
+                if not (
+                    isinstance(item, dict)
+                    and item.get("status") == "object_tracking"
+                )
             ]
             if tracked_objects and not had_tracking:
                 assignments = {
                     (
                         str(item.get("label") or ""),
-                        json.dumps(item.get("box"), sort_keys=True, separators=(",", ":")),
+                        json.dumps(
+                            item.get("box"),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                     ): item
                     for item in tracked_objects
                     if item.get("track_id") is not None
@@ -1712,21 +1831,38 @@ class EventStore(
                 for item in objects:
                     if not isinstance(item, dict) or not item.get("label"):
                         continue
-                    assigned = assignments.get((
-                        str(item.get("label") or ""),
-                        json.dumps(item.get("box"), sort_keys=True, separators=(",", ":")),
-                    ))
+                    assigned = assignments.get(
+                        (
+                            str(item.get("label") or ""),
+                            json.dumps(
+                                item.get("box"),
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        )
+                    )
                     if assigned is not None:
                         item["track_id"] = assigned["track_id"]
                         item["track_state"] = assigned.get("track_state")
-                        item["track_observations"] = assigned.get("track_observations")
-            objects.append({"status": "object_tracking", "object_tracking": tracking})
-            objects_json = json.dumps(objects, separators=(",", ":"))
+                        item["track_observations"] = assigned.get(
+                            "track_observations"
+                        )
+            objects.append(
+                {"status": "object_tracking", "object_tracking": tracking}
+            )
             conn.execute(
                 "update events set objects_json = ? where id = ?",
-                (objects_json, event_id),
+                (
+                    json.dumps(objects, separators=(",", ":")),
+                    event_id,
+                ),
             )
-            updated = self._finish_evidence_commit(conn, event_id, row, reason="tracking_updated")
+            updated = self._finish_evidence_commit(
+                conn,
+                event_id,
+                row,
+                reason="tracking_updated",
+            )
         return dict(updated) if updated is not None else None
 
     def for_camera_range(

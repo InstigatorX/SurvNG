@@ -8,7 +8,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .camera import CameraWorker
+from .native_evidence import NativeEvidenceService
+from .native_camera import NativeCameraWorker as CameraWorker
 from .camera_capture import CaptureOpenLimiter
 from .dlstreamer_capture import (
     DlStreamerCaptureBackend,
@@ -36,13 +37,10 @@ from .config import (
     SemanticSearchConfig,
 )
 from .events import EventStore
-from .ema_route_cache import EmaRouteCandidateCache
-from .detector import objects_to_json
-from .detection_watch import RouteDetectionWatch
 from .go2rtc import Go2RtcAdapter
-from .inference_lifecycle import InferenceLifecycle
+from .native_runtime import NativeRuntime as InferenceLifecycle
 from .config_application import live_detection_threshold
-from .inference_runtime.worker_topology import object_worker_recommendation_from_status
+from survng.native_deepsort import resolve_native_tracking
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .identity_projection import apply_event_identity
@@ -58,19 +56,14 @@ from .semantic_search import DisabledSemanticSearch, SemanticIndex
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
     EVIDENCE_REPOSITORY_SERVICE,
-    MotionDecisionHandlerFactory,
     MotionEvidenceRepository,
     MotionPipeline,
     MotionPipelineFactory,
     MotionStageDependencies,
-    RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
     resolve_motion_pipeline_graphs,
 )
-from .motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
-from .main_evidence_lifecycle import MainEvidenceFleet
 from .evidence_projection import EvidenceProjection
-from .motion_analysis import FairMotionAnalysisLimiter
 from .recording_lifecycle import RecordingLifecycle
 from .state_events import StateEventBroker
 from .incident_lifecycle import IncidentLifecycle
@@ -254,11 +247,18 @@ def validate_motion_pipeline_configuration(config: AppConfig) -> None:
 
 
 def validate_manager_configuration(config: AppConfig) -> None:
+    if config.detector.enabled and config.detector.backend != "openvino":
+        raise ValueError("native detection requires an OpenVINO model for gvadetect")
+    if config.detector.enabled and not config.detector.resolved_model_path():
+        raise ValueError("native detection is enabled but detector.model_path is empty")
+    if config.detector.enabled:
+        resolve_native_tracking(config.detector)
     validate_media_storage_configuration(config)
-    validate_motion_pipeline_configuration(config)
 
 
 class AppManager:
+    native_first = True
+
     def __init__(
         self,
         config: AppConfig,
@@ -266,13 +266,6 @@ class AppManager:
     ) -> None:
         validate_manager_configuration(config)
         self.config = config
-        self.detection_watch = RouteDetectionWatch(
-            config.detector.tracking.camera_transition_routes
-        )
-        self._motion_reconfiguration_fenced = False
-        self._restored_detection_watches: list[Any] = []
-        self._restored_watch_retry_lock = threading.Lock()
-        self._restored_watch_retry_timer: threading.Timer | None = None
         self.storage_dir = Path(config.storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.database_dir = Path(config.database_dir) if config.database_dir else self.storage_dir
@@ -287,11 +280,6 @@ class AppManager:
             media_storage=self.media_storage,
             database_write_lock=self.database_write_lock,
         )
-        self.ema_route_candidates = EmaRouteCandidateCache(
-            self.database_dir / "ema-route-cache.sqlite3",
-            legacy_jobs_path=self.events.jobs_db_path,
-        )
-        self._restore_detection_watches()
         self.telemetry = TelemetryStore(self.database_dir)
         with self.database_write_lock:
             migrate_legacy_runtime_telemetry(self.events.db_path, self.telemetry)
@@ -313,6 +301,7 @@ class AppManager:
         # Compatibility handle for media APIs and camera dependencies. Shared
         # lifecycle/reconfiguration ownership lives in ``self.recording``.
         self.recorder = self.recording.recorder
+        self.native_evidence = NativeEvidenceService(config, self.events, self.recorder, self.image_writer, self.media_storage, self.publish_event)
         self.go2rtc = Go2RtcAdapter()
         # Camera startup pacing is an internal safety policy. Keep live
         # DL Streamer admission and the startup coordinator on the same cap.
@@ -320,26 +309,32 @@ class AppManager:
             CAMERA_STARTUP_MAX_CONCURRENCY
         )
         detector = config.detector
+        native_tracking = resolve_native_tracking(detector)
         self.capture_backend = DlStreamerCaptureBackend(
             self._capture_open_limiter,
             DlStreamerCaptureOptions(
                 rtsp_transport=config.capture_rtsp_transport,
-                frame_rate=lambda: self.config.motion_qualification.sample_fps,
+                frame_rate=lambda: self.config.detector.live_sample_fps,
                 detection_frame_rate=lambda: self.config.detector.live_sample_fps,
-                main_frame_rate=lambda: max(
-                    self.config.motion_qualification.sample_fps,
-                    self.config.detector.tracking.sample_fps if self.config.detector.tracking.enabled else 0.5,
-                ),
+                main_frame_rate=lambda: 1.0,
                 model_path=detector.resolved_model_path(),
                 inference_device=detector.device,
-                # Qualification submits evidence to the priority-aware pool.
-                detect_enabled=False,
+                detect_enabled=detector.enabled,
+                batch_size=detector.native.batch_size,
+                inference_interval=detector.native.inference_interval,
+                inference_requests=detector.native.inference_requests,
+                inference_streams=detector.native.inference_streams,
+                native_tracking=native_tracking.mode,
+                tracking_classes=native_tracking.tracking_classes,
+                reid_model_path=native_tracking.reid_model_path,
+                reid_device=native_tracking.reid_device,
+                deep_sort_config=native_tracking.deep_sort_config,
                 labels_path=detector.labels_path,
                 labels=tuple(detector.labels),
                 confidence_threshold=live_detection_threshold(config),
                 nms_threshold=detector.nms_threshold,
                 model_proc_path=adjacent_model_proc(detector.resolved_model_path()),
-                frame_width=self.config.motion_qualification.frame_width,
+                frame_width=0,
             ),
         )
         self.state_events = StateEventBroker()
@@ -355,7 +350,6 @@ class AppManager:
                 appearance_index=self.appearance_index,
                 semantic_index=self.semantic_index,
                 event_publisher=self.publish_event,
-                tracking_burst_guard=self._tracking_burst_available,
                 database_dir=self.database_dir,
                 media_storage=self.media_storage,
                 database_write_lock=self.database_write_lock,
@@ -381,23 +375,6 @@ class AppManager:
         self.face_recognizer = self.inference.face_recognizer
         self.person_reidentifier = self.inference.person_reidentifier
         self.faces = self.inference.faces
-        self.motion_pipeline_registry = build_builtin_motion_registry()
-        self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
-            events=self.events,
-            object_serializer=objects_to_json,
-            face_candidate_sink=self.faces.ingest_candidates,
-        )
-        self.motion_object_detector_factory = RecordedMotionObjectDetectorFactory(
-            detector=self.detector,
-            recorder=self.recorder,
-            decode_budget=RecordedDecodeBudget.from_detector_config(config.detector),
-            main_evidence_provider=lambda camera: self.main_evidence.providers.get(camera.id),
-        )
-        self.main_evidence = MainEvidenceFleet(
-            config.main_evidence, self._unique_cameras(),
-            self.motion_object_detector_factory.decode_budget,
-            self._main_evidence_enabled,
-        )
         self.evidence_projection = EvidenceProjection(
             self.events, lambda: self.semantic_search, self.state_events,
             self._refresh_incident_notification,
@@ -437,13 +414,6 @@ class AppManager:
             max_concurrency=CAMERA_STARTUP_MAX_CONCURRENCY,
             readiness_timeout_seconds=CAMERA_STARTUP_FIRST_FRAME_TIMEOUT_SECONDS,
             recorder_settle_seconds=CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
-        )
-        self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
-        # Keep the established two-camera CPU ceiling by default, but dispatch
-        # those slots fairly so continuous EMA work from one camera cannot
-        # starve another. Operators can raise this on a larger NVR.
-        self._motion_analysis_limiter = FairMotionAnalysisLimiter(
-            self.config.motion_qualification.max_concurrent_analysis
         )
         workers: dict[str, CameraWorker] = {}
         try:
@@ -510,277 +480,13 @@ class AppManager:
         self.mqtt.publish("events/identity", event)
         self._refresh_incident_notification(str(event.get("camera_id") or ""), int(event.get("event_id") or 0))
 
-    def _tracking_burst_available(self) -> bool:
-        """Allow the optional extra tracker only while inference and memory are healthy."""
-        if getattr(self, "_stopping", False) or getattr(self, "_closed", False):
-            return False
-        detector = getattr(self, "detector", None)
-        if detector is None:
-            # The limiter is assembled with the inference lifecycle. Deny a
-            # burst if a future implementation evaluates the guard before the
-            # manager has published its stable detector handle.
-            return False
-        try:
-            runtime = detector.cached_object_status().get("runtime") or {}
-            _total, _used, memory_percent = system_memory_usage()
-            return (
-                int(runtime.get("queue_depth") or 0) == 0
-                and int(runtime.get("pending_frames") or 0) == 0
-                and int(runtime.get("active_inferences") or 0) <= 1
-                and (memory_percent <= 0.0 or memory_percent < 85.0)
-            )
-        except Exception:
-            LOGGER.exception("could not evaluate adaptive tracking burst capacity")
-            return False
-
-    def _restore_detection_watches(self) -> None:
-        """Rebuild unexpired route windows from locally durable incidents."""
-        routes = tuple(self.config.detector.tracking.camera_transition_routes)
-        maximum_window = max(
-            (float(route.max_seconds) for route in routes if route.enabled),
-            default=0.0,
-        )
-        if maximum_window <= 0.0:
-            return
-        now = datetime.now(timezone.utc)
-        start = datetime.fromtimestamp(
-            now.timestamp() - maximum_window,
-            timezone.utc,
-        ).isoformat()
-        for event in self.events.between(start, now.isoformat(), limit=200000):
-            try:
-                objects = json.loads(str(event.get("objects_json") or "[]"))
-            except (TypeError, ValueError):
-                continue
-            eligible = [
-                item
-                for item in objects
-                if isinstance(item, dict)
-                and item.get("label")
-                and item.get("incident_eligible") is not False
-            ] if isinstance(objects, list) else []
-            if not eligible:
-                continue
-            try:
-                event_at = datetime.fromisoformat(
-                    str(event.get("created_at") or "")
-                ).timestamp()
-                route_path, origin_camera_id, origin_event_id = (
-                    _route_provenance_from_event(event)
-                )
-                observe_kwargs = {
-                    "camera_id": str(event.get("camera_id") or ""),
-                    "event_id": int(event.get("id") or 0),
-                    "event_at": event_at,
-                    "objects": eligible,
-                }
-                if route_path:
-                    observe_kwargs["route_path"] = route_path
-                if origin_camera_id and origin_event_id > 0:
-                    observe_kwargs["origin_camera_id"] = origin_camera_id
-                    observe_kwargs["origin_event_id"] = origin_event_id
-                created = self.detection_watch.observe_incident(
-                    **observe_kwargs,
-                )
-                for watch in created:
-                    route_target_admitted = getattr(
-                        self.events,
-                        "route_target_admitted",
-                        None,
-                    )
-                    already_admitted = (
-                        route_target_admitted(
-                            watch.origin_camera_id,
-                            watch.origin_event_id,
-                            watch.target_camera_id,
-                        )
-                        if callable(route_target_admitted)
-                        else False
-                    )
-                    if already_admitted is True:
-                        self.detection_watch.consume_origin(
-                            watch.target_camera_id,
-                            watch.origin_camera_id,
-                            watch.origin_event_id,
-                        )
-                    elif self.events.route_watch_consumed(
-                        watch.target_camera_id,
-                        watch.source_event_id,
-                    ):
-                        self.detection_watch.consume(
-                            watch.target_camera_id,
-                            watch.source_event_id,
-                        )
-                    else:
-                        self._restored_detection_watches.append(watch)
-            except (TypeError, ValueError):
-                continue
-
-    def _consume_detection_watch(
-        self,
-        target_camera_id: str,
-        source_event_id: int,
-    ) -> bool:
-        self.events.mark_route_watch_consumed(target_camera_id, source_event_id)
-        return self.detection_watch.consume(target_camera_id, source_event_id)
-
-    def _route_target_admitted(
-        self,
-        target_camera_id: str,
-        origin_camera_id: str,
-        origin_event_id: int,
-    ) -> bool:
-        consumed = self.detection_watch.consume_origin(
-            target_camera_id,
-            origin_camera_id,
-            origin_event_id,
-        )
-        for watch in consumed:
-            self.events.mark_route_watch_consumed(
-                watch.target_camera_id,
-                watch.source_event_id,
-            )
-        return bool(consumed)
-
-    def _replay_restored_detection_watches(self) -> None:
-        """Join restored route windows with durable EMA after workers exist."""
-        retry_lock = getattr(self, "_restored_watch_retry_lock", None)
-        if retry_lock is None:
-            retry_lock = threading.Lock()
-            self._restored_watch_retry_lock = retry_lock
-        with retry_lock:
-            pending = getattr(self, "_restored_detection_watches", None)
-            if not pending:
-                return
-            restored = tuple(pending)
-            pending.clear()
-        retry: list[Any] = []
-        now = time.time()
-        for watch in restored:
-            if float(getattr(watch, "expires_at", now + 1.0)) < now:
-                continue
-            target = self.workers.get(watch.target_camera_id)
-            if target is None:
-                retry.append(watch)
-                continue
-            try:
-                replayed = target.consider_route_detection_watch(watch)
-            except Exception:
-                retry.append(watch)
-                LOGGER.exception(
-                    "restored route detection replay failed for camera=%s event=%s",
-                    watch.target_camera_id,
-                    watch.source_event_id,
-                )
-            else:
-                if not replayed:
-                    retry.append(watch)
-        if retry:
-            with retry_lock:
-                known = {
-                    (item.target_camera_id, item.source_event_id)
-                    for item in pending
-                }
-                pending.extend(
-                    item
-                    for item in retry
-                    if (item.target_camera_id, item.source_event_id) not in known
-                )
-            self._schedule_restored_watch_retry()
-
-    def _schedule_restored_watch_retry(self) -> None:
-        if not getattr(self, "_started", False) or getattr(self, "_stopping", False):
-            return
-        with self._restored_watch_retry_lock:
-            timer = self._restored_watch_retry_timer
-            if timer is not None and timer.is_alive():
-                return
-            timer = threading.Timer(2.0, self._retry_restored_detection_watches)
-            timer.daemon = True
-            self._restored_watch_retry_timer = timer
-            timer.start()
-
-    def _retry_restored_detection_watches(self) -> None:
-        with self._restored_watch_retry_lock:
-            self._restored_watch_retry_timer = None
-        if getattr(self, "_stopping", False) or getattr(self, "_closed", False):
-            return
-        self._replay_restored_detection_watches()
-
     def _create_camera_worker(self, camera: CameraConfig) -> CameraWorker:
-        motion_config = self.config.motion_qualification
-        override = camera.motion_qualification
-        graphs = resolve_motion_pipeline_graphs(motion_config, override)
-        ring_size = max(
-            12,
-            round(
-                motion_config.sample_fps
-                * (
-                    motion_config.window_seconds
-                    + motion_config.post_trigger_seconds
-                    + 3.0
-                )
-            ),
+        return CameraWorker(
+            camera, self.storage_dir, config=self.config.detector,
+            capture_backend=self.capture_backend, events=self.events,
+            publish=self.publish_event, image_writer=self.image_writer,
+            media_storage=self.media_storage, evidence_service=self.native_evidence,
         )
-        evidence = MotionEvidenceRepository(camera.id, max_samples_per_source=ring_size)
-        self.motion_evidence[camera.id] = evidence
-        dependencies = MotionStageDependencies(
-            services={EVIDENCE_REPOSITORY_SERVICE: evidence},
-        )
-        factory = MotionPipelineFactory(
-            registry=self.motion_pipeline_registry,
-            dependencies=dependencies,
-            observer=LoggingMotionPipelineObserver(),
-        )
-        pipelines: list[MotionPipeline] = []
-        try:
-            qualification_pipeline = factory.create(
-                camera.id,
-                graphs.qualification,
-                required_artifacts={"scoring"},
-            )
-            pipelines.append(qualification_pipeline)
-            observation_pipeline = factory.create(
-                camera.id,
-                graphs.observation,
-                required_artifacts={"source_evidence"},
-            )
-            pipelines.append(observation_pipeline)
-            fusion_pipeline = factory.create(
-                camera.id,
-                graphs.fusion,
-                initial_artifacts={"scoring"},
-                required_artifacts={"scoring"},
-            )
-            pipelines.append(fusion_pipeline)
-            return CameraWorker(
-                camera,
-                self.storage_dir,
-                motion_config,
-                self.publish_event,
-                motion_pipeline=qualification_pipeline,
-                motion_observation_pipeline=observation_pipeline,
-                motion_fusion_pipeline=fusion_pipeline,
-                motion_evidence=evidence,
-                motion_pipeline_origins=graphs.origins,
-                motion_decision_handler_factory=self.motion_decision_handler_factory,
-                motion_object_detector_factory=self.motion_object_detector_factory,
-                object_tracking_session_factory=self.inference.tracking_factory,
-                motion_analysis_limiter=self._motion_analysis_limiter,
-                image_writer=self.image_writer,
-                onvif_cache_dir=self.database_dir / "onvif",
-                capture_backend=self.capture_backend,
-                media_storage=self.media_storage,
-                route_detection_watch=self.detection_watch.match,
-                consume_route_detection_watch=self._consume_detection_watch,
-                route_target_admitted=self._route_target_admitted,
-                record_ema_route_candidate=self.ema_route_candidates.submit,
-                load_ema_route_candidates=self.ema_route_candidates.between,
-            )
-        except BaseException:
-            for pipeline in reversed(pipelines):
-                pipeline.close()
-            raise
 
     def _unique_cameras(self):
         seen: set[str] = set()
@@ -793,18 +499,9 @@ class AppManager:
     def recording_enabled(self, camera_id: str) -> bool:
         return self.camera_controls.recording_enabled(camera_id)
 
-    def _main_evidence_enabled(self, camera_id: str) -> bool:
-        worker = self.workers.get(camera_id)
-        return bool(worker is not None and worker.runtime_state.phase == "running"
-                    and self.detection_enabled(camera_id) and self.recording_enabled(camera_id))
-
     def reconfigure_main_evidence(self, config: AppConfig) -> None:
-        with self._lifecycle_lock:
-            if self._stopping or self._closed:
-                raise RuntimeError("application manager is stopping")
-            self.main_evidence.reconfigure(config.main_evidence, config.cameras)
-            if self._started:
-                self.main_evidence.start()
+        if config.main_evidence.enabled:
+            raise ValueError("main-stream inference buffering is not part of the native-first runtime")
 
     def detection_enabled(self, camera_id: str) -> bool:
         return self.camera_controls.detection_enabled(camera_id)
@@ -837,7 +534,6 @@ class AppManager:
             startup_started = time.monotonic()
             phase_started = startup_started
             try:
-                self.ema_route_candidates.start()
                 # Rewrite the restored or explicitly transferred snapshot so
                 # removed cameras are pruned before startup admission.
                 self.camera_controls.persist()
@@ -860,7 +556,6 @@ class AppManager:
                     detection_enabled=preferences["detection_enabled"],
                     recording_is_enabled=self.recording_enabled,
                 )
-                self._replay_restored_detection_watches()
                 self._startup_timings["recorder_services_seconds"] = round(
                     recording_timings.services_seconds, 3
                 )
@@ -871,12 +566,13 @@ class AppManager:
                 self.mqtt.start()
                 self.mqtt.set_server_lifecycle("starting")
                 self.runtime_monitor.start()
+                if getattr(self, "native_evidence", None) is not None:
+                    self.native_evidence.start()
                 self._startup_timings["mqtt_seconds"] = round(
                     time.monotonic() - phase_started,
                     3,
                 )
                 self._started = True
-                self.main_evidence.start()
                 self.evidence_projection.start()
                 self.camera_fleet.start_admission(
                     startup_tasks,
@@ -909,7 +605,6 @@ class AppManager:
                 raise
 
     def _camera_startup_completed(self) -> None:
-        self._replay_restored_detection_watches()
         self._mark_running_if_startup_complete()
 
     def _mark_running_if_startup_complete(self) -> None:
@@ -930,7 +625,6 @@ class AppManager:
         return {
             **self.camera_fleet.status(),
             "application_startup": dict(self._startup_timings),
-            "ema_route_cache": self.ema_route_candidates.status(),
         }
 
     def stop_all(self) -> None:
@@ -968,11 +662,6 @@ class AppManager:
     def _shutdown_components(self) -> None:
         errors: list[tuple[str, Exception]] = []
 
-        retry_timer = getattr(self, "_restored_watch_retry_timer", None)
-        if retry_timer is not None:
-            retry_timer.cancel()
-            self._restored_watch_retry_timer = None
-
         def attempt(label: str, callback) -> None:
             try:
                 callback()
@@ -982,7 +671,6 @@ class AppManager:
 
         started = time.monotonic()
         self.camera_controls.quiesce()
-        self.ema_route_candidates.close_admission()
         self.mqtt.set_server_lifecycle("stopping", refresh_status=False)
         LOGGER.info(
             "SurvNG shutdown: cancelling camera admission and releasing ONVIF subscriptions"
@@ -1020,11 +708,8 @@ class AppManager:
                 for failure in error.failures
             )
 
-        attempt(
-            "EMA route candidate cache",
-            lambda: self.ema_route_candidates.close(timeout=2.0),
-        )
-
+        if getattr(self, "native_evidence", None) is not None:
+            attempt("native evidence", self.native_evidence.stop)
         capture_backend = getattr(self, "capture_backend", None)
         if capture_backend is not None:
             attempt("GStreamer capture supervisor", capture_backend.close)
@@ -1155,6 +840,9 @@ class AppManager:
                 runtime = dict(detector.get("runtime") or {})
                 isolation = dict(detector.get("isolation") or {})
                 detector_ready = self._detector_runtime_ready(detector)
+                native_idle = detector.get("native") and detector.get("active_cameras") == 0
+                if native_idle:
+                    detector_ready = True  # No camera currently requests inference.
                 object_workers_configured = int(
                     isolation.get("configured_workers")
                     or int(bool(isolation.get("enabled")))
@@ -1168,7 +856,8 @@ class AppManager:
                     and object_workers_configured > 0
                     and object_workers_alive < object_workers_configured
                 )
-                detector_state = (
+                detector_degraded = detector_degraded or bool(detector.get("degraded"))
+                detector_state = "idle" if native_idle else (
                     "degraded"
                     if detector_degraded
                     else "ready" if detector_ready else "unavailable"
@@ -1215,7 +904,6 @@ class AppManager:
         except OSError:
             load_1m = 0.0
         storage_free_percent = storage.get("free_percent")
-        route_watch = self.detection_watch.status(time.time())
         return {
             "state": {
                 "health": health,
@@ -1250,12 +938,6 @@ class AppManager:
                 "camera_startup_degraded": int(startup_counts.get("degraded") or 0),
                 "camera_startup_failed": int(startup_counts.get("failed") or 0),
                 "camera_startup_queued": int(startup_counts.get("queued") or 0),
-                "route_watches_active": int(route_watch.get("active") or 0),
-                "route_watches_opened": int(route_watch.get("opened") or 0),
-                "route_watches_matched": int(route_watch.get("matched") or 0),
-                "route_watches_consumed": int(route_watch.get("consumed") or 0),
-                "route_watches_expired": int(route_watch.get("expired") or 0),
-                "route_watches_overflowed": int(route_watch.get("overflowed") or 0),
             },
         }
 
@@ -1281,18 +963,9 @@ class AppManager:
     def reconfigure_detector_policy(self, config: AppConfig) -> None:
         """Apply policy-only detector settings without disturbing camera workers."""
         self.inference.reconfigure_policy(config.detector)
-        self.motion_object_detector_factory.reconfigure_decode_budget(config.detector)
-        cameras = {camera.id: camera for camera in config.cameras}
-        for worker in self.camera_fleet.workers.values():
-            camera = cameras.get(worker.camera.id)
-            mode = (
-                config.detector.object_activity_attribution
-                if camera is None or camera.object_activity_attribution == "inherit"
-                else camera.object_activity_attribution
-            )
-            worker.reconfigure_object_activity_attribution(
-                mode
-            )
+        self.config.detector = config.detector
+        self.native_evidence.config = self.config
+        self.native_evidence.verifier.config = config.detector
 
     def reconfigure_motion(
         self,
@@ -1301,168 +974,7 @@ class AppManager:
         restart_camera_ids: set[str],
         hot_camera_ids: set[str],
     ) -> None:
-        """Apply EMA policy live and replace only structurally affected cameras."""
-        cameras = {camera.id: camera for camera in config.cameras}
-        with self._lifecycle_lock:
-            if self._stopping or self._closed:
-                raise RuntimeError("application manager is stopping")
-            if getattr(self, "_motion_reconfiguration_fenced", False):
-                raise MotionReconfigurationIncompleteError(
-                    "motion reconfiguration is fenced after an incomplete rollback; "
-                    "reload the application manager before applying another motion change"
-                )
-            self._motion_analysis_limiter.set_capacity(
-                config.motion_qualification.max_concurrent_analysis
-            )
-            for camera_id in sorted(hot_camera_ids):
-                worker = self.workers.get(camera_id)
-                camera = cameras.get(camera_id)
-                if worker is not None and camera is not None:
-                    worker.reconfigure_motion_policy(
-                        config.motion_qualification,
-                        camera,
-                    )
-            if not restart_camera_ids:
-                return
-
-            replacements: dict[str, CameraWorker] = {}
-            previous: dict[str, CameraWorker] = {}
-            previous_evidence: dict[str, MotionEvidenceRepository] = {}
-            enabled: dict[str, bool] = {}
-            detection: dict[str, bool] = {}
-            publication_attempted: set[str] = set()
-            replacement_start_attempted: set[str] = set()
-            try:
-                for camera_id in sorted(restart_camera_ids):
-                    camera = cameras.get(camera_id)
-                    old_worker = self.workers.get(camera_id)
-                    if camera is None or old_worker is None:
-                        raise RuntimeError(f"camera {camera_id} cannot be reconfigured")
-                    previous[camera_id] = old_worker
-                    previous_evidence[camera_id] = self.motion_evidence[camera_id]
-                    enabled[camera_id] = self.camera_controls.camera_enabled(camera_id)
-                    detection[camera_id] = self.camera_controls.detection_enabled(camera_id)
-                    replacements[camera_id] = self._create_camera_worker(camera)
-
-                for camera_id, old_worker in previous.items():
-                    old_worker.stop()
-                    replacement = replacements[camera_id]
-                    replacement.set_detection_enabled(detection[camera_id])
-                    if enabled[camera_id]:
-                        # start() can fail after launching a subset of owned
-                        # workers, so rollback must treat invocation as enough
-                        # evidence that an explicit stop is required.
-                        replacement_start_attempted.add(camera_id)
-                        replacement.start()
-                    camera = cameras[camera_id]
-                    # From this point forward a failed registry operation may
-                    # have mutated its owner before raising. Rollback therefore
-                    # restores every owner for this camera unconditionally.
-                    publication_attempted.add(camera_id)
-                    self.workers[camera_id] = replacement
-                    self.camera_fleet.replace_worker(camera, replacement)
-                    self.camera_controls.replace_worker(camera, replacement)
-                    self.inference.replace_worker(camera_id, replacement)
-            except BaseException as error:
-                rollback_incomplete = False
-                replacement_stopped: dict[str, bool] = {}
-                for camera_id, replacement in replacements.items():
-                    replacement_stopped[camera_id] = True
-                    if camera_id in replacement_start_attempted:
-                        try:
-                            replacement.stop()
-                        except Exception:
-                            LOGGER.exception(
-                                "failed to stop replacement camera %s during rollback",
-                                camera_id,
-                            )
-                            replacement_stopped[camera_id] = False
-                            rollback_incomplete = True
-                    if replacement_stopped[camera_id]:
-                        try:
-                            replacement.close()
-                        except Exception:
-                            LOGGER.exception(
-                                "failed to close replacement camera %s during rollback",
-                                camera_id,
-                            )
-                            rollback_incomplete = True
-                for camera_id in publication_attempted:
-                    old_worker = previous[camera_id]
-                    old_camera = old_worker.camera
-                    self.workers[camera_id] = old_worker
-                    for label, restore in (
-                        (
-                            "camera fleet",
-                            lambda: self.camera_fleet.replace_worker(
-                                old_camera,
-                                old_worker,
-                            ),
-                        ),
-                        (
-                            "camera controls",
-                            lambda: self.camera_controls.replace_worker(
-                                old_camera,
-                                old_worker,
-                            ),
-                        ),
-                        (
-                            "inference lifecycle",
-                            lambda: self.inference.replace_worker(
-                                camera_id,
-                                old_worker,
-                            ),
-                        ),
-                    ):
-                        try:
-                            restore()
-                        except Exception:
-                            LOGGER.exception(
-                                "failed to restore %s for camera %s during rollback",
-                                label,
-                                camera_id,
-                            )
-                            rollback_incomplete = True
-                    self.motion_evidence[camera_id] = previous_evidence[camera_id]
-                for camera_id in previous.keys() - publication_attempted:
-                    self.motion_evidence[camera_id] = previous_evidence[camera_id]
-                for camera_id, old_worker in previous.items():
-                    if enabled.get(camera_id) and replacement_stopped.get(
-                        camera_id,
-                        True,
-                    ):
-                        try:
-                            old_worker.start()
-                        except Exception:
-                            LOGGER.exception(
-                                "failed to restart camera %s after motion rollback",
-                                camera_id,
-                            )
-                            rollback_incomplete = True
-                if rollback_incomplete:
-                    self._motion_reconfiguration_fenced = True
-                    raise MotionReconfigurationIncompleteError(
-                        "camera replacement rollback was incomplete; manager is fenced"
-                    ) from error
-                raise
-
-            for camera_id, old_worker in previous.items():
-                try:
-                    old_worker.close()
-                except Exception:
-                    LOGGER.exception(
-                        "retired camera %s did not close after motion reconfiguration",
-                        camera_id,
-                    )
-            try:
-                self._mqtt_connected()
-            except Exception:
-                # Camera replacement is already committed. Discovery refresh
-                # is observational and must not turn a healthy cutover into a
-                # second camera-generation rollback.
-                LOGGER.exception(
-                    "MQTT discovery refresh failed after motion reconfiguration"
-                )
+        raise ValueError("EMA is not part of the native-first runtime")
 
     def reconfigure_object_tracking(self, config: DetectorConfig) -> None:
         """Replace tracking sessions without restarting camera-owned services."""
@@ -1470,9 +982,6 @@ class AppManager:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
             self.inference.reconfigure_tracking(config)
-            self.detection_watch.reconfigure(
-                config.tracking.camera_transition_routes
-            )
 
     def reconfigure_inference(
         self,
@@ -1490,10 +999,6 @@ class AppManager:
                 roles,
                 refresh_tracking=refresh_tracking,
             )
-            if refresh_tracking:
-                self.detection_watch.reconfigure(
-                    config.tracking.camera_transition_routes
-                )
             if "object" in roles:
                 try:
                     self._mqtt_connected()
@@ -1643,6 +1148,8 @@ class AppManager:
         camera_id = str(payload.get("camera_id") or "")
         if not camera_id:
             return
+        if event_type == "object_tracking" and payload.get("state") != "active" and getattr(self, "native_evidence", None) is not None:
+            self.native_evidence.enqueue(int(payload.get("event_id") or 0))
         if event_type == "incident_update":
             event_id = int(payload.get("event_id") or 0)
             event = self.events.get(event_id) if event_id else None
@@ -1665,59 +1172,6 @@ class AppManager:
                 incident_objects if isinstance(incident_objects, list) else objects
             )
             event_id = payload.get("event_id")
-            route_objects = [
-                item
-                for item in alert_objects
-                if isinstance(item, dict)
-                and item.get("label")
-                and item.get("incident_eligible") is not False
-            ]
-            if event_id and route_objects:
-                try:
-                    observed_at = datetime.fromisoformat(
-                        str(payload.get("timestamp") or "")
-                    ).timestamp()
-                    event = self.events.get(int(event_id))
-                    route_path, origin_camera_id, origin_event_id = (
-                        _route_provenance_from_event(event)
-                    )
-                    observe_kwargs = {
-                        "camera_id": camera_id,
-                        "event_id": int(event_id),
-                        "event_at": observed_at,
-                        "objects": route_objects,
-                    }
-                    if route_path:
-                        observe_kwargs["route_path"] = route_path
-                    if origin_camera_id and origin_event_id > 0:
-                        observe_kwargs["origin_camera_id"] = origin_camera_id
-                        observe_kwargs["origin_event_id"] = origin_event_id
-                    opened_watches = self.detection_watch.observe_incident(
-                        **observe_kwargs,
-                    )
-                    for watch in opened_watches:
-                        target = self.workers.get(watch.target_camera_id)
-                        if target is not None:
-                            try:
-                                target.consider_route_detection_watch(watch)
-                            except Exception:
-                                LOGGER.exception(
-                                    "route detection replay failed for camera=%s event=%s",
-                                    watch.target_camera_id,
-                                    event_id,
-                                )
-                except (TypeError, ValueError):
-                    LOGGER.warning(
-                        "could not open route detection watch for camera=%s event=%s",
-                        camera_id,
-                        event_id,
-                    )
-            if event_id:
-                event = self.events.get(int(event_id))
-                if event:
-                    self.faces.ingest_events([event])
-                    self.semantic_search.queue_event(event)
-                    self.appearance_backfill.enqueue(int(event_id), camera_id)
             payload = {
                 **payload,
                 "classes": sorted({str(item.get("label")) for item in alert_objects if item.get("label")}),
@@ -1725,7 +1179,7 @@ class AppManager:
             }
         self.mqtt.publish(f"camera/{camera_id}/{event_type}", payload)
         self.state_events.publish(event_type, payload)
-        if event_type == "object_tracking" and payload.get("state") != "active":
+        if event_type == "object_tracking" and payload.get("state") != "active" and getattr(self, "native_evidence", None) is not None:
             if payload.get("cover_promoted") and payload.get("event_id"):
                 event_id = int(payload["event_id"])
                 event = self.events.get(event_id)
@@ -1734,6 +1188,8 @@ class AppManager:
                     # the newly promoted cover, not the original early sample.
                     self.semantic_search.refresh_event(event)
             self._refresh_incident_notification(camera_id, int(payload.get("event_id") or 0))
+            if payload.get("implementation") == "gvatrack":
+                self.incidents.complete_event(int(payload.get("event_id") or 0))
             # Existing incident clients already use this event to coalesce refreshes.
             self.state_events.publish("incident", {
                 "event_id": payload.get("event_id"),
@@ -1795,20 +1251,7 @@ class AppManager:
         ]
 
     def detector_status(self) -> dict:
-        recorded_decode = self.motion_object_detector_factory.decode_budget.status()
-        status = {
-            **self.detector.status(),
-            "lifecycle": self.inference.status(),
-            "recorded_decode": recorded_decode,
-            "main_evidence": self.main_evidence.status() if getattr(self, "main_evidence", None) else {},
-        }
-        status["object_worker_recommendation"] = (
-            object_worker_recommendation_from_status(
-                status,
-                recorded_decode=recorded_decode,
-            )
-        )
-        return status
+        return {**self.detector.status(), "lifecycle": self.inference.status()}
 
     def go2rtc_status(self) -> dict:
         return self.go2rtc.status(list(self._unique_cameras()))

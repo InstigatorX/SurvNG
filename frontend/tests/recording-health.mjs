@@ -79,3 +79,8 @@ result = recordingHealth(base({ appConfig: { cameras: [{ id: "paused", record: t
 assert.match(recordingHealthContext(result).recording[1], /1 paused or disabled camera is excluded/);
 assert.deepEqual(recordingHealthContext(result).attention, []);
 console.log("recording health tests passed");
+
+result = recordingHealth(base({system: {...base().system, detector: {enabled: true, native: true, active_cameras: 8, healthy_cameras: 8, ready: true}}}));
+assert.deepEqual(result.systemReasons, []);
+result = recordingHealth(base({system: {...base().system, detector: {enabled: true, native: true, active_cameras: 8, healthy_cameras: 6, ready: true}}}));
+assert.deepEqual(result.systemReasons, ["6 of 8 native detection pipelines are healthy."]);

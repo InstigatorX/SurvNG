@@ -19,9 +19,11 @@ Without zones, every part of the frame is treated the same. With zones, you can 
 | **Incident** | Create incidents when matching objects appear here |
 | **Ignore** | Suppress object incidents in this region |
 | **No object effect** | Shape exists for motion exclusion only |
-| **Exclude from EMA** | Do not let motion inside this shape drive visual triggers |
+| **Exclude from motion wake-up** | Prevent movement inside this shape from waking or keeping adaptive inference active |
 
-You can combine ideas. Example: an Incident zone on a porch that also excludes EMA for a fluttering flag in the corner of that same polygon — depending on the controls you select for that zone.
+Motion exclusion is independent of object behavior. For a clock overlay, draw a zone around it, select **No object effect** (or **Ignore** if object incidents should also be suppressed), and enable **Exclude from motion wake-up**. Exclusions override incident-zone approach margins. Movement crossing a boundary can still wake inference where it extends into an eligible, unexcluded area. Recording and AI object detection are unchanged.
+
+Existing saved motion exclusions retain their values. The configuration key remains `exclude_from_ema` for compatibility, but the control now applies to native motion wake-up. Motion rectangles can extend beyond the pixels that moved, so allow some room around a clock or other nuisance source.
 
 ## Practical examples
 
@@ -35,9 +37,9 @@ Watch the gate apron, not the entire street. Headlights and opposite-lane traffi
 
 ### Tree problem
 
-If a tree fills half the frame and constantly triggers camera notices, either:
+If a tree fills half the frame and constantly wakes adaptive inference, either:
 
-- exclude that region from EMA, or
+- exclude that region from motion wake-up, or
 - shrink the incident zone away from the foliage
 
 ## Tips

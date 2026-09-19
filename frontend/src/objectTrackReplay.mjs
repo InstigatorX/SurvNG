@@ -204,3 +204,16 @@ export function trackingCoverageLabel(tracking) {
   if (reason === "session_stopped") return "Tracking incomplete — session stopped";
   return "Tracking incomplete";
 }
+
+// Never project live-stream boxes onto an unverified main-stream field of view.
+export function trackReplaySource(event, showTracks = true) {
+  return showTracks && event?.object_tracking?.recording_overlay_compatible === false ? "live" : "main";
+}
+
+// Calibrations belong to one episode and recording source; never shift video.
+export function trackReplayOffset(tracking, source) {
+  const alignment = tracking?.recording_alignment;
+  const offset = finiteNumber(alignment?.offset_seconds);
+  return alignment?.verified === true && alignment.source === source
+    && offset !== null && Math.abs(offset) < 3 ? offset : 0;
+}

@@ -608,6 +608,37 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertFalse(result["camera_workers_restarted"])
         self.assertEqual(effective.cameras[0].live_view.live.focal_x, 72)
 
+    def test_native_runtime_treats_legacy_tracking_depth_motion_as_compatibility_only(self) -> None:
+        active = Mock()
+        active.native_first = True
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.tracking.lost_timeout_seconds = 4.0
+        incoming.detector.depth.max_distance_m = 90.0
+        incoming.motion_qualification.visual_backup_min_score = 0.77
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_object_tracking.assert_not_called()
+        active.reconfigure_inference.assert_not_called()
+        active.reconfigure_motion.assert_not_called()
+        assert set(result["compatibility_only"]) == {
+            "legacy_tracking",
+            "legacy_depth",
+            "legacy_motion",
+        }
+        assert result["apply_mode"] == "unchanged"
+        assert effective.detector.tracking.lost_timeout_seconds == 4.0
+
+
     def test_detector_policy_change_hot_applies_without_restarting_cameras(self) -> None:
         active = Mock()
         current = AppConfig()
@@ -676,15 +707,8 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_motion.assert_called_once_with(
-            effective,
-            restart_camera_ids=set(),
-            hot_camera_ids={"gate"},
-        )
-        self.assertEqual(result["apply_mode"], "hot")
-        self.assertIn("motion_policy", result["hot_updated"])
-        self.assertFalse(result["camera_workers_restarted"])
+        reload.assert_called_once()
+        active.reconfigure_motion.assert_not_called()
 
     def test_motion_analysis_capacity_hot_applies_without_worker_restart(self) -> None:
         active = Mock()
@@ -703,16 +727,8 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_motion.assert_called_once_with(
-            effective,
-            restart_camera_ids=set(),
-            hot_camera_ids={"gate"},
-        )
-        self.assertEqual(result["apply_mode"], "hot")
-        self.assertIn("motion_analysis_capacity", result["hot_updated"])
-        self.assertIn("motion_policy", result["hot_updated"])
-        self.assertFalse(result["camera_workers_restarted"])
+        reload.assert_called_once()
+        active.reconfigure_motion.assert_not_called()
 
     def test_camera_motion_structural_change_restarts_only_affected_camera(self) -> None:
         active = Mock()
@@ -732,14 +748,8 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_motion.assert_called_once_with(
-            effective,
-            restart_camera_ids={"gate"},
-            hot_camera_ids=set(),
-        )
-        self.assertEqual(result["subsystems_restarted"], ["camera:gate"])
-        self.assertTrue(result["camera_workers_restarted"])
+        reload.assert_called_once()
+        active.reconfigure_motion.assert_not_called()
 
     def test_global_motion_tuning_hot_applies_only_to_inheriting_camera(self) -> None:
         gate = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
@@ -759,12 +769,8 @@ class ConfigReloadTest(unittest.TestCase):
         ):
             effective, _result = main.apply_config_update(incoming)
 
-        reload.assert_not_called()
-        active.reconfigure_motion.assert_called_once_with(
-            effective,
-            restart_camera_ids=set(),
-            hot_camera_ids={"gate"},
-        )
+        reload.assert_called_once()
+        active.reconfigure_motion.assert_not_called()
 
     def test_detector_device_change_rebuilds_native_capture_graph(self) -> None:
         active = Mock()

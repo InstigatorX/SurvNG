@@ -124,3 +124,17 @@ assert.equal(trackingCoverageLabel({ state: "complete", coverage_incomplete: fal
 assert.match(trackingCoverageLabel({ state: "interrupted", completion_reason: "missing_media_while_object_active" }), /recording coverage unavailable/);
 assert.match(trackingCoverageLabel({ state: "interrupted", completion_reason: "processing_budget_exhausted" }), /processing time limit/);
 assert.equal(trackingCoverageLabel({ state: "complete", coverage_incomplete: true }), "Tracking incomplete");
+
+const { trackReplaySource } = await import("../src/objectTrackReplay.mjs");
+assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: false}}), "live");
+assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: true}}), "main");
+assert.equal(trackReplaySource({object_tracking: {recording_overlay_compatible: false}}, false), "main");
+assert.equal(trackReplaySource({}), "main");
+
+const { trackReplayOffset } = await import("../src/objectTrackReplay.mjs");
+const aligned = { recording_alignment: { verified: true, source: "main", offset_seconds: 1.1 } };
+assert.equal(trackReplayOffset(aligned, "main"), 1.1);
+assert.equal(trackReplayOffset(aligned, "live"), 0);
+assert.equal(trackReplayOffset({}, "main"), 0);
+assert.equal(trackReplayOffset({recording_alignment:{source:"main",offset_seconds:1}}, "main"), 0);
+assert.equal(trackReplayOffset({recording_alignment:{verified:true,source:"main",offset_seconds:NaN}}, "main"), 0);

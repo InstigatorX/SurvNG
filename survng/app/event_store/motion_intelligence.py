@@ -12,6 +12,19 @@ from ..incident_utils import portable_media_path, snapshot_deletion_claimed
 
 
 class EventStoreMotionIntelligenceMixin:
+    @staticmethod
+    def _result_json_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        payload = dict(row)
+        try:
+            result = json.loads(str(payload.pop("result_json") or "{}"))
+        except (json.JSONDecodeError, TypeError):
+            result = {}
+        payload["result"] = result if isinstance(result, dict) else {}
+        return payload
+
+
     def add_motion_audit(
         self,
         *,

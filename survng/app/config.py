@@ -159,7 +159,8 @@ class DetectionZone(BaseModel):
     min_depth_m: float | None = Field(default=None, ge=0.01, le=500.0)
     max_depth_m: float | None = Field(default=None, ge=0.01, le=500.0)
     behavior: Literal["incident", "ignore", "none"] = "incident"
-    exclude_from_ema: bool = False
+    # Persisted legacy key retained so existing motion exclusion zones migrate unchanged.
+    exclude_from_ema: bool = Field(default=False, description="Exclude this zone from native motion wake-up")
     notifications_enabled: bool = True
     trigger: Literal["bottom_center"] = "bottom_center"
 
@@ -540,12 +541,63 @@ class CameraLiveViewConfig(BaseModel):
     live: CameraViewFrameConfig = Field(default_factory=CameraViewFrameConfig)
 
 
+class NativeBudgetConfig(BaseModel):
+    enabled: bool = False
+    idle_fps: float = Field(default=1.0, ge=0.5, le=10.0)
+    active_fps: float = Field(default=5.0, ge=0.5, le=10.0)
+    cooldown_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
+    approach_padding: float = Field(default=0.1, ge=0.0, le=0.5)
+    motion_enabled: bool = True
+    block_size: int = Field(default=64, ge=16, le=512)
+    motion_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
+    min_persistence: int = Field(default=2, ge=1, le=30)
+    max_miss: int = Field(default=1, ge=0, le=30)
+    iou_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    smooth_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    confirm_frames: int = Field(default=1, ge=1, le=10)
+    pixel_diff_threshold: int = Field(default=15, ge=1, le=255)
+    min_rel_area: float = Field(default=0.0005, ge=0.0, le=0.25)
+
+    @model_validator(mode="after")
+    def check_rates(self):
+        if self.idle_fps > self.active_fps:
+            raise ValueError("adaptive idle FPS must not exceed active FPS")
+        return self
+
+
+class NativeBudgetOverrides(BaseModel):
+    enabled: bool | None = None
+    idle_fps: float | None = Field(default=None, ge=0.5, le=10.0)
+    active_fps: float | None = Field(default=None, ge=0.5, le=10.0)
+    cooldown_seconds: float | None = Field(default=None, ge=0.0, le=300.0)
+    approach_padding: float | None = Field(default=None, ge=0.0, le=0.5)
+    motion_enabled: bool | None = None
+    block_size: int | None = Field(default=None, ge=16, le=512)
+    motion_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_persistence: int | None = Field(default=None, ge=1, le=30)
+    max_miss: int | None = Field(default=None, ge=0, le=30)
+    iou_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    smooth_alpha: float | None = Field(default=None, ge=0.0, le=1.0)
+    confirm_frames: int | None = Field(default=None, ge=1, le=10)
+    pixel_diff_threshold: int | None = Field(default=None, ge=1, le=255)
+    min_rel_area: float | None = Field(default=None, ge=0.0, le=0.25)
+
+
+class NativeRoiConfig(BaseModel):
+    enabled: bool = False
+    zone_names: list[str] = Field(default_factory=list)
+    padding: float = Field(default=0.15, ge=0.0, le=0.5)
+    full_frame_interval: int = Field(default=5, ge=1, le=30)
+
+
 class CameraConfig(BaseModel):
+    native_same_field_of_view: bool = False
     main_evidence_enabled: bool | None = None
     incident_notifications_enabled: bool = True
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
     video_backend: str = "url"
+    h264_decoder_compliance: Literal["auto", "strict", "normal", "flexible"] = "auto"
     stream_url: str = Field(max_length=4096)
     live_stream_url: str | None = Field(default=None, max_length=4096)
     live_view: CameraLiveViewConfig = Field(default_factory=CameraLiveViewConfig)
@@ -557,6 +609,8 @@ class CameraConfig(BaseModel):
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
+    native_roi: NativeRoiConfig = Field(default_factory=NativeRoiConfig)
+    native_budget: NativeBudgetOverrides = Field(default_factory=NativeBudgetOverrides)
 
     @model_validator(mode="after")
     def derive_connection_from_url(self) -> "CameraConfig":
@@ -769,10 +823,98 @@ class ObjectTrackingConfig(BaseModel):
         return auxiliary_openvino_device(self.vehicle_reid_device)
 
 
+class NativeTrackingConfig(BaseModel):
+    """Native GStreamer tracking and optional Deep SORT appearance inference."""
+
+    mode: Literal["short-term-imageless", "deep-sort"] = "short-term-imageless"
+    reid_enabled: bool = False
+    reid_model_path: str = Field(default="", max_length=4096)
+    reid_device: str = Field(default="CPU", min_length=1, max_length=64)
+    deep_sort_config: str = Field(
+        default=(
+            "max_iou_distance=0.7,max_age=60,n_init=3,"
+            "max_cosine_distance=0.3,nn_budget=100,"
+            "object_class=person,reid_max_age=30"
+        ),
+        min_length=1,
+        max_length=4096,
+    )
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_mode(cls, value: object) -> str:
+        mode = str(value or "short-term-imageless").strip().lower()
+        if mode in {"dlstreamer_deep_sort", "deep_sort", "deepsort"}:
+            return "deep-sort"
+        if mode in {"survng_hybrid", "short-term", "short_term_imageless"}:
+            return "short-term-imageless"
+        return mode
+
+    @model_validator(mode="after")
+    def validate_reid(self):
+        if self.mode == "deep-sort":
+            if not self.reid_enabled:
+                raise ValueError(
+                    "native Deep SORT requires native.tracking.reid_enabled=true"
+                )
+            if not self.reid_model_path.strip():
+                raise ValueError(
+                    "native Deep SORT requires native.tracking.reid_model_path"
+                )
+        return self
+
+    def resolved_reid_device(self) -> str:
+        return auxiliary_openvino_device(self.reid_device)
+
+
+class NativeStationaryConfig(BaseModel):
+    enabled: bool = True
+    labels: list[str] = Field(default_factory=lambda: ["person", "car", "truck", "bus", "van", "suv", "motorcycle"], max_length=64)
+    stationary_seconds: float = Field(default=8.0, ge=1.0, le=120.0)
+    window_seconds: float = Field(default=2.0, ge=0.5, le=10.0)
+    moving_threshold: float = Field(default=0.15, ge=0.01, le=2.0)
+    stationary_threshold: float = Field(default=0.05, ge=0.001, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self):
+        if self.stationary_threshold >= self.moving_threshold:
+            raise ValueError("stationary_threshold must be below moving_threshold")
+        self.labels = list(dict.fromkeys(label.strip().lower() for label in self.labels if label.strip()))
+        return self
+
+
+class NativeActivityConfig(BaseModel):
+    """Native observation freshness and presence episode policy."""
+    tracking_classes: list[str] | None = Field(default=None, max_length=256)
+    tracking: NativeTrackingConfig = Field(default_factory=NativeTrackingConfig)
+    stationary: NativeStationaryConfig = Field(default_factory=NativeStationaryConfig)
+    budget: NativeBudgetConfig = Field(default_factory=NativeBudgetConfig)
+    verification_enabled: bool = True
+
+    activity_timeout_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
+    maximum_observation_age_seconds: float = Field(default=2.0, ge=0.2, le=10.0)
+    maximum_tracks: int = Field(default=128, ge=1, le=1024)
+    metadata_restart_seconds: float = Field(default=15.0, ge=5.0, le=120.0)
+    batch_size: int = Field(default=1, ge=1, le=4)
+    inference_interval: int = Field(default=1, ge=1, le=5)
+    inference_requests: int = Field(default=4, ge=1, le=16)
+    inference_streams: int = Field(default=2, ge=1, le=8)
+
+    @field_validator("tracking_classes")
+    @classmethod
+    def normalize_tracking_classes(cls, value):
+        if value is None:
+            return None
+        labels = [label.strip().lower() for label in value]
+        if any(not label or len(label) > 128 for label in labels):
+            raise ValueError("tracking classes must be nonempty labels of at most 128 characters")
+        return list(dict.fromkeys(labels))
+
+
 class DetectorConfig(BaseModel):
+    native: NativeActivityConfig = Field(default_factory=NativeActivityConfig)
     enabled: bool = False
-    # Retained for native continuous-inference integrations; production capture
-    # is frames-only and qualification schedules inference in the shared pool.
+    # Native pipeline input cadence; inference can skip frames via its interval.
     live_sample_fps: float = Field(default=5.0, ge=0.5, le=10.0)
     backend: Literal["openvino", "coreml"] = "openvino"
     object_worker_count: int = Field(default=2, ge=1, le=4)
@@ -850,6 +992,39 @@ class DetectorConfig(BaseModel):
     labels: list[str] = Field(default_factory=list)
     depth: DepthConfig = Field(default_factory=DepthConfig)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_native_tracking(cls, value: object):
+        """Import old Deep SORT settings once; native runtime never reads them."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        native = dict(data.get("native") or {})
+        if "tracking" not in native:
+            legacy = data.get("tracking")
+            if isinstance(legacy, dict):
+                implementation = str(
+                    legacy.get("implementation") or ""
+                ).strip().lower()
+                if implementation in {
+                    "deep-sort",
+                    "dlstreamer_deep_sort",
+                    "deep_sort",
+                    "deepsort",
+                }:
+                    native["tracking"] = {
+                        "mode": "deep-sort",
+                        "reid_enabled": bool(legacy.get("reid_enabled")),
+                        "reid_model_path": str(
+                            legacy.get("reid_model_path") or ""
+                        ),
+                        "reid_device": str(
+                            legacy.get("reid_device") or "CPU"
+                        ),
+                    }
+                    data["native"] = native
+        return data
 
     @staticmethod
     def _normalize_refinement_stages(
@@ -987,6 +1162,15 @@ class DetectorConfig(BaseModel):
                 raise ValueError("event class confidence thresholds must be between 0.01 and 0.99")
             normalized[label] = threshold
         return normalized
+
+    @model_validator(mode="after")
+    def validate_native_batch_cadence(self) -> "DetectorConfig":
+        # Explicit VA batches have no supported fill timeout. A configuration
+        # must remain usable when every other source disconnects.
+        fill_seconds = (self.native.batch_size - 1) * self.native.inference_interval / self.live_sample_fps
+        if self.native.batch_size > 1 and fill_seconds >= self.native.maximum_observation_age_seconds:
+            raise ValueError("native batch waiting time must be below maximum result age; reduce batch size or inference interval, increase detection FPS, or increase maximum result age")
+        return self
 
     @model_validator(mode="after")
     def ensure_tracking_protected_incident_lane(self) -> "DetectorConfig":
@@ -1128,6 +1312,14 @@ class AppConfig(BaseModel):
     def validate_event_clip_window(self) -> "AppConfig":
         if self.event_clip_before_seconds + self.event_clip_after_seconds <= 0:
             raise ValueError("event clip window must include time before or after the event")
+        for camera in self.cameras:
+            budget = effective_native_budget(camera, self.detector)
+            if budget.enabled:
+                fill = (self.detector.native.batch_size - 1) / budget.idle_fps
+                if fill >= self.detector.native.maximum_observation_age_seconds:
+                    raise ValueError(f"{camera.id}: adaptive idle rate/batch fill must be below maximum observation age")
+                if (self.detector.native.batch_size + 0.5) / budget.idle_fps >= self.detector.native.metadata_restart_seconds:
+                    raise ValueError(f"{camera.id}: metadata recovery timeout must exceed adaptive idle coverage interval")
         camera_ids = [camera.id for camera in self.cameras]
         if len(camera_ids) != len(set(camera_ids)):
             raise ValueError("camera ids must be unique")
@@ -1313,3 +1505,9 @@ def save_config(
 
 def camera_by_id(config: AppConfig, camera_id: str) -> Optional[CameraConfig]:
     return next((camera for camera in config.cameras if camera.id == camera_id), None)
+
+
+def effective_native_budget(camera, detector) -> NativeBudgetConfig:
+    values = detector.native.budget.model_dump()
+    values.update(camera.native_budget.model_dump(exclude_none=True))
+    return NativeBudgetConfig.model_validate(values)
