@@ -559,7 +559,11 @@ class NativeActivity:
                     track,
                     self._public_activity_state(self._activity_state(key)),
                 )
-        self._capture_inventory()
+        # A delayed admission owns a source-time context snapshot. The
+        # live registry may now describe an unrelated scene; only ordinary
+        # live activation may import it into this episode.
+        if seed is None:
+            self._capture_inventory()
 
         self.last_activity = max(self.last_activity, now)
         self.last_motion_at = max(self.last_motion_at, iso(epoch))
@@ -567,7 +571,9 @@ class NativeActivity:
         if self.event_id is None:
             visible_ids = {
                 self.registry.get(key)["track_id"]
-                for key in self.registry.confirmed(self._seen_keys)
+                for key in self.registry.confirmed(
+                    self._seen_keys if seed is None else ()
+                )
                 if self.registry.get(key) is not None
             }
             stored = self.inventory.objects(visible_track_ids=visible_ids)
@@ -620,7 +626,9 @@ class NativeActivity:
             )
             self.persist("active", now=now)
 
-        if self.event_id is not None and self.offer_evidence is not None:
+        # Delayed results already carry their verified cover. Never pair
+        # current-registry boxes with an older nomination observation.
+        if seed is None and self.event_id is not None and self.offer_evidence is not None:
             evidence_objects = self._visible_evidence_objects()
             if evidence_objects:
                 self.offer_evidence(
