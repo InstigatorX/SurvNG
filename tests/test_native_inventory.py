@@ -183,6 +183,12 @@ def test_registry_uses_weak_candidates_for_identity_but_not_confirmation():
     assert track["observations"] == 3
     # Final confidence is temporal consensus, not the last/highest outlier.
     assert track["confidence"] == .72
+    assert track["temporal_consensus"] is True
+    assert track["temporal_observations"] == 3
+    assert track["temporal_incident_observations"] == 2
+    assert track["temporal_required_observations"] == 2
+    assert track["temporal_peak_confidence"] == .81
+    assert track["temporal_label_votes"] == {"dog": 3}
 
 
 def test_registry_weak_candidates_alone_never_confirm():
