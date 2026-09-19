@@ -307,9 +307,28 @@ class NativeObjectRegistry:
         if not include_history:
             excluded |= {"box_history", "trajectory"}
         result = {k: deepcopy(v) for k, v in track.items() if k not in excluded}
+        winning = str(track.get("label") or "")
+        votes = track.get("_label_votes") or {}
+        confidences = track.get("_label_confidences") or {}
+        confirmations = track.get("_label_confirmations") or {}
+        winning_confidences = list(confidences.get(winning, []))
         result["track_state"] = track["state"]
         result["track_observations"] = track["observations"]
         result["detection_provenance"] = "native_fresh_detection"
+        result["temporal_consensus"] = track.get("state") == "confirmed"
+        result["temporal_observations"] = int(votes.get(winning, 0))
+        result["temporal_track_observations"] = int(track.get("observations") or 0)
+        result["temporal_incident_observations"] = int(
+            confirmations.get(winning, 0)
+        )
+        result["temporal_required_observations"] = int(
+            track.get("required_observations") or 0
+        )
+        result["temporal_peak_confidence"] = max(
+            winning_confidences,
+            default=float(track.get("confidence") or 0.0),
+        )
+        result["temporal_label_votes"] = dict(votes)
         return result
 
 
