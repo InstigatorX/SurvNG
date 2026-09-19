@@ -37,7 +37,7 @@ jobs:
           s = s.replace('from pathlib import Path\n', '')
           p.write_text(s)
           PY
-      - name: Prove baseline loses source-time isolation
+      - name: Prove baseline source-time and hidden-cover failures
         run: |
           .venv/bin/python - <<'PY'
           import subprocess
@@ -51,12 +51,12 @@ jobs:
           print(result.stderr)
           cases = ET.parse('/tmp/native-context-before.xml').findall('.//testcase')
           failed = [case for case in cases if case.find('failure') is not None]
-          assert result.returncode == 1, 'Expected a reproduced behavioral failure'
-          assert len(cases) == 2 and len(failed) == 1, 'Unexpected failure: investigate rather than patch blindly'
-          assert '[True]' in failed[0].attrib['name']
-          assert '20' in (failed[0].find('failure').text or '')
+          assert result.returncode == 1 and len(cases) == 2 and len(failed) == 2
+          by_name = {case.attrib['name']: case.find('failure').text or '' for case in failed}
+          assert 'snapshot_visible' in next(text for name, text in by_name.items() if '[False]' in name)
+          assert '20' in next(text for name, text in by_name.items() if '[True]' in name)
           PY
-      - name: Restrict delayed activation to its preserved evidence
+      - name: Restrict delayed activation and preserve cover visibility
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -93,20 +93,37 @@ jobs:
               s = s.replace(before, after)
           ast.parse(s)
           p.write_text(s)
+          p = Path('survng/app/native_event_projection.py')
+          assert subprocess.check_output(['git', 'hash-object', str(p)], text=True).strip() == '9dec508d0360c1fdb7087d49a5ed15805598d62e'
+          s = p.read_text()
+          before = '                        item[field] = deepcopy(existing[field])\n        else:\n            item["snapshot_visible"] = False'
+          after = (
+              '                        item[field] = deepcopy(existing[field])\n'
+              '            else:\n'
+              '                # Inventory confirms presence, not visibility on the selected\n'
+              '                # raster. Only a new cover may make this annotation visible.\n'
+              '                item["snapshot_visible"] = False\n'
+              '        else:\n'
+              '            item["snapshot_visible"] = False'
+          )
+          assert s.count(before) == 1
+          s = s.replace(before, after)
+          ast.parse(s)
+          p.write_text(s)
           PY
       - name: Validate incident lifecycle, registry, admission, and cover regression suites
         run: |
           .venv/bin/python -m pytest -q tests/test_native*.py
-          .venv/bin/python -m compileall -q survng/app/native_activity.py tests/test_native_delayed_inventory_persistence.py
+          .venv/bin/python -m compileall -q survng/app/native_activity.py survng/app/native_event_projection.py tests/test_native_delayed_inventory_persistence.py
           git diff --check
           git diff --stat
-          git diff -- survng/app/native_activity.py
-      - name: Save only the tested production and regression changes to staging
+          git diff -- survng/app/native_activity.py survng/app/native_event_projection.py
+      - name: Save tested production and regression changes to staging
         run: |
           git config user.name 'SurvNG validation'
           git config user.email 'actions@users.noreply.github.com'
-          git add survng/app/native_activity.py tests/test_native_delayed_inventory_persistence.py
+          git add survng/app/native_activity.py survng/app/native_event_projection.py tests/test_native_delayed_inventory_persistence.py
           git diff --cached --check
-          git commit -m 'fix(native): isolate delayed incident activation from current scene'
+          git commit -m 'fix(native): preserve incident source-time and cover visibility'
           git push origin HEAD:refs/heads/test/native-delayed-context-e2e-20260919
           git log -1 --format='%H %s'
