@@ -8,6 +8,10 @@ from survng.app.event_store import EventStore
 from survng.app.live_detections import DetectionSnapshot
 from survng.app.native_activity import NativeActivity
 from survng.app.native_objects import NativeObjectRegistry
+from survng.app.native_event_projection import (
+    merge_cover_objects,
+    merge_inventory_objects,
+)
 
 
 def detected(label, native_id, x, *, confidence=.9):
@@ -155,6 +159,68 @@ def test_registry_uses_one_identity_when_native_label_changes_with_same_id():
     assert track["track_id"] == 1
     assert track["observations"] == 2
     assert len(track["box_history"]) == 2
+
+
+def test_native_projection_separates_inventory_truth_from_cover_geometry():
+    existing = [
+        {
+            "label": "person",
+            "track_id": 1,
+            "native_identity": "cam/s/0/7",
+            "first_seen": "2026-09-18T10:00:00+00:00",
+            "zones": ["door"],
+            "activity_eligible": True,
+            "box": {"x1": 10, "y1": 10, "x2": 30, "y2": 80},
+            "detection_frame_width": 100,
+            "detection_frame_height": 100,
+            "snapshot_visible": True,
+        },
+        {
+            "label": "car",
+            "track_id": 2,
+            "native_identity": "cam/s/0/8",
+            "zones": [],
+            "activity_eligible": False,
+            "box": {"x1": 40, "y1": 20, "x2": 80, "y2": 60},
+            "snapshot_visible": True,
+        },
+        {"status": "object_tracking", "object_tracking": {"state": "active"}},
+    ]
+    cover = [{
+        "label": "person",
+        "track_id": 1,
+        "native_identity": "cam/s/0/7",
+        "box": {"x1": 200, "y1": 100, "x2": 500, "y2": 900},
+        "detection_frame_width": 2560,
+        "detection_frame_height": 1920,
+        "frame_source": "recorded_main",
+        "snapshot_visible": True,
+        "native_cover_verified": True,
+    }]
+    projected = merge_cover_objects(existing, cover)
+    person = next(item for item in projected if item.get("track_id") == 1)
+    car = next(item for item in projected if item.get("track_id") == 2)
+    assert person["first_seen"] == "2026-09-18T10:00:00+00:00"
+    assert person["zones"] == ["door"]
+    assert person["box"]["x1"] == 200
+    assert person["detection_frame_width"] == 2560
+    assert car["snapshot_visible"] is False
+    assert next(item for item in projected if item.get("status") == "object_tracking")
+
+    inventory = [{
+        "label": "person",
+        "track_id": 1,
+        "native_identity": "cam/s/0/7",
+        "first_seen": "2026-09-18T10:00:00+00:00",
+        "zones": ["door", "porch"],
+        "activity_eligible": True,
+        "box": {"x1": 12, "y1": 10, "x2": 32, "y2": 80},
+    }]
+    merged = merge_inventory_objects(projected, inventory)
+    person = next(item for item in merged if item.get("track_id") == 1)
+    assert person["zones"] == ["door", "porch"]
+    assert person["box"]["x1"] == 200
+    assert person["detection_frame_width"] == 2560
 
 
 def test_event_store_native_state_merge_preserves_hi_res_cover_and_adds_new_objects(tmp_path):
