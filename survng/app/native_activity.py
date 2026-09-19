@@ -352,12 +352,17 @@ class NativeActivity:
                 # high-resolution verification rejects it. Context-only objects
                 # (parked/stationary/untracked-by-policy) are descriptive and
                 # are retained immediately.
+                track_id = int(track["track_id"])
                 if (
                     key != primary_key
                     and requires_independent_verification(key, track)
                 ):
+                    # If a context object itself becomes an activity candidate,
+                    # its independent verification now owns whether it belongs
+                    # in the authoritative incident inventory.
+                    context.pop(track_id, None)
                     continue
-                context[int(track["track_id"])] = deepcopy(track)
+                context[track_id] = deepcopy(track)
 
     def _gate(self, confirmed_keys, observation, epoch, now):
         allowed = []
