@@ -121,6 +121,107 @@ def test_incident_inventory_keeps_confirmed_context_objects_without_using_them_f
     assert len(activity.registry.tracks) == 4
 
 
+def test_registry_uses_weak_candidates_for_identity_but_not_confirmation():
+    config = DetectorConfig(
+        enabled=True,
+        confidence_threshold=.6,
+        event_candidate_confidence_threshold=.25,
+        event_confirmation_frames=2,
+    )
+    registry = NativeObjectRegistry("test", config)
+
+    def observation(confidence):
+        item = detected("dog", 7, 10, confidence=confidence)
+        item.update(
+            confidence_threshold=.6,
+            confidence_eligible=confidence >= .6,
+            incident_eligible=confidence >= .6,
+            zone_eligible=confidence >= .6,
+        )
+        return item
+
+    seen = registry.observe(
+        [observation(.72)],
+        session="s",
+        identity_epoch=0,
+        epoch=100,
+        now=10,
+        dimensions=(200, 100),
+        fresh_fps=5,
+    )
+    key = next(iter(seen))
+    assert registry.export(key)["state"] == "tentative"
+
+    # This weak observation preserves the same temporal identity but cannot
+    # satisfy the second configured confirmation.
+    registry.observe(
+        [observation(.34)],
+        session="s",
+        identity_epoch=0,
+        epoch=100.2,
+        now=10.2,
+        dimensions=(200, 100),
+        fresh_fps=5,
+    )
+    track = registry.export(key)
+    assert track["state"] == "tentative"
+    assert track["confirming_observations"] == 1
+    assert track["observations"] == 2
+
+    registry.observe(
+        [observation(.81)],
+        session="s",
+        identity_epoch=0,
+        epoch=100.4,
+        now=10.4,
+        dimensions=(200, 100),
+        fresh_fps=5,
+    )
+    track = registry.export(key)
+    assert track["state"] == "confirmed"
+    assert track["confirming_observations"] == 2
+    assert track["observations"] == 3
+    # Final confidence is temporal consensus, not the last/highest outlier.
+    assert track["confidence"] == .72
+    assert track["temporal_consensus"] is True
+    assert track["temporal_observations"] == 3
+    assert track["temporal_incident_observations"] == 2
+    assert track["temporal_required_observations"] == 2
+    assert track["temporal_peak_confidence"] == .81
+    assert track["temporal_label_votes"] == {"dog": 3}
+
+
+def test_registry_weak_candidates_alone_never_confirm():
+    config = DetectorConfig(
+        enabled=True,
+        confidence_threshold=.6,
+        event_candidate_confidence_threshold=.25,
+        event_confirmation_frames=2,
+    )
+    registry = NativeObjectRegistry("test", config)
+    for index, confidence in enumerate((.31, .37, .42), start=1):
+        item = detected("dog", 7, 10 + index, confidence=confidence)
+        item.update(
+            confidence_threshold=.6,
+            confidence_eligible=False,
+            incident_eligible=False,
+            zone_eligible=False,
+        )
+        seen = registry.observe(
+            [item],
+            session="s",
+            identity_epoch=0,
+            epoch=100 + index / 5,
+            now=10 + index / 5,
+            dimensions=(200, 100),
+            fresh_fps=5,
+        )
+    track = registry.export(next(iter(seen)))
+    assert track["state"] == "tentative"
+    assert track["confirming_observations"] == 0
+    assert track["observations"] == 3
+
+
 def test_registry_uses_one_identity_when_native_label_changes_with_same_id():
     config = DetectorConfig(enabled=True)
     registry = NativeObjectRegistry("test", config)

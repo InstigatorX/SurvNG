@@ -159,14 +159,28 @@ class NativeObjectRegistry:
                 continue
             label = str(obj.get("label") or "").strip()
             box = _box(obj)
-            if not label or box is None or obj.get("confidence_eligible") is False:
+            if not label or box is None:
                 continue
             try:
                 confidence = float(obj.get("confidence") or 0.0)
+                standard_threshold = float(
+                    obj.get("confidence_threshold")
+                    or self.config.confidence_threshold
+                )
+                candidate_threshold = min(
+                    standard_threshold,
+                    float(self.config.event_candidate_confidence_threshold),
+                )
             except (TypeError, ValueError, OverflowError):
                 continue
-            if not math.isfinite(confidence):
+            if (
+                not math.isfinite(confidence)
+                or not math.isfinite(standard_threshold)
+                or not math.isfinite(candidate_threshold)
+                or confidence < candidate_threshold
+            ):
                 continue
+            confirming = confidence >= standard_threshold
             key = self._key(obj, seen)
             if key in seen:
                 self.counts["duplicate_objects"] += 1
@@ -196,6 +210,7 @@ class NativeObjectRegistry:
                     "trajectory": [],
                     "_label_votes": Counter(),
                     "_label_confidences": {},
+                    "_label_confirmations": Counter(),
                 }
                 self.tracks[key] = track
                 self._next_track_id += 1
@@ -206,17 +221,26 @@ class NativeObjectRegistry:
                 3 / max(.001, fresh_fps),
             ):
                 track["consecutive"] = 0
+                track["_label_confirmations"].clear()
             track["_label_votes"][label] += 1
             track["_label_confidences"].setdefault(label, []).append(confidence)
             if len(track["_label_confidences"][label]) > 32:
                 del track["_label_confidences"][label][:-32]
+            if confirming:
+                track["_label_confirmations"][label] += 1
             winning = self._winning_label(track)
+            winning_confidences = track["_label_confidences"].get(winning, [])
+            aggregate_confidence = (
+                float(median(winning_confidences))
+                if winning_confidences
+                else confidence
+            )
             track.update(
                 label=winning,
                 last_monotonic=now,
                 last_seen=iso(epoch),
                 box=dict(zip(("x1", "y1", "x2", "y2"), box)),
-                confidence=confidence,
+                confidence=aggregate_confidence,
                 zones=deepcopy(obj.get("zones", [])),
                 incident_eligible=bool(obj.get("incident_eligible")),
                 zone_eligible=bool(obj.get("zone_eligible")),
@@ -231,9 +255,21 @@ class NativeObjectRegistry:
             required = self.config.event_class_confirmation_frames.get(
                 winning, self.config.event_confirmation_frames
             )
-            track["state"] = "confirmed" if track["consecutive"] >= required else "tentative"
-            track["confirmed"] = track.get("confirmed", False) or track["state"] == "confirmed"
-            track["max_confidence"] = max(track.get("max_confidence", 0.0), confidence)
+            winning_confirmations = track["_label_confirmations"][winning]
+            track["state"] = (
+                "confirmed"
+                if winning_confirmations >= required
+                else "tentative"
+            )
+            track["confirmed"] = (
+                track.get("confirmed", False)
+                or track["state"] == "confirmed"
+            )
+            track["confirming_observations"] = winning_confirmations
+            track["required_observations"] = required
+            track["candidate_threshold"] = candidate_threshold
+            track["confidence_threshold"] = standard_threshold
+            track["max_confidence"] = max(winning_confidences, default=0.0)
             x1, y1, x2, y2 = box
             track["box_history"] = compact_history(
                 [*track["box_history"], [epoch, x1, y1, x2, y2]]
@@ -244,6 +280,8 @@ class NativeObjectRegistry:
         for key, track in self.tracks.items():
             if key not in seen:
                 track["consecutive"] = 0
+                track["_label_confirmations"].clear()
+                track["confirming_observations"] = 0
         return seen
 
     def get(self, key):
@@ -259,13 +297,38 @@ class NativeObjectRegistry:
         track = self.tracks.get(key)
         if track is None:
             return None
-        excluded = {"last_monotonic", "consecutive", "_label_votes", "_label_confidences"}
+        excluded = {
+            "last_monotonic",
+            "consecutive",
+            "_label_votes",
+            "_label_confidences",
+            "_label_confirmations",
+        }
         if not include_history:
             excluded |= {"box_history", "trajectory"}
         result = {k: deepcopy(v) for k, v in track.items() if k not in excluded}
+        winning = str(track.get("label") or "")
+        votes = track.get("_label_votes") or {}
+        confidences = track.get("_label_confidences") or {}
+        confirmations = track.get("_label_confirmations") or {}
+        winning_confidences = list(confidences.get(winning, []))
         result["track_state"] = track["state"]
         result["track_observations"] = track["observations"]
         result["detection_provenance"] = "native_fresh_detection"
+        result["temporal_consensus"] = track.get("state") == "confirmed"
+        result["temporal_observations"] = int(votes.get(winning, 0))
+        result["temporal_track_observations"] = int(track.get("observations") or 0)
+        result["temporal_incident_observations"] = int(
+            confirmations.get(winning, 0)
+        )
+        result["temporal_required_observations"] = int(
+            track.get("required_observations") or 0
+        )
+        result["temporal_peak_confidence"] = max(
+            winning_confidences,
+            default=float(track.get("confidence") or 0.0),
+        )
+        result["temporal_label_votes"] = dict(votes)
         return result
 
 
