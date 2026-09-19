@@ -257,6 +257,8 @@ def validate_manager_configuration(config: AppConfig) -> None:
 
 
 class AppManager:
+    native_first = True
+
     def __init__(
         self,
         config: AppConfig,
@@ -373,7 +375,6 @@ class AppManager:
         self.face_recognizer = self.inference.face_recognizer
         self.person_reidentifier = self.inference.person_reidentifier
         self.faces = self.inference.faces
-        self.motion_pipeline_registry = build_builtin_motion_registry()
         self.evidence_projection = EvidenceProjection(
             self.events, lambda: self.semantic_search, self.state_events,
             self._refresh_incident_notification,
@@ -965,8 +966,6 @@ class AppManager:
         self.config.detector = config.detector
         self.native_evidence.config = self.config
         self.native_evidence.verifier.config = config.detector
-        for worker in self.workers.values():
-            worker.reconfigure_policy(config.detector)
 
     def reconfigure_motion(
         self,

@@ -1075,5 +1075,28 @@ class ManagerLifecycleTest(unittest.TestCase):
 
 
 
+def test_native_detector_policy_has_one_runtime_owner(tmp_path):
+    from types import SimpleNamespace
+    from survng.app.manager import AppManager
+
+    manager = AppManager.__new__(AppManager)
+    manager.inference = Mock()
+    manager.config = AppConfig(storage_dir=str(tmp_path))
+    manager.native_evidence = SimpleNamespace(
+        config=manager.config,
+        verifier=SimpleNamespace(config=manager.config.detector),
+    )
+    worker = Mock()
+    manager.workers = {"front": worker}
+    incoming = manager.config.model_copy(deep=True)
+    incoming.detector.confidence_threshold = 0.61
+
+    manager.reconfigure_detector_policy(incoming)
+
+    manager.inference.reconfigure_policy.assert_called_once_with(incoming.detector)
+    worker.reconfigure_policy.assert_not_called()
+    assert manager.config.detector.confidence_threshold == 0.61
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -97,8 +97,8 @@ class NativeRuntime:
         self._closed = False
         self.detector = NativeDetectorStatus(config, lambda: self._workers)
         self.face_recognizer = UnavailableEnrichment(config)
-        self.person_reidentifier = UnavailableEnrichment(config.tracking)
-        self.appearance_backfill = UnavailableEnrichment(config.tracking)
+        self.person_reidentifier = UnavailableEnrichment(config.native.tracking)
+        self.appearance_backfill = UnavailableEnrichment(config.native.tracking)
         self.faces = FaceStore(storage_dir, config.face_max_observations, self.face_recognizer,
                                start_recognition=False, database_dir=database_dir,
                                media_storage=media_storage, database_write_lock=database_write_lock)
@@ -146,4 +146,6 @@ class NativeRuntime:
         raise ValueError("native model/device changes require a capture reload")
 
     def reconfigure_semantic_search(self, config):
-        raise ValueError("semantic inference is unavailable in the native-first runtime")
+        # Semantic inference remains disabled, but configuration can be stored
+        # without manufacturing a retired inference-role restart.
+        self.semantic_search.config = config.model_copy(deep=True)
