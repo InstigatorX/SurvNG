@@ -74,6 +74,110 @@ def test_no_event_or_notification_before_verification_and_retains_departed_objec
     assert a.counts['verification_confirmed'] == 1
 
 
+def test_delayed_verified_primary_retains_all_confirmed_context_objects():
+    events = Mock()
+    events.add_event.return_value = {"id": 1}
+    config = DetectorConfig(
+        native={"tracking_classes": ["dog"]},
+    )
+    activity = NativeActivity(
+        CameraConfig(
+            id="front",
+            name="Front",
+            stream_url="rtsp://unused.invalid",
+        ),
+        config,
+        events,
+        Mock(),
+        Mock(return_value="preview"),
+    )
+    activity.admission = Mock()
+    activity.admission.poll.return_value = None
+    activity.nominate = Mock()
+    activity.verified_snapshot = Mock(return_value="main.webp")
+
+    def scene(sequence, objects):
+        now = 100 + sequence / 5
+        activity.consume(
+            DetectionSnapshot(
+                sequence / 5,
+                sequence,
+                200,
+                100,
+                tuple(objects),
+                "session",
+                "native_fresh_detection",
+                now,
+            ),
+            now=now,
+            epoch=1000 + sequence / 5,
+        )
+
+    for sequence in (1, 2, 3):
+        scene(
+            sequence,
+            [
+                {
+                    "label": "dog",
+                    "confidence": .9,
+                    "box": {
+                        "x1": 20 + sequence,
+                        "y1": 20,
+                        "x2": 40 + sequence,
+                        "y2": 60,
+                    },
+                    "native_track_id": 9,
+                    "detection_provenance": "native_fresh_detection",
+                },
+                {
+                    "label": "person",
+                    "confidence": .88,
+                    "box": {"x1": 70, "y1": 10, "x2": 90, "y2": 80},
+                    "native_track_id": 10,
+                    "detection_provenance": "native_fresh_detection",
+                },
+                {
+                    "label": "car",
+                    "confidence": .92,
+                    "box": {"x1": 110, "y1": 30, "x2": 180, "y2": 75},
+                    "native_track_id": 11,
+                    "detection_provenance": "native_fresh_detection",
+                },
+            ],
+        )
+
+    assert len(activity._verification_pending) == 1
+    pending = next(iter(activity._verification_pending.values()))
+    assert {
+        item["label"] for item in pending["context_tracks"].values()
+    } == {"dog", "person", "car"}
+
+    # Let the live registry age out before main-recording verification returns.
+    for sequence in range(4, 45):
+        scene(sequence, [])
+    assert not activity.registry.tracks
+
+    activity.admission.poll.return_value = {
+        "status": "confirmed",
+        "votes": ["confirmed"],
+    }
+    activity.tick(now=110)
+
+    assert events.add_event.call_count == 1
+    created = json.loads(events.add_event.call_args.kwargs["objects_json"])
+    assert {item["label"] for item in created if item.get("label")} == {
+        "dog",
+        "person",
+        "car",
+    }
+    persisted = events.update_native_incident_state.call_args.args[1]
+    assert {item["label"] for item in persisted["tracks"]} == {
+        "dog",
+        "person",
+        "car",
+    }
+
+
 @pytest.mark.parametrize('status', ['rejected', 'unverified'])
 def test_negative_or_unavailable_never_alerts(status):
     a=setup_activity(); feed(a,1); feed(a,2)
