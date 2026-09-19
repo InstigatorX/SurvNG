@@ -44,11 +44,14 @@ shed old frames rather than accumulating an unbounded backlog. Tracking runs
 before the leaky metadata queue so delivery drops do not skip tracker updates.
 OpenVINO remains the inference engine inside `gvadetect`.
 
-`NativeCameraWorker` owns capture and one metadata consumer. `NativeActivity`
-owns confirmation, episode state and persistence; it never calls a model or a
-second association algorithm. Metadata processing does not wait for a matching
-Python pixel frame. Only snapshot creation requires an exact session/PTS match.
-There is no on-demand detection when metadata is missing.
+`NativeCameraWorker` owns capture and one metadata consumer. `NativeObjectRegistry`
+is the single owner of native object identity, temporal confirmation and history.
+`NativeActivity` owns incident admission/lifecycle policy, while
+`NativeIncidentInventory` owns the credible objects observed during an episode.
+Fallback spatial association may describe untracked context but cannot admit or
+extend an incident. Metadata processing does not wait for a matching Python pixel
+frame. Only snapshot creation requires an exact session/PTS match. There is no
+on-demand live detection when metadata is missing.
 
 ## Presence semantics
 
@@ -65,8 +68,9 @@ There is no on-demand detection when metadata is missing.
   invalid metadata ends activity with a coverage-loss reason, not evidence that
   the scene was empty. Persistent metadata stalls rebuild the native stream after
   15 seconds; failed graph shutdown is reported rather than starting a second graph.
-- **Stationary vehicles remain tracked but do not create or extend incidents.**
-  New vehicles start uncertain and must demonstrate movement. After eight seconds
+- **Configured stationary classes remain tracked but do not create or extend incidents while stationary.**
+  The default includes people and common vehicle classes. New stationary-policy
+  tracks start uncertain and must demonstrate movement before activity is admitted. After eight seconds
   of stable evidence, moving vehicles become stationary; the normal five-second
   activity timeout then completes the incident when no other object is active.
   People and other unlisted classes retain presence-based admission.
@@ -76,8 +80,8 @@ There is no on-demand detection when metadata is missing.
   is 0.05. At least five observations spanning 0.4 seconds are required; at low FPS the
   window retains five observations even when they span more than two seconds. This
   hysteresis tolerates jitter; it is image-space motion, not calibrated speed.
-- Default vehicle labels: car, truck, bus, van, suv, motorcycle. Configure
-  `detector.native.stationary` with `enabled`, `labels`, `stationary_seconds`,
+- Default stationary labels: person, car, truck, bus, van, suv, motorcycle.
+  Configure `detector.native.stationary` with `enabled`, `labels`, `stationary_seconds`,
   `window_seconds`, `moving_threshold`, and `stationary_threshold`. Disabling it
   restores presence-based admission for every class. All detector/tracker work
   continues; suppression saves incident work, not inference work.
@@ -132,8 +136,10 @@ capture. Requests/streams configure the shared model, not separate per-camera po
 
 Do not add PR #206's `live_pipeline_inference_enabled`,
 `live_pipeline_inference_interval`, or `live_pipeline_tracking` settings. This
-branch uses `detector.native.inference_interval` and native tracking. The old `detector.tracking.enabled`,
-EMA, enrichment, and main-evidence buffering settings do not select runtime paths.
+branch uses `detector.native.inference_interval` and native tracking. The old Python tracking-session, EMA, enrichment, and main-evidence buffering
+settings do not select native runtime paths. Native tracker/ReID ownership lives
+under `detector.native.tracking`; legacy Deep SORT fields under `detector.tracking`
+are accepted only as load-time migration compatibility.
 
 Switching to this branch with `detector.enabled: true` activates native inference
 on camera startup. Restart the application after switching builds. To keep test
@@ -177,6 +183,27 @@ actual throughput, plus metadata restarts, invalid evidence, missing native IDs,
 track capacity drops and missing snapshot frames. A higher stage latency can be
 acceptable when throughput and notification delay remain acceptable; this PR
 makes no claim about the capacity of the deployed camera fleet.
+
+## Native module boundaries
+
+The native child executable is intentionally split by concern rather than hidden
+behind a framework. `survng.dlstreamer_live` owns executable/supervisor and graph
+assembly; `survng.native_pipeline.metadata` owns detector/tracker metadata
+normalization and provenance. On the parent side,
+`survng.app.dlstreamer_supervisor` owns child-process transport and stream inbox
+state, while `survng.app.dlstreamer_capture` adapts that transport to the generic
+capture API.
+
+Recorded main-frame access and object verification are similarly independent of
+admission/cover policy. `NativeMainFrameVerifier` owns decode, registration and
+bounded CPU verification. `NativeAdmission` owns nomination/retry/decision policy,
+and `NativeEvidenceService` owns post-incident cover selection. Admission receives
+priority when both need the single bounded verifier.
+
+Durable incident object truth and snapshot-specific presentation geometry are
+merged through one projection policy. Terminal tracking state uses the small
+vocabulary `active`, `complete`, `interrupted`, and `failed`, with a separate
+`completion_reason` for lifecycle causes such as metadata loss or stream reset.
 
 ## Validation
 
@@ -244,12 +271,14 @@ array such as `["person", "car", "cat", "dog", "robot_lawnmower"]` excludes
 face detections from this model. Labels are trimmed, lowercased and deduplicated.
 Changing the model does not automatically expand an explicit selection.
 
-Filtering runs after gvadetect and before both native evidence capture and
-gvatrack. It removes excluded detections from both GstVideo ROI and GstAnalytics
-relation metadata; removing only the former does not filter this DL Streamer
-version's tracker input. Selected bounding boxes, confidence and class IDs are
-retained without mapping/copying pixel memory. Model inference still evaluates
-all output classes. Existing stored tracks are not rewritten. ReID remains off.
+`gvadetect` fresh detections are captured before tracker-class filtering so the
+application can inventory credible context that is intentionally not tracked.
+The selected-class filter then removes excluded detections from both GstVideo ROI
+and GstAnalytics relation metadata before `gvatrack`; removing only the former
+does not filter this DL Streamer version's tracker input. Untracked context has no
+native tracker ID and cannot drive admission. Selected tracker boxes, confidence
+and class IDs are retained without mapping/copying pixel memory. Model inference
+still evaluates all output classes. Existing stored tracks are not rewritten.
 
 Validation with the installed native runtime:
 `/usr/bin/python3 scripts/check-native-class-filter.py` exercises all/none/subset
