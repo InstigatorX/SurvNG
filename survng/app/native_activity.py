@@ -269,6 +269,7 @@ class NativeActivity:
             confirmed_activity = self._gate(
                 confirmed_activity, observation, epoch, now
             )
+            self._capture_pending_context(now)
         if confirmed_activity:
             self._activate(confirmed_activity, observation, epoch, now)
 
@@ -278,6 +279,54 @@ class NativeActivity:
                 self.persist("active", now=now)
 
         self.tick(now=now)
+
+    @staticmethod
+    def _bounded_context_track(track, limit=64):
+        """Retain concise pre-admission evidence without pinning live registry history."""
+        stored = deepcopy(track)
+        for field in ("box_history", "trajectory"):
+            values = list(stored.get(field) or [])
+            if len(values) > limit:
+                values = values[-limit:]
+            stored[field] = values
+        if stored.get("box_history"):
+            stored["first_seen"] = iso(stored["box_history"][0][0])
+        return stored
+
+    def _capture_pending_context(self, now):
+        """Attach all confirmed scene objects to active admission nominations.
+
+        This mirrors v1.3's temporal-consensus semantics: one object may admit
+        the incident, but every temporally credible co-present object describes
+        its contents. Context is copied into the bounded pending job because the
+        live registry may expire before recorded-main verification completes.
+        """
+        if not self._verification_pending:
+            return
+        current = {}
+        for key in self.registry.confirmed(self._seen_keys):
+            track = self.registry.export(key)
+            if track is None:
+                continue
+            state = self._activity_states.get(key)
+            if state is not None:
+                track.update(self._public_activity_state(state))
+            else:
+                track.update(
+                    motion_state="context",
+                    motion_extent=None,
+                    activity_eligible=False,
+                )
+            current[int(track["track_id"])] = self._bounded_context_track(track)
+        if not current:
+            return
+        timeout = self.config.native.activity_timeout_seconds
+        for pending in self._verification_pending.values():
+            source = float(pending.get("source_monotonic") or pending.get("started") or now)
+            if now - source > timeout:
+                continue
+            context = pending.setdefault("context_tracks", {})
+            context.update(deepcopy(current))
 
     def _gate(self, confirmed_keys, observation, epoch, now):
         allowed = []
@@ -392,6 +441,7 @@ class NativeActivity:
                 pending["source_monotonic"],
                 cover=result.get("cover"),
                 seed=(track, pending["activity"]),
+                context=list((pending.get("context_tracks") or {}).values()),
             )
 
     def _capture_inventory(self):
@@ -438,6 +488,7 @@ class NativeActivity:
         now,
         cover=None,
         seed=None,
+        context=None,
     ):
         if self.event_id is None:
             # Episode inventory begins at activity onset. A delayed admission
@@ -454,6 +505,15 @@ class NativeActivity:
                 except (KeyError, TypeError, ValueError):
                     pass
             self.inventory.begin(trigger_epoch, 0)
+        for track in context or ():
+            self.inventory.record(
+                track,
+                {
+                    "motion_state": track.get("motion_state", "context"),
+                    "motion_extent": track.get("motion_extent"),
+                    "activity_eligible": bool(track.get("activity_eligible")),
+                },
+            )
         if seed is not None:
             self.inventory.record(seed[0], seed[1])
         for key in confirmed_keys:
