@@ -4,7 +4,6 @@ The observation stream and verifier result are deterministic. Registry, activity
 incident inventory, EventStore transactions, and cover promotion are real.
 """
 from copy import deepcopy
-from pathlib import Path
 from unittest.mock import Mock
 
 import cv2
@@ -146,7 +145,7 @@ def test_delayed_inventory_survives_real_store_cover_and_completion(tmp_path, la
     assert sum(item["label"] == "person" for item in subjects) == 2
     assert tracking["state"] == "complete"
     assert {item["native_track_id"] for item in tracking["tracks"]} == expected_ids
-    assert saved["snapshot_path"] == str(first_cover)
+    assert saved["snapshot_path"] == first_cover.relative_to(tmp_path).as_posix()
     primary = next(item for item in subjects if item["native_track_id"] == 9)
     assert primary["box"] == main_box
     assert primary["detection_frame_width"] == 400
@@ -176,9 +175,9 @@ def test_delayed_inventory_survives_real_store_cover_and_completion(tmp_path, la
     assert result["status"] == "promoted"
     saved = events.get(event_id)
     selected_path = saved["snapshot_path"]
-    assert selected_path != str(first_cover)
-    assert Path(selected_path).exists()
-    assert cv2.imread(selected_path).shape[:2] == (400, 800)
+    assert selected_path != first_cover.relative_to(tmp_path).as_posix()
+    assert (tmp_path / selected_path).exists()
+    assert cv2.imread(str(tmp_path / selected_path)).shape[:2] == (400, 800)
 
     # Simulate a late inventory write with live-raster geometry. The common
     # presentation merge must retain the selected main-raster annotation.

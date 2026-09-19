@@ -87,6 +87,10 @@ def merge_inventory_objects(existing_objects, inventory_objects):
                 for field in PRESENTATION_FIELDS:
                     if field in existing:
                         item[field] = deepcopy(existing[field])
+            else:
+                # Inventory confirms presence, not visibility on the selected
+                # raster. Only a new cover may make this annotation visible.
+                item["snapshot_visible"] = False
         else:
             item["snapshot_visible"] = False
         merged.append(item)
