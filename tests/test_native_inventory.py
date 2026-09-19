@@ -222,6 +222,48 @@ def test_registry_weak_candidates_alone_never_confirm():
     assert track["observations"] == 3
 
 
+def test_registry_label_votes_reject_high_confidence_outliers():
+    config = DetectorConfig(
+        enabled=True,
+        confidence_threshold=.45,
+        event_confirmation_frames=2,
+    )
+    registry = NativeObjectRegistry("test", config)
+    observations = [
+        ("robot_lawnmower", .93, 100),
+        ("car", .76, 102),
+        ("robot_lawnmower", .91, 104),
+        ("car", .78, 106),
+        ("car", .80, 108),
+    ]
+    for index, (label, confidence, x) in enumerate(observations):
+        item = detected(label, 7, x, confidence=confidence)
+        item.update(
+            confidence_threshold=.45,
+            confidence_eligible=True,
+            incident_eligible=True,
+            zone_eligible=True,
+        )
+        seen = registry.observe(
+            [item],
+            session="s",
+            identity_epoch=0,
+            epoch=100 + index / 5,
+            now=10 + index / 5,
+            dimensions=(640, 480),
+            fresh_fps=5,
+        )
+    track = registry.export(next(iter(seen)))
+    assert track["label"] == "car"
+    assert track["confidence"] == .78
+    assert track["temporal_label_votes"] == {
+        "robot_lawnmower": 2,
+        "car": 3,
+    }
+    assert track["temporal_track_observations"] == 5
+    assert track["temporal_peak_confidence"] == .80
+
+
 def test_registry_uses_one_identity_when_native_label_changes_with_same_id():
     config = DetectorConfig(enabled=True)
     registry = NativeObjectRegistry("test", config)
