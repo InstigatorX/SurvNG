@@ -317,16 +317,47 @@ class NativeActivity:
                     motion_extent=None,
                     activity_eligible=False,
                 )
-            current[int(track["track_id"])] = self._bounded_context_track(track)
+            current[key] = self._bounded_context_track(track)
         if not current:
             return
+
+        def requires_independent_verification(key, track):
+            state = self._activity_states.get(key)
+            selected = self.config.native.tracking_classes
+            label = str(track.get("label") or "").strip().lower()
+            native_id = track.get("native_track_id")
+            return bool(
+                type(native_id) is int
+                and native_id >= 0
+                and track.get("incident_eligible")
+                and state is not None
+                and state.get("activity_eligible")
+                and (selected is None or label in selected)
+            )
+
         timeout = self.config.native.activity_timeout_seconds
         for pending in self._verification_pending.values():
-            source = float(pending.get("source_monotonic") or pending.get("started") or now)
+            source = float(
+                pending.get("source_monotonic")
+                or pending.get("started")
+                or now
+            )
             if now - source > timeout:
                 continue
             context = pending.setdefault("context_tracks", {})
-            context.update(deepcopy(current))
+            primary_key = pending.get("key")
+            for key, track in current.items():
+                # A second activity-qualified subject has its own admission
+                # decision. Do not smuggle it into this incident if its later
+                # high-resolution verification rejects it. Context-only objects
+                # (parked/stationary/untracked-by-policy) are descriptive and
+                # are retained immediately.
+                if (
+                    key != primary_key
+                    and requires_independent_verification(key, track)
+                ):
+                    continue
+                context[int(track["track_id"])] = deepcopy(track)
 
     def _gate(self, confirmed_keys, observation, epoch, now):
         allowed = []
