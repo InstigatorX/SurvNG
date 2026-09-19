@@ -1,0 +1,28 @@
+name: Native context consensus check
+
+on:
+  push:
+    branches:
+      - experiment/native-first-context-fix
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+      - name: Run native incident consensus regressions
+        env:
+          SURVNG_TEST_TIMEOUT_SECONDS: "300"
+        run: |
+          mkdir -p survng/static
+          ./scripts/run-tests.sh -q             tests/test_native_admission.py             tests/test_native_inventory.py             tests/test_native_first.py             tests/test_native_stationary.py             tests/test_native_evidence.py             tests/test_native_deepsort.py
+          python -m py_compile             survng/app/native_activity.py             survng/app/native_objects.py
+          git diff --check
