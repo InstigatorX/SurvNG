@@ -15,10 +15,12 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - name: Install test dependencies
+      - name: Install dependencies and build real static assets
         run: |
           python -m venv .venv
           .venv/bin/pip install -r requirements.txt pytest anyio httpx2
+          npm --prefix frontend ci
+          npm --prefix frontend run build
       - name: Respect EventStore relative media references in regression
         run: |
           python - <<'PY'
