@@ -18,6 +18,7 @@ from ..media_storage import MediaStorageRegistry
 from ..native_event_projection import (
     merge_cover_objects,
     merge_inventory_objects,
+    should_adopt_native_cover,
 )
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
@@ -1680,7 +1681,8 @@ class EventStore(
                 previous_score = max((float(x.get("native_cover_score", -1)) for x in existing if x.get("native_cover_score") is not None and x.get("snapshot_visible") is not False), default=-1)
                 if diagnostics is not None:
                     diagnostics["reason"] = "better_cover_retained"
-                if score > previous_score + 0.05:
+                adoption = should_adopt_native_cover(existing, objects, score, previous_score)
+                if adoption:
                     old_assets = conn.execute("select distinct snapshot_path from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,)).fetchall()
                     stale = [str(x["snapshot_path"]) for x in old_assets if x["snapshot_path"]]
                     conn.execute("delete from event_source_observations where event_id=? and json_extract(observation_json,'$.native_cover_score') is not null", (event_id,))
@@ -1697,7 +1699,7 @@ class EventStore(
                         ),
                     )
                     if diagnostics is not None:
-                        diagnostics["reason"] = "promoted"
+                        diagnostics["reason"] = adoption
                     updated = self._finish_evidence_commit(conn,event_id,row,reason="native_cover_selected",cover_satisfied=True)
         if updated is None:
             stale.extend(portable_media_path(self.storage_dir, path) for path, _ in assets)

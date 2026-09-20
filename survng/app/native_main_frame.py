@@ -146,20 +146,27 @@ class NativeMainFrameVerifier:
         projected = []
         for original in candidate.objects:
             box = original["box"]
-            values = [
-                (box["x1"] / live_width * sx + ox) * main_width,
-                (box["y1"] / live_height * sy + oy) * main_height,
-                (box["x2"] / live_width * sx + ox) * main_width,
-                (box["y2"] / live_height * sy + oy) * main_height,
-            ]
-            if not (
-                0 <= values[0] < values[2] <= main_width
-                and 0 <= values[1] < values[3] <= main_height
-            ):
+            x1 = (box["x1"] / live_width * sx + ox) * main_width
+            y1 = (box["y1"] / live_height * sy + oy) * main_height
+            x2 = (box["x2"] / live_width * sx + ox) * main_width
+            y2 = (box["y2"] / live_height * sy + oy) * main_height
+            if not (x1 < x2 and y1 < y2):
+                continue
+            # Edge-touching live boxes often project a few pixels past main after
+            # modest stream scale/offset. Clip those instead of dropping siblings.
+            cx1 = min(max(0.0, x1), float(main_width))
+            cy1 = min(max(0.0, y1), float(main_height))
+            cx2 = min(max(0.0, x2), float(main_width))
+            cy2 = min(max(0.0, y2), float(main_height))
+            if not (cx1 < cx2 and cy1 < cy2):
+                continue
+            projected_area = (x2 - x1) * (y2 - y1)
+            clipped_area = (cx2 - cx1) * (cy2 - cy1)
+            if projected_area <= 0 or clipped_area / projected_area < 0.5:
                 continue
             obj = deepcopy(original)
             obj.update(
-                box=dict(zip(("x1", "y1", "x2", "y2"), values)),
+                box={"x1": cx1, "y1": cy1, "x2": cx2, "y2": cy2},
                 detection_frame_width=main_width,
                 detection_frame_height=main_height,
                 frame_source="recorded_main",
@@ -217,6 +224,45 @@ class NativeMainFrameVerifier:
                 relevant.append(item)
 
         config = self.config.detector
+        threshold = self._object_threshold(camera_id, obj)
+        accepted = [
+            item for item in relevant
+            if item["confidence"] >= threshold
+        ]
+        if accepted:
+            actual = max(accepted, key=lambda item: item["confidence"])
+            cover = dict(
+                obj,
+                box=actual["box"],
+                confidence=actual["confidence"],
+                native_cover_verified=True,
+                frame_captured_at_epoch=frame_epoch,
+            )
+            if len(aligned) <= 1:
+                scene = [deepcopy(cover)]
+                scene[0].update(
+                    detection_frame_width=main.shape[1],
+                    detection_frame_height=main.shape[0],
+                    frame_source="recorded_main",
+                    snapshot_visible=True,
+                    box_provenance=scene[0].get("box_provenance") or "detected_in_main",
+                )
+            else:
+                scene = self.match_scene_detections(
+                    camera_id,
+                    aligned,
+                    main,
+                    frame_epoch,
+                    primary=cover,
+                    detections=None,
+                    priority=priority,
+                    cancelled=cancelled,
+                )
+            return "confirmed", (main, cover, frame_epoch, scene)
+        return ("ambiguous" if nearby else "negative"), None
+
+    def _object_threshold(self, camera_id, obj):
+        config = self.config.detector
         threshold = config.event_class_confidence_thresholds.get(
             obj["label"],
             config.confidence_threshold,
@@ -231,22 +277,111 @@ class NativeMainFrameVerifier:
             if zone.name in obj.get("zones", [])
             and zone.confidence_threshold is not None
         ]
-        threshold = min([threshold, *zone_thresholds])
-        accepted = [
-            item for item in relevant
-            if item["confidence"] >= threshold
-        ]
-        if accepted:
-            actual = max(accepted, key=lambda item: item["confidence"])
-            cover = dict(
-                obj,
-                box=actual["box"],
-                confidence=actual["confidence"],
-                native_cover_verified=True,
+        return min([threshold, *zone_thresholds])
+
+    def match_scene_detections(
+        self,
+        camera_id,
+        aligned_objects,
+        main,
+        frame_epoch,
+        *,
+        primary=None,
+        detections=None,
+        priority="cover",
+        cancelled=None,
+    ):
+        """Match projected inventory objects onto one verified main raster."""
+        if cancelled is not None and cancelled.is_set():
+            return [deepcopy(primary)] if primary is not None else []
+        if detections is None:
+            detections = self.detect(main, priority=priority)
+        if cancelled is not None and cancelled.is_set():
+            return [deepcopy(primary)] if primary is not None else []
+
+        main_height, main_width = main.shape[:2]
+        matched = []
+        used_detection_ids = set()
+
+        def identity(item):
+            if item.get("track_id") is not None:
+                return ("track", item.get("track_id"))
+            if item.get("native_identity"):
+                return ("native", str(item["native_identity"]))
+            if item.get("native_track_id") is not None:
+                return (
+                    "native_track",
+                    str(item.get("label") or ""),
+                    item.get("native_track_id"),
+                )
+            return None
+
+        primary_key = identity(primary) if primary is not None else None
+        if primary is not None:
+            item = deepcopy(primary)
+            item.update(
+                detection_frame_width=main_width,
+                detection_frame_height=main_height,
+                frame_source="recorded_main",
                 frame_captured_at_epoch=frame_epoch,
+                snapshot_visible=True,
+                native_cover_verified=True,
+                box_provenance=item.get("box_provenance") or "detected_in_main",
             )
-            return "confirmed", (main, cover, frame_epoch)
-        return ("ambiguous" if nearby else "negative"), None
+            matched.append(item)
+
+        for obj in aligned_objects or ():
+            if not isinstance(obj, dict) or not obj.get("label") or not obj.get("box"):
+                continue
+            key = identity(obj)
+            if primary_key is not None and key is not None and key == primary_key:
+                continue
+            if primary is not None and key is None:
+                # Avoid duplicating the primary when it lacks stable IDs.
+                expected = primary.get("box") or {}
+                actual = obj.get("box") or {}
+                if (
+                    all(name in expected and name in actual for name in ("x1", "y1", "x2", "y2"))
+                    and matches_object_extent(expected, actual)
+                    and obj.get("label") == primary.get("label")
+                ):
+                    continue
+            threshold = self._object_threshold(camera_id, obj)
+            candidates = []
+            for index, detected in enumerate(detections or ()):
+                if index in used_detection_ids:
+                    continue
+                if detected.get("label") != obj["label"]:
+                    continue
+                if float(detected.get("confidence") or 0) < threshold:
+                    continue
+                actual = detected.get("box") or {}
+                if not all(name in actual for name in ("x1", "y1", "x2", "y2")):
+                    continue
+                if matches_object_extent(obj["box"], actual):
+                    candidates.append((index, detected))
+            if not candidates:
+                continue
+            index, detected = max(
+                candidates,
+                key=lambda item: float(item[1].get("confidence") or 0),
+            )
+            used_detection_ids.add(index)
+            item = deepcopy(obj)
+            item.update(
+                box=deepcopy(detected["box"]),
+                confidence=detected["confidence"],
+                detection_frame_width=main_width,
+                detection_frame_height=main_height,
+                frame_source="recorded_main",
+                frame_captured_at_epoch=frame_epoch,
+                snapshot_visible=True,
+                native_cover_verified=True,
+                box_provenance="detected_in_main",
+                verification={"status": "confirmed", "source": "main"},
+            )
+            matched.append(item)
+        return matched
 
     def verify_candidate(
         self,
@@ -321,5 +456,8 @@ class NativeMainFrameVerifier:
             "reason": "main_crop_verification",
         }
         if cover is not None:
-            result["cover"] = cover
+            main, primary, frame_epoch, scene = cover
+            # Admission keeps the historical 3-tuple; cover refinement uses scene.
+            result["cover"] = (main, primary, frame_epoch)
+            result["cover_objects"] = scene or [primary]
         return result

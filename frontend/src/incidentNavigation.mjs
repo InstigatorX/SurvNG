@@ -26,16 +26,55 @@ export function incidentSelectionHref(currentHref, eventId, basePath = "") {
   return `${path}${search}${hash}`;
 }
 
-export function incidentDetectionFrameSize(event) {
-  const detected = (Array.isArray(event?.objects) ? event.objects : []).find((object) => (
-    Number(object?.detection_frame_width) > 0
-    && Number(object?.detection_frame_height) > 0
-  ));
-  if (detected) return {
-    width: Number(detected.detection_frame_width),
-    height: Number(detected.detection_frame_height),
+function objectHasDetectionFrame(object) {
+  return Number(object?.detection_frame_width) > 0
+    && Number(object?.detection_frame_height) > 0;
+}
+
+function detectionFrameFromObject(object) {
+  return {
+    width: Number(object.detection_frame_width),
+    height: Number(object.detection_frame_height),
   };
+}
+
+export function incidentDetectionFrameSize(event) {
+  // Hidden inventory objects often keep live/substream dimensions. Never let
+  // them define the scale for snapshot_visible cover annotations.
+  const objects = Array.isArray(event?.objects) ? event.objects : [];
+  const coverVisible = objects.find((object) => (
+    objectHasDetectionFrame(object) && object?.snapshot_visible === true
+  ));
+  if (coverVisible) return detectionFrameFromObject(coverVisible);
+  const drawable = objects.find((object) => (
+    objectHasDetectionFrame(object) && object?.snapshot_visible !== false
+  ));
+  if (drawable) return detectionFrameFromObject(drawable);
   return incidentTrackingFrameSize(event, false);
+}
+
+export function incidentInventoryLabels(eventOrIncident) {
+  if (Array.isArray(eventOrIncident?.labels)) {
+    return Array.from(new Set(eventOrIncident.labels.filter(Boolean)));
+  }
+  const objects = Array.isArray(eventOrIncident?.objects) ? eventOrIncident.objects : [];
+  return Array.from(new Set(
+    objects.map((object) => object?.label).filter((label) => Boolean(label && String(label).trim())),
+  ));
+}
+
+export function incidentObjectShouldDraw(object, incidentEligibleOnly = false) {
+  if (!object?.label || !String(object.label).trim()) return false;
+  if (object.snapshot_visible === false) return false;
+  const box = object?.box;
+  if (!box || ![box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value)))) {
+    return false;
+  }
+  if (Number(box.x2) <= Number(box.x1) || Number(box.y2) <= Number(box.y1)) return false;
+  // Cover-promoted subjects must draw even when outside an incident zone.
+  if (object.snapshot_visible === true) return true;
+  if (incidentEligibleOnly && object.incident_eligible === false) return false;
+  return true;
 }
 
 export function incidentTrackingFrameSize(event, fallbackToDetection = true) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectFocusThumbnailWidth, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailObjectFocusEnabled, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentImageRenderRect, incidentIndexForEvent, incidentInventoryLabels, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectFocusThumbnailWidth, incidentObjectIconName, incidentObjectShouldDraw, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailObjectFocusEnabled, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -181,6 +181,94 @@ assert.deepEqual(incidentTrackingFrameSize({
   objects: [{ detection_frame_width: 2560, detection_frame_height: 1920 }],
 }), { width: 1280, height: 720 });
 assert.equal(incidentDetectionFrameSize({ objects: [{}] }), null);
+// Hidden live-coord inventory must not scale a later main-frame cover subject.
+assert.deepEqual(incidentDetectionFrameSize({
+  objects: [
+    {
+      label: "car",
+      snapshot_visible: false,
+      detection_frame_width: 896,
+      detection_frame_height: 512,
+      box: { x1: 100, y1: 100, x2: 400, y2: 300 },
+    },
+    {
+      label: "person",
+      snapshot_visible: true,
+      detection_frame_width: 3840,
+      detection_frame_height: 2160,
+      box: { x1: 2100, y1: 1110, x2: 2180, y2: 1300 },
+    },
+  ],
+}), { width: 3840, height: 2160 });
+assert.deepEqual(incidentDetectionFrameSize({
+  objects: [
+    {
+      label: "person",
+      snapshot_visible: false,
+      detection_frame_width: 672,
+      detection_frame_height: 896,
+    },
+    {
+      label: "car",
+      snapshot_visible: true,
+      detection_frame_width: 1920,
+      detection_frame_height: 2560,
+    },
+  ],
+}), { width: 1920, height: 2560 });
+// When nothing is explicitly cover-visible, still ignore snapshot_visible=false.
+assert.deepEqual(incidentDetectionFrameSize({
+  objects: [
+    {
+      label: "car",
+      snapshot_visible: false,
+      detection_frame_width: 896,
+      detection_frame_height: 512,
+    },
+    {
+      label: "person",
+      detection_frame_width: 3840,
+      detection_frame_height: 2160,
+      box: { x1: 1, y1: 1, x2: 2, y2: 2 },
+    },
+  ],
+}), { width: 3840, height: 2160 });
+
+// Inventory badges include ignore-zone / ineligible context objects.
+assert.deepEqual(incidentInventoryLabels({
+  objects: [
+    { label: "car", incident_eligible: false },
+    { label: "person", incident_eligible: true },
+    { label: "person", incident_eligible: true },
+    { status: "object_tracking" },
+  ],
+}), ["car", "person"]);
+assert.deepEqual(incidentInventoryLabels({ labels: ["dog", "car", "dog"] }), ["dog", "car"]);
+
+// Cover-visible subjects draw even when incident_eligible is false.
+assert.equal(incidentObjectShouldDraw({
+  label: "person",
+  snapshot_visible: true,
+  incident_eligible: false,
+  box: { x1: 909, y1: 1304, x2: 1230, y2: 1949 },
+}, true), true);
+assert.equal(incidentObjectShouldDraw({
+  label: "car",
+  snapshot_visible: false,
+  incident_eligible: true,
+  box: { x1: 1, y1: 1, x2: 2, y2: 2 },
+}, true), false);
+assert.equal(incidentObjectShouldDraw({
+  label: "car",
+  incident_eligible: false,
+  box: { x1: 1, y1: 1, x2: 2, y2: 2 },
+}, true), false);
+assert.equal(incidentObjectShouldDraw({
+  label: "car",
+  incident_eligible: false,
+  box: { x1: 1, y1: 1, x2: 2, y2: 2 },
+}, false), true);
+
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "compact" }), 6);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 720, density: "compact" }), 8);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "comfortable" }), 4);

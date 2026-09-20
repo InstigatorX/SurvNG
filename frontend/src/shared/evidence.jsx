@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { trackReplayOffset, trackReplaySource, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
-import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
+import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentInventoryLabels, incidentObjectShouldDraw, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
 import { formatDateTime } from "./format.js";
 import { useStoredState, useModalFocus } from "./hooks.js";
@@ -67,10 +67,9 @@ export function incidentClipWindow(event, before, after) {
 }
 
 export function incidentLabels(incident) {
-  const labels = Array.isArray(incident.labels)
-    ? incident.labels
-    : eventObjects(incident).filter((object) => object.incident_eligible !== false).map((object) => object.label).filter(Boolean);
-  return Array.from(new Set(labels.filter(Boolean)));
+  // Inventory presence drives badges. Zone/admission eligibility still gates
+  // whether an object may create an incident, not whether it is named here.
+  return incidentInventoryLabels(incident);
 }
 
 export function IncidentObjectIcon({ label, size = 14 }) {
@@ -113,7 +112,7 @@ export function IncidentSourceDot({ trigger, className = "", onClick = null, ari
 
 export function hasDetectedObjects(event) {
   if (typeof event.has_objects === "boolean") return event.has_objects;
-  return eventObjects(event).some((object) => object.label && object.incident_eligible !== false) || incidentLabels(event).length > 0;
+  return eventObjects(event).some((object) => object.label) || incidentLabels(event).length > 0;
 }
 
 export function incidentZones(incident) {
@@ -133,24 +132,28 @@ export function visualSearchObjects(event) {
 }
 
 export function objectBoxes(event, incidentEligibleOnly = false) {
-  return visualSearchObjects(event)
-    .map((object, objectIndex) => ({ object, objectIndex, box: object?.box }))
-    .filter(({ object, box }) => (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
-    .map(({ object, objectIndex, box }) => ({
-      objectIndex,
-      trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
-      label: object.label,
-      confidence: object.confidence,
-      depthMeters: Number(object?.depth_stats?.median_m),
-      maskPolygon: Array.isArray(object.mask_polygon)
-        ? object.mask_polygon.filter((point) => Array.isArray(point) && point.length >= 2).map((point) => [Number(point[0]), Number(point[1])])
-        : [],
-      x1: Number(box.x1),
-      y1: Number(box.y1),
-      x2: Number(box.x2),
-      y2: Number(box.y2),
-    }))
-    .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
+  return eventObjects(event)
+    .map((object, objectIndex) => ({ object, objectIndex }))
+    .filter(({ object }) => incidentObjectShouldDraw(object, incidentEligibleOnly))
+    .map(({ object, objectIndex }) => {
+      const box = object.box;
+      return {
+        objectIndex,
+        trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
+        label: object.label,
+        confidence: object.confidence,
+        depthMeters: Number(object?.depth_stats?.median_m),
+        detectionFrameWidth: Number(object?.detection_frame_width) || null,
+        detectionFrameHeight: Number(object?.detection_frame_height) || null,
+        maskPolygon: Array.isArray(object.mask_polygon)
+          ? object.mask_polygon.filter((point) => Array.isArray(point) && point.length >= 2).map((point) => [Number(point[0]), Number(point[1])])
+          : [],
+        x1: Number(box.x1),
+        y1: Number(box.y1),
+        x2: Number(box.x2),
+        y2: Number(box.y2),
+      };
+    });
 }
 
 export function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, objectFocusMode = null, objectFocusZoom = 1, objectFocusAspect = { width: 16, height: 9 }, objectFocusControls = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, selectedObjectIndex = null, onSelectObject = null, onRequestFullResolution, onImageSize, children }) {
@@ -287,19 +290,23 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
           .join(" "),
       })).filter((box) => box.width > 0 && box.height > 0);
     }
-    const sourceWidth = boxCoordinateSize?.width || imageSize?.width;
-    const sourceHeight = boxCoordinateSize?.height || imageSize?.height;
-    if (!sourceWidth || !sourceHeight) return [];
-    const scaleX = renderedImage.width / sourceWidth;
-    const scaleY = renderedImage.height / sourceHeight;
-    return boxes.map((box) => ({
-      ...box,
-      left: renderedImage.x + box.x1 * scaleX,
-      top: renderedImage.y + box.y1 * scaleY,
-      width: (box.x2 - box.x1) * scaleX,
-      height: (box.y2 - box.y1) * scaleY,
-      maskPoints: box.maskPolygon.map(([x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
-    })).filter((box) => box.width > 0 && box.height > 0);
+    const fallbackWidth = boxCoordinateSize?.width || imageSize?.width;
+    const fallbackHeight = boxCoordinateSize?.height || imageSize?.height;
+    if (!fallbackWidth || !fallbackHeight) return [];
+    return boxes.map((box) => {
+      const sourceWidth = box.detectionFrameWidth > 0 ? box.detectionFrameWidth : fallbackWidth;
+      const sourceHeight = box.detectionFrameHeight > 0 ? box.detectionFrameHeight : fallbackHeight;
+      const scaleX = renderedImage.width / sourceWidth;
+      const scaleY = renderedImage.height / sourceHeight;
+      return {
+        ...box,
+        left: renderedImage.x + box.x1 * scaleX,
+        top: renderedImage.y + box.y1 * scaleY,
+        width: (box.x2 - box.x1) * scaleX,
+        height: (box.y2 - box.y1) * scaleY,
+        maskPoints: box.maskPolygon.map(([x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
+      };
+    }).filter((box) => box.width > 0 && box.height > 0);
   }, [boxes, boxCoordinateSize?.height, boxCoordinateSize?.width, focusCrop, frameSize, imageSize, renderedImage, useServerObjectCrop]);
 
   const renderedTracks = useMemo(() => {

@@ -362,6 +362,22 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                 inspection = active_manager.detector.inspect_model(path_text)
                 item["input_shape"] = list(inspection.get("input_shape") or [])
                 item["output_shapes"] = list(inspection.get("output_shapes") or [])
+                for key in (
+                    "labels",
+                    "labels_source",
+                    "model_proc_path",
+                    "model_proc_match",
+                    "output_format",
+                    "output_format_source",
+                    "nms_threshold",
+                    "nms_source",
+                    "validated",
+                    "inspection_complete",
+                    "warnings",
+                    "metadata",
+                ):
+                    if key in inspection:
+                        item[key] = inspection[key]
                 if inspection.get("error"):
                     item["error"] = str(inspection["error"])
                 else:

@@ -103,6 +103,42 @@ def merge_inventory_objects(existing_objects, inventory_objects):
     return [*merged, *deepcopy(metadata)]
 
 
+def cover_visible_object_count(objects) -> int:
+    """How many labeled objects are drawn on the current cover raster."""
+    count = 0
+    for item in objects or ():
+        if not isinstance(item, dict) or not item.get("label") or item.get("status"):
+            continue
+        if item.get("snapshot_visible") is not True:
+            continue
+        box = item.get("box")
+        if not isinstance(box, dict):
+            continue
+        if not all(isinstance(box.get(key), (int, float)) for key in ("x1", "y1", "x2", "y2")):
+            continue
+        count += 1
+    return count
+
+
+def should_adopt_native_cover(existing_objects, cover_objects, score, previous_score) -> str | None:
+    """Decide whether a verified cover should replace the retained snapshot.
+
+    Returns a diagnostics reason when the cover should be adopted, else None.
+    Higher beauty score still wins. A lower or equal score may still win when
+    the new cover annotates more inventory objects on the raster.
+    """
+    try:
+        numeric_score = float(score)
+        numeric_previous = float(previous_score)
+    except (TypeError, ValueError):
+        return None
+    if numeric_score > numeric_previous + 0.05:
+        return "promoted"
+    if cover_visible_object_count(cover_objects) > cover_visible_object_count(existing_objects):
+        return "cover_enriched"
+    return None
+
+
 def merge_cover_objects(existing_objects, cover_objects):
     """Apply one cover's raster-specific annotations to durable incident truth."""
     existing_labels, metadata = _split(existing_objects)

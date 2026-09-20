@@ -554,17 +554,32 @@ class NativeEvidenceService:
                         failures["main_verification_failed"] += 1
                     continue
                 main, detected, main_epoch = cover
-                objects = [deepcopy(detected)]
-                objects[0].pop("mask_polygon", None)
-                objects[0].update(
-                    frame_source="recorded_main", frame_captured_at_epoch=main_epoch,
-                    detection_frame_width=main.shape[1], detection_frame_height=main.shape[0],
-                    snapshot_visible=True, native_cover_verified=True,
-                    box_provenance="detected_in_main",
-                    verification={"status": "confirmed", "source": "main"},
-                    native_alignment={"method": "main_frame_verified", "nomination_epoch": candidate.epoch,
-                                      "sample_offset_seconds": main_epoch - candidate.epoch},
-                )
+                objects = [
+                    deepcopy(item)
+                    for item in (checked.get("cover_objects") or [detected])
+                    if isinstance(item, dict) and item.get("label") and item.get("box")
+                ]
+                if not objects:
+                    objects = [deepcopy(detected)]
+                for index, item in enumerate(objects):
+                    item.pop("mask_polygon", None)
+                    item.update(
+                        frame_source="recorded_main",
+                        frame_captured_at_epoch=main_epoch,
+                        detection_frame_width=main.shape[1],
+                        detection_frame_height=main.shape[0],
+                        snapshot_visible=True,
+                        native_cover_verified=bool(item.get("native_cover_verified", True)),
+                        box_provenance=item.get("box_provenance") or "detected_in_main",
+                        verification=item.get("verification")
+                        or {"status": "confirmed", "source": "main"},
+                        native_alignment={
+                            "method": "main_frame_verified",
+                            "nomination_epoch": candidate.epoch,
+                            "sample_offset_seconds": main_epoch - candidate.epoch,
+                        },
+                        snapshot_primary_subject=index == 0,
+                    )
             else:
                 main_epoch = (
                     candidate.epoch - float(replay_offset)
@@ -630,7 +645,7 @@ class NativeEvidenceService:
             if main.shape[0] * main.shape[1] <= candidate.image.shape[0] * candidate.image.shape[1]:
                 failures["main_not_higher_resolution"] += 1
                 continue
-            for obj in objects:
+            for index, obj in enumerate(objects):
                 obj["native_cover_score"] = score
                 obj["snapshot_quality_score"] = min(1.0, score / 6)
                 box = obj["box"]
@@ -645,7 +660,7 @@ class NativeEvidenceService:
                     1 - box["x2"] / main.shape[1],
                     1 - box["y2"] / main.shape[0],
                 )
-                obj["snapshot_primary_subject"] = True
+                obj["snapshot_primary_subject"] = index == 0
                 obj["temporal_sample_offset_seconds"] = (
                     candidate.epoch - datetime.fromisoformat(event["created_at"]).timestamp()
                 )
@@ -702,12 +717,23 @@ class NativeEvidenceService:
                     "evidence_revision": result["evidence_revision"],
                 },
             )
+        if result:
+            reason = (
+                "cover_enriched"
+                if adoption.get("reason") == "cover_enriched"
+                else objects[0].get("native_alignment", {}).get("method", "verified_main")
+            )
+            status = "promoted"
+        elif adoption.get("reason") == "better_cover_retained":
+            reason = "better_cover_retained"
+            status = "kept_better_cover"
+        else:
+            reason = adoption.get("reason", "cover_not_adopted")
+            status = "recording_pending"
         return {
             "event_id": event_id,
-            "status": ("promoted" if result else "kept_better_cover"
-                       if adoption.get("reason") == "better_cover_retained" else "recording_pending"),
-            "reason": (objects[0].get("native_alignment", {}).get("method", "verified_main")
-                       if result else adoption.get("reason", "cover_not_adopted")),
+            "status": status,
+            "reason": reason,
             **details,
             "width": width,
             "height": height,
