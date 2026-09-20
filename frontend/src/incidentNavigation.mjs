@@ -27,8 +27,14 @@ export function incidentSelectionHref(currentHref, eventId, basePath = "") {
 }
 
 export function incidentDetectionFrameSize(event) {
+  // Incident inventory includes hidden objects in their original coordinate
+  // planes. Only snapshot-visible evidence can describe the displayed cover;
+  // the selected subject may be promoted in place rather than moved to index 0.
   const detected = (Array.isArray(event?.objects) ? event.objects : []).find((object) => (
-    Number(object?.detection_frame_width) > 0
+    object?.snapshot_visible !== false
+    && Number.isFinite(Number(object?.detection_frame_width))
+    && Number.isFinite(Number(object?.detection_frame_height))
+    && Number(object?.detection_frame_width) > 0
     && Number(object?.detection_frame_height) > 0
   ));
   if (detected) return {
