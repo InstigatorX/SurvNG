@@ -128,6 +128,183 @@ def test_match_scene_identity_slot_fill_when_projection_misses():
     assert by_id["car:390"]["box"]["x1"] == 0
 
 
+def test_match_scene_primary_slot_fill_claims_od_before_siblings():
+    """Primary projection miss must claim nearest leftover OD after extent pass."""
+    verifier, _ = _verifier()
+    main = np.zeros((720, 1280, 3), dtype=np.uint8)
+    # Far enough that extent fails against the OD at 200..280.
+    primary = {
+        "label": "person",
+        "track_id": 1,
+        "episode_identity": "person:1",
+        "confidence": 0.9,
+        "box": {"x1": 40.0, "y1": 100.0, "x2": 90.0, "y2": 300.0},
+        "zones": [],
+    }
+    sibling = {
+        "label": "person",
+        "track_id": 2,
+        "episode_identity": "person:2",
+        "confidence": 0.85,
+        "box": {"x1": 500.0, "y1": 100.0, "x2": 560.0, "y2": 300.0},
+        "zones": [],
+    }
+    detections = [
+        {"label": "person", "confidence": 0.93, "box": {"x1": 200, "y1": 110, "x2": 280, "y2": 310}},
+        {"label": "person", "confidence": 0.88, "box": {"x1": 505, "y1": 105, "x2": 555, "y2": 295}},
+    ]
+    scene = verifier.match_scene_detections(
+        "test",
+        [primary, sibling],
+        main,
+        10.0,
+        primary=dict(primary),
+        detections=detections,
+    )
+    by_id = {item["episode_identity"]: item for item in scene}
+    assert by_id["person:1"]["box"]["x1"] == 200
+    assert by_id["person:1"]["box_provenance"] == "identity_slot_from_main"
+    assert by_id["person:2"]["box"]["x1"] == 505
+    assert by_id["person:2"]["box_provenance"] == "detected_in_main"
+
+
+def test_match_scene_primary_slot_does_not_steal_sibling_extent():
+    """Extent claims run before slot-fill so primary cannot steal a sibling OD."""
+    verifier, _ = _verifier()
+    main = np.zeros((720, 1280, 3), dtype=np.uint8)
+    primary = {
+        "label": "person",
+        "track_id": 1,
+        "episode_identity": "person:1",
+        "confidence": 0.9,
+        "box": {"x1": 40.0, "y1": 100.0, "x2": 90.0, "y2": 300.0},
+        "zones": [],
+    }
+    sibling = {
+        "label": "person",
+        "track_id": 2,
+        "episode_identity": "person:2",
+        "confidence": 0.85,
+        "box": {"x1": 200.0, "y1": 100.0, "x2": 280.0, "y2": 300.0},
+        "zones": [],
+    }
+    detections = [
+        {"label": "person", "confidence": 0.93, "box": {"x1": 205, "y1": 105, "x2": 275, "y2": 295}},
+    ]
+    scene = verifier.match_scene_detections(
+        "test",
+        [primary, sibling],
+        main,
+        10.0,
+        primary=dict(primary),
+        detections=detections,
+    )
+    assert scene[0]["episode_identity"] == "person:1"
+    by_id = {item["episode_identity"]: item for item in scene}
+    assert by_id["person:2"]["box"]["x1"] == 205
+    assert by_id["person:2"]["box_provenance"] == "detected_in_main"
+    assert by_id["person:1"]["box"]["x1"] == 40.0
+    assert by_id["person:1"]["box_provenance"] == "projected_main"
+
+
+def test_match_scene_crop_verified_primary_skips_slot_replace():
+    """Crop-confirmed primary must not be replaced by a nearby full-frame OD."""
+    verifier, _ = _verifier()
+    main = np.zeros((720, 1280, 3), dtype=np.uint8)
+    primary = {
+        "label": "person",
+        "track_id": 1,
+        "episode_identity": "person:1",
+        "confidence": 0.95,
+        "box": {"x1": 200.0, "y1": 110.0, "x2": 280.0, "y2": 310.0},
+        "zones": [],
+        "native_cover_verified": True,
+    }
+    sibling = {
+        "label": "person",
+        "track_id": 2,
+        "episode_identity": "person:2",
+        "confidence": 0.8,
+        "box": {"x1": 500.0, "y1": 100.0, "x2": 560.0, "y2": 300.0},
+        "zones": [],
+    }
+    detections = [
+        {"label": "person", "confidence": 0.9, "box": {"x1": 350, "y1": 120, "x2": 430, "y2": 320}},
+    ]
+    scene = verifier.match_scene_detections(
+        "test",
+        [primary, sibling],
+        main,
+        10.0,
+        primary=dict(primary),
+        detections=detections,
+    )
+    by_id = {item["episode_identity"]: item for item in scene}
+    assert by_id["person:1"]["box"]["x1"] == 200.0
+    assert by_id["person:1"]["box_provenance"] == "detected_in_main"
+    # Nearby OD reserved for crop primary — sibling must not slot-claim it.
+    assert "person:2" not in by_id or by_id["person:2"]["box"]["x1"] != 350
+
+
+def test_match_scene_preserves_crop_verified_provenance_on_rematch_miss():
+    verifier, _ = _verifier()
+    main = np.zeros((720, 1280, 3), dtype=np.uint8)
+    primary = {
+        "label": "person",
+        "track_id": 1,
+        "episode_identity": "person:1",
+        "confidence": 0.95,
+        "box": {"x1": 200.0, "y1": 110.0, "x2": 280.0, "y2": 310.0},
+        "zones": [],
+        "native_cover_verified": True,
+        # Crop path confirmed this box; rematch miss must not lie as projected.
+    }
+    detections = [
+        {"label": "person", "confidence": 0.9, "box": {"x1": 900, "y1": 100, "x2": 980, "y2": 380}},
+    ]
+    scene = verifier.match_scene_detections(
+        "test",
+        [primary],
+        main,
+        10.0,
+        primary=dict(primary),
+        detections=detections,
+    )
+    assert len(scene) == 1
+    assert scene[0]["box"]["x1"] == 200.0
+    assert scene[0]["box_provenance"] == "detected_in_main"
+
+
+def test_match_scene_primary_miss_clears_stale_detected_provenance():
+    """Projected primary must not keep a prior detected_in_main provenance."""
+    verifier, _ = _verifier()
+    main = np.zeros((720, 1280, 3), dtype=np.uint8)
+    primary = {
+        "label": "person",
+        "track_id": 1,
+        "episode_identity": "person:1",
+        "confidence": 0.9,
+        "box": {"x1": 40.0, "y1": 100.0, "x2": 90.0, "y2": 300.0},
+        "zones": [],
+        "box_provenance": "detected_in_main",
+    }
+    # OD far beyond slot radius so neither extent nor slot claims.
+    detections = [
+        {"label": "person", "confidence": 0.93, "box": {"x1": 900, "y1": 100, "x2": 980, "y2": 380}},
+    ]
+    scene = verifier.match_scene_detections(
+        "test",
+        [primary],
+        main,
+        10.0,
+        primary=dict(primary),
+        detections=detections,
+    )
+    assert len(scene) == 1
+    assert scene[0]["box"]["x1"] == 40.0
+    assert scene[0]["box_provenance"] == "projected_main"
+
+
 def test_match_scene_slot_fill_does_not_invent_unpaired_detections():
     verifier, _ = _verifier()
     main = np.zeros((720, 1280, 3), dtype=np.uint8)

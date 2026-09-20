@@ -69,6 +69,16 @@ class SemanticIndexTest(unittest.TestCase):
                 "detection_frame_height": 512,
                 "box_history": [[100.0, 80, 130, 120, 180]],
             },
+            {
+                "label": "person",
+                "track_id": 499,
+                "confidence": 0.7,
+                "max_confidence": 0.7,
+                "detection_frame_width": 896,
+                "detection_frame_height": 512,
+                # Far later singleton — would become a third identity without a census cap.
+                "box_history": [[200.0, 500, 140, 560, 250]],
+            },
         ]
         objects = [
             {
@@ -89,8 +99,15 @@ class SemanticIndexTest(unittest.TestCase):
                 "label": "person",
                 "track_id": 401,
                 "confidence": 0.92,
-                "snapshot_visible": False,
+                "snapshot_visible": True,
                 "box": {"x1": 9, "y1": 10, "x2": 11, "y2": 12},
+            },
+            {
+                "label": "person",
+                "track_id": 499,
+                "confidence": 0.7,
+                "snapshot_visible": True,
+                "box": {"x1": 13, "y1": 14, "x2": 15, "y2": 16},
             },
             {
                 "status": "object_tracking",
@@ -98,12 +115,49 @@ class SemanticIndexTest(unittest.TestCase):
                     "tracks": tracks,
                     "frame_width": 896,
                     "frame_height": 512,
+                    "episode_counts": {"person": 2},
                 },
             },
         ]
         roster = semantic_event_objects({"objects": objects})
         self.assertEqual(len(roster), 2)
         self.assertEqual({item["track_id"] for item in roster}, {400, 401})
+        self.assertTrue(all(item.get("snapshot_visible") is not False for item in roster))
+
+    def test_semantic_objects_zero_episode_counts_do_not_empty_roster(self) -> None:
+        tracks = [
+            {
+                "label": "person",
+                "track_id": 7,
+                "confidence": 0.9,
+                "max_confidence": 0.9,
+                "detection_frame_width": 896,
+                "detection_frame_height": 512,
+                "box_history": [],
+            },
+        ]
+        objects = [
+            {
+                "label": "person",
+                "track_id": 7,
+                "confidence": 0.9,
+                "snapshot_visible": True,
+                "episode_identity": "person:7",
+                "box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+            },
+            {
+                "status": "object_tracking",
+                "object_tracking": {
+                    "tracks": tracks,
+                    "frame_width": 896,
+                    "frame_height": 512,
+                    "episode_counts": {"person": 0},
+                },
+            },
+        ]
+        roster = semantic_event_objects({"objects": objects})
+        self.assertEqual(len(roster), 1)
+        self.assertEqual(roster[0]["track_id"], 7)
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

@@ -371,3 +371,75 @@ def test_same_fov_unverified_timing_never_promotes_projected_main_without_verifi
     service.match_main.assert_not_called()
     assert events.get(event['id'])['snapshot_path'] == event['snapshot_path']
     assert result['reason'] == 'main_verification_failed'
+
+
+def test_aligned_same_fov_verification_assigns_detections_exclusively(tmp_path):
+    """Calibrated same-FOV cover must use exclusive match_scene OD assignment."""
+    from survng.app.config import CameraConfig
+
+    service, events, event, image, obj, tracking = fixture(tmp_path)
+    service.config.detector.native.verification_enabled = True
+    service.config.cameras = [CameraConfig(
+        id='test', name='Test', stream_url='rtsp://unused.invalid', native_same_field_of_view=True
+    )]
+    sibling = {
+        'label': 'person',
+        'confidence': 0.88,
+        'track_id': 2,
+        'episode_identity': 'person:2',
+        'box': {'x1': 400, 'y1': 80, 'x2': 540, 'y2': 300},
+        'incident_eligible': True,
+        'zones': [],
+    }
+    primary = dict(
+        obj,
+        episode_identity='person:1',
+        zones=[],
+    )
+    tracking.update(
+        state='complete',
+        native_session='test-session',
+        recording_alignment={
+            'source': 'main',
+            'verified': True,
+            'offset_seconds': 0.0,
+            'mean_iou': 0.9,
+        },
+        tracks=[
+            {'track_id': 1, 'label': 'person', 'box_history': [[100, 100, 80, 240, 300]]},
+            {'track_id': 2, 'label': 'person', 'box_history': [[100, 400, 80, 540, 300]]},
+        ],
+    )
+    events.update_object_tracking(event['id'], tracking)
+    main = cv2.resize(image, (1280, 720))
+    service.read_frame = Mock(return_value=main)
+    service.match_main = Mock(side_effect=AssertionError('aligned same-FOV must not template-match'))
+    # One OD overlapping primary's scaled box; sibling must not also claim it.
+    od_primary = {
+        'label': 'person',
+        'confidence': 0.95,
+        'box': {'x1': 200, 'y1': 160, 'x2': 480, 'y2': 600},
+    }
+    od_sibling = {
+        'label': 'person',
+        'confidence': 0.91,
+        'box': {'x1': 800, 'y1': 160, 'x2': 1080, 'y2': 600},
+    }
+    service.main_frames.detect = Mock(return_value=[od_primary, od_sibling])
+    service.verifier.detect = service.main_frames.detect
+
+    result = service.process(
+        event['id'],
+        [Candidate(100, image, [primary, sibling], 5)],
+    )
+    assert result['status'] == 'promoted'
+    service.match_main.assert_not_called()
+    stored = json.loads(events.get(event['id'])['objects_json'])
+    people = [item for item in stored if item.get('label') == 'person']
+    boxes = [tuple(item['box'][k] for k in ('x1', 'y1', 'x2', 'y2')) for item in people]
+    assert len(people) == 2
+    assert len(set(boxes)) == 2
+    assert all(
+        item.get('box_provenance') in ('detected_in_main', 'identity_slot_from_main')
+        for item in people
+    )

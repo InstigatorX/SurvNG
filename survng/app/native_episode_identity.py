@@ -357,8 +357,16 @@ def annotate_objects_with_episode_identities(
 
 def best_objects_by_episode_identity(
     objects: list[dict[str, Any]],
+    *,
+    label_limits: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep the highest-confidence object per episode identity (or track/label)."""
+    """Keep the highest-confidence object per episode identity (or track/label).
+
+    When ``label_limits`` is provided (typically peak concurrent counts), keep at
+    most that many identities per label, preferring cover-visible then confidence.
+    Non-positive limits are ignored so empty-history census zeros do not wipe a
+    label from the roster.
+    """
     best: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for item in objects or ():
@@ -394,4 +402,41 @@ def best_objects_by_episode_identity(
         )
         if score > previous_score:
             best[key] = item
-    return [best[key] for key in order]
+    selected = [best[key] for key in order]
+    if not label_limits:
+        return selected
+
+    def rank(item: dict[str, Any]) -> tuple[float, float]:
+        try:
+            confidence = float(item.get("confidence") or item.get("max_confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        visible = 1.0 if item.get("snapshot_visible") is True else 0.0
+        return (visible, confidence)
+
+    kept_keys: set[str] = set()
+    capped_labels: set[str] = set()
+    for label, limit in label_limits.items():
+        try:
+            cap = int(limit)
+        except (TypeError, ValueError):
+            continue
+        # Non-positive / missing census means "do not cap" (e.g. empty box_history
+        # still stamps episode_identity but reports peak concurrent 0).
+        if cap <= 0:
+            continue
+        capped_labels.add(label)
+        candidates = [
+            (key, best[key])
+            for key in order
+            if best[key].get("label") == label
+        ]
+        candidates.sort(key=lambda pair: rank(pair[1]), reverse=True)
+        for key, _item in candidates[:cap]:
+            kept_keys.add(key)
+    # Preserve labels without a positive explicit limit.
+    for key in order:
+        label = best[key].get("label")
+        if label not in capped_labels:
+            kept_keys.add(key)
+    return [best[key] for key in order if key in kept_keys]

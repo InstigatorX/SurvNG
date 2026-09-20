@@ -147,6 +147,14 @@ def semantic_query_plan(query: str) -> SemanticQueryPlan:
     )
 
 
+def _positive_int(value: object) -> int | None:
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
     """Return labeled detections for semantic evidence.
 
@@ -158,6 +166,7 @@ def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
     from .native_episode_identity import (
         annotate_objects_with_episode_identities,
         best_objects_by_episode_identity,
+        episode_label_counts,
     )
 
     raw_objects: object = event.get("objects")
@@ -185,6 +194,7 @@ def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(tracking, dict):
         tracking = event.get("object_tracking") if isinstance(event.get("object_tracking"), dict) else None
     tracks = tracking.get("tracks") if isinstance(tracking, dict) else None
+    counts = None
     if isinstance(tracks, list) and tracks:
         labeled = annotate_objects_with_episode_identities(
             labeled,
@@ -192,10 +202,28 @@ def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
             frame_width=tracking.get("frame_width") if isinstance(tracking, dict) else None,
             frame_height=tracking.get("frame_height") if isinstance(tracking, dict) else None,
         )
+        counts = tracking.get("episode_counts") if isinstance(tracking, dict) else None
+        if not isinstance(counts, dict) or not counts:
+            counts = episode_label_counts(tracks)
+        if isinstance(counts, dict):
+            # Drop non-positive census entries so empty-history zeros do not
+            # wipe the label from the searchable roster.
+            filtered = {
+                str(label): number
+                for label, limit in counts.items()
+                if str(label).strip()
+                and (number := _positive_int(limit)) is not None
+            }
+            counts = filtered or None
     if any(item.get("episode_identity") for item in labeled):
-        # Identity roster: include the best crop per identity even when only one
-        # fragment was promoted onto the cover raster.
-        return best_objects_by_episode_identity(labeled)
+        # Identity roster capped by concurrent census. Prefer cover-visible
+        # fragments so crops come from the promoted raster's coordinate plane.
+        roster = best_objects_by_episode_identity(labeled, label_limits=counts)
+        visible = [
+            item for item in roster
+            if item.get("snapshot_visible") is not False
+        ]
+        return visible if visible else roster
     return [
         item for item in labeled
         if item.get("snapshot_visible") is not False

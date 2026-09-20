@@ -23,7 +23,6 @@ from .native_evidence_common import (
     Candidate,
     image_quality as _common_image_quality,
     is_native_tracking_implementation,
-    matches_object_extent,
     resize_objects,
 )
 from .native_main_frame import NativeMainFrameVerifier
@@ -616,41 +615,24 @@ class NativeEvidenceService:
                     if same_fov_aligned
                     else self.match_main(candidate, main)
                 )
-                detections = []
                 if require_verification and objects:
-                    detections = self.main_frames.detect(main, priority="cover")
-                if require_verification:
-                    verified = []
-                    for obj in objects:
-                        expected = obj["box"]
-                        matching = []
-                        for detected in detections:
-                            threshold = self.config.detector.event_class_confidence_thresholds.get(
-                                obj["label"], self.config.detector.confidence_threshold
-                            )
-                            if (
-                                detected.get("label") != obj["label"]
-                                or detected.get("confidence", 0) < threshold
-                            ):
-                                continue
-                            actual = detected.get("box") or {}
-                            if (
-                                all(k in actual for k in ("x1", "y1", "x2", "y2"))
-                                and matches_object_extent(expected, actual)
-                            ):
-                                matching.append(detected)
-                        if matching:
-                            actual = max(matching, key=lambda x: x.get("confidence", 0))
-                            obj.update(
-                                box=actual["box"],
-                                confidence=actual["confidence"],
-                                native_cover_verified=True,
-                                box_provenance="detected_in_main",
-                                verification={"status": "confirmed", "source": "main"},
-                            )
-                            verified.append(obj)
-                    objects = verified
-                else:
+                    # Exclusive OD assignment + identity slot-fill (same path as
+                    # uncalibrated same-FOV verify_candidate).
+                    matched = self.main_frames.match_scene_detections(
+                        event["camera_id"],
+                        objects,
+                        main,
+                        main_epoch,
+                        primary=objects[0],
+                        priority="cover",
+                    )
+                    objects = [
+                        item
+                        for item in matched
+                        if item.get("box_provenance")
+                        in ("detected_in_main", "identity_slot_from_main")
+                    ]
+                elif not require_verification:
                     for obj in objects:
                         obj.update(
                             native_cover_verified=False,

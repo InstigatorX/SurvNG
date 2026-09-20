@@ -103,3 +103,25 @@ def test_annotate_and_best_objects_collapse_fragments_for_semantic():
     ids = {obj["track_id"] for obj in best}
     assert 401 in ids
     assert 400 in ids or 415 in ids
+
+
+def test_best_objects_zero_label_limit_preserves_label():
+    objects = [
+        {
+            "label": "person",
+            "episode_identity": "person:1",
+            "confidence": 0.9,
+            "snapshot_visible": True,
+            "box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+        },
+        {
+            "label": "car",
+            "episode_identity": "car:1",
+            "confidence": 0.8,
+            "snapshot_visible": True,
+            "box": {"x1": 5, "y1": 6, "x2": 7, "y2": 8},
+        },
+    ]
+    # Zero census must not wipe the label; only positive caps constrain.
+    kept = best_objects_by_episode_identity(objects, label_limits={"person": 0, "car": 1})
+    assert {item["label"] for item in kept} == {"person", "car"}
