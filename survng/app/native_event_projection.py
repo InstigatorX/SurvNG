@@ -19,6 +19,7 @@ PRESENTATION_FIELDS = frozenset({
     "native_alignment",
     "native_cover_verified",
     "box_provenance",
+    "cover_role",
     "verification",
     "native_cover_score",
     "snapshot_quality_score",

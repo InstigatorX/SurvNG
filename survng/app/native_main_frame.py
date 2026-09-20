@@ -412,7 +412,14 @@ class NativeMainFrameVerifier:
             used_detection_ids.add(index)
             return detected
 
-        def promote(obj, detected, *, provenance, source):
+        def cover_role_for(obj, *, is_primary):
+            if is_primary:
+                return "primary"
+            if obj.get("incident_eligible") is False:
+                return "witness"
+            return "peer"
+
+        def promote(obj, detected, *, provenance, source, is_primary=False):
             item = deepcopy(obj)
             item.update(
                 box=deepcopy(detected["box"]),
@@ -424,6 +431,7 @@ class NativeMainFrameVerifier:
                 snapshot_visible=True,
                 native_cover_verified=True,
                 box_provenance=provenance,
+                cover_role=cover_role_for(obj, is_primary=is_primary),
                 verification={"status": "confirmed", "source": source},
             )
             return item
@@ -443,6 +451,7 @@ class NativeMainFrameVerifier:
                 snapshot_visible=True,
                 native_cover_verified=True,
                 box_provenance=provenance,
+                cover_role="primary",
             )
             return item
 
@@ -490,6 +499,7 @@ class NativeMainFrameVerifier:
                     detected,
                     provenance="detected_in_main",
                     source="main",
+                    is_primary=True,
                 )
 
         sibling_results = []
@@ -500,7 +510,12 @@ class NativeMainFrameVerifier:
                 unmatched_siblings.append(obj)
                 continue
             sibling_results.append(
-                promote(obj, detected, provenance="detected_in_main", source="main")
+                promote(
+                    obj,
+                    detected,
+                    provenance="detected_in_main",
+                    source="main",
+                )
             )
 
         # Pass 2: identity slot-fill only for leftovers (primary first).
@@ -518,6 +533,7 @@ class NativeMainFrameVerifier:
                         detected,
                         provenance="identity_slot_from_main",
                         source="main_identity_slot",
+                        is_primary=True,
                     )
                 else:
                     primary_result = keep_unmatched_primary(primary_item)

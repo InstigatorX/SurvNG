@@ -229,6 +229,9 @@ def _incident_event_payload(event: dict) -> dict:
                 "track_id",
                 "track_state",
                 "track_observations",
+                "cover_role",
+                "box_provenance",
+                "zone_admission_reason",
             )
             if key in item
         }

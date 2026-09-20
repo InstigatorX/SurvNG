@@ -44,6 +44,17 @@ def image_quality(image):
     return _common_image_quality(image)
 
 
+def _plausible_cover_box(obj, width, height):
+    box = obj.get("box") or {}
+    try:
+        x1, y1, x2, y2 = [float(box[k]) for k in ("x1", "y1", "x2", "y2")]
+    except (KeyError, TypeError, ValueError):
+        return False
+    x1, x2 = max(0.0, x1), min(float(width), x2)
+    y1, y2 = max(0.0, y1), min(float(height), y2)
+    return x2 - x1 >= 8 and y2 - y1 >= 8
+
+
 def candidate_score(image, objects):
     if not any(obj.get("incident_eligible") is not False for obj in objects):
         return None
@@ -67,7 +78,137 @@ def candidate_score(image, objects):
         area = (x2-x1)*(y2-y1)/(width*height)
         clearance = min(x1/width, y1/height, (width-x2)/width, (height-y2)/height)
         scores.append(float(obj.get("confidence") or 0) + min(area*8, 2) + crop_quality + min(clearance*10, 0.5))
-    return quality + max(scores) if scores else None
+    if not scores:
+        return None
+    # Prefer frames that can annotate concurrent peers (including outside-zone
+    # witnesses) without letting them open or dominate admission scoring.
+    peer_count = sum(
+        1 for obj in objects
+        if isinstance(obj, dict) and obj.get("label") and _plausible_cover_box(obj, width, height)
+    )
+    peer_bonus = min(0.45, 0.15 * max(0, peer_count - 1))
+    return quality + max(scores) + peer_bonus
+
+
+def _object_identity_key(item):
+    if not isinstance(item, dict) or not item.get("label"):
+        return None
+    if item.get("episode_identity"):
+        return ("episode", str(item["episode_identity"]))
+    if item.get("track_id") is not None:
+        return ("track", item.get("track_id"))
+    if item.get("native_identity"):
+        return ("native", str(item["native_identity"]))
+    if item.get("native_track_id") is not None:
+        return (
+            "native_track",
+            str(item.get("label") or ""),
+            item.get("native_track_id"),
+        )
+    return None
+
+
+def concurrent_scene_objects(tracking, epoch, *, tolerance=0.5):
+    """Inventory boxes present near ``epoch`` from persisted track history.
+
+    Preserves each track's zone admission fields so cover matching can promote
+    outside-zone peers as witnesses without admitting them.
+    """
+    from .native_episode_identity import (
+        annotate_tracks_with_episode_identities,
+        best_objects_by_episode_identity,
+    )
+
+    width = tracking.get("frame_width", 0)
+    height = tracking.get("frame_height", 0)
+    tracks, _identities, _counts = annotate_tracks_with_episode_identities(
+        tracking.get("tracks") or [],
+        frame_width=width,
+        frame_height=height,
+    )
+    objects = []
+    for track in tracks:
+        if not isinstance(track, dict) or not track.get("label"):
+            continue
+        history = track.get("box_history") or []
+        if not history:
+            continue
+        point = min(history, key=lambda sample: abs(sample[0] - epoch))
+        if abs(point[0] - epoch) > tolerance:
+            continue
+        if len(point) < 5:
+            continue
+        objects.append({
+            "label": track["label"],
+            "confidence": track.get("max_confidence", track.get("confidence", 0)),
+            "track_id": track.get("track_id"),
+            "episode_identity": track.get("episode_identity"),
+            "native_identity": track.get("native_identity"),
+            "native_track_id": track.get("native_track_id"),
+            "incident_eligible": track.get("incident_eligible") is not False,
+            "zones": deepcopy(track.get("zones") or []),
+            "zone_admission_reason": track.get("zone_admission_reason"),
+            "box": dict(zip(("x1", "y1", "x2", "y2"), point[1:5])),
+        })
+    return best_objects_by_episode_identity(objects)
+
+
+def enrich_candidate_objects(
+    candidate_objects,
+    tracking,
+    epoch,
+    *,
+    live_size=None,
+    tolerance=0.5,
+):
+    """Merge live nomination boxes with concurrent census peers at ``epoch``.
+
+    Live candidate geometry wins on identity collision. Census peers missing from
+    the nomination (typically outside-zone context) are appended so main matching
+    can promote them as cover witnesses. Admitted subjects stay sorted first.
+    """
+    nominated = [
+        deepcopy(item)
+        for item in (candidate_objects or ())
+        if isinstance(item, dict) and item.get("label") and item.get("box")
+    ]
+    census = concurrent_scene_objects(tracking, epoch, tolerance=tolerance)
+    track_width = tracking.get("frame_width") or 0
+    track_height = tracking.get("frame_height") or 0
+    if (
+        live_size
+        and track_width
+        and track_height
+        and (track_width, track_height) != tuple(live_size)
+    ):
+        census = resize_objects(census, (track_width, track_height), live_size)
+    by_id = {}
+    order = []
+    for item in nominated:
+        key = _object_identity_key(item)
+        if key is None:
+            order.append(item)
+            continue
+        if key not in by_id:
+            order.append(key)
+        by_id[key] = item
+    for item in census:
+        key = _object_identity_key(item)
+        if key is None or key in by_id:
+            continue
+        by_id[key] = item
+        order.append(key)
+    merged = []
+    for entry in order:
+        merged.append(entry if isinstance(entry, dict) else by_id[entry])
+    merged.sort(
+        key=lambda item: (
+            item.get("incident_eligible") is not False,
+            float(item.get("confidence") or 0.0),
+        ),
+        reverse=True,
+    )
+    return merged
 
 
 def shortlist(candidates, limit=3):
@@ -269,10 +410,7 @@ class NativeEvidenceService:
     def recorded_candidates(self, event, tracking, retained=()):
         # Replay metadata nominates a bounded set of timestamps. Native pixels
         # are unavailable for old incidents, so use recorded live evidence.
-        from .native_episode_identity import (
-            annotate_tracks_with_episode_identities,
-            best_objects_by_episode_identity,
-        )
+        from .native_episode_identity import annotate_tracks_with_episode_identities
 
         width, height = tracking.get("frame_width", 0), tracking.get("frame_height", 0)
         if not width or not height:
@@ -297,25 +435,10 @@ class NativeEvidenceService:
                 continue
             if self._closed:
                 break
-            objects = []
-            for track in tracks:
-                history = track.get("box_history") or []
-                if not history:
-                    continue
-                point = min(history, key=lambda x: abs(x[0]-epoch))
-                if abs(point[0]-epoch) > 0.5:
-                    continue
-                objects.append({
-                    "label": track["label"],
-                    "confidence": track.get("max_confidence", track.get("confidence", 0)),
-                    "track_id": track.get("track_id"),
-                    "episode_identity": track.get("episode_identity"),
-                    "incident_eligible": True,
-                    "box": dict(zip(("x1","y1","x2","y2"), point[1:5])),
-                })
-            # One box per episode identity on this frame — concurrent people, not
-            # every fragment track that ever belonged to the episode.
-            objects = best_objects_by_episode_identity(objects)
+            # Preserve zone admission so outside-zone peers stay witnesses.
+            objects = concurrent_scene_objects(tracking, epoch, tolerance=0.5)
+            if not objects:
+                continue
             live = self.read_frame(event["camera_id"], epoch, "live")
             if live is None:
                 missing = True
@@ -545,6 +668,23 @@ class NativeEvidenceService:
         for candidate in candidates:
             if self._closed:
                 break
+            # Pull concurrent census peers (including outside-zone witnesses)
+            # into the nomination so main matching can annotate the full scene.
+            live_size = None
+            if candidate.image is not None:
+                live_size = (candidate.image.shape[1], candidate.image.shape[0])
+            enriched_objects = enrich_candidate_objects(
+                candidate.objects,
+                tracking,
+                candidate.epoch,
+                live_size=live_size,
+            )
+            candidate = Candidate(
+                candidate.epoch,
+                candidate.image,
+                enriched_objects,
+                candidate.score,
+            )
             if frame_verification:
                 # A still-image check is not recording-clock calibration. Use
                 # only a box detected on the returned main image, never a
@@ -663,6 +803,13 @@ class NativeEvidenceService:
                     1 - box["y2"] / main.shape[0],
                 )
                 obj["snapshot_primary_subject"] = index == 0
+                if not obj.get("cover_role"):
+                    if index == 0:
+                        obj["cover_role"] = "primary"
+                    elif obj.get("incident_eligible") is False:
+                        obj["cover_role"] = "witness"
+                    else:
+                        obj["cover_role"] = "peer"
                 obj["temporal_sample_offset_seconds"] = (
                     candidate.epoch - datetime.fromisoformat(event["created_at"]).timestamp()
                 )
