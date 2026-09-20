@@ -1090,7 +1090,7 @@ export function EventOverlay({ event, events, timeZone, onClose, onSelect, onRef
         <div className="event-detail-body">
           {storedTracks.length ? <div className="event-track-summary">
             <strong>{storedTracks.length} native track{storedTracks.length === 1 ? "" : "s"}</strong>
-            <small>Stream-local identities from gvatrack. Only fresh detections confirm presence.</small>
+            <small>Soft association identities for presentation. Only fresh detections confirm presence.</small>
           </div> : null}
         </div>
       </section>

@@ -41,7 +41,6 @@ from .dlstreamer_protocol import (
     decode_stream_payload,
 )
 from survng.dlstreamer_live import STREAM_STOP_TIMEOUT_SECONDS, model_instance_id
-from survng.native_deepsort import DEFAULT_DEEP_SORT_CONFIG
 from .live_detections import DetectionSnapshot
 from .dlstreamer_supervisor import (
     DLSTREAMER_INFERENCE_STALL_SECONDS,
@@ -95,9 +94,6 @@ class DlStreamerCaptureOptions:
     inference_streams: int = 2
     native_tracking: str = "off"
     tracking_classes: tuple[str, ...] | None = None
-    reid_model_path: str = ""
-    reid_device: str = "CPU"
-    deep_sort_config: str = DEFAULT_DEEP_SORT_CONFIG
     frame_width: int = 320
     jpeg_fps: float = 1.0
     confidence_threshold: float = 0.1
@@ -451,13 +447,8 @@ class DlStreamerCaptureBackend:
             raise ValueError("batch_size must be between 1 and 4")
         if not 1 <= int(self.options.inference_interval) <= 5:
             raise ValueError("inference_interval must be between 1 and 5")
-        if self.options.native_tracking not in {"off", "short-term-imageless", "deep-sort"}:
-            raise ValueError("native_tracking must be off, short-term-imageless, or deep-sort")
-        if self.options.native_tracking == "deep-sort":
-            if not self.options.reid_model_path.strip():
-                raise ValueError("deep-sort requires a ReID model path")
-            if self.options.tracking_classes != ("person",):
-                raise ValueError("deep-sort experiment requires person-only tracking")
+        if self.options.native_tracking != "off":
+            raise ValueError("native_tracking must be off; live capture never inserts a tracker")
         self._credential_warning_lock = threading.Lock()
         self._credential_warning_hosts: set[str] = set()
         self._shared: _SharedLiveProcess | None = None
@@ -608,10 +599,6 @@ class DlStreamerCaptureBackend:
             command.extend(["--inference-requests", str(self.options.inference_requests)])
             command.extend(["--inference-streams", str(self.options.inference_streams)])
             command.extend(["--native-tracking", self.options.native_tracking])
-            if self.options.native_tracking == "deep-sort":
-                command.extend(["--reid-model", self.options.reid_model_path.strip()])
-                command.extend(["--reid-device", self.options.reid_device or "CPU"])
-                command.extend(["--deep-sort-config", self.options.deep_sort_config])
             if self.options.tracking_classes is not None:
                 command.extend(["--tracking-classes", json.dumps(self.options.tracking_classes)])
             command.extend(

@@ -42,12 +42,13 @@ def feed(activity, sequence, objects):
     )
 
 
-def test_incident_inventory_keeps_confirmed_context_objects_without_using_them_for_admission():
+def test_incident_inventory_keeps_context_objects_outside_tracking_classes():
     events = Mock()
     events.add_event.return_value = {"id": 1}
+    events.open_incident = Mock(return_value={"id": 10, "observation_count": 1})
     config = DetectorConfig(
         enabled=True,
-        native={"stationary": {"labels": ["car"]}},
+        native={"tracking_classes": ["person"]},
     )
     activity = NativeActivity(
         CameraConfig(
@@ -72,10 +73,13 @@ def test_incident_inventory_keeps_confirmed_context_objects_without_using_them_f
         )
 
     assert activity.event_id == 1
-    stored = json.loads(events.add_event.call_args.kwargs["objects_json"])
-    assert {item["label"] for item in stored} == {"person", "car"}
-    car = next(item for item in stored if item["label"] == "car")
-    assert car["activity_eligible"] is False
+    activity.persist("active", now=101)
+    inventory = events.update_native_incident_state.call_args.args[2]
+    assert {item["label"] for item in inventory} == {"person", "car"}
+    car = next(item for item in inventory if item["label"] == "car")
+    assert car.get("activity_eligible") is False
+    person = next(item for item in inventory if item["label"] == "person")
+    assert person.get("activity_eligible") is True
 
     feed(
         activity,

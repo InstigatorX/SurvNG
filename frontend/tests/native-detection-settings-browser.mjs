@@ -46,7 +46,7 @@ try {
   await page.keyboard.press("ArrowRight");
   assert.equal(await tab("Incidents").getAttribute("aria-selected"), "true");
   assert.equal(await tab("Incidents").evaluate(el => el === document.activeElement), true);
-  const verification = page.getByLabel("Verify objects in main-recording crops before creating incidents");
+  const verification = page.getByLabel("Verify cover images in main-recording crops");
   assert.equal(await verification.isChecked(), true);
   await verification.uncheck();
   assert.match(await page.locator("body").textContent(), /usable aligned main-recording images are still promoted/);
@@ -59,24 +59,12 @@ try {
   await tab("Performance").click();
   await page.getByText("Fixed-rate inference", {exact:true}).click();
   await page.getByLabel("Inference interval", {exact:true}).fill("3");
-  await tab("Tracking").click();
-  await page.getByLabel("Classes requiring movement").fill("car, truck, person");
   await tab("Advanced").click();
   await page.getByLabel("Shared inference requests").fill("6");
-  await tab("Tracking").click();
-  await page.getByText("Movement sensitivity", {exact:true}).click();
-  await page.getByLabel("Stationary jitter threshold").fill("0.2");
-  await page.getByRole("alert").waitFor();
-  assert.match(await page.getByRole("alert").textContent(), /below the movement/);
-  await tab("Model").click();
-  assert.match(await page.getByRole("alert").textContent(), /below the movement/);
-  await tab("Tracking").click();
-  await page.getByLabel("Stationary jitter threshold").fill("0.04");
   await tab("Incidents").click();
   await page.getByText("Customize class thresholds", { exact: true }).click();
   await page.getByLabel("person confidence", { exact: true }).fill("0.7");
-  await page.getByLabel("person confirmation frames").fill("3");
-  await tab("Tracking").click();
+  await tab("Classes").click();
   await page.getByLabel("Find tracked classes").fill("face");
   assert.equal(await page.getByRole("checkbox", {name:"Track person", exact:true}).count(), 0);
   await page.getByLabel("Find tracked classes").fill("");
@@ -91,18 +79,16 @@ try {
   const config = JSON.parse(await page.locator("#config").textContent());
   assert.equal(config.model_path, "new.xml");
   assert.equal(config.model_xml, "");
-  assert.deepEqual(config.native.stationary.labels, ["car", "truck", "person"]);
   assert.equal(config.native.inference_requests, 6);
   assert.equal(config.native.inference_interval, 3);
   assert.equal(config.native.batch_size, 2);
   assert.equal(config.event_class_confidence_thresholds.person, 0.7);
-  assert.equal(config.event_class_confirmation_frames.person, 3);
   assert.equal(await page.getByRole("alert").count(), 0);
   await tab("Model").click();
   assert.equal(await page.getByLabel("OpenVINO model").inputValue(), "new.xml");
   for (const width of [1440, 390]) {
     await page.setViewportSize({width, height: 1000});
-    for (const name of ["Model", "Incidents", "Tracking", "Performance", "Advanced"]) {
+    for (const name of ["Model", "Incidents", "Classes", "Performance", "Advanced"]) {
       await tab(name).click();
       assert.equal(await page.getByRole("tabpanel").count(), 1);
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `${name} overflows at ${width}px`);

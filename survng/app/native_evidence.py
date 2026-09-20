@@ -385,14 +385,11 @@ class NativeEvidenceService:
         # Compatibility handle for diagnostics/tests; scheduling and config
         # ownership live in NativeMainFrameVerifier.
         self.verifier = self.main_frames.detector
-        from .native_admission import NativeAdmission
-        self.admission = NativeAdmission(self.main_frames)
 
     def start(self):
         with self._condition:
             if self._threads:
                 return
-            self.admission.start()
             for number in range(2):
                 thread = threading.Thread(target=self._run, name=f"native-evidence-{number}", daemon=True)
                 self._threads.append(thread)
@@ -404,7 +401,6 @@ class NativeEvidenceService:
             self._pending.clear()
             self._condition.notify_all()
         self.main_frames.request_stop()
-        self.admission.stop()
         for thread in self._threads:
             thread.join(timeout=35)
         self.main_frames.close()
@@ -416,7 +412,7 @@ class NativeEvidenceService:
             return {"queued": sum(job["due"] != float("inf") for job in self._pending.values()),
                     "retained": sum(job["due"] == float("inf") for job in self._pending.values()),
                     "active": len(self._active), "counters": dict(self.counts),
-                    "recent": list(self.recent), "admission": self.admission.status()}
+                    "recent": list(self.recent)}
 
     def offer(self, event_id, epoch, frame, objects, size):
         # Called at most once a second by the native camera worker. Pixel work

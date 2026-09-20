@@ -827,23 +827,11 @@ class NativeTrackingConfig(BaseModel):
     """Retired native GStreamer tracker settings.
 
     Live detection no longer inserts ``gvatrack``. ``mode`` remains for config
-    compatibility and is normalized to ``off``. Deep SORT is rejected at resolve
-    time. ``tracking_classes`` on the parent native config still filters activity.
+    compatibility and is normalized to ``off``. ``tracking_classes`` on the
+    parent native config still filters activity.
     """
 
-    mode: Literal["off", "short-term-imageless", "deep-sort"] = "off"
-    reid_enabled: bool = False
-    reid_model_path: str = Field(default="", max_length=4096)
-    reid_device: str = Field(default="CPU", min_length=1, max_length=64)
-    deep_sort_config: str = Field(
-        default=(
-            "max_iou_distance=0.7,max_age=60,n_init=3,"
-            "max_cosine_distance=0.3,nn_budget=100,"
-            "object_class=person,reid_max_age=30"
-        ),
-        min_length=1,
-        max_length=4096,
-    )
+    mode: Literal["off"] = "off"
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -862,20 +850,16 @@ class NativeTrackingConfig(BaseModel):
             "on",
             "true",
             "1",
+            "",
+            "none",
+            "disabled",
+            "false",
+            "0",
+            "off",
         }:
-            # Tracker graph stage was removed from the live incident path.
             return "off"
-        if mode in {"", "none", "disabled", "false", "0"}:
-            return "off"
-        return mode
-
-    @model_validator(mode="after")
-    def validate_reid(self):
-        # Deep SORT settings are retained for config compatibility only.
-        return self
-
-    def resolved_reid_device(self) -> str:
-        return auxiliary_openvino_device(self.reid_device)
+        # Reject unknown modes rather than silently accepting new trackers.
+        raise ValueError(f"unsupported native tracking mode: {value!r}")
 
 
 class NativeStationaryConfig(BaseModel):

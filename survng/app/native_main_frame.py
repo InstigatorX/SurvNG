@@ -1,8 +1,7 @@
 """Shared recorded-main frame access and object verification.
 
-Admission and post-incident cover selection use this service independently. The
-single CPU verifier remains bounded, with admission work prioritized over cover
-refinement when both are waiting.
+Post-incident cover selection uses this service. The single CPU verifier remains
+bounded so concurrent cover checks serialize cleanly.
 """
 from __future__ import annotations
 
@@ -26,21 +25,14 @@ class _VerifierScheduler:
     def __init__(self):
         self._condition = threading.Condition()
         self._busy = False
-        self._admission_waiters = 0
 
     @contextmanager
-    def lease(self, priority: str):
-        admission = priority == "admission"
+    def lease(self, priority: str = "cover"):
+        del priority  # Priority differentiation retired with pre-create admission.
         with self._condition:
-            if admission:
-                self._admission_waiters += 1
-            try:
-                while self._busy or (not admission and self._admission_waiters):
-                    self._condition.wait()
-                self._busy = True
-            finally:
-                if admission:
-                    self._admission_waiters -= 1
+            while self._busy:
+                self._condition.wait()
+            self._busy = True
         try:
             yield
         finally:

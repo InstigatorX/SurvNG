@@ -217,11 +217,10 @@ normalization and provenance. On the parent side,
 state, while `survng.app.dlstreamer_capture` adapts that transport to the generic
 capture API.
 
-Recorded main-frame access and object verification are similarly independent of
-admission/cover policy. `NativeMainFrameVerifier` owns decode, registration and
-bounded CPU verification. `NativeAdmission` owns nomination/retry/decision policy,
-and `NativeEvidenceService` owns post-incident cover selection. Admission receives
-priority when both need the single bounded verifier.
+Recorded main-frame access and object verification are independent of scene
+activity. `NativeMainFrameVerifier` owns decode, registration and bounded CPU
+verification. `NativeEvidenceService` owns post-incident cover selection. Cover
+checks serialize on the single bounded verifier.
 
 Durable incident object truth and snapshot-specific presentation geometry are
 merged through one projection policy. Terminal tracking state uses the small
@@ -421,36 +420,25 @@ latency and brief-appearance recall for fewer inferences; validate these on each
 scene before enabling broadly. Motion still processes frames at the active rate,
 and shared compiled pools and batching affect realized compute and latency.
 
-### Main-recording incident confirmation
+### Main-recording cover confirmation
 
 `detector.native.verification_enabled` defaults true and is exposed under Admin →
-Detection → High-resolution incident confirmation. Low-resolution fresh detections
-nominate candidates after normal class, zone, confidence, movement and consecutive
-frame checks. They do not create events or publish incident/object notifications
-until a main-recording crop confirms the same object. Turning the option off restores
-immediate native presence admission.
+Detection → High-resolution cover confirmation. Scene activity opens incidents
+from fresh detections immediately (class, confidence, ignore-zone, and
+`tracking_classes` only). When verification is enabled, post-incident cover
+promotion requires a matching detection in a recorded main-stream crop.
+Turning the option off still promotes usable aligned main-recording images when
+available, without requiring object confirmation in the crop.
 
-A bounded worker collects up to three nominations spaced at least 0.4 seconds
-apart. It waits initially 15 seconds for recorded segments, aligns each original
-preview to the matching main frame, and checks a contextual crop at its native
-resolution with the existing isolated CPU `gvadetect` verifier. Positive detections
-must match class, location and extent (IoU at least 0.3, with half of the detected
-box overlapping the nominated object) and satisfy the configured class/zone threshold.
-A same-class fragment inside the original box is ambiguous, not confirmation or a
-clear negative.
-One clear positive confirms; three clear negatives reject. Missing recordings,
-failed registration, poor image quality, weak detections and verifier failures do
-not count as negatives. Unavailable evidence is retried for up to 90 seconds;
-remaining candidates are unverified and do not alert. Cameras without usable main
-recordings therefore cannot confirm incidents with this option enabled.
+`NativeEvidenceService` shortlists live preview candidates, waits for recorded
+segments, aligns each preview to the matching main frame, and checks a contextual
+crop with the isolated CPU `gvadetect` verifier. Positive detections must match
+class, location and extent and satisfy the configured class/zone threshold.
+Missing recordings, failed registration, poor image quality, and verifier
+failures leave the cover unverified rather than inventing a negative.
 
-Detection and tracking continue during this delay. Candidate histories are bounded
-and survive a track leaving the scene while verification runs. Accepted events retain
-the original observation timeline and start with a genuine main-resolution cover;
-cover objects and live tracking histories keep their respective coordinate geometry.
-Stream, geometry, policy and stop transitions cancel pending candidates and discard
-late results. Rejected tracks can be nominated again after substantial displacement;
-unverified tracks can retry after 30 seconds. No permanent detection mask is created.
+Verification never blocks scene-activity admission. Cover promotion can arrive
+after the incident is already open and visible.
 
 There are at most 32 pending jobs globally and 32 candidate histories per camera.
 Overload expires as unverified, never as rejection or an automatic alert. Camera

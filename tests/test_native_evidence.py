@@ -10,7 +10,7 @@ from survng.app.config import AppConfig
 from survng.app.event_store import EventStore
 from survng.app.image_storage import DurableImageWriter
 from survng.app.media_storage import MediaStorageRegistry
-from survng.app.native_activity import compact_history
+from survng.app.native_objects import compact_history
 from survng.app.native_evidence import Candidate, NativeEvidenceService, calibration_epochs, image_quality, shortlist
 from survng.app.native_evidence_common import matches_object_extent
 from survng.app.stream_alignment import estimate_stream_alignment

@@ -4553,7 +4553,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <p>{native.health} · {Number(native.effective_fresh_fps || 0).toFixed(1)} fresh detections/sec</p>
       <p>Detector time: {pipeline.native_detector_average_ms ?? "—"} ms average · {pipeline.native_detector_p95_ms ?? "—"} ms p95</p>
       <p>Last fresh result: {native.last_fresh_age_seconds == null ? "waiting" : `${Number(native.last_fresh_age_seconds).toFixed(1)} seconds ago`}</p>
-      <p>{native.motion_states?.moving || 0} moving objects · {native.motion_states?.stationary || 0} stationary objects · {native.motion_states?.uncertain || 0} gathering evidence</p>
+      <p>{native.motion_states?.presence || 0} present objects · {native.motion_states?.uncertain || 0} uncertain · {native.inventory_count || 0} live associations</p>
       <p>{native.active ? "Object presence active" : "No active presence episode"} · {native.counters?.events_created || 0} events · {native.counters?.metadata_restarts || 0} metadata recoveries</p>
       <NativeBudgetTelemetry budget={pipeline.native_budget} detectionEnabled={status.detection_enabled} connected={status.connected} />
     </section>;

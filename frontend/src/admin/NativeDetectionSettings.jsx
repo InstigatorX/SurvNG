@@ -2,13 +2,13 @@ import NativeBudgetSettings from "./NativeBudgetSettings.jsx";
 import "./nativeDetection.css";
 import { Cpu, ScanLine, Route, Gauge, SlidersHorizontal } from "lucide-react";
 import { nextTabId } from "../adminWorkspace.mjs";
-import React, { useEffect, useState } from "react";
-import { DEFAULT_STATIONARY_LABELS, NATIVE_DETECTION_FIELDS, detectionFieldValue, nativeDetectionError } from "../nativeDetectionSettings.mjs";
+import React, { useState } from "react";
+import { NATIVE_DETECTION_FIELDS, detectionFieldValue, nativeDetectionError } from "../nativeDetectionSettings.mjs";
 
 const SECTIONS = [
   { id: "model", label: "Model", icon: Cpu, help: "Choose the detection model and the hardware that runs it." },
-  { id: "incidents", label: "Incidents", icon: ScanLine, help: "Decide which detections become incidents and how they are confirmed." },
-  { id: "tracking", label: "Tracking", icon: Route, help: "Choose objects to follow and when movement is required for an incident." },
+  { id: "incidents", label: "Incidents", icon: ScanLine, help: "Decide which detections become incidents and how cover images are confirmed." },
+  { id: "tracking", label: "Classes", icon: Route, help: "Choose which model classes can create native incidents." },
   { id: "performance", label: "Performance", icon: Gauge, help: "Balance detection frequency, responsiveness, and resource use." },
   { id: "advanced", label: "Advanced", icon: SlidersHorizontal, help: "Tune shared inference resources and recovery limits. Change these only when needed." },
 ];
@@ -25,14 +25,6 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
   const section = SECTIONS.some(item => item.id === (selectedSection ?? localSection)) ? (selectedSection ?? localSection) : "model";
   const selectSection = onSectionChange || setLocalSection;
   const active = SECTIONS.find(item => item.id === section);
-  const [labelsText, setLabelsText] = useState(() => (detector.native?.stationary?.labels ?? DEFAULT_STATIONARY_LABELS).join(", "));
-  const configuredLabels = JSON.stringify(detector.native?.stationary?.labels ?? DEFAULT_STATIONARY_LABELS);
-  useEffect(() => {
-    setLabelsText((current) => {
-      const parsed = [...new Set(current.split(",").map((label) => label.trim().toLowerCase()).filter(Boolean))];
-      return JSON.stringify(parsed) === configuredLabels ? current : JSON.parse(configuredLabels).join(", ");
-    });
-  }, [configuredLabels]);
   const [extraClass, setExtraClass] = useState("");
   const [addedClasses, setAddedClasses] = useState([]);
   const classes = [...new Set([...modelClasses, ...(detector.labels || []), ...(detector.native?.tracking_classes || []), ...addedClasses,
@@ -57,7 +49,7 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
       selectSection(next);
       event.currentTarget.querySelector(`#native-detection-tab-${next}`)?.focus();
     }}>
-      {SECTIONS.map(({ id, label, icon: Icon }) => <button key={id} id={`native-detection-tab-${id}`} type="button" role="tab" aria-selected={section === id} aria-controls={`native-detection-panel-${id}`} tabIndex={section === id ? 0 : -1} className={section === id ? "active" : ""} onClick={() => selectSection(id)}><Icon size={15} />{label}</button>)}
+    {SECTIONS.map(({ id, label, icon: Icon }) => <button key={id} id={`native-detection-tab-${id}`} type="button" role="tab" aria-selected={section === id} aria-controls={`native-detection-panel-${id}`} tabIndex={section === id ? 0 : -1} className={section === id ? "active" : ""} onClick={() => selectSection(id)}><Icon size={15} />{label}</button>)}
     </div>
     <div className="subsection-workspace-content">
       <header className="native-settings-intro"><div><h3>{active.label}</h3><p>{active.help}</p></div><span>Global defaults · Save to apply</span></header>
@@ -77,14 +69,14 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
           </SettingsCard>
         </> : null}
         {id === "incidents" ? <>
-          <SettingsCard title="Incident rules" description="Set the minimum evidence needed to start an incident. Higher confidence and more confirmation frames reduce weak detections, but may miss brief appearances.">
+          <SettingsCard title="Incident rules" description="Set the minimum evidence needed to start an incident. Higher confidence reduces weak detections, but may miss brief appearances.">
               <label>Default incident eligibility<select value={String(detector.require_incident_zone ?? true)} onChange={(event) => update("require_incident_zone", event.target.value === "true")}><option value="true">Incident zones only</option><option value="false">Zones and full frame</option></select><small>Cameras can override this. Ignore zones always apply.</small></label>
 
-            {numericFields("confidence_threshold", "event_confirmation_frames", "native.activity_timeout_seconds")}
+            {numericFields("confidence_threshold", "native.activity_timeout_seconds")}
           </SettingsCard>
-          <SettingsCard title="High-resolution incident confirmation" description="Check recording detail before alerting.">
-              <label className="check-field"><input type="checkbox" checked={detector.native?.verification_enabled ?? true} onChange={event => update("native.verification_enabled", event.target.checked)} /> Verify objects in main-recording crops before creating incidents</label>
-              {!(detector.native?.verification_enabled ?? true) ? <p>When disabled, substream detections validate incidents and usable aligned main-recording images are still promoted, without requiring object confirmation. Projected boxes are not marked as main-stream verified.</p> : <p>When enabled, a clear matching detection confirms an object; three clear misses reject it. Missing or unclear evidence remains unverified and does not send an alert. Verification waits for recorded frames, so alerts arrive later. Live detection and tracking continue while it waits.</p>}
+          <SettingsCard title="High-resolution cover confirmation" description="Confirm objects in recorded main-stream crops after an incident opens.">
+              <label className="check-field"><input type="checkbox" checked={detector.native?.verification_enabled ?? true} onChange={event => update("native.verification_enabled", event.target.checked)} /> Verify cover images in main-recording crops</label>
+              {!(detector.native?.verification_enabled ?? true) ? <p>When disabled, substream detections remain valid evidence and usable aligned main-recording images are still promoted, without requiring object confirmation. Projected boxes are not marked as main-stream verified.</p> : <p>When enabled, a clear matching detection confirms a cover object. Missing or unclear evidence remains unverified. Verification waits for recorded frames, so cover promotion can arrive after the incident opens.</p>}
           </SettingsCard>
           <SettingsCard title="Per-class incident thresholds" description="Optional exceptions for individual object classes.">
             <details><summary>Customize class thresholds</summary>
@@ -95,16 +87,15 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
               <div className="native-class-list">
               {visibleClasses.map((label) => <div className="form-grid" key={label}>
                 <label>{label} confidence<input aria-label={`${label} confidence`} type="number" min="0.01" max="0.99" step="0.01" placeholder={`Global (${detector.confidence_threshold ?? 0.45})`} value={detector.event_class_confidence_thresholds?.[label] ?? ""} onChange={(event) => override("event_class_confidence_thresholds", label, event.target.value)} /></label>
-                <label>{label} confirmation frames<input type="number" min="1" max="5" step="1" placeholder={`Global (${detector.event_confirmation_frames ?? 2})`} value={detector.event_class_confirmation_frames?.[label] ?? ""} onChange={(event) => override("event_class_confirmation_frames", label, event.target.value)} /></label>
               </div>)}
               </div>
             </details>
           </SettingsCard>
         </> : null}
         {id === "tracking" ? <>
-          <SettingsCard title="Objects to track" description="Choose which model classes can receive tracking IDs and create incidents.">
+          <SettingsCard title="Objects that create incidents" description="Choose which model classes can open and extend native incidents.">
               <div className="tracking-class-picker">
-                <p>Tracked classes: {trackedClasses === null ? "All model classes" : trackedClasses.length ? trackedClasses.join(", ") : "None"}</p>
+                <p>Active classes: {trackedClasses === null ? "All model classes" : trackedClasses.length ? trackedClasses.join(", ") : "None"}</p>
                 <label>Find tracked classes<input type="search" value={classSearch} onChange={event => setClassSearch(event.target.value)} placeholder="Filter classes…" /></label>
                 <div className="form-grid native-class-list" role="group" aria-label="Tracked classes">
                   <label className="compact-toggle"><input type="checkbox" checked={trackedClasses === null} onChange={(event) => update("native.tracking_classes", event.target.checked ? null : [])} /><span>All model classes</span></label>
@@ -115,18 +106,8 @@ export function NativeDetectionSettings({ detector, updateConfig, modelClasses =
                 </div>
                 {classes.length > 0 && !visibleClasses.length ? <p>No matching classes.</p> : null}
                 {!classes.length ? <p>Choose a model or add a class in Incidents → Per-class incident thresholds to populate this list.</p> : null}
-                <small>Only selected classes receive tracking IDs and create native incidents. The model still evaluates all its output classes. Save to restart native tracking with this selection.</small>
+                <small>Only selected classes create native incidents. The model still evaluates all its output classes. Soft association IDs remain for presentation only.</small>
               </div>
-          </SettingsCard>
-          <SettingsCard title="Stationary object policy" description="Avoid repeated incidents from parked vehicles while keeping presence alerts for other objects.">
-              <label className="compact-toggle"><input type="checkbox" checked={detector.native?.stationary?.enabled ?? true} onChange={(event) => update("native.stationary.enabled", event.target.checked)} /><span>Require movement for selected classes</span></label>
-              <label>Classes requiring movement<input value={labelsText} onChange={(event) => { setLabelsText(event.target.value); update("native.stationary.labels", [...new Set(event.target.value.split(",").map((label) => label.trim().toLowerCase()).filter(Boolean))]); }} /><small>Comma-separated model labels. Other classes keep presence alerts, even while standing still.</small></label>
-              {numericFields("native.stationary.stationary_seconds")}
-              <details><summary>Movement sensitivity</summary>
-                <p>Adjust these together if stationary objects are mistaken for moving objects.</p>
-                {numericFields("native.stationary.window_seconds", "native.stationary.moving_threshold", "native.stationary.stationary_threshold")}
-              </details>
-              <p>Selected classes must show movement before starting an incident. Stationary objects remain tracked as scene context. Reconnecting a stream resets IDs and movement evidence.</p>
           </SettingsCard>
         </> : null}
         {id === "performance" ? <>

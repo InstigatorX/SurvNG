@@ -1,24 +1,22 @@
-"""Native observations own admission and activity; no pixels or model calls.
+"""Native observations own scene activity; no pixels or model calls.
 
 NativeObjectRegistry owns soft spatial/temporal association for presentation.
 A minimal scene-activity policy opens and extends multi-object incidents from
 fresh detections. Track IDs, confirmation frames, stationary motion, and
-main-stream verification never admit or block an incident.
+main-stream verification never admit or block an incident. Cover verification
+runs after creation via NativeEvidenceService.
 """
 from __future__ import annotations
 
 from collections import Counter, deque
 from copy import deepcopy
-from datetime import datetime
 import json
 import logging
 import time
-import uuid
 from typing import Callable
 
 from .live_detections import DetectionSnapshot
-from .native_motion import NativeMotion
-from .native_objects import NativeIncidentInventory, NativeObjectRegistry, compact_history, iso
+from .native_objects import NativeIncidentInventory, NativeObjectRegistry, iso
 from .zones import apply_detection_zones
 from survng.native_spatial import spatial_plan
 
@@ -62,14 +60,9 @@ class NativeActivity:
         self.last_activity = 0.0
         self.last_persist = 0.0
         self.offer_evidence = None
-        self.nominate = None
-        self.admission = None
-        self.verified_snapshot = None
         self.route_watch_match = None
         self.consume_route_watch = None
         self._expected_handoffs = {}
-        self._verification_pending = {}
-        self._verification_recent = deque(maxlen=16)
         self.event_id = None
         self.incident_id = None
         self._observation_seq = 0
@@ -103,9 +96,8 @@ class NativeActivity:
         state = self._activity_states.get(key)
         if state is None:
             state = {
-                "_motion": NativeMotion(),
                 "motion_state": "uncertain",
-                "motion_extent": 0.0,
+                "motion_extent": None,
                 "activity_eligible": False,
             }
             self._activity_states[key] = state
@@ -113,14 +105,11 @@ class NativeActivity:
 
     @staticmethod
     def _public_activity_state(state):
-        result = {
+        return {
             "motion_state": state.get("motion_state", "uncertain"),
             "motion_extent": state.get("motion_extent"),
             "activity_eligible": bool(state.get("activity_eligible")),
         }
-        if state.get("verification") is not None:
-            result["verification"] = deepcopy(state["verification"])
-        return result
 
     def _activity_object(self, key, *, include_history=True):
         obj = self.registry.export(key, include_history=include_history)
@@ -257,180 +246,6 @@ class NativeActivity:
             keys.append(key)
         return keys
 
-    @staticmethod
-    def _bounded_context_track(track, limit=64):
-        """Retain concise pre-admission evidence without pinning live registry history."""
-        stored = deepcopy(track)
-        for field in ("box_history", "trajectory"):
-            values = list(stored.get(field) or [])
-            if len(values) > limit:
-                values = values[-limit:]
-            stored[field] = values
-        if stored.get("box_history"):
-            stored["first_seen"] = iso(stored["box_history"][0][0])
-        return stored
-
-    def _capture_pending_context(self, now):
-        """Attach all confirmed scene objects to active admission nominations.
-
-        One object may admit the incident, but every temporally credible
-        co-present object is a first-class participant. Context is copied into
-        the bounded pending job because the live registry may expire before
-        recorded-main verification completes.
-        """
-        if not self._verification_pending:
-            return
-        current = {}
-        for key in self.registry.confirmed(self._seen_keys):
-            track = self.registry.export(key)
-            if track is None:
-                continue
-            state = self._activity_states.get(key)
-            if state is not None:
-                track.update(self._public_activity_state(state))
-            else:
-                track.update(
-                    motion_state="context",
-                    motion_extent=None,
-                    activity_eligible=False,
-                )
-            current[key] = self._bounded_context_track(track)
-        if not current:
-            return
-
-        timeout = self.config.native.activity_timeout_seconds
-        for pending in self._verification_pending.values():
-            source = float(
-                pending.get("source_monotonic")
-                or pending.get("started")
-                or now
-            )
-            if now - source > timeout:
-                continue
-            context = pending.setdefault("context_tracks", {})
-            for key, track in current.items():
-                track_id = int(track["track_id"])
-                context[track_id] = deepcopy(track)
-
-    def _gate(self, confirmed_keys, observation, epoch, now):
-        allowed = []
-        for key in confirmed_keys:
-            track = self.registry.get(key)
-            if track is None:
-                continue
-            state = self._activity_state(key)
-            verification = state.get("_verification")
-            if verification == "confirmed":
-                allowed.append(key)
-                continue
-            if verification in {"rejected", "unverified"}:
-                before = state.get("_verification_box", track["box"])
-                box = track["box"]
-                scale = max(
-                    1,
-                    before["x2"] - before["x1"],
-                    before["y2"] - before["y1"],
-                )
-                moved = max(
-                    abs((box["x1"] + box["x2"] - before["x1"] - before["x2"]) / 2),
-                    abs((box["y1"] + box["y2"] - before["y1"] - before["y2"]) / 2),
-                ) > scale * .5
-                if not moved and (
-                    verification != "unverified"
-                    or now < state.get("_verification_retry_at", now)
-                ):
-                    continue
-                state.pop("_verification_token", None)
-                state.pop("_verification", None)
-
-            token = state.get("_verification_token")
-            if token is None:
-                if len(self._verification_pending) >= 32:
-                    self.counts["verification_capacity_drops"] += 1
-                    continue
-                token = state["_verification_token"] = uuid.uuid4().hex
-                state["_verification"] = "pending"
-
-            activity = self._public_activity_state(state)
-            pending = self._verification_pending.setdefault(token, {"started": now})
-            pending.update(
-                key=key,
-                track=self._activity_object(key),
-                activity=activity,
-                observation=observation,
-                epoch=epoch,
-                source_monotonic=track["last_monotonic"],
-            )
-            self.nominate(
-                token,
-                observation,
-                epoch,
-                self._activity_object(key, include_history=False),
-            )
-        return allowed
-
-    def _poll_verification(self, now):
-        if self.admission is None:
-            return
-        pending_items = sorted(
-            self._verification_pending.items(),
-            key=lambda item: item[1]["track"]["first_seen"],
-        )
-        for token, pending in pending_items:
-            result = self.admission.poll(token)
-            if result is None and now - pending["started"] < 150:
-                break
-            if result is None:
-                self.admission.cancel(token)
-                result = {"status": "unverified", "reason": "deadline"}
-            del self._verification_pending[token]
-
-            status = result["status"]
-            track = pending["track"]
-            key = pending["key"]
-            self.counts["verification_" + status] += 1
-            self._verification_recent.append(
-                {
-                    "label": track["label"],
-                    "status": status,
-                    "reason": result.get("reason", ""),
-                    "epoch": pending["epoch"],
-                    "timestamp": iso(pending["epoch"]),
-                    "votes": result.get("votes", []),
-                    "checks": result.get("checks", []),
-                }
-            )
-
-            state = self._activity_states.get(key)
-            if state is not None and state.get("_verification_token") == token:
-                state["_verification"] = status
-                state["_verification_box"] = deepcopy(track["box"])
-                state["_verification_retry_at"] = now + 30
-                state["verification"] = {
-                    name: value for name, value in result.items() if name != "cover"
-                }
-
-            if status != "confirmed":
-                continue
-
-            pending["activity"]["verification"] = {
-                name: value for name, value in result.items() if name != "cover"
-            }
-            # Time-range membership only: a verified subject that does not
-            # overlap the open incident span starts a new incident. Concurrent
-            # subjects still join the same open range.
-            if self.event_id is not None and not self._joins_open_range(track):
-                self.finish("complete", now=now)
-            self._activate(
-                [],
-                pending["observation"],
-                pending["epoch"],
-                pending["source_monotonic"],
-                cover=result.get("cover"),
-                seed=(track, pending["activity"]),
-                context=list((pending.get("context_tracks") or {}).values()),
-            )
-
     def _capture_inventory(self):
         self.inventory.capture(
             self.registry,
@@ -538,45 +353,12 @@ class NativeActivity:
             return None
         return watch
 
-    def _activate(
-        self,
-        confirmed_keys,
-        observation,
-        epoch,
-        now,
-        cover=None,
-        seed=None,
-        context=None,
-    ):
+    def _activate(self, confirmed_keys, observation, epoch, now):
         opening = self.event_id is None
         if opening:
-            # Incident inventory begins at activity onset. A delayed admission
-            # result retains the nominated object's original first observation,
-            # but ordinary reactivation never imports stale history from a
-            # previous completed incident.
-            trigger_epoch = epoch
-            if seed is not None:
-                try:
-                    trigger_epoch = min(
-                        trigger_epoch,
-                        datetime.fromisoformat(seed[0]["first_seen"]).timestamp(),
-                    )
-                except (KeyError, TypeError, ValueError):
-                    pass
-            self.inventory.begin(trigger_epoch, 0)
+            self.inventory.begin(epoch, 0)
             self._observation_samples.clear()
             self._observation_seq = 0
-        for track in context or ():
-            self.inventory.record(
-                track,
-                {
-                    "motion_state": track.get("motion_state", "context"),
-                    "motion_extent": track.get("motion_extent"),
-                    "activity_eligible": bool(track.get("activity_eligible")),
-                },
-            )
-        if seed is not None:
-            self.inventory.record(seed[0], seed[1])
         for key in confirmed_keys:
             track = self.registry.export(key)
             if track is not None:
@@ -584,11 +366,7 @@ class NativeActivity:
                     track,
                     self._public_activity_state(self._activity_state(key)),
                 )
-        # A delayed admission owns a source-time context snapshot. The
-        # live registry may now describe an unrelated scene; only ordinary
-        # live activation may import it into this incident.
-        if seed is None:
-            self._capture_inventory()
+        self._capture_inventory()
 
         self.last_activity = max(self.last_activity, now)
         self.last_motion_at = max(self.last_motion_at, iso(epoch))
@@ -597,23 +375,12 @@ class NativeActivity:
         if opening:
             visible_ids = {
                 self.registry.get(key)["track_id"]
-                for key in (self._seen_keys if seed is None else ())
+                for key in self._seen_keys
                 if self.registry.get(key) is not None
             }
             stored = self.inventory.objects(visible_track_ids=visible_ids)
-            path = (
-                self.verified_snapshot(cover)
-                if cover is not None
-                else self.snapshot(observation, epoch)
-            )
-            if cover is not None:
-                stored = self.inventory.objects(cover=cover[1])
-            created_epoch = (
-                self.inventory.first_seen_epoch()
-                if cover is not None
-                else None
-            )
-            start_at = iso(created_epoch if created_epoch is not None else epoch)
+            path = self.snapshot(observation, epoch)
+            start_at = iso(epoch)
             route_watch = self._matching_route_watch(epoch, stored)
             route_origin_camera_id = None
             route_origin_event_id = None
@@ -641,13 +408,11 @@ class NativeActivity:
                 objects_json=json.dumps(stored),
                 detection_intent_id=(
                     f"native:{self.camera.id}:{self.session}:{self.sequence}"
-                    + (f":{uuid.uuid4().hex}" if cover is not None else "")
                 ),
                 route_origin_camera_id=route_origin_camera_id,
                 route_origin_event_id=route_origin_event_id,
             )
             self.event_id = int(event["id"])
-            self.counts["events_created"] += 1
             if hasattr(self.events, "open_incident"):
                 try:
                     incident = self.events.open_incident(
@@ -736,9 +501,7 @@ class NativeActivity:
                     self.incident_id,
                 )
 
-        # Delayed results already carry their verified cover. Never pair
-        # current-registry boxes with an older nomination observation.
-        if seed is None and self.event_id is not None and self.offer_evidence is not None:
+        if self.event_id is not None and self.offer_evidence is not None:
             evidence_objects = self._visible_evidence_objects()
             if evidence_objects:
                 self.offer_evidence(
@@ -932,11 +695,6 @@ class NativeActivity:
         )
         self.last_persist = now
 
-    def _pending_verification_blocks_completion(self, now: float) -> bool:
-        return any(
-            now - pending["started"] < 150
-            for pending in self._verification_pending.values()
-        )
 
     @property
     def fresh_detection_fps(self):
@@ -975,26 +733,6 @@ class NativeActivity:
             for zone_id in ids
         )
 
-    def _joins_open_range(self, track):
-        """Whether a subject overlaps the open incident time range."""
-        tracks = self.inventory.tracking_tracks()
-        if not tracks:
-            return False
-        try:
-            start = min(
-                datetime.fromisoformat(item["first_seen"]).timestamp()
-                for item in tracks
-            )
-            end = max(
-                datetime.fromisoformat(item["last_seen"]).timestamp()
-                for item in tracks
-            )
-            first = datetime.fromisoformat(track["first_seen"]).timestamp()
-            last = datetime.fromisoformat(track["last_seen"]).timestamp()
-        except (KeyError, TypeError, ValueError):
-            return False
-        timeout = self.config.native.activity_timeout_seconds
-        return first <= end + timeout and last >= start - timeout
 
     def tick(self, *, now: float):
         if self.last_fresh and now - self.last_fresh > max(
@@ -1028,10 +766,6 @@ class NativeActivity:
         self._observation_samples.clear()
         self.inventory.clear()
         if state != "complete":
-            if self.admission is not None:
-                for token in self._verification_pending:
-                    self.admission.cancel(token)
-            self._verification_pending.clear()
             self.registry.reset()
             self._activity_states.clear()
             self._seen_keys.clear()
@@ -1069,8 +803,6 @@ class NativeActivity:
                     for track in public_tracks.values()
                 )
             ),
-            "verification_pending": len(self._verification_pending),
-            "verification_recent": list(self._verification_recent),
             "expected_route_handoffs": self.expected_handoffs(),
             "inventory_count": len(self.registry.tracks),
             "participants": list(public_tracks.values()),

@@ -17,24 +17,22 @@ def detector(*, classes=None):
     return SimpleNamespace(native=native)
 
 
-def test_default_native_tracking_is_off():
+def test_resolve_native_tracking_exposes_classes_and_forces_off():
     plan = resolve_native_tracking(detector(classes=["person", "car"]))
     assert plan.mode == "off"
     assert plan.tracking_classes == ("person", "car")
-    assert plan.reid_model_path == ""
 
 
-def test_legacy_short_term_config_normalizes_to_off():
-    config = DetectorConfig.model_validate({
-        "native": {
-            "tracking": {"mode": "short-term-imageless"},
-        },
-    })
-    assert config.native.tracking.mode == "off"
-    assert resolve_native_tracking(config).mode == "off"
+def test_legacy_tracker_modes_normalize_to_off():
+    for mode in ("short-term-imageless", "deep-sort", "gvatrack"):
+        config = DetectorConfig.model_validate({
+            "native": {"tracking": {"mode": mode}},
+        })
+        assert config.native.tracking.mode == "off"
+        assert resolve_native_tracking(config).mode == "off"
 
 
-def test_legacy_deep_sort_config_normalizes_to_off():
+def test_legacy_detector_tracking_implementation_migrates_to_off():
     config = DetectorConfig.model_validate({
         "native": {"inference_interval": 1},
         "tracking": {
@@ -42,20 +40,6 @@ def test_legacy_deep_sort_config_normalizes_to_off():
             "reid_enabled": True,
             "reid_model_path": "/models/mars.xml",
             "reid_device": "GPU",
-        },
-    })
-    assert config.native.tracking.mode == "off"
-    assert resolve_native_tracking(config).mode == "off"
-
-
-def test_explicit_deep_sort_mode_normalizes_to_off():
-    config = DetectorConfig.model_validate({
-        "native": {
-            "tracking": {
-                "mode": "deep-sort",
-                "reid_enabled": True,
-                "reid_model_path": "/models/mars.xml",
-            },
         },
     })
     assert config.native.tracking.mode == "off"
@@ -75,6 +59,20 @@ def test_capture_command_passes_tracking_off():
     command = backend.command()
     assert "--native-tracking" in command
     assert command[command.index("--native-tracking") + 1] == "off"
+    assert "--reid-model" not in command
+    assert "--deep-sort-config" not in command
+
+
+def test_capture_rejects_non_off_tracking():
+    try:
+        DlStreamerCaptureBackend(
+            CaptureOpenLimiter(1),
+            DlStreamerCaptureOptions(native_tracking="deep-sort"),
+        )
+    except ValueError as error:
+        assert "must be off" in str(error)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_parser_defaults_native_tracking_off():

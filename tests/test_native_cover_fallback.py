@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from survng.app.config import CameraConfig
-from survng.app.native_admission import context_crop
+from survng.app.native_main_frame import context_crop
 from survng.app.native_evidence import Candidate, event_tracking
 from survng.app.native_routes import create_native_router
 from tests.test_native_evidence import fixture
@@ -119,7 +119,6 @@ def test_missing_recording_then_retry_uses_retained_exact_live_frame(tmp_path):
 def test_valid_alignment_still_uses_corrected_timestamp_without_inference(tmp_path):
     service, events, event, candidate, main, _, tracking = setup(tmp_path, aligned=True)
     service.verifier.detect = Mock(side_effect=AssertionError('unnecessary inference'))
-    service.admission.verify = Mock(side_effect=AssertionError('unnecessary fallback'))
     result = service.process(event['id'], [candidate], recorded_history=True)
     assert result['status'] == 'promoted'
     assert result['reason'] == 'same_fov_timestamp_aligned'
@@ -178,11 +177,9 @@ def test_successful_preview_remains_available_for_later_completion(tmp_path, mon
     assert calls == [False, True]
 
 
-def test_fallback_attempts_are_bounded_and_do_not_touch_live_incident_admission(tmp_path):
+def test_fallback_attempts_are_bounded(tmp_path):
     service, _, event, candidate, _, _, _ = setup(tmp_path)
     service.verifier.detect.return_value = []
-    service.admission.offer = Mock(side_effect=AssertionError('must not create admission work'))
-    service.admission.poll = Mock(side_effect=AssertionError('must not consume admission results'))
     candidates = [Candidate(100+i, candidate.image, candidate.objects, 5) for i in range(20)]
     result = service.process(event['id'], candidates)
     assert result['status'] == 'no_usable_candidate'
