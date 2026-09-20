@@ -76,13 +76,17 @@ def _parser() -> argparse.ArgumentParser:
         "--native-tracking",
         choices=("off", "short-term-imageless", "deep-sort"),
         default="off",
-        help="optional DL Streamer ROI tracking between detector frames",
+        help="lab-only gvatrack mode; SurvNG live capture forces off",
     )
     parser.add_argument("--reid-model", default="", help="OpenVINO person ReID IR XML for Deep SORT")
     parser.add_argument("--reid-device", default="CPU", help="OpenVINO device for Deep SORT ReID inference")
     parser.add_argument("--deep-sort-config", default="max_iou_distance=0.7,max_age=30,n_init=3,max_cosine_distance=0.2,nn_budget=100")
-    parser.add_argument("--tracking-classes", type=_tracking_classes_argument, default=None,
-                        help="JSON array of classes admitted to gvatrack; omitted means all, [] means none")
+    parser.add_argument(
+        "--tracking-classes",
+        type=_tracking_classes_argument,
+        default=None,
+        help="JSON array of classes admitted to activity; omitted means all, [] means none",
+    )
     parser.add_argument("--batch-size", type=int, default=1, choices=range(1, 5),
                         help="shared inference batch size; 1 disables batching")
     parser.add_argument("--open-timeout", type=float, default=3.0)
@@ -936,18 +940,16 @@ def _pump_pipeline(
             # Python reference that otherwise makes metadata read-only.
             with GST_PAD_PROBE_INFO_BUFFER(info) as buffer:
                 if buffer is not None:
-                    # Capture the detector result before any tracker-class
-                    # filtering. The object registry describes scene contents;
-                    # tracking_classes controls activity/tracker work only.
+                    # Capture the detector result before any optional tracker-class
+                    # filtering. Without gvatrack, all fresh detections reach
+                    # zone analytics and the application inventory.
                     native_evidence.observe(
                         buffer, pad.get_current_caps(), video_frame_type
                     )
-                    # Deep SORT must see the original gvadetect ROI metadata.
-                    # Rebuilding those regions before gvainference strips the
-                    # metadata attachment identity used for per-ROI raw tensors.
-                    # gvainference/object-class and gvatrack/object_class perform
-                    # the person filtering without mutating detector metadata.
-                    if args.native_tracking != "deep-sort":
+                    # Only imageless gvatrack needs a pre-tracker class filter.
+                    # Deep SORT filters via object-class; tracking-off keeps every
+                    # detector ROI for gvaanalytics and metadata delivery.
+                    if args.native_tracking == "short-term-imageless":
                         try:
                             _filter_tracking_regions(buffer, pad.get_current_caps(), video_frame_type, allowed_classes)
                         except Exception as exc:

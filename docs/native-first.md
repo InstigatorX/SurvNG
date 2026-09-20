@@ -20,15 +20,14 @@ Live/substream RTSP
       ├─ sampled color frames / JPEG preview → preview and exact-PTS snapshots
       └─ drop-only sampling (target 5 FPS)
           → gvadetect: OpenVINO, configurable shared batch and interval (both default 1)
-          → selected-class metadata filter (no pixel mapping)
-          → gvatrack: short-term-imageless
+          → selected-class metadata retained for application policy
           → gvaanalytics: live-coordinate zone membership
           → bounded metadata delivery
-              → session-qualified native observation consumer
-                  → class confidence + zone admission policy
-                  → fresh-observation confirmation
-                  → multi-object incident time range
-                      → incidents + observations tables, compat event row, MQTT/SSE
+          → session-qualified native observation consumer
+              → class confidence + zone admission policy
+              → fresh-observation confirmation
+              → multi-object incident time range
+                  → incidents + observations tables, compat event row, MQTT/SSE
 
 Main stream → existing continuous recorder → incident video/playback
 ```
@@ -49,7 +48,7 @@ OpenVINO remains the inference engine inside `gvadetect`.
 owns soft spatial/temporal association, confirmation, and short live history.
 `NativeActivity` owns multi-object incident admission and time-range lifecycle, while
 `NativeIncidentInventory` owns the participants observed during an open incident.
-Track IDs from `gvatrack` are ignored for admit/extend/close; detections without a
+Track IDs from a tracker are not produced on the live path. Detections without a
 native ID still confirm by consecutive fresh label+spatial association. Metadata
 processing does not wait for a matching Python pixel frame. Only snapshot creation
 requires an exact session/PTS match. There is no on-demand live detection when
@@ -80,9 +79,8 @@ list/detail APIs keep working; it no longer stores `object_tracking` as truth.
 - Soft association is scoped to camera + stream session + geometry generation.
   Reconnects, resolution changes and graph rebuilds start new associations; the
   application does not claim cross-camera identity or re-identification after
-  disappearance. `gvatrack` IDs are ignored for association keys and are never
-  required for admit/extend/close. Confirmation uses consecutive fresh
-  label+spatial overlap only.
+  disappearance. The live graph does not insert `gvatrack`; confirmation uses
+  consecutive fresh label+spatial overlap only.
 - Live status may still expose a compatibility `object_tracking` mirror of
   `native_activity`. Native activity does not publish track-centric SSE lifecycle
   events; terminal `incident` publishes settle notifications and cover work.
@@ -93,9 +91,8 @@ list/detail APIs keep working; it no longer stores `object_tracking` as truth.
   camera, and a later normally admitted target may stamp route provenance / chain
   the next hop. Watches never bypass zones or create incidents by themselves.
   Related-incident and cross-camera trace surfaces may bias expected handoffs.
-- `gvatrack` can append predicted ROIs even to a fresh detector frame. Exact
-  pre-tracker ROI evidence distinguishes these from fresh observations. Predicted
-  confidence never admits an object, increments observations, or extends presence.
+- Predicted tracker ROIs are not produced on the live path. Only
+  `native_fresh_detection` metadata can admit or extend presence.
 - Default completion: five seconds without fresh eligible presence. Missing or
   invalid metadata ends activity with a coverage-loss reason, not evidence that
   the scene was empty. Persistent metadata stalls rebuild the native stream after
@@ -162,17 +159,20 @@ with no model path is rejected. `live_sample_fps` is a target per camera, not a
 throughput guarantee: 13 enabled cameras at 5 FPS and interval 1 request 65
 inferences per second. `native.inference_interval` accepts integers 1–5 and is
 available in Admin → Detection → Inference interval. Interval 2 at 5 FPS targets
-2.5 fresh detections/sec per camera; tracker predictions fill intervening pipeline
-frames but cannot admit or extend incidents. Confirmation and stationary decisions
-take longer with fewer fresh observations. Saving an interval change reloads native
-capture. Requests/streams configure the shared model, not separate per-camera pools.
+2.5 fresh detections/sec per camera; intervening buffers are not treated as
+detections (no tracker predictions on the live path). Confirmation and stationary
+decisions take longer with fewer fresh observations. Saving an interval change
+reloads native capture. Requests/streams configure the shared model, not separate
+per-camera pools.
 
 Do not add PR #206's `live_pipeline_inference_enabled`,
 `live_pipeline_inference_interval`, or `live_pipeline_tracking` settings. This
-branch uses `detector.native.inference_interval` and native tracking. The old Python tracking-session, EMA, enrichment, and main-evidence buffering
-settings do not select native runtime paths. Native tracker/ReID ownership lives
-under `detector.native.tracking`; legacy Deep SORT fields under `detector.tracking`
-are accepted only as load-time migration compatibility.
+branch uses `detector.native.inference_interval` and forces live tracking off.
+The old Python tracking-session, EMA, enrichment, and main-evidence buffering
+settings do not select native runtime paths. `detector.native.tracking_classes`
+still filters activity admission. Legacy Deep SORT fields under `detector.tracking`
+are accepted only as load-time migration compatibility and are rejected at
+resolve time.
 
 Switching to this branch with `detector.enabled: true` activates native inference
 on camera startup. Restart the application after switching builds. To keep test
@@ -299,29 +299,20 @@ verification to gain a correction; they do not inherit another incident's result
 Admin → Native detection and tracking → **Tracked classes** is a checkbox
 selection dropdown populated from model labels. Save applies it by rebuilding
 native capture. `detector.native.tracking_classes` is `null` by default (all
-classes), `[]` disables tracking/admission for every class, and an explicit
+classes), `[]` disables activity admission for every class, and an explicit
 array such as `["person", "car", "cat", "dog", "robot_lawnmower"]` excludes
 face detections from this model. Labels are trimmed, lowercased and deduplicated.
 Changing the model does not automatically expand an explicit selection.
 
-`gvadetect` fresh detections are captured before tracker-class filtering so the
-application can inventory credible context that is intentionally not tracked.
-The selected-class filter then removes excluded detections from both GstVideo ROI
-and GstAnalytics relation metadata before `gvatrack`; removing only the former
-does not filter this DL Streamer version's tracker input. Untracked context has no
-native tracker ID and cannot drive admission. Selected tracker boxes, confidence
-and class IDs are retained without mapping/copying pixel memory. Model inference
-still evaluates all output classes. Existing stored tracks are not rewritten.
-
-Validation with the installed native runtime:
-`/usr/bin/python3 scripts/check-native-class-filter.py` exercises all/none/subset
-selection through real gvatrack and JSON conversion, retained IDs, and unchanged
-pixel-memory references.
+`gvadetect` fresh detections are delivered to zone analytics and the application
+without a `gvatrack` stage. `tracking_classes` is enforced in application
+activity policy, not by mutating detector ROI metadata before a tracker.
+Model inference still evaluates all output classes.
 
 ## Native zones and optional inference regions
 
 Each camera sends its existing normalized zone configuration to its native graph.
-`gvaanalytics` runs after `gvatrack`, evaluating bottom-center points in uncropped
+`gvaanalytics` runs after `gvadetect`, evaluating bottom-center points in uncropped
 live-stream coordinates. Python consumes native zone IDs and retains class and
 confidence rules, ignore precedence, confirmation, and notification policy. The
 2026.2 plugin rounds geometry to integer pixels and does not include every polygon
@@ -352,8 +343,9 @@ to one inference rather than multiplying work across overlapping crops. No match
 valid incident zones means full-frame coverage. A metadata-only `gvapython` adapter
 attaches the rectangle using a writable buffer header, retaining VA pixel memory;
 `gvadetect inference-region=roi-list` restores detections to full-frame coordinates.
-Inference-region markers are removed before fresh evidence capture and tracking.
-Fresh detections, empty results, and predictions retain distinct meanings.
+Inference-region markers are removed before fresh evidence capture.
+Fresh detections and empty results retain distinct meanings; non-fresh
+interval buffers are unknown without a tracker.
 
 With adaptive inference disabled, detection FPS and inference interval remain unchanged. Objects outside the crop
 receive only periodic coverage and may not satisfy consecutive-frame confirmation;
@@ -395,10 +387,10 @@ relevant. Ignore zones still suppress incidents without masking discovery.
 
 Every idle inference covers the full frame, even when optional ROI inference is
 enabled. Active ROI inference retains periodic full-frame sweeps. Fresh detections
-of stationary objects can keep a camera active. Tracker predictions cannot wake it;
-motion alone cannot confirm or extend incidents. Skipped inputs produce no synthetic
-empty detection results. Health checks allow intentional idle gaps; configurations
-whose idle batch fill exceeds freshness/recovery limits are rejected.
+of stationary objects can keep a camera active. Non-fresh interval buffers cannot
+wake it; motion alone cannot confirm or extend incidents. Skipped inputs produce no
+synthetic empty detection results. Health checks allow intentional idle gaps;
+configurations whose idle batch fill exceeds freshness/recovery limits are rejected.
 
 The motion subsection controls `gvamotiondetect` before inference: `block-size`,
 `motion-threshold`, `min-persistence`, `max-miss`, `iou-threshold`, `smooth-alpha`,

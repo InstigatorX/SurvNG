@@ -824,9 +824,14 @@ class ObjectTrackingConfig(BaseModel):
 
 
 class NativeTrackingConfig(BaseModel):
-    """Native GStreamer tracking and optional Deep SORT appearance inference."""
+    """Retired native GStreamer tracker settings.
 
-    mode: Literal["short-term-imageless", "deep-sort"] = "short-term-imageless"
+    Live detection no longer inserts ``gvatrack``. ``mode`` remains for config
+    compatibility and is normalized to ``off``. Deep SORT is rejected at resolve
+    time. ``tracking_classes`` on the parent native config still filters activity.
+    """
+
+    mode: Literal["off", "short-term-imageless", "deep-sort"] = "off"
     reid_enabled: bool = False
     reid_model_path: str = Field(default="", max_length=4096)
     reid_device: str = Field(default="CPU", min_length=1, max_length=64)
@@ -843,11 +848,23 @@ class NativeTrackingConfig(BaseModel):
     @field_validator("mode", mode="before")
     @classmethod
     def normalize_mode(cls, value: object) -> str:
-        mode = str(value or "short-term-imageless").strip().lower()
+        mode = str(value or "off").strip().lower()
         if mode in {"dlstreamer_deep_sort", "deep_sort", "deepsort"}:
             return "deep-sort"
-        if mode in {"survng_hybrid", "short-term", "short_term_imageless"}:
-            return "short-term-imageless"
+        if mode in {
+            "survng_hybrid",
+            "short-term",
+            "short_term_imageless",
+            "short-term-imageless",
+            "gvatrack",
+            "on",
+            "true",
+            "1",
+        }:
+            # Tracker graph stage was removed from the live incident path.
+            return "off"
+        if mode in {"", "none", "disabled", "false", "0"}:
+            return "off"
         return mode
 
     @model_validator(mode="after")

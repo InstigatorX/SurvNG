@@ -310,10 +310,11 @@ ov.save_model(ov.Model([output],[image]),sys.argv[1],compress_to_fp16=False)
         row = events.get(event_id)
         assert row["topic"] == "native/object-presence"
         assert worker.status()["native_activity"]["counters"]["fresh_frames"] >= 2
-        assert worker.status()["live_pipeline"]["native_tracking"] == "short-term-imageless"
+        assert worker.status()["live_pipeline"]["native_tracking"] == "off"
         assert worker.status()["live_pipeline"]["inference_interval"] == interval
         if interval > 1:
-            assert worker.status()["native_activity"]["counters"].get("prediction_frames", 0) > 0
+            # Without gvatrack, non-fresh interval buffers are unknown, not predictions.
+            assert worker.status()["native_activity"]["counters"].get("unknown_frames", 0) > 0
         old_session = worker.activity.session
         # Kill only this test's private synthetic-source process. Capture must
         # recover natively and cannot carry an ID into the new stream session.

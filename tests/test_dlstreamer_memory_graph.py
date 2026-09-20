@@ -82,7 +82,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
     monkeypatch.setattr(live, "_link_tee", lambda gst, tee, target: tee.link(target))
     stop = threading.Event()
     stop.set()  # Construct/link the real graph, but do not enter its native loop.
-    args = live._parser().parse_args(["--decoder", decoder, "--native-tracking", "short-term-imageless"])
+    args = live._parser().parse_args(["--decoder", decoder, "--native-tracking", "off"])
     from survng.app.config import NativeBudgetConfig
     plan = {"zones": [], "revision": "test", "roi": {"enabled": spatial},
             "budget": NativeBudgetConfig(enabled=adaptive, motion_threshold=.23, min_persistence=4).model_dump()}
@@ -103,7 +103,7 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         assert elements["detect"].properties["inference-region"] == 1
         assert elements["detect"].properties["model-instance-id"].endswith("-roi")
         assert ("inference-region", "detect") in links
-        assert ("native-track", "zone-analytics") in links
+        assert ("detect", "zone-analytics") in links
         assert ("zone-analytics", "detect-output-queue") in links
     if detect and adaptive:
         assert elements['budget-motion'].factory == 'gvamotiondetect'
@@ -160,8 +160,12 @@ def test_host_consumers_download_after_rate_limit_without_breaking_detection(
         )
         assert elements["meta-sink"].properties["async"] is False
         assert elements["detect"].properties["nireq"] == 4
-        assert ("detect", "native-track") in links
-        assert ("zone-analytics" if spatial or adaptive else "native-track", "detect-output-queue") in links
+        assert "native-track" not in elements
+        if spatial or adaptive:
+            assert ("detect", "zone-analytics") in links
+            assert ("zone-analytics", "detect-output-queue") in links
+        else:
+            assert ("detect", "detect-output-queue") in links
         assert ("detect-output-queue", "detect-meta") in links
         assert elements["detect"].properties["scheduling-policy"] == "throughput"
 

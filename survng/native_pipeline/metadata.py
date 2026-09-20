@@ -91,14 +91,14 @@ def _packed_gray(pixels: bytes, width: int, height: int) -> bytes:
 
 
 class _NativeInferenceEvidence:
-    """Bounded pre-tracker evidence, before the leaky output queue.
+    """Bounded detector evidence, before the leaky output queue.
 
     gvadetect's no-block=false contract runs the first buffer and
     every inference-interval buffer thereafter, emitting buffers in order.
     ROI mode supplies exactly one region on every input, including sweeps.
-    Count here, never at appsink (which drops buffers). Capture ROIs here too:
-    gvatrack can append predictions even on frames with fresh detections.
-    See DL Streamer inference_impl.cpp::TransformFrameIp and tracker.cpp::track.
+    Count here, never at appsink (which drops buffers). Capture ROIs here
+    before optional lab-only gvatrack; SurvNG live capture keeps tracking off.
+    See DL Streamer inference_impl.cpp::TransformFrameIp.
     """
 
     def __init__(self, interval: int, *, tracking: bool = False) -> None:

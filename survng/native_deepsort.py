@@ -35,42 +35,20 @@ def _tracking_classes(native) -> tuple[str, ...] | None:
 
 
 def resolve_native_tracking(detector) -> NativeTrackingPlan:
-    """Map existing detector.tracking settings onto the native GStreamer tracker.
+    """Resolve live-graph tracking. The incident path no longer inserts gvatrack.
 
-    Deep SORT is intentionally an opt-in, person-only experiment. The default
-    native-first behavior remains short-term-imageless and keeps its existing
-    tracking-class filter unchanged.
+    ``tracking_classes`` still selects which labels may admit/extend activity in
+    the application. Deep SORT remains rejected because it requires gvatrack.
     """
     native = detector.native
     tracking = native.tracking
     classes = _tracking_classes(native)
-    if tracking.mode != "deep-sort":
-        return NativeTrackingPlan(
-            mode="short-term-imageless",
-            tracking_classes=classes,
-        )
-
-    if not tracking.reid_enabled:
+    if tracking.mode == "deep-sort":
         raise ValueError(
-            "DL Streamer Deep SORT requires detector.native.tracking.reid_enabled=true"
-        )
-    if not tracking.reid_model_path.strip():
-        raise ValueError(
-            "DL Streamer Deep SORT requires detector.native.tracking.reid_model_path"
-        )
-    if int(native.inference_interval) != 1:
-        raise ValueError(
-            "DL Streamer Deep SORT requires detector.native.inference_interval=1"
-        )
-    if classes is not None and classes != ("person",):
-        raise ValueError(
-            "DL Streamer Deep SORT is person-only; "
-            "detector.native.tracking_classes must be ['person'] or omitted"
+            "DL Streamer Deep SORT is unavailable; "
+            "native live detection runs without gvatrack"
         )
     return NativeTrackingPlan(
-        mode="deep-sort",
-        tracking_classes=("person",),
-        reid_model_path=tracking.reid_model_path.strip(),
-        reid_device=tracking.resolved_reid_device().strip().upper() or "CPU",
-        deep_sort_config=tracking.deep_sort_config,
+        mode="off",
+        tracking_classes=classes,
     )

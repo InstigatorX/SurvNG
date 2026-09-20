@@ -260,7 +260,10 @@ class NativeRuntime:
             worker.reconfigure_policy(config)
 
     def reconfigure_tracking(self, config):
-        raise ValueError("gvatrack is the sole tracker; legacy tracking settings are unavailable")
+        raise ValueError(
+            "native live detection no longer uses gvatrack; "
+            "legacy tracking settings are unavailable"
+        )
 
     def reconfigure_roles(self, config, roles, **kwargs):
         raise ValueError("native model/device changes require a capture reload")
