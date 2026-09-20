@@ -42,18 +42,47 @@ def image_quality(image):
 
 
 def matches_object_extent(expected, actual):
-    """A same-class fragment is not confirmation of the nominated object."""
+    """Return True when ``actual`` confirms the nominated object extent.
+
+    Rejects same-class fragments and oversized blobs: the detection must mostly
+    lie inside the expected box, share meaningful IoU, and be similar in area
+    (at least 40% of the larger box). Cover/crop verification used to accept a
+    small OD patch inside a large projected car; that made incident annotations
+    much smaller than the vehicle.
+    """
+    try:
+        expected_box = {
+            key: float(expected[key]) for key in ("x1", "y1", "x2", "y2")
+        }
+        actual_box = {
+            key: float(actual[key]) for key in ("x1", "y1", "x2", "y2")
+        }
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not (
+        expected_box["x1"] < expected_box["x2"]
+        and expected_box["y1"] < expected_box["y2"]
+        and actual_box["x1"] < actual_box["x2"]
+        and actual_box["y1"] < actual_box["y2"]
+    ):
+        return False
+
     intersection = (
-        max(0, min(expected["x2"], actual["x2"]) - max(expected["x1"], actual["x1"]))
-        * max(0, min(expected["y2"], actual["y2"]) - max(expected["y1"], actual["y1"]))
+        max(0.0, min(expected_box["x2"], actual_box["x2"]) - max(expected_box["x1"], actual_box["x1"]))
+        * max(0.0, min(expected_box["y2"], actual_box["y2"]) - max(expected_box["y1"], actual_box["y1"]))
     )
 
-    def area(box):
-        return max(1, (box["x2"] - box["x1"]) * (box["y2"] - box["y1"]))
+    def area(box: dict[str, float]) -> float:
+        return max(1.0, (box["x2"] - box["x1"]) * (box["y2"] - box["y1"]))
 
+    expected_area = area(expected_box)
+    actual_area = area(actual_box)
+    union = expected_area + actual_area - intersection
+    size_ratio = min(expected_area, actual_area) / max(expected_area, actual_area)
     return (
-        intersection / area(actual) >= .5
-        and intersection / (area(actual) + area(expected) - intersection) >= .3
+        intersection / actual_area >= 0.5
+        and intersection / union >= 0.3
+        and size_ratio >= 0.4
     )
 
 

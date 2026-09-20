@@ -12,7 +12,19 @@ from survng.app.image_storage import DurableImageWriter
 from survng.app.media_storage import MediaStorageRegistry
 from survng.app.native_activity import compact_history
 from survng.app.native_evidence import Candidate, NativeEvidenceService, calibration_epochs, image_quality, shortlist
+from survng.app.native_evidence_common import matches_object_extent
 from survng.app.stream_alignment import estimate_stream_alignment
+
+
+def test_matches_object_extent_rejects_small_same_class_fragment():
+    # Incident #73707: projected SUV vs crop OD covering only the rear cabin.
+    expected = {"x1": 1774.3, "y1": 905.7, "x2": 2177.1, "y2": 1140.0}
+    fragment = {"x1": 1660.0, "y1": 902.0, "x2": 1881.0, "y2": 1025.0}
+    assert matches_object_extent(expected, expected)
+    assert not matches_object_extent(expected, fragment)
+    # Near-sized confirmation still passes.
+    confirmed = {"x1": 1780.0, "y1": 910.0, "x2": 2160.0, "y2": 1130.0}
+    assert matches_object_extent(expected, confirmed)
 
 
 def fixture(tmp_path):
