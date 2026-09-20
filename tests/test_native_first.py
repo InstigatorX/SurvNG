@@ -26,7 +26,7 @@ def activity():
     )
     return NativeActivity(
         CameraConfig(id="front", name="Front", stream_url="rtsp://example.test/live"),
-        DetectorConfig(enabled=True, native={"stationary": {"labels": []}}),
+        DetectorConfig(enabled=True, event_confirmation_frames=1, native={"stationary": {"labels": []}}),
         events,
         Mock(),
         Mock(return_value=""),
@@ -212,7 +212,7 @@ def test_native_event_persists_replay_and_notification_duration(tmp_path):
     from survng.app.incident_utils import event_end_epoch
     events = EventStore(tmp_path)
     activity = NativeActivity(CameraConfig(id="front", name="Front", stream_url="rtsp://example.test/live"),
-                              DetectorConfig(enabled=True, native={"stationary": {"labels": []}}),
+                              DetectorConfig(enabled=True, event_confirmation_frames=1, native={"stationary": {"labels": []}}),
                               events, Mock(), Mock(return_value=""))
     feed(activity, 1)
     feed(activity, 2)
@@ -285,7 +285,7 @@ ov.save_model(ov.Model([output],[image]),sys.argv[1],compress_to_fp16=False)
     manager = AppManager(AppConfig(
         storage_dir=str(tmp_path), database_dir=str(tmp_path / "db"),
         recording_index_dir=str(tmp_path / "recording-index"),
-        detector=DetectorConfig(enabled=True, model_path=str(model), native={
+        detector=DetectorConfig(enabled=True, event_confirmation_frames=1, model_path=str(model), native={
             "inference_interval": interval,
             "verification_enabled": False,
             # Fixture detector emits a fixed box every frame; keep stationary

@@ -62,7 +62,7 @@ def test_scene_inventory_survives_real_store_cover_and_completion(tmp_path):
     detector = DetectorConfig(
         enabled=True,
         confidence_threshold=0.5,
-        event_confirmation_frames=2,
+        event_confirmation_frames=1,
         native={
             "verification_enabled": True,
             "tracking_classes": ["dog", "person", "car", "package"],

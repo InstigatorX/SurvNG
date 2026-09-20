@@ -47,7 +47,7 @@ def _activity(tmp_path: Path) -> NativeActivity:
     events = EventStore(tmp_path)
     return NativeActivity(
         CameraConfig(id="yard", name="Yard", stream_url="rtsp://example.test/live"),
-        DetectorConfig(enabled=True, native={"stationary": {"labels": []}}),
+        DetectorConfig(enabled=True, event_confirmation_frames=1, native={"stationary": {"labels": []}}),
         events,
         Mock(),
         Mock(return_value=""),

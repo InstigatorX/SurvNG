@@ -48,6 +48,7 @@ def test_incident_inventory_keeps_context_objects_outside_tracking_classes():
     events.open_incident = Mock(return_value={"id": 10, "observation_count": 1})
     config = DetectorConfig(
         enabled=True,
+        event_confirmation_frames=2,
         native={"tracking_classes": ["person"]},
     )
     activity = NativeActivity(
@@ -269,7 +270,7 @@ def test_registry_label_votes_reject_high_confidence_outliers():
 
 
 def test_registry_uses_one_identity_when_native_label_changes_with_same_id():
-    config = DetectorConfig(enabled=True)
+    config = DetectorConfig(enabled=True, event_confirmation_frames=1)
     registry = NativeObjectRegistry("test", config)
     first = detected("car", 7, 10)
     second = detected("truck", 7, 12)

@@ -43,6 +43,7 @@ def setup_activity(**detector_kwargs):
     events.open_incident = Mock(
         side_effect=[{"id": 10, "observation_count": 1}, {"id": 11, "observation_count": 1}]
     )
+    detector_kwargs.setdefault("event_confirmation_frames", 1)
     return NativeActivity(
         CameraConfig(id="front", name="Front", stream_url="rtsp://unused.invalid"),
         DetectorConfig(**detector_kwargs),
@@ -141,6 +142,88 @@ def test_policy_reset_clears_open_scene_incident():
     assert a.event_id == 1
     a.finish("policy_changed", now=101)
     assert a.event_id is None
+
+
+def test_below_confidence_spike_does_not_open_scene_activity():
+    a = setup_activity(confidence_threshold=0.65, event_confirmation_frames=1)
+    feed(
+        a,
+        1,
+        [
+            {
+                "label": "person",
+                "confidence": 0.48,
+                "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 60},
+                "detection_provenance": "native_fresh_detection",
+            }
+        ],
+    )
+    a.events.add_event.assert_not_called()
+    assert a.event_id is None
+
+
+def test_confirmation_frames_required_before_scene_activity():
+    a = setup_activity(confidence_threshold=0.65, event_confirmation_frames=2)
+    person = {
+        "label": "person",
+        "confidence": 0.71,
+        "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 60},
+        "detection_provenance": "native_fresh_detection",
+    }
+    feed(a, 1, [person])
+    a.events.add_event.assert_not_called()
+    feed(a, 2, [person])
+    assert a.events.add_event.call_count == 1
+
+
+def test_incident_zone_required_blocks_outside_zone_activity():
+    camera = CameraConfig(
+        id="front",
+        name="Front",
+        stream_url="rtsp://unused.invalid",
+        require_incident_zone=True,
+        zones=[
+            {
+                "name": "Entry",
+                "behavior": "incident",
+                "enabled": True,
+                "points": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 0.2, "y": 0.0},
+                    {"x": 0.2, "y": 0.2},
+                    {"x": 0.0, "y": 0.2},
+                ],
+            }
+        ],
+    )
+    events = Mock()
+    events.add_event.side_effect = [{"id": 1}]
+    events.open_incident = Mock(return_value={"id": 10, "observation_count": 1})
+    a = NativeActivity(
+        camera,
+        DetectorConfig(
+            confidence_threshold=0.65,
+            require_incident_zone=True,
+            event_confirmation_frames=1,
+        ),
+        events,
+        Mock(),
+        Mock(return_value="preview"),
+    )
+    # Bottom-right box is outside Entry.
+    feed(
+        a,
+        1,
+        [
+            {
+                "label": "person",
+                "confidence": 0.9,
+                "box": {"x1": 70, "y1": 70, "x2": 90, "y2": 90},
+                "detection_provenance": "native_fresh_detection",
+            }
+        ],
+    )
+    a.events.add_event.assert_not_called()
 
 
 def test_cover_verifier_requires_spatial_match_and_clear_view():

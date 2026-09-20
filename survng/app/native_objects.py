@@ -283,6 +283,10 @@ class NativeObjectRegistry:
                 track["consecutive"] = 0
                 track["_label_confirmations"].clear()
                 track["confirming_observations"] = 0
+                # A gap breaks confirmation. Soft association may retain the
+                # spatial key, but a later spike must re-earn admission.
+                track["state"] = "tentative"
+                track["confirmed"] = False
         return seen
 
     def get(self, key):

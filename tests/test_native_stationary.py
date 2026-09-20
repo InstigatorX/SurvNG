@@ -26,7 +26,7 @@ def activity():
     )
     return NativeActivity(
         CameraConfig(id="test", name="Test", stream_url="rtsp://example.test/live"),
-        DetectorConfig(enabled=True),
+        DetectorConfig(enabled=True, event_confirmation_frames=1),
         events,
         Mock(),
         Mock(return_value=""),

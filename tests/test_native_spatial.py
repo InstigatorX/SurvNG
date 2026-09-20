@@ -101,7 +101,7 @@ def test_native_membership_replaces_polygon_work_away_from_edges(monkeypatch):
 
 def test_revision_mismatch_cannot_admit_or_supply_empty_coverage():
     c = camera()
-    activity = NativeActivity(c, DetectorConfig(enabled=True), Mock(), Mock(), Mock(), native_zones=True)
+    activity = NativeActivity(c, DetectorConfig(enabled=True, event_confirmation_frames=1), Mock(), Mock(), Mock(), native_zones=True)
     observation = DetectionSnapshot(1, 1, 100, 100, (), "session", "native_fresh_detection", 100, "old")
     activity.consume(observation, now=100, epoch=1000)
     assert activity.last_fresh == 0
@@ -117,7 +117,7 @@ def test_per_object_invalid_zone_ids_rejected_without_track_id():
     events.add_event.side_effect = [{"id": 1}]
     events.open_incident = Mock(return_value={"id": 10, "observation_count": 1})
     activity = NativeActivity(
-        c, DetectorConfig(enabled=True), events, Mock(), Mock(), native_zones=True
+        c, DetectorConfig(enabled=True, event_confirmation_frames=1), events, Mock(), Mock(), native_zones=True
     )
     revision = spatial_plan(c)["revision"]
     bad = {

@@ -78,15 +78,19 @@ incident.
 
 ## Presence semantics
 
-- Minimal scene-activity policy: a fresh detection with a label, detector
-  confidence floor, optional `tracking_classes` allow-list, and no ignore-zone
-  suppression opens or extends an incident on the first eligible observation.
-  Confirmation frames, stationary motion, incident-polygon membership, and
-  main-stream verification are not admission gates.
+- Scene-activity policy: a fresh detection opens or extends an incident when it
+  has a label, clears ignore-zone suppression, satisfies
+  confidence / incident-zone eligibility (`incident_eligible`), is allowed by
+  optional `tracking_classes`, and has earned the configured confirmation-frame
+  floor on the current soft association. Soft-association history alone cannot
+  admit a confidence spike. Stationary motion and main-stream cover verification
+  are not admission gates; cover verification still runs after creation.
 - Soft association is scoped to camera + stream session + geometry generation.
-  Reconnects, resolution changes and graph rebuilds start new associations; the
-  application does not claim cross-camera identity or re-identification after
-  disappearance. The live graph does not insert `gvatrack`.
+  Reconnects, resolution changes and graph rebuilds start new associations; a
+  detection gap on an existing association clears sticky confirmation so a later
+  spike must re-earn admission. The application does not claim cross-camera
+  identity or re-identification after disappearance. The live graph does not
+  insert `gvatrack`.
 - Live status may still expose a compatibility `object_tracking` mirror of
   `native_activity`. Native activity does not publish track-centric SSE lifecycle
   events; terminal `incident` publishes settle notifications and cover work.

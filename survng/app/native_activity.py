@@ -1,10 +1,10 @@
 """Native observations own scene activity; no pixels or model calls.
 
 NativeObjectRegistry owns soft spatial/temporal association for presentation.
-A minimal scene-activity policy opens and extends multi-object incidents from
-fresh detections. Track IDs, confirmation frames, stationary motion, and
-main-stream verification never admit or block an incident. Cover verification
-runs after creation via NativeEvidenceService.
+Scene activity opens and extends multi-object incidents from fresh detections
+that clear class, ignore-zone, confidence/incident-zone eligibility, and
+confirmation-frame requirements. Main-stream cover verification still runs
+after creation via NativeEvidenceService.
 """
 from __future__ import annotations
 
@@ -223,10 +223,11 @@ class NativeActivity:
     def _scene_activity_keys(self, seen_keys):
         """Keys that constitute live scene activity under the minimal policy.
 
-        A fresh associated detection is activity when it has a label, passes the
-        detector confidence floor, is allowed by ``tracking_classes``, and is
-        not suppressed by an ignore zone. Incident polygons, confirmation
-        frames, stationary motion, and main verification are not gates.
+        A fresh associated detection is activity when it has a label, is allowed
+        by ``tracking_classes``, is not on an ignore zone, meets the configured
+        confidence / incident-zone eligibility, and has enough confirming
+        observations. Soft-association history alone cannot admit a spike that
+        has not cleared the confirmation floor on this association.
         """
         keys = []
         selected = self.config.native.tracking_classes
@@ -241,7 +242,13 @@ class NativeActivity:
                 continue
             if track.get("zone_admission_reason") == "ignored_zone":
                 continue
+            if not track.get("incident_eligible"):
+                continue
             if track.get("confidence_eligible") is False:
+                continue
+            required = int(track.get("required_observations") or 1)
+            confirming = int(track.get("confirming_observations") or 0)
+            if confirming < required and track.get("state") != "confirmed":
                 continue
             keys.append(key)
         return keys
