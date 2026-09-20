@@ -35,7 +35,7 @@ for (const autoplay of [true, false]) {
   assert.equal(calls.find(([name]) => name === "segment")[1].start_epoch, 110);
   assert.equal(context.pendingSeekEpochRef.current, 110.01);
   assert.equal(context.autoplayRef.current, autoplay);
-  if (!autoplay) assert.deepEqual(calls[0], ["playing", false]);
+  assert.deepEqual(calls[0], ["playing", Boolean(autoplay)]);
 }
 
 // A loading incoming video is paused even while the UI still intends to play.
@@ -44,12 +44,17 @@ const paused = [];
 const toggle = vm.createContext({
   videoRef: { current: { paused: true, pause: () => paused.push("pause") } },
   useSegmentPlayback: true, heroSeeking: true, autoplayRef: { current: true },
+  pendingSeekEpochRef: { current: 110 }, pendingSeekModeRef: { current: "native-ready" },
+  clearSeekWatchdog: () => paused.push("clear"),
+  setHeroSeeking: (value) => paused.push(["seeking", value]),
+  setPlaybackNotice: (value) => paused.push(["notice", value]),
   setHeroPlaying: (value) => paused.push(value), requestRecordingPlay: () => paused.push("play"),
 });
 vm.runInContext(functionSource("toggleHeroPlayback", "beginFrameSearch"), toggle);
 toggle.toggleHeroPlayback();
-assert.deepEqual(paused, [false, "pause"]);
+assert.deepEqual(paused, [false, "pause", "clear", ["seeking", false], ["notice", ""]]);
 assert.equal(toggle.autoplayRef.current, false);
+assert.equal(toggle.pendingSeekEpochRef.current, null);
 
 // A watchdog belonging to the outgoing element cannot seek or complete the
 // incoming clip, including when the same element has been recycled for a URL.

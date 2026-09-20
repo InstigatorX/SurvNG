@@ -1277,40 +1277,69 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
   }
 
-  function scheduleSeekWatchdog(video, mediaTime) {
+  function scheduleSeekWatchdog(video, mediaTime, attempt = 0) {
     clearSeekWatchdog();
     if (!video || !Number.isFinite(mediaTime)) return;
     const tolerance = recordingSeekToleranceSeconds();
     const requestedSource = video.getAttribute("src");
     const isCurrent = () => video === videoRef.current && video.getAttribute("src") === requestedSource;
+    const maxAttempts = prefersJpegScrubPreview() ? 8 : 5;
+    const delay = attempt === 0
+      ? seekWatchdogDelayMs()
+      : (prefersJpegScrubPreview() ? 400 : 150);
     seekWatchdogRef.current = window.setTimeout(() => {
       seekWatchdogRef.current = null;
       if (!isCurrent() || !Number.isFinite(pendingSeekEpochRef.current)) return;
       const pendingMode = pendingSeekModeRef.current;
       if (pendingMode !== "local" && pendingMode !== "window-ready") return;
-      const activeVideo = video;
-      if (!activeVideo) return;
-      if (!videoReachedSeekTarget(activeVideo, mediaTime, tolerance)) {
-        activeVideo.currentTime = mediaTime;
-        seekWatchdogRef.current = window.setTimeout(() => {
-          seekWatchdogRef.current = null;
-          if (isCurrent() && Number.isFinite(pendingSeekEpochRef.current)) {
-            completePendingRecordingSeek(activeVideo);
+      const atTarget = videoReachedSeekTarget(video, mediaTime, tolerance);
+      if (!atTarget) {
+        if (attempt >= maxAttempts) {
+          try {
+            video.currentTime = mediaTime;
+          } catch {
+            /* Ignore Immutable seek failures; force-complete below. */
           }
-        }, prefersJpegScrubPreview() ? 400 : 150);
+          completePendingRecordingSeek(video, { force: true });
+          return;
+        }
+        video.currentTime = mediaTime;
+        scheduleSeekWatchdog(video, mediaTime, attempt + 1);
         return;
       }
-      completePendingRecordingSeek(activeVideo);
-    }, seekWatchdogDelayMs());
+      // Mobile Safari can leave seeking=true after currentTime has arrived.
+      // Re-arm instead of abandoning the scrub, then force-complete.
+      if (video.seeking && attempt < maxAttempts) {
+        scheduleSeekWatchdog(video, mediaTime, attempt + 1);
+        return;
+      }
+      completePendingRecordingSeek(video, { force: attempt >= maxAttempts });
+    }, delay);
   }
 
-  function completePendingRecordingSeek(video) {
-    if (video !== videoRef.current || video.seeking) return;
+  function completePendingRecordingSeek(video, { force = false } = {}) {
+    if (video !== videoRef.current) return;
+    if (video.seeking && !force) return;
     const pendingMode = pendingSeekModeRef.current;
     if (pendingMode !== "local" && pendingMode !== "window-ready") return;
     // A delayed seeked event can belong to the previous scrub on this same video.
     const target = epochToPlaybackMediaTime(pendingSeekEpochRef.current);
-    if (!videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds())) return;
+    if (!Number.isFinite(target)) {
+      clearSeekWatchdog();
+      pendingSeekEpochRef.current = null;
+      pendingSeekModeRef.current = null;
+      setHeroSeeking(false);
+      setPlaybackNotice("");
+      return;
+    }
+    if (!videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds())) {
+      if (!force) return;
+      try {
+        video.currentTime = target;
+      } catch {
+        /* Keep clearing pending UI even if the engine rejects the snap. */
+      }
+    }
     clearSeekWatchdog();
     const epoch = mediaTimeToEpoch(video.currentTime);
     if (Number.isFinite(epoch)) {
@@ -1327,12 +1356,28 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
   }
 
-  function completePendingNativeSeek(video) {
-    if (video !== videoRef.current || video.seeking) return;
+  function completePendingNativeSeek(video, { force = false } = {}) {
+    if (video !== videoRef.current) return;
+    if (video.seeking && !force) return;
     const pendingMode = pendingSeekModeRef.current;
     if (pendingMode !== "native-local" && pendingMode !== "native-ready") return;
     const target = recordingSegmentLocalTime(nativeSegment, pendingSeekEpochRef.current, video);
-    if (!videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds({ preferNativeHls: true }))) return;
+    if (!Number.isFinite(target)) {
+      clearSeekWatchdog();
+      pendingSeekEpochRef.current = null;
+      pendingSeekModeRef.current = null;
+      setHeroSeeking(false);
+      setPlaybackNotice("");
+      return;
+    }
+    if (!videoReachedSeekTarget(video, target, recordingSeekToleranceSeconds({ preferNativeHls: true }))) {
+      if (!force) return;
+      try {
+        video.currentTime = target;
+      } catch {
+        /* Keep clearing pending UI even if the engine rejects the snap. */
+      }
+    }
     clearSeekWatchdog();
     const segment = nativeSegment;
     if (segment) {
@@ -1348,25 +1393,40 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (autoplayRef.current && video.paused) requestRecordingPlay(video);
   }
 
-  function scheduleNativeSeekWatchdog(video, localTime) {
+  function scheduleNativeSeekWatchdog(video, localTime, attempt = 0) {
     clearSeekWatchdog();
     if (!video || !Number.isFinite(localTime)) return;
     const tolerance = recordingSeekToleranceSeconds({ preferNativeHls: true });
     const requestedSource = video.getAttribute("src");
     const isCurrent = () => video === videoRef.current && video.getAttribute("src") === requestedSource;
+    const maxAttempts = 8;
+    const delay = attempt === 0 ? seekWatchdogDelayMs({ preferNativeHls: true }) : 400;
     seekWatchdogRef.current = window.setTimeout(() => {
       seekWatchdogRef.current = null;
       if (!isCurrent() || !Number.isFinite(pendingSeekEpochRef.current)) return;
-      if (!videoReachedSeekTarget(video, localTime, tolerance)) {
+      const pendingMode = pendingSeekModeRef.current;
+      if (pendingMode !== "native-local" && pendingMode !== "native-ready") return;
+      const atTarget = videoReachedSeekTarget(video, localTime, tolerance);
+      if (!atTarget) {
+        if (attempt >= maxAttempts) {
+          try {
+            video.currentTime = localTime;
+          } catch {
+            /* Ignore Immutable seek failures; force-complete below. */
+          }
+          completePendingNativeSeek(video, { force: true });
+          return;
+        }
         video.currentTime = localTime;
-        seekWatchdogRef.current = window.setTimeout(() => {
-          seekWatchdogRef.current = null;
-          if (isCurrent()) completePendingNativeSeek(video);
-        }, 400);
+        scheduleNativeSeekWatchdog(video, localTime, attempt + 1);
         return;
       }
-      completePendingNativeSeek(video);
-    }, seekWatchdogDelayMs({ preferNativeHls: true }));
+      if (video.seeking && attempt < maxAttempts) {
+        scheduleNativeSeekWatchdog(video, localTime, attempt + 1);
+        return;
+      }
+      completePendingNativeSeek(video, { force: attempt >= maxAttempts });
+    }, delay);
   }
 
   function handleNativeSegmentMetadata(event) {
@@ -1458,6 +1518,9 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     clearSeekWatchdog();
     setHeroSeeking(true);
     autoplayRef.current = autoplay;
+    // Show Pause while an autoplay scrub is outstanding so a second tap cancels
+    // intent instead of looking like Play and clearing the pending seek.
+    setHeroPlaying(Boolean(autoplay));
     setFollowTarget(null);
     setPlaybackError("");
     setPlaybackErrorStage("");
@@ -2080,6 +2143,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       autoplayRef.current = false;
       setHeroPlaying(false);
       video.pause();
+      // A stuck Seeking... state must not trap the control: cancel clears it.
+      if (heroSeeking || Number.isFinite(pendingSeekEpochRef.current)) {
+        clearSeekWatchdog();
+        pendingSeekEpochRef.current = null;
+        pendingSeekModeRef.current = null;
+        setHeroSeeking(false);
+        setPlaybackNotice("");
+      }
       return;
     }
     autoplayRef.current = true;

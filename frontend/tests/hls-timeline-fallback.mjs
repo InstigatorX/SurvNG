@@ -233,8 +233,9 @@ const readyHandler = source.slice(source.indexOf("  function handleRecordingRead
     snapToRecording: (time) => time, windowAround: () => ({ start: 1000, end: 1900 }),
     videoRef: { current: video }, autoplayRef: {}, pendingSeekEpochRef: {}, pendingSeekModeRef: {}, desiredEpochRef: {},
     playbackRequestRef: { current: 0 }, epochToPlaybackMediaTime: (epoch) => epoch - 1000, seekVideoToTime,
-    setHeroSeeking() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
+    setHeroSeeking() {}, setHeroPlaying() {}, setFollowTarget() {}, setPlaybackError() {}, setPlaybackErrorStage() {}, setPlayhead() {},
     setPlaybackWindow() {}, setPlaybackNotice() {}, scheduleSeekWatchdog() {}, clearSeekWatchdog() {},
+    requestRecordingPlay() {},
   });
   const playAt = source.slice(source.indexOf("  function playAt("), source.indexOf("  function panTimelineViewport("));
   vm.runInContext(playAt, context);
@@ -281,7 +282,7 @@ for (const secondTick of [false, true]) {
   for (const recycle of [false, true]) {
     const timers = [];
     let src = "day.m3u8?reload=0";
-    const video = { currentTime: 0, getAttribute: () => src };
+    const video = { currentTime: 0, seeking: false, getAttribute: () => src };
     const context = vm.createContext({
       Number, videoRef: { current: video }, seekWatchdogRef: {}, clearSeekWatchdog() {},
       recordingSeekToleranceSeconds: () => .35, seekWatchdogDelayMs: () => 3000,
@@ -295,11 +296,61 @@ for (const secondTick of [false, true]) {
     if (secondTick) timers.shift()();
     const timeBefore = video.currentTime;
     if (recycle) src = "day.m3u8?reload=1";
-    else context.videoRef.current = { currentTime: 0 };
+    else context.videoRef.current = { currentTime: 0, seeking: false };
     timers.shift()();
     assert.equal(video.currentTime, timeBefore);
     assert.equal(timers.length, 0);
   }
+}
+
+// A stuck seeking flag after the playhead arrives must re-arm, then force-complete.
+{
+  const timers = [];
+  const completes = [];
+  const video = { currentTime: 25, seeking: true, getAttribute: () => "day.m3u8" };
+  const context = vm.createContext({
+    Number, videoRef: { current: video }, seekWatchdogRef: {}, clearSeekWatchdog() {},
+    recordingSeekToleranceSeconds: () => .35, seekWatchdogDelayMs: () => 3000,
+    pendingSeekEpochRef: { current: 125 }, pendingSeekModeRef: { current: "local" },
+    videoReachedSeekTarget: () => true, prefersJpegScrubPreview: () => true,
+    completePendingRecordingSeek: (_video, options = {}) => completes.push(options),
+    window: { setTimeout: (fn) => { timers.push(fn); return timers.length; } },
+  });
+  vm.runInContext(watchdog, context);
+  context.scheduleSeekWatchdog(video, 25);
+  for (let i = 0; i < 8; i++) {
+    assert.equal(completes.length, 0, `attempt ${i} must wait while seeking`);
+    assert.equal(timers.length, 1);
+    timers.shift()();
+  }
+  assert.equal(timers.length, 1, "final force-complete attempt remains armed");
+  timers.shift()();
+  assert.equal(completes.length, 1);
+  assert.equal(completes[0].force, true);
+  assert.equal(timers.length, 0);
+}
+
+// An unmappable pending epoch must release the Seeking UI instead of hanging.
+{
+  const notices = [];
+  const seeking = [];
+  const video = { currentTime: 0, seeking: false };
+  const context = vm.createContext({
+    Number, Math, performance, videoRef: { current: video },
+    pendingSeekEpochRef: { current: 999 }, pendingSeekModeRef: { current: "local" },
+    epochToPlaybackMediaTime: () => null, videoReachedSeekTarget, recordingSeekToleranceSeconds,
+    clearSeekWatchdog() {}, setHeroSeeking: (value) => seeking.push(value),
+    setPlaybackNotice: (value) => notices.push(value), setPlayhead() {},
+    mediaTimeToEpoch: () => null, ignorePauseUntilRef: {}, ignorePauseAfterSeekMs: () => 0,
+    shouldResumePlaybackAfterSeek: () => false, requestRecordingPlay() {}, desiredEpochRef: {},
+  });
+  const completion = source.slice(source.indexOf("  function completePendingRecordingSeek("), source.indexOf("  function completePendingNativeSeek("));
+  vm.runInContext(completion, context);
+  context.completePendingRecordingSeek(video);
+  assert.equal(context.pendingSeekEpochRef.current, null);
+  assert.equal(context.pendingSeekModeRef.current, null);
+  assert.deepEqual(seeking, [false]);
+  assert.deepEqual(notices, [""]);
 }
 
 console.log("HLS default, codec fallback, retained playback intent, and network retry tests passed");
