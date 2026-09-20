@@ -36,6 +36,7 @@ from .config import (
     MqttConfig,
     SemanticSearchConfig,
 )
+from .detection_watch import RouteDetectionWatch
 from .events import EventStore
 from .go2rtc import Go2RtcAdapter
 from .native_runtime import NativeRuntime as InferenceLifecycle
@@ -90,14 +91,17 @@ def _route_provenance_from_event(
     for item in objects:
         if not isinstance(item, dict):
             continue
+        watch = None
         qualification = item.get("motion_qualification")
-        if not isinstance(qualification, dict):
-            continue
-        features = qualification.get("features")
-        if not isinstance(features, dict):
-            continue
-        watch = features.get("route_detection_watch")
-        if not isinstance(watch, dict):
+        if isinstance(qualification, dict):
+            features = qualification.get("features")
+            if isinstance(features, dict) and isinstance(
+                features.get("route_detection_watch"), dict
+            ):
+                watch = features.get("route_detection_watch")
+        if watch is None and isinstance(item.get("route_detection_watch"), dict):
+            watch = item.get("route_detection_watch")
+        if watch is None:
             continue
         path = watch.get("route_path")
         if not isinstance(path, (list, tuple)):
@@ -107,22 +111,36 @@ def _route_provenance_from_event(
             for value in (str(camera_id).strip() for camera_id in path)
             if value
         )
-        if normalized:
-            origin_camera_id = str(
-                watch.get("origin_camera_id")
-                or watch.get("source_camera_id")
-                or ""
-            ).strip()
-            try:
-                origin_event_id = int(
-                    watch.get("origin_event_id")
-                    or watch.get("source_event_id")
-                    or 0
-                )
-            except (TypeError, ValueError):
-                origin_event_id = 0
-            return normalized, origin_camera_id, origin_event_id
+        if not normalized:
+            continue
+        origin_camera_id = str(
+            watch.get("origin_camera_id")
+            or watch.get("source_camera_id")
+            or ""
+        ).strip()
+        try:
+            origin_event_id = int(
+                watch.get("origin_event_id")
+                or watch.get("source_event_id")
+                or 0
+            )
+        except (TypeError, ValueError):
+            origin_event_id = 0
+        return normalized, origin_camera_id, origin_event_id
     return (), "", 0
+
+
+def _route_eligible_objects(objects) -> list[dict]:
+    if not isinstance(objects, list):
+        return []
+    return [
+        item
+        for item in objects
+        if isinstance(item, dict)
+        and item.get("label")
+        and item.get("incident_eligible") is not False
+        and item.get("status") not in {"object_tracking", "native_route_handoff"}
+    ]
 
 
 class ManagerShutdownIncompleteError(RuntimeError):
@@ -280,6 +298,16 @@ class AppManager:
             media_storage=self.media_storage,
             database_write_lock=self.database_write_lock,
         )
+        # Advisory adjacency from configured camera_transition_routes. Native
+        # never auto-admits from a watch; targets only stamp provenance when a
+        # normal zone-eligible incident already opens.
+        self.detection_watch = RouteDetectionWatch(
+            config.detector.tracking.camera_transition_routes
+        )
+        self._restored_detection_watches: list = []
+        self._restored_watch_retry_lock = threading.Lock()
+        self._restored_watch_retry_timer: threading.Timer | None = None
+        self._restore_detection_watches()
         self.telemetry = TelemetryStore(self.database_dir)
         with self.database_write_lock:
             migrate_legacy_runtime_telemetry(self.events.db_path, self.telemetry)
@@ -470,6 +498,9 @@ class AppManager:
             state_path=self.database_dir / "runtime_state.json",
             legacy_state_paths=(self.storage_dir / "runtime_state.json",),
         )
+        # Soft-signal restored watches once workers exist; cameras may still be
+        # starting, so retries continue after admission completes.
+        self._replay_restored_detection_watches()
 
     def _publish_identity_update(self, payload: dict) -> None:
         event = dict(payload)
@@ -481,12 +512,201 @@ class AppManager:
         self._refresh_incident_notification(str(event.get("camera_id") or ""), int(event.get("event_id") or 0))
 
     def _create_camera_worker(self, camera: CameraConfig) -> CameraWorker:
-        return CameraWorker(
+        worker = CameraWorker(
             camera, self.storage_dir, config=self.config.detector,
             capture_backend=self.capture_backend, events=self.events,
             publish=self.publish_event, image_writer=self.image_writer,
             media_storage=self.media_storage, evidence_service=self.native_evidence,
         )
+        worker.activity.route_watch_match = (
+            lambda epoch, camera_id=camera.id: self.detection_watch.match(
+                camera_id, epoch
+            )
+        )
+        worker.activity.consume_route_watch = self._consume_detection_watch
+        return worker
+
+    def _restore_detection_watches(self) -> None:
+        """Rebuild unexpired route windows from locally durable incidents."""
+        routes = tuple(self.config.detector.tracking.camera_transition_routes)
+        maximum_window = max(
+            (float(route.max_seconds) for route in routes if route.enabled),
+            default=0.0,
+        )
+        if maximum_window <= 0.0:
+            return
+        now = datetime.now(timezone.utc)
+        start = datetime.fromtimestamp(
+            now.timestamp() - maximum_window,
+            timezone.utc,
+        ).isoformat()
+        for event in self.events.between(start, now.isoformat(), limit=200000):
+            try:
+                objects = json.loads(str(event.get("objects_json") or "[]"))
+            except (TypeError, ValueError):
+                continue
+            eligible = _route_eligible_objects(objects)
+            if not eligible:
+                continue
+            try:
+                event_at = datetime.fromisoformat(
+                    str(event.get("created_at") or "")
+                ).timestamp()
+                route_path, origin_camera_id, origin_event_id = (
+                    _route_provenance_from_event(event)
+                )
+                observe_kwargs = {
+                    "camera_id": str(event.get("camera_id") or ""),
+                    "event_id": int(event.get("id") or 0),
+                    "event_at": event_at,
+                    "objects": eligible,
+                }
+                if route_path:
+                    observe_kwargs["route_path"] = route_path
+                if origin_camera_id and origin_event_id > 0:
+                    observe_kwargs["origin_camera_id"] = origin_camera_id
+                    observe_kwargs["origin_event_id"] = origin_event_id
+                created = self.detection_watch.observe_incident(**observe_kwargs)
+                for watch in created:
+                    if self.events.route_target_admitted(
+                        watch.origin_camera_id,
+                        watch.origin_event_id,
+                        watch.target_camera_id,
+                    ):
+                        self.detection_watch.consume_origin(
+                            watch.target_camera_id,
+                            watch.origin_camera_id,
+                            watch.origin_event_id,
+                        )
+                    elif self.events.route_watch_consumed(
+                        watch.target_camera_id,
+                        watch.source_event_id,
+                    ):
+                        self.detection_watch.consume(
+                            watch.target_camera_id,
+                            watch.source_event_id,
+                        )
+                    else:
+                        self._restored_detection_watches.append(watch)
+            except (TypeError, ValueError):
+                continue
+
+    def _consume_detection_watch(
+        self,
+        target_camera_id: str,
+        source_event_id: int,
+    ) -> bool:
+        self.events.mark_route_watch_consumed(target_camera_id, source_event_id)
+        return self.detection_watch.consume(target_camera_id, source_event_id)
+
+    def _notify_route_watch(self, watch) -> bool:
+        worker = self.workers.get(watch.target_camera_id)
+        if worker is None:
+            return False
+        try:
+            return bool(worker.consider_route_detection_watch(watch))
+        except Exception:
+            LOGGER.exception(
+                "route detection notify failed for camera=%s event=%s",
+                watch.target_camera_id,
+                watch.source_event_id,
+            )
+            return False
+
+    def _replay_restored_detection_watches(self) -> None:
+        """Soft-signal restored adjacency windows onto running native workers."""
+        with self._restored_watch_retry_lock:
+            pending = self._restored_detection_watches
+            if not pending:
+                return
+            restored = tuple(pending)
+            pending.clear()
+        retry = []
+        now = time.time()
+        for watch in restored:
+            if float(getattr(watch, "expires_at", now + 1.0)) < now:
+                continue
+            if self.workers.get(watch.target_camera_id) is None:
+                retry.append(watch)
+                continue
+            if not self._notify_route_watch(watch):
+                retry.append(watch)
+        if retry:
+            with self._restored_watch_retry_lock:
+                known = {
+                    (item.target_camera_id, item.source_event_id)
+                    for item in self._restored_detection_watches
+                }
+                self._restored_detection_watches.extend(
+                    item
+                    for item in retry
+                    if (item.target_camera_id, item.source_event_id) not in known
+                )
+            self._schedule_restored_watch_retry()
+
+    def _schedule_restored_watch_retry(self) -> None:
+        if not getattr(self, "_started", False) or getattr(self, "_stopping", False):
+            return
+        with self._restored_watch_retry_lock:
+            timer = self._restored_watch_retry_timer
+            if timer is not None and timer.is_alive():
+                return
+            timer = threading.Timer(2.0, self._retry_restored_detection_watches)
+            timer.daemon = True
+            self._restored_watch_retry_timer = timer
+            timer.start()
+
+    def _retry_restored_detection_watches(self) -> None:
+        with self._restored_watch_retry_lock:
+            self._restored_watch_retry_timer = None
+        if getattr(self, "_stopping", False) or getattr(self, "_closed", False):
+            return
+        self._replay_restored_detection_watches()
+
+    def _open_route_watches_for_event(
+        self,
+        *,
+        camera_id: str,
+        event_id: int,
+        objects,
+        observed_at: float | None = None,
+    ) -> None:
+        eligible = _route_eligible_objects(objects)
+        if not eligible or event_id <= 0:
+            return
+        event = self.events.get(int(event_id))
+        route_path, origin_camera_id, origin_event_id = (
+            _route_provenance_from_event(event) if event else ((), "", 0)
+        )
+        if observed_at is None:
+            try:
+                observed_at = datetime.fromisoformat(
+                    str((event or {}).get("created_at") or "")
+                ).timestamp()
+            except (TypeError, ValueError):
+                observed_at = time.time()
+        observe_kwargs = {
+            "camera_id": camera_id,
+            "event_id": int(event_id),
+            "event_at": float(observed_at),
+            "objects": eligible,
+        }
+        if route_path:
+            observe_kwargs["route_path"] = route_path
+        if origin_camera_id and origin_event_id > 0:
+            observe_kwargs["origin_camera_id"] = origin_camera_id
+            observe_kwargs["origin_event_id"] = origin_event_id
+        try:
+            opened = self.detection_watch.observe_incident(**observe_kwargs)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "could not open route detection watch for camera=%s event=%s",
+                camera_id,
+                event_id,
+            )
+            return
+        for watch in opened:
+            self._notify_route_watch(watch)
 
     def _unique_cameras(self):
         seen: set[str] = set()
@@ -606,6 +826,7 @@ class AppManager:
 
     def _camera_startup_completed(self) -> None:
         self._mark_running_if_startup_complete()
+        self._replay_restored_detection_watches()
 
     def _mark_running_if_startup_complete(self) -> None:
         if (
@@ -668,6 +889,13 @@ class AppManager:
             except Exception as exc:
                 errors.append((label, exc))
                 LOGGER.exception("SurvNG shutdown step failed: %s", label)
+
+        with self._restored_watch_retry_lock:
+            timer = self._restored_watch_retry_timer
+            self._restored_watch_retry_timer = None
+            self._restored_detection_watches.clear()
+        if timer is not None:
+            timer.cancel()
 
         started = time.monotonic()
         self.camera_controls.quiesce()
@@ -982,6 +1210,8 @@ class AppManager:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
             self.inference.reconfigure_tracking(config)
+            self.config.detector.tracking = config.tracking
+            self.detection_watch.reconfigure(config.tracking.camera_transition_routes)
 
     def reconfigure_inference(
         self,
@@ -999,6 +1229,11 @@ class AppManager:
                 roles,
                 refresh_tracking=refresh_tracking,
             )
+            if refresh_tracking:
+                self.config.detector.tracking = config.tracking
+                self.detection_watch.reconfigure(
+                    config.tracking.camera_transition_routes
+                )
             if "object" in roles:
                 try:
                     self._mqtt_connected()
@@ -1148,6 +1383,17 @@ class AppManager:
         camera_id = str(payload.get("camera_id") or "")
         if not camera_id:
             return
+        terminal_incident = (
+            event_type == "incident"
+            and str(payload.get("state") or "")
+            in {"complete", "interrupted", "failed"}
+        )
+        if terminal_incident:
+            event_id = int(payload.get("event_id") or 0)
+            if event_id and getattr(self, "native_evidence", None) is not None:
+                self.native_evidence.enqueue(event_id)
+            if event_id:
+                self.incidents.complete_event(event_id)
         if event_type == "object_tracking" and payload.get("state") != "active" and getattr(self, "native_evidence", None) is not None:
             self.native_evidence.enqueue(int(payload.get("event_id") or 0))
         if event_type == "incident_update":
@@ -1177,6 +1423,25 @@ class AppManager:
                 "classes": sorted({str(item.get("label")) for item in alert_objects if item.get("label")}),
                 "zones": sorted({str(zone) for item in alert_objects for zone in item.get("zones", []) if zone}),
             }
+            try:
+                observed_at = datetime.fromisoformat(
+                    str(payload.get("timestamp") or "").replace("Z", "+00:00")
+                ).timestamp()
+            except (TypeError, ValueError):
+                observed_at = time.time()
+            try:
+                self._open_route_watches_for_event(
+                    camera_id=camera_id,
+                    event_id=int(event_id or 0),
+                    objects=alert_objects,
+                    observed_at=observed_at,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "route watch open failed for camera=%s event=%s",
+                    camera_id,
+                    event_id,
+                )
         self.mqtt.publish(f"camera/{camera_id}/{event_type}", payload)
         self.state_events.publish(event_type, payload)
         if event_type == "object_tracking" and payload.get("state") != "active" and getattr(self, "native_evidence", None) is not None:

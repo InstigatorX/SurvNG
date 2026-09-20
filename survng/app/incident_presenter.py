@@ -60,7 +60,23 @@ def _event_row(row: dict) -> dict:
         ),
         None,
     )
+    native_incident = next(
+        (
+            item.get("native_incident")
+            for item in reversed(objects)
+            if item.get("status") == "native_incident"
+            and isinstance(item.get("native_incident"), dict)
+        ),
+        None,
+    )
     event["object_tracking"] = tracking_entry
+    event["native_incident"] = native_incident
+    if tracking_entry is None and isinstance(native_incident, dict):
+        # Compat projection: duration/end helpers still read object_tracking.
+        event["object_tracking"] = {
+            **native_incident,
+            "tracks": [],
+        }
     event["camera_semantics"] = (
         qualification_entry.get("camera_semantics")
         if isinstance((qualification_entry or {}).get("camera_semantics"), dict)

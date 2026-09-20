@@ -341,6 +341,57 @@ class EventStoreJobsMixin:
                 "on route_incident_admissions(event_id)"
             )
             conn.execute(
+                """
+                create table if not exists incidents (
+                    id integer primary key autoincrement,
+                    camera_id text not null,
+                    start_at text not null,
+                    end_at text,
+                    state text not null,
+                    completion_reason text not null default '',
+                    snapshot_path text not null default '',
+                    snapshot_size_bytes integer not null default 0,
+                    recording_path text not null default '',
+                    participants_json text not null default '[]',
+                    evidence_revision integer not null default 0,
+                    seed_event_id integer,
+                    created_at text not null,
+                    updated_at text not null,
+                    foreign key(seed_event_id) references events(id) on delete set null
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_incidents_camera_start "
+                "on incidents(camera_id, start_at desc)"
+            )
+            conn.execute(
+                "create index if not exists idx_incidents_seed_event "
+                "on incidents(seed_event_id) where seed_event_id is not null"
+            )
+            conn.execute(
+                "create index if not exists idx_incidents_state_updated "
+                "on incidents(state, updated_at desc)"
+            )
+            conn.execute(
+                """
+                create table if not exists incident_observations (
+                    id integer primary key autoincrement,
+                    incident_id integer not null,
+                    seq integer not null,
+                    observed_at text not null,
+                    objects_json text not null default '[]',
+                    snapshot_path text not null default '',
+                    foreign key(incident_id) references incidents(id) on delete cascade,
+                    unique(incident_id, seq)
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_incident_observations_incident_seq "
+                "on incident_observations(incident_id, seq)"
+            )
+            conn.execute(
                 "create index if not exists idx_events_created_at on events(created_at desc)"
             )
             conn.execute(

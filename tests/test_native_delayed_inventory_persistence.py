@@ -17,7 +17,6 @@ from survng.app.live_detections import DetectionSnapshot
 from survng.app.media_storage import MediaStorageRegistry
 from survng.app.native_activity import NativeActivity
 from survng.app.native_evidence import Candidate, NativeEvidenceService, event_tracking
-from survng.app.native_objects import NativeIncidentInventory
 
 
 def detection(label, native_id, left, width=15):
@@ -144,7 +143,13 @@ def test_delayed_inventory_survives_real_store_cover_and_completion(tmp_path, la
     assert len(subjects) == 5
     assert sum(item["label"] == "person" for item in subjects) == 2
     assert tracking["state"] == "complete"
-    assert {item["native_track_id"] for item in tracking["tracks"]} == expected_ids
+    assert tracking.get("implementation") == "native_observations"
+    assert "tracks" not in tracking or tracking.get("tracks") in (None, [])
+    incident = events.incident_for_event(event_id)
+    assert incident is not None
+    assert incident["state"] == "complete"
+    assert incident["observation_count"] >= 1
+    assert {item["native_track_id"] for item in incident["participants"] if item.get("native_track_id") is not None} == expected_ids
     assert saved["snapshot_path"] == first_cover.relative_to(tmp_path).as_posix()
     primary = next(item for item in subjects if item["native_track_id"] == 9)
     assert primary["box"] == main_box
@@ -181,9 +186,31 @@ def test_delayed_inventory_survives_real_store_cover_and_completion(tmp_path, la
 
     # Simulate a late inventory write with live-raster geometry. The common
     # presentation merge must retain the selected main-raster annotation.
+    post_cover = subject_objects(saved)
+    live_inventory = [
+        {
+            **item,
+            "snapshot_visible": False,
+            "box": {
+                "x1": 10,
+                "y1": 10,
+                "x2": 20,
+                "y2": 40,
+            },
+            "detection_frame_width": 200,
+            "detection_frame_height": 100,
+        }
+        for item in post_cover
+    ]
     events.update_native_incident_state(
-        event_id, tracking,
-        [NativeIncidentInventory.object_view(item) for item in tracking["tracks"]],
+        event_id,
+        {
+            **tracking,
+            "state": "complete",
+            "implementation": "native_observations",
+            "incident_id": incident["id"],
+        },
+        live_inventory,
     )
     saved = events.get(event_id)
     subjects = subject_objects(saved)

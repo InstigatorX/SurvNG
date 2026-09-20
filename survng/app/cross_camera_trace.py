@@ -9,6 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .assistant_investigation import correlate_incident_timeline
+from .camera_routes import match_camera_route
 from .incident_presenter import _event_row, _incident_rows
 from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS
 from .manager import AppManager
@@ -19,6 +20,7 @@ CROSS_CAMERA_TRACE_LIMITATIONS = (
     "Confirmed recognized faces can link incidents across cameras.",
     "Possible face matches remain uncertain.",
     "Shared person, vehicle, or animal labels plus nearby time provide context only.",
+    "Configured camera transition routes boost expected handoffs when timing fits.",
     "Appearance similarity uses durable, model-versioned ReID vectors and is stronger "
     "than a shared class label, but it is not proof of identity.",
     "Camera angle, lighting, occlusion, and visually similar subjects can change the score.",
@@ -34,6 +36,10 @@ MATCH_EXPORT_KEYS = (
     "confidence",
     "reasons",
     "appearance_similarity",
+    "route_name",
+    "route_from_camera",
+    "route_to_camera",
+    "route_timing_score",
 )
 
 
@@ -280,6 +286,76 @@ def build_cross_camera_trace(
         matches.append(item)
         matches_by_event_id[representative_id] = item
 
+    # Bias / surface configured adjacency. Routes never invent identity; they
+    # promote expected handoffs when timing and direction already fit.
+    tracking = getattr(getattr(manager, "config", None), "detector", None)
+    tracking = getattr(tracking, "tracking", None) if tracking is not None else None
+    routes = tuple(getattr(tracking, "camera_transition_routes", ()) or ())
+    anchor_camera = str((anchor or {}).get("camera_id") or "")
+    if routes and anchor_camera:
+        for incident in candidates:
+            candidate_camera = str(incident.get("camera_id") or "")
+            representative_id = int(incident.get("representative_event_id") or 0)
+            if (
+                not candidate_camera
+                or candidate_camera == anchor_camera
+                or representative_id <= 0
+            ):
+                continue
+            matched_at = str(incident.get("start_at") or "")
+            matched_epoch = parse_trace_datetime(matched_at, selected_zone)
+            if matched_epoch is None:
+                continue
+            delta = abs(matched_epoch.timestamp() - anchor_at.timestamp())
+            if matched_epoch >= anchor_at:
+                route = match_camera_route(
+                    routes, anchor_camera, candidate_camera, delta
+                )
+            else:
+                route = match_camera_route(
+                    routes, candidate_camera, anchor_camera, delta
+                )
+            if route is None:
+                continue
+            reason = (
+                f"Expected camera transition {route.name} "
+                f"({route.min_seconds:.0f}-{route.max_seconds:.0f}s)"
+            )
+            existing = matches_by_event_id.get(representative_id)
+            route_fields = {
+                "route_name": route.name,
+                "route_from_camera": route.from_camera,
+                "route_to_camera": route.to_camera,
+                "route_timing_score": route.timing_score,
+            }
+            if existing is not None:
+                reasons = existing.setdefault("reasons", [])
+                if reason not in reasons:
+                    reasons.append(reason)
+                existing.update(route_fields)
+                if existing.get("match_strength") == "context_candidate":
+                    existing["confidence"] = max(
+                        float(existing.get("confidence") or 0.0),
+                        0.55,
+                    )
+                continue
+            item = {
+                "incident": incident,
+                "event_id": representative_id,
+                "camera_id": candidate_camera,
+                "start_at": matched_at,
+                "seconds_from_anchor": round(
+                    matched_epoch.timestamp() - anchor_at.timestamp(),
+                    1,
+                ),
+                "match_strength": "context_candidate",
+                "confidence": 0.55,
+                "reasons": [reason],
+                **route_fields,
+            }
+            matches.append(item)
+            matches_by_event_id[representative_id] = item
+
     strength_rank = {
         "confirmed_identity": 4,
         "possible_identity": 3,
@@ -292,6 +368,7 @@ def build_cross_camera_trace(
             key=lambda item: (
                 -strength_rank.get(str(item.get("match_strength") or ""), 0),
                 -float(item.get("confidence") or 0.0),
+                -float(item.get("route_timing_score") or 0.0),
                 abs(float(item.get("seconds_from_anchor") or 0.0)),
             ),
         )[:bounded_limit],

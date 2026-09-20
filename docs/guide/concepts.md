@@ -27,15 +27,32 @@ Motion means something in the picture changed. Cameras often send a motion notic
 
 ## Object detection
 
-When motion qualifies, SurvNG can run a model that looks for known shapes — for example a person, car, or animal. Detection is optional. Without it, SurvNG still records video and can store motion-related notes.
+When detection is enabled, SurvNG looks for known shapes — for example a person,
+car, or animal — on the live stream. Detection is optional. Without it, SurvNG
+still records video and can store motion-related notes.
+
+## Observation
+
+An **observation** is one camera sample at a moment in time: the set of labeled
+boxes SurvNG saw on that frame (and their zone membership). Observations do not
+require tracker IDs.
+
+## Participant
+
+A **participant** is a labeled object role inside an incident (person, car, and
+so on). Several participants can share one incident for its whole time range.
 
 ## Incident
 
-An **incident** is a stretch of activity SurvNG kept for review. It groups related camera observations, keeps a representative picture, and links you to nearby recorded video.
+An **incident** is a stretch of related activity SurvNG kept for review. It has
+a start and end time, the participants that appeared during that span, an ordered
+sequence of observations, a representative picture, and links into recorded video.
 
 ## Event
 
-An **event** is one camera observation inside an incident — one moment from one camera. The Incidents workspace is built from these observations.
+An **event** is the compatibility storage/API row behind an incident while older
+clients still expect event IDs. Prefer **incident** and **observation** when
+talking about product behavior.
 
 ## Zone
 

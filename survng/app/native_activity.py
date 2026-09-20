@@ -1,8 +1,9 @@
 """Native observations own admission and activity; no pixels or model calls.
 
-NativeObjectRegistry owns identity, confirmation, and object history once.
+NativeObjectRegistry owns soft spatial/temporal association and confirmation.
 Activity policy decides whether confirmed objects start or extend an incident;
-NativeIncidentInventory independently records what credible objects were present.
+NativeIncidentInventory records multi-object participants for the open time range.
+Track IDs never admit, extend, or split incidents.
 """
 from __future__ import annotations
 
@@ -61,16 +62,22 @@ class NativeActivity:
         self.nominate = None
         self.admission = None
         self.verified_snapshot = None
+        self.route_watch_match = None
+        self.consume_route_watch = None
+        self._expected_handoffs = {}
         self._verification_pending = {}
         self._verification_recent = deque(maxlen=16)
         self.event_id = None
+        self.incident_id = None
+        self._observation_seq = 0
 
-        # Single identity/history owner plus two independent consumers:
-        # activity policy and episode inventory.
+        # Soft association/history owner plus two independent consumers:
+        # activity policy and multi-object incident inventory.
         self.registry = NativeObjectRegistry(camera.id, config)
         self.inventory = NativeIncidentInventory(config.native.maximum_tracks)
         self._activity_states = {}
         self._seen_keys = set()
+        self._observation_samples: deque = deque(maxlen=256)
 
         self.counts = Counter()
         self.last_motion_at = ""
@@ -224,12 +231,6 @@ class NativeActivity:
             track = self.registry.get(key)
             if track is None or not track.get("incident_eligible"):
                 continue
-            native_id = track.get("native_track_id")
-            if type(native_id) is not int or native_id < 0:
-                # Fallback association is inventory-only context. Activity
-                # admission still requires authoritative native tracker identity.
-                self.counts["missing_track_id"] += 1
-                continue
             label = str(track.get("label") or "").strip().lower()
             selected = self.config.native.tracking_classes
             if selected is not None and label not in selected:
@@ -273,10 +274,11 @@ class NativeActivity:
         if confirmed_activity:
             self._activate(confirmed_activity, observation, epoch, now)
 
-        if self.event_id is not None:
+        if self.incident_id is not None or self.event_id is not None:
             self._capture_inventory()
+            self._record_observation_sample(epoch)
             if now - self.last_persist >= 1.0:
-                self.persist("active", now=now)
+                self.persist("active", now=now, append_observation=True)
 
         self.tick(now=now)
 
@@ -296,10 +298,10 @@ class NativeActivity:
     def _capture_pending_context(self, now):
         """Attach all confirmed scene objects to active admission nominations.
 
-        This mirrors v1.3's temporal-consensus semantics: one object may admit
-        the incident, but every temporally credible co-present object describes
-        its contents. Context is copied into the bounded pending job because the
-        live registry may expire before recorded-main verification completes.
+        One object may admit the incident, but every temporally credible
+        co-present object is a first-class participant. Context is copied into
+        the bounded pending job because the live registry may expire before
+        recorded-main verification completes.
         """
         if not self._verification_pending:
             return
@@ -321,20 +323,6 @@ class NativeActivity:
         if not current:
             return
 
-        def requires_independent_verification(key, track):
-            state = self._activity_states.get(key)
-            selected = self.config.native.tracking_classes
-            label = str(track.get("label") or "").strip().lower()
-            native_id = track.get("native_track_id")
-            return bool(
-                type(native_id) is int
-                and native_id >= 0
-                and track.get("incident_eligible")
-                and state is not None
-                and state.get("activity_eligible")
-                and (selected is None or label in selected)
-            )
-
         timeout = self.config.native.activity_timeout_seconds
         for pending in self._verification_pending.values():
             source = float(
@@ -345,23 +333,8 @@ class NativeActivity:
             if now - source > timeout:
                 continue
             context = pending.setdefault("context_tracks", {})
-            primary_key = pending.get("key")
             for key, track in current.items():
-                # A second activity-qualified subject has its own admission
-                # decision. Do not smuggle it into this incident if its later
-                # high-resolution verification rejects it. Context-only objects
-                # (parked/stationary/untracked-by-policy) are descriptive and
-                # are retained immediately.
                 track_id = int(track["track_id"])
-                if (
-                    key != primary_key
-                    and requires_independent_verification(key, track)
-                ):
-                    # If a context object itself becomes an activity candidate,
-                    # its independent verification now owns whether it belongs
-                    # in the authoritative incident inventory.
-                    context.pop(track_id, None)
-                    continue
                 context[track_id] = deepcopy(track)
 
     def _gate(self, confirmed_keys, observation, epoch, now):
@@ -468,8 +441,8 @@ class NativeActivity:
             pending["activity"]["verification"] = {
                 name: value for name, value in result.items() if name != "cover"
             }
-            if self.event_id is not None and not self._joins_episode(track):
-                self.finish("complete", now=now)
+            # Multi-object incidents stay open; a newly verified subject joins
+            # the current time range rather than splitting a sibling episode.
             self._activate(
                 [],
                 pending["observation"],
@@ -516,6 +489,77 @@ class NativeActivity:
         )
         return values
 
+    def note_expected_handoff(self, watch) -> None:
+        """Remember an advisory upstream route watch for status and provenance."""
+        if watch is None:
+            return
+        try:
+            source_event_id = int(getattr(watch, "source_event_id", 0) or 0)
+            expires_at = float(getattr(watch, "expires_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return
+        if source_event_id <= 0:
+            return
+        now = time.time()
+        expired = [
+            key
+            for key, item in self._expected_handoffs.items()
+            if float(getattr(item, "expires_at", 0.0) or 0.0) < now
+        ]
+        for key in expired:
+            self._expected_handoffs.pop(key, None)
+        self._expected_handoffs[source_event_id] = watch
+
+    def expected_handoffs(self, *, now: float | None = None) -> list[dict]:
+        when = time.time() if now is None else float(now)
+        active = []
+        for key, watch in list(self._expected_handoffs.items()):
+            expires = float(getattr(watch, "expires_at", 0.0) or 0.0)
+            if expires < when:
+                self._expected_handoffs.pop(key, None)
+                continue
+            payload = watch.as_dict() if hasattr(watch, "as_dict") else dict(watch)
+            active.append(payload)
+        return active
+
+    def _matching_route_watch(self, epoch, objects):
+        labels = {
+            str(item.get("label") or "").strip().lower()
+            for item in objects or ()
+            if isinstance(item, dict)
+            and item.get("label")
+            and item.get("incident_eligible") is not False
+        }
+        if not labels:
+            return None
+        watch = None
+        if callable(self.route_watch_match):
+            try:
+                watch = self.route_watch_match(float(epoch))
+            except Exception:
+                watch = None
+        if watch is None:
+            when = float(epoch)
+            candidates = [
+                item
+                for item in self._expected_handoffs.values()
+                if float(getattr(item, "eligible_at", 0.0) or 0.0)
+                <= when
+                <= float(getattr(item, "expires_at", 0.0) or 0.0)
+            ]
+            if candidates:
+                watch = max(candidates, key=lambda item: float(item.source_event_at))
+        if watch is None:
+            return None
+        watch_labels = {
+            str(label).strip().lower()
+            for label in (getattr(watch, "labels", ()) or ())
+            if str(label).strip()
+        }
+        if watch_labels and not (watch_labels & labels):
+            return None
+        return watch
+
     def _activate(
         self,
         confirmed_keys,
@@ -526,8 +570,9 @@ class NativeActivity:
         seed=None,
         context=None,
     ):
-        if self.event_id is None:
-            # Episode inventory begins at activity onset. A delayed admission
+        opening = self.event_id is None
+        if opening:
+            # Incident inventory begins at activity onset. A delayed admission
             # result retains the nominated object's original first observation,
             # but ordinary reactivation never imports stale history from a
             # previous completed incident.
@@ -541,6 +586,8 @@ class NativeActivity:
                 except (KeyError, TypeError, ValueError):
                     pass
             self.inventory.begin(trigger_epoch, 0)
+            self._observation_samples.clear()
+            self._observation_seq = 0
         for track in context or ():
             self.inventory.record(
                 track,
@@ -561,14 +608,15 @@ class NativeActivity:
                 )
         # A delayed admission owns a source-time context snapshot. The
         # live registry may now describe an unrelated scene; only ordinary
-        # live activation may import it into this episode.
+        # live activation may import it into this incident.
         if seed is None:
             self._capture_inventory()
 
         self.last_activity = max(self.last_activity, now)
         self.last_motion_at = max(self.last_motion_at, iso(epoch))
+        self._record_observation_sample(epoch)
 
-        if self.event_id is None:
+        if opening:
             visible_ids = {
                 self.registry.get(key)["track_id"]
                 for key in self.registry.confirmed(
@@ -589,28 +637,78 @@ class NativeActivity:
                 if cover is not None
                 else None
             )
+            start_at = iso(created_epoch if created_epoch is not None else epoch)
+            route_watch = self._matching_route_watch(epoch, stored)
+            route_origin_camera_id = None
+            route_origin_event_id = None
+            if route_watch is not None:
+                handoff = {
+                    "status": "native_route_handoff",
+                    "route_detection_watch": route_watch.as_dict(),
+                }
+                stored = [*stored, handoff]
+                route_origin_camera_id = str(
+                    route_watch.origin_camera_id or route_watch.source_camera_id or ""
+                ) or None
+                route_origin_event_id = int(
+                    route_watch.origin_event_id or route_watch.source_event_id or 0
+                ) or None
+            participants = [item for item in stored if item.get("label")]
+            observation_objects = self._observation_objects(visible_ids)
             event = self.events.add_event(
                 camera_id=self.camera.id,
                 kind="motion",
                 topic="native/object-presence",
                 message="Confirmed native object presence",
-                created_at=iso(created_epoch if created_epoch is not None else epoch),
+                created_at=start_at,
                 snapshot_path=path,
                 objects_json=json.dumps(stored),
                 detection_intent_id=(
                     f"native:{self.camera.id}:{self.session}:{self.sequence}"
                     + (f":{uuid.uuid4().hex}" if cover is not None else "")
                 ),
+                route_origin_camera_id=route_origin_camera_id,
+                route_origin_event_id=route_origin_event_id,
             )
             self.event_id = int(event["id"])
             self.counts["events_created"] += 1
+            if hasattr(self.events, "open_incident"):
+                try:
+                    incident = self.events.open_incident(
+                        camera_id=self.camera.id,
+                        start_at=start_at,
+                        participants=participants,
+                        observation_objects=observation_objects,
+                        snapshot_path=path,
+                        seed_event_id=self.event_id,
+                    )
+                    self.incident_id = int(incident["id"])
+                    self._observation_seq = int(
+                        incident.get("observation_count") or 1
+                    )
+                    self.counts["incidents_created"] += 1
+                except (TypeError, ValueError, KeyError, AttributeError):
+                    self.incident_id = None
+                    self._observation_seq = 0
+            if route_watch is not None and callable(self.consume_route_watch):
+                try:
+                    self.consume_route_watch(
+                        self.camera.id,
+                        int(route_watch.source_event_id),
+                    )
+                except Exception:
+                    pass
+                self._expected_handoffs.pop(int(route_watch.source_event_id), None)
+                self.counts["route_handoffs"] += 1
             self.publish(
                 "incident",
                 {
                     "camera_id": self.camera.id,
                     "event_id": self.event_id,
+                    "incident_id": self.incident_id,
                     "timestamp": iso(epoch),
                     "kind": "motion",
+                    "state": "active",
                 },
             )
             self.publish(
@@ -618,13 +716,33 @@ class NativeActivity:
                 {
                     "camera_id": self.camera.id,
                     "event_id": self.event_id,
+                    "incident_id": self.incident_id,
                     "timestamp": iso(epoch),
                     "objects": stored,
                     "source": "native",
                     "snapshot_path": path,
                 },
             )
-            self.persist("active", now=now)
+            self.persist("active", now=now, append_observation=False)
+        elif (
+            self.incident_id is not None
+            and hasattr(self.events, "append_incident_observation")
+        ):
+            try:
+                visible_ids = {
+                    self.registry.get(key)["track_id"]
+                    for key in self.registry.confirmed(self._seen_keys)
+                    if self.registry.get(key) is not None
+                }
+                self.events.append_incident_observation(
+                    self.incident_id,
+                    observed_at=iso(epoch),
+                    objects=self._observation_objects(visible_ids),
+                    participants=self.inventory.objects(),
+                )
+                self._observation_seq += 1
+            except (TypeError, ValueError, AttributeError):
+                pass
 
         # Delayed results already carry their verified cover. Never pair
         # current-registry boxes with an older nomination observation.
@@ -638,33 +756,133 @@ class NativeActivity:
                     evidence_objects,
                 )
 
+    def _record_observation_sample(self, epoch: float):
+        sample = []
+        for key in self.registry.confirmed(self._seen_keys):
+            track = self.registry.get(key)
+            if track is None or not track.get("label"):
+                continue
+            box = track.get("box") or {}
+            sample.append(
+                {
+                    "label": track["label"],
+                    "track_id": track.get("track_id"),
+                    "box": deepcopy(box),
+                    "epoch": float(epoch),
+                }
+            )
+        if sample:
+            self._observation_samples.append(sample)
+
+    def _observation_objects(self, visible_ids=None):
+        visible = set(visible_ids or ())
+        objects = []
+        for item in self.inventory.objects(
+            visible_track_ids=visible if visible_ids is not None else None
+        ):
+            if not item.get("label"):
+                continue
+            objects.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "label",
+                        "confidence",
+                        "box",
+                        "zones",
+                        "track_id",
+                        "incident_eligible",
+                        "activity_eligible",
+                        "motion_state",
+                        "snapshot_visible",
+                        "detection_frame_width",
+                        "detection_frame_height",
+                    )
+                    if key in item
+                }
+            )
+        return objects
+
+    def _episode_counts(self):
+        from .native_episode_identity import episode_label_counts
+
+        # Prefer observation bags when present; fall back to inventory histories.
+        if self._observation_samples:
+            synthetic = []
+            for index, sample in enumerate(self._observation_samples):
+                for item in sample:
+                    box = item.get("box") or {}
+                    try:
+                        x1, y1, x2, y2 = (
+                            float(box["x1"]),
+                            float(box["y1"]),
+                            float(box["x2"]),
+                            float(box["y2"]),
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    synthetic.append(
+                        {
+                            "label": item["label"],
+                            "track_id": item.get("track_id") or f"{index}:{item['label']}",
+                            "box_history": [[float(item["epoch"]), x1, y1, x2, y2]],
+                        }
+                    )
+            return episode_label_counts(synthetic)
+        return episode_label_counts(self.inventory.tracking_tracks())
+
     def persist(
         self,
         state: str,
         *,
         now: float,
         completion_reason: str = "",
+        append_observation: bool = False,
     ):
         if self.event_id is None:
             return
-        from .native_episode_identity import (
-            annotate_objects_with_episode_identities,
-            annotate_tracks_with_episode_identities,
-        )
-
-        tracks = self.inventory.tracking_tracks()
-        annotated_tracks, identities, counts = annotate_tracks_with_episode_identities(
-            tracks,
-            frame_width=self.dimensions[0],
-            frame_height=self.dimensions[1],
-        )
+        participants = self.inventory.objects()
+        if (
+            append_observation
+            and self.incident_id is not None
+            and state == "active"
+            and hasattr(self.events, "append_incident_observation")
+        ):
+            try:
+                visible_ids = {
+                    item.get("track_id")
+                    for item in participants
+                    if item.get("snapshot_visible") is not False
+                    and item.get("track_id") is not None
+                }
+                self.events.append_incident_observation(
+                    self.incident_id,
+                    observed_at=self.last_motion_at or iso(now),
+                    objects=self._observation_objects(visible_ids),
+                    participants=participants,
+                )
+                self._observation_seq += 1
+            except (TypeError, ValueError, AttributeError):
+                pass
+        observation_count = self._observation_seq
+        if (
+            observation_count <= 0
+            and self.incident_id is not None
+            and hasattr(self.events, "get_incident")
+        ):
+            try:
+                incident = self.events.get_incident(self.incident_id)
+                if incident is not None:
+                    observation_count = int(incident.get("observation_count") or 0)
+            except (TypeError, ValueError, AttributeError):
+                pass
         payload = {
-            "implementation": "gvatrack",
+            "implementation": "native_observations",
             "state": state,
             "sample_fps": self.fresh_detection_fps,
-            "tracks": annotated_tracks,
-            "episode_identities": identities,
-            "episode_counts": counts,
+            "incident_id": self.incident_id,
+            "observation_count": observation_count,
+            "episode_counts": self._episode_counts(),
             "updated_at": self.last_motion_at,
             "frame_width": self.dimensions[0],
             "frame_height": self.dimensions[1],
@@ -677,36 +895,44 @@ class NativeActivity:
         }
         if state != "active":
             payload["completion_reason"] = completion_reason or "unknown"
-        inventory_objects = annotate_objects_with_episode_identities(
-            self.inventory.objects(),
-            annotated_tracks,
-            frame_width=self.dimensions[0],
-            frame_height=self.dimensions[1],
-        )
+            payload["end_at"] = self.last_motion_at
+        if self.incident_id is not None and state != "active" and hasattr(
+            self.events, "close_incident"
+        ):
+            try:
+                self.events.close_incident(
+                    self.incident_id,
+                    end_at=self.last_motion_at or iso(now),
+                    state=state,
+                    completion_reason=completion_reason or "unknown",
+                    participants=participants,
+                )
+            except (TypeError, ValueError, AttributeError):
+                pass
         self.events.update_native_incident_state(
             self.event_id,
             payload,
-            inventory_objects,
+            participants,
         )
         self.publish(
-            "object_tracking",
+            "incident",
             {
                 "camera_id": self.camera.id,
                 "event_id": self.event_id,
-                **payload,
+                "incident_id": self.incident_id,
+                "timestamp": self.last_motion_at,
+                "state": state,
+                "completion_reason": completion_reason or "",
+                "updated": True,
             },
         )
-        if state == "active":
-            self.publish(
-                "incident",
-                {
-                    "camera_id": self.camera.id,
-                    "event_id": self.event_id,
-                    "timestamp": self.last_motion_at,
-                    "updated": True,
-                },
-            )
         self.last_persist = now
+
+    def _pending_verification_blocks_completion(self, now: float) -> bool:
+        return any(
+            now - pending["started"] < 150
+            for pending in self._verification_pending.values()
+        )
 
     @property
     def fresh_detection_fps(self):
@@ -721,25 +947,6 @@ class NativeActivity:
             idle_fps
             if enabled
             else self.config.live_sample_fps / self.config.native.inference_interval
-        )
-
-    def _joins_episode(self, track):
-        """Group by observed activity, independent of verification completion."""
-        tracks = self.inventory.tracking_tracks()
-        if not tracks:
-            return False
-        start = min(
-            datetime.fromisoformat(item["first_seen"]).timestamp()
-            for item in tracks
-        )
-        end = max(
-            datetime.fromisoformat(item["last_seen"]).timestamp()
-            for item in tracks
-        )
-        timeout = self.config.native.activity_timeout_seconds
-        return (
-            datetime.fromisoformat(track["first_seen"]).timestamp() <= end + timeout
-            and datetime.fromisoformat(track["last_seen"]).timestamp() >= start - timeout
         )
 
     def tick(self, *, now: float):
@@ -761,11 +968,7 @@ class NativeActivity:
                 >= self.last_activity + self.config.native.activity_timeout_seconds
                 and not (
                     now - self.last_activity < 150
-                    and any(
-                        now - pending["started"] < 150
-                        and self._joins_episode(pending["track"])
-                        for pending in self._verification_pending.values()
-                    )
+                    and self._pending_verification_blocks_completion(now)
                 )
             ):
                 self.finish("complete", now=now)
@@ -778,6 +981,9 @@ class NativeActivity:
             completion_reason=completion_reason,
         )
         self.event_id = None
+        self.incident_id = None
+        self._observation_seq = 0
+        self._observation_samples.clear()
         self.inventory.clear()
         if state != "complete":
             if self.admission is not None:
@@ -799,10 +1005,12 @@ class NativeActivity:
         counters.update(self.registry.counts)
         public_tracks = self.tracks
         return {
-            "implementation": "gvatrack",
+            "implementation": "native_observations",
             "enabled": self.config.enabled,
             "active": self.event_id is not None,
             "event_id": self.event_id,
+            "incident_id": self.incident_id,
+            "observation_count": self._observation_seq,
             "health": self.health,
             "native_session": self.session,
             "effective_fresh_fps": (
@@ -821,7 +1029,9 @@ class NativeActivity:
             ),
             "verification_pending": len(self._verification_pending),
             "verification_recent": list(self._verification_recent),
+            "expected_route_handoffs": self.expected_handoffs(),
             "inventory_count": len(self.registry.tracks),
+            "participants": list(public_tracks.values()),
             "tracks": list(public_tracks.values()),
             "counters": dict(counters),
         }

@@ -71,6 +71,9 @@ def manager_with_mocks() -> AppManager:
     manager.detection_watch = Mock()
     manager.detection_watch.observe_incident.return_value = ()
     manager.detection_watch.status.return_value = {}
+    manager._restored_detection_watches = []
+    manager._restored_watch_retry_lock = threading.Lock()
+    manager._restored_watch_retry_timer = None
     manager.workers = {"gate": Mock()}
     manager.workers["gate"].live_capture_ready.return_value = True
     manager.workers["gate"].wait_stopped.return_value = True
@@ -220,7 +223,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             self.assertEqual(manager.state_events.publish.call_args.args[1]["notifications_enabled"], allowed)
             self.assertEqual(manager.mqtt.publish.called, allowed)
 
-    def test_native_object_event_does_not_schedule_extra_detection(self) -> None:
+    def test_native_object_event_opens_advisory_route_detection_watch(self) -> None:
         manager = manager_with_mocks()
         manager.events = Mock()
         manager.events.get.return_value = None
@@ -234,7 +237,11 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.publish_event("object", payload)
 
-        manager.detection_watch.observe_incident.assert_not_called()
+        manager.detection_watch.observe_incident.assert_called_once()
+        kwargs = manager.detection_watch.observe_incident.call_args.kwargs
+        self.assertEqual(kwargs["camera_id"], "gate")
+        self.assertEqual(kwargs["event_id"], 42)
+        self.assertEqual(kwargs["objects"][0]["label"], "car")
 
 
     def test_ineligible_object_event_does_not_open_route_detection_watch(self) -> None:

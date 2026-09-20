@@ -69,7 +69,7 @@ def event_epoch(event: dict[str, Any]) -> float:
 
 
 def event_end_epoch(event: dict[str, Any]) -> float:
-    """Native presence events span the observed track lifetime."""
+    """Native presence events span the observed incident lifetime."""
     start = event_epoch(event)
     raw = event.get("objects")
     if raw is None:
@@ -77,24 +77,27 @@ def event_end_epoch(event: dict[str, Any]) -> float:
             raw = json.loads(str(event.get("objects_json") or "[]"))
         except (TypeError, ValueError):
             raw = []
-    tracking = event.get("object_tracking")
-    if not isinstance(tracking, dict):
-        tracking = next((item.get("object_tracking") for item in raw or []
-                         if isinstance(item, dict) and item.get("status") == "object_tracking"), {})
-    from .native_evidence_common import is_native_tracking_implementation
+    from .native_evidence_common import native_lifecycle_from_objects
 
-    if not isinstance(tracking, dict) or not is_native_tracking_implementation(
-        tracking.get("implementation")
-    ):
+    lifecycle = event.get("object_tracking")
+    if not isinstance(lifecycle, dict):
+        lifecycle = event.get("native_incident")
+    if not isinstance(lifecycle, dict):
+        lifecycle = native_lifecycle_from_objects(raw)
+    if not isinstance(lifecycle, dict):
         return start
+    updated = lifecycle.get("updated_at") or lifecycle.get("end_at")
     try:
-        return max(start, datetime.fromisoformat(str(tracking.get("updated_at"))).timestamp())
+        return max(start, datetime.fromisoformat(str(updated)).timestamp())
     except (TypeError, ValueError):
         return start
 
 
 def native_presence_event(event: dict[str, Any]) -> bool:
-    from .native_evidence_common import is_native_tracking_implementation
+    from .native_evidence_common import (
+        is_native_tracking_implementation,
+        native_lifecycle_from_objects,
+    )
 
     if event.get("topic") == "native/object-presence":
         return True
@@ -103,13 +106,25 @@ def native_presence_event(event: dict[str, Any]) -> bool:
         tracking.get("implementation")
     ):
         return True
+    lifecycle = event.get("native_incident")
+    if isinstance(lifecycle, dict) and is_native_tracking_implementation(
+        lifecycle.get("implementation")
+    ):
+        return True
     raw = event.get("objects")
     if raw is None:
         try:
             raw = json.loads(str(event.get("objects_json") or "[]"))
         except (TypeError, ValueError):
             raw = []
-    return isinstance(raw, list) and any(isinstance(item, dict) and item.get("native_identity") for item in raw)
+    if isinstance(raw, list):
+        if native_lifecycle_from_objects(raw) is not None:
+            return True
+        if any(
+            isinstance(item, dict) and item.get("native_identity") for item in raw
+        ):
+            return True
+    return False
 
 
 def incident_event_groups(

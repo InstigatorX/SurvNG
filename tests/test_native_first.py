@@ -56,12 +56,14 @@ def test_episode_history_updates_do_not_mutate_published_snapshots(activity):
     feed(activity, 1)
     feed(activity, 2)
     published = activity.events.update_native_incident_state.call_args.args[1]
-    history = published['tracks'][0]['box_history']
-    original = [list(point) for point in history]
+    assert published["implementation"] == "native_observations"
+    assert published["state"] == "active"
+    participants = activity.events.update_native_incident_state.call_args.args[2]
+    original = [dict(item) for item in participants]
     for sequence in range(3, 50):
         feed(activity, sequence, received=100+sequence/5)
-    assert history == original
-    assert len(activity.inventory.tracking_tracks()[0]['box_history']) > len(history)
+    assert participants == original
+    assert len(activity.inventory.objects()) >= len(original)
 
 
 def test_terminal_lifecycle_uses_canonical_state_and_reason(activity):
@@ -152,12 +154,20 @@ def test_missing_metadata_reports_health_and_settles(activity):
     assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "interrupted"
 
 
-@pytest.mark.parametrize("change", [{"native_track_id": None}, {"native_track_id": True}, {"confidence": .01}])
+@pytest.mark.parametrize("change", [{"confidence": .01}])
 def test_unusable_observations_do_not_admit(activity, change):
     obj = dict(observation(1).objects[0], **change)
     feed(activity, 1, objects=[obj])
     feed(activity, 2, objects=[obj])
     activity.events.add_event.assert_not_called()
+
+
+def test_missing_native_track_id_still_admits(activity):
+    obj = dict(observation(1).objects[0], native_track_id=None)
+    feed(activity, 1, objects=[obj])
+    feed(activity, 2, objects=[obj])
+    assert activity.event_id == 1
+    activity.events.add_event.assert_called_once()
 
 
 def test_stale_and_unknown_results_cannot_admit(activity):
@@ -207,20 +217,22 @@ def test_native_event_persists_replay_and_notification_duration(tmp_path):
         feed(activity, sequence, received=100 + sequence / 5)
     row = events.get(activity.event_id)
     public = _event_row(row)
-    track = public["object_tracking"]["tracks"][0]
-    assert track["box_history"][-1][0] > track["box_history"][0][0]
-    assert public["object_tracking"]["frame_width"] == 100
+    lifecycle = public.get("native_incident") or public.get("object_tracking")
+    assert lifecycle["implementation"] == "native_observations"
+    assert lifecycle["frame_width"] == 100
+    assert lifecycle.get("incident_id") == activity.incident_id
+    assert int(lifecycle.get("observation_count") or 0) >= 1
     assert event_end_epoch(row) > 1002
-    lifecycle = IncidentLifecycle(Mock())
-    lifecycle.start()
+    notifications = IncidentLifecycle(Mock())
+    notifications.start()
     try:
-        lifecycle.track_incident(row, "Front")
-        payload = lifecycle.snapshot()[0]
+        notifications.track_incident(row, "Front")
+        payload = notifications.snapshot()[0]
         assert payload["duration_seconds"] >= 2
-        lifecycle.complete_event(row["id"])
-        assert lifecycle.snapshot()[0]["state"] == "complete"
+        notifications.complete_event(row["id"])
+        assert notifications.snapshot()[0]["state"] == "complete"
     finally:
-        lifecycle.close()
+        notifications.close()
 
 
 def test_native_only_routes_do_not_register_comparison_or_python_inference():

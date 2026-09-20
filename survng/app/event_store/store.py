@@ -1741,17 +1741,293 @@ class EventStore(
     ) -> list[dict[str, Any]]:
         return merge_inventory_objects(existing_objects, inventory_objects)
 
+    def open_incident(
+        self,
+        *,
+        camera_id: str,
+        start_at: str,
+        participants: list[dict[str, Any]],
+        observation_objects: list[dict[str, Any]],
+        snapshot_path: str = "",
+        seed_event_id: int | None = None,
+        state: str = "active",
+    ) -> dict[str, Any]:
+        """Create a durable multi-object incident and its first observation."""
+        now = datetime.now(timezone.utc).isoformat()
+        snapshot_path = portable_media_path(self.storage_dir, snapshot_path)
+        snapshot_size_bytes = self._snapshot_file_size(snapshot_path)
+        participants_json = json.dumps(participants, separators=(",", ":"))
+        observation_json = json.dumps(observation_objects, separators=(",", ":"))
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                insert into incidents (
+                    camera_id, start_at, end_at, state, completion_reason,
+                    snapshot_path, snapshot_size_bytes, recording_path,
+                    participants_json, evidence_revision, seed_event_id,
+                    created_at, updated_at
+                ) values (?, ?, null, ?, '', ?, ?, '', ?, 0, ?, ?, ?)
+                """,
+                (
+                    camera_id,
+                    start_at,
+                    state,
+                    snapshot_path,
+                    snapshot_size_bytes,
+                    participants_json,
+                    seed_event_id,
+                    now,
+                    now,
+                ),
+            )
+            incident_id = int(cursor.lastrowid)
+            conn.execute(
+                """
+                insert into incident_observations (
+                    incident_id, seq, observed_at, objects_json, snapshot_path
+                ) values (?, 1, ?, ?, ?)
+                """,
+                (incident_id, start_at, observation_json, snapshot_path),
+            )
+            row = conn.execute(
+                "select * from incidents where id = ?",
+                (incident_id,),
+            ).fetchone()
+        return self._incident_view(row, observation_count=1)
+
+    def append_incident_observation(
+        self,
+        incident_id: int,
+        *,
+        observed_at: str,
+        objects: list[dict[str, Any]],
+        snapshot_path: str = "",
+        participants: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Append one observation and optionally refresh participants."""
+        snapshot_path = portable_media_path(self.storage_dir, snapshot_path)
+        objects_json = json.dumps(objects, separators=(",", ":"))
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "select * from incidents where id = ?",
+                (incident_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            seq_row = conn.execute(
+                "select coalesce(max(seq), 0) as seq from incident_observations where incident_id = ?",
+                (incident_id,),
+            ).fetchone()
+            seq = int(seq_row["seq"] if seq_row is not None else 0) + 1
+            conn.execute(
+                """
+                insert into incident_observations (
+                    incident_id, seq, observed_at, objects_json, snapshot_path
+                ) values (?, ?, ?, ?, ?)
+                """,
+                (incident_id, seq, observed_at, objects_json, snapshot_path),
+            )
+            if participants is not None:
+                conn.execute(
+                    """
+                    update incidents
+                    set participants_json = ?, updated_at = ?, end_at = null
+                    where id = ? and state = 'active'
+                    """,
+                    (
+                        json.dumps(participants, separators=(",", ":")),
+                        now,
+                        incident_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "update incidents set updated_at = ? where id = ?",
+                    (now, incident_id),
+                )
+            updated = conn.execute(
+                "select * from incidents where id = ?",
+                (incident_id,),
+            ).fetchone()
+        return self._incident_view(updated, observation_count=seq)
+
+    def close_incident(
+        self,
+        incident_id: int,
+        *,
+        end_at: str,
+        state: str,
+        completion_reason: str = "",
+        participants: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Close a durable incident time range."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "select * from incidents where id = ?",
+                (incident_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            values = [
+                end_at,
+                state,
+                completion_reason or "",
+                now,
+                incident_id,
+            ]
+            if participants is not None:
+                conn.execute(
+                    """
+                    update incidents
+                    set end_at = ?, state = ?, completion_reason = ?,
+                        participants_json = ?, updated_at = ?
+                    where id = ?
+                    """,
+                    (
+                        end_at,
+                        state,
+                        completion_reason or "",
+                        json.dumps(participants, separators=(",", ":")),
+                        now,
+                        incident_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    update incidents
+                    set end_at = ?, state = ?, completion_reason = ?, updated_at = ?
+                    where id = ?
+                    """,
+                    values,
+                )
+            updated = conn.execute(
+                "select * from incidents where id = ?",
+                (incident_id,),
+            ).fetchone()
+            count = conn.execute(
+                "select count(*) as n from incident_observations where incident_id = ?",
+                (incident_id,),
+            ).fetchone()
+        return self._incident_view(
+            updated,
+            observation_count=int(count["n"] if count is not None else 0),
+        )
+
+    def get_incident(self, incident_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select * from incidents where id = ?",
+                (incident_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            count = conn.execute(
+                "select count(*) as n from incident_observations where incident_id = ?",
+                (incident_id,),
+            ).fetchone()
+        return self._incident_view(
+            row,
+            observation_count=int(count["n"] if count is not None else 0),
+        )
+
+    def incident_for_event(self, event_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select * from incidents where seed_event_id = ? order by id desc limit 1",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            count = conn.execute(
+                "select count(*) as n from incident_observations where incident_id = ?",
+                (int(row["id"]),),
+            ).fetchone()
+        return self._incident_view(
+            row,
+            observation_count=int(count["n"] if count is not None else 0),
+        )
+
+    def list_incident_observations(
+        self,
+        incident_id: int,
+        *,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 100_000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select * from incident_observations
+                where incident_id = ?
+                order by seq asc
+                limit ?
+                """,
+                (incident_id, bounded),
+            ).fetchall()
+        return [self._observation_view(row) for row in rows]
+
+    @staticmethod
+    def _incident_view(row, *, observation_count: int = 0) -> dict[str, Any]:
+        try:
+            participants = json.loads(str(row["participants_json"] or "[]"))
+        except (TypeError, ValueError):
+            participants = []
+        if not isinstance(participants, list):
+            participants = []
+        return {
+            "id": int(row["id"]),
+            "camera_id": str(row["camera_id"]),
+            "start_at": str(row["start_at"]),
+            "end_at": row["end_at"],
+            "state": str(row["state"]),
+            "completion_reason": str(row["completion_reason"] or ""),
+            "snapshot_path": str(row["snapshot_path"] or ""),
+            "snapshot_size_bytes": int(row["snapshot_size_bytes"] or 0),
+            "recording_path": str(row["recording_path"] or ""),
+            "participants": participants,
+            "participants_json": str(row["participants_json"] or "[]"),
+            "evidence_revision": int(row["evidence_revision"] or 0),
+            "seed_event_id": (
+                int(row["seed_event_id"])
+                if row["seed_event_id"] is not None
+                else None
+            ),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "observation_count": int(observation_count),
+        }
+
+    @staticmethod
+    def _observation_view(row) -> dict[str, Any]:
+        try:
+            objects = json.loads(str(row["objects_json"] or "[]"))
+        except (TypeError, ValueError):
+            objects = []
+        if not isinstance(objects, list):
+            objects = []
+        return {
+            "id": int(row["id"]),
+            "incident_id": int(row["incident_id"]),
+            "seq": int(row["seq"]),
+            "observed_at": str(row["observed_at"]),
+            "objects": objects,
+            "objects_json": str(row["objects_json"] or "[]"),
+            "snapshot_path": str(row["snapshot_path"] or ""),
+        }
+
     def update_native_incident_state(
         self,
         event_id: int,
-        tracking: dict[str, Any],
+        lifecycle: dict[str, Any],
         inventory_objects: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        """Atomically persist native tracking metadata and incident inventory.
+        """Atomically persist native incident participants onto the compat event.
 
-        Admission evidence and cover presentation remain independent: inventory
-        updates can add context objects, but only matching objects inherit the
-        current snapshot's presentation coordinates.
+        Lifecycle ownership lives on the incidents table. This method keeps the
+        legacy events row readable without writing object_tracking as truth.
         """
         with self._lock, self._connect() as conn:
             conn.execute("begin immediate")
@@ -1771,18 +2047,91 @@ class EventStore(
                 existing,
                 inventory_objects,
             )
-            objects.append(
-                {"status": "object_tracking", "object_tracking": tracking}
-            )
+            # Drop legacy tracking blobs; participants/observations are truth.
+            objects = [
+                item
+                for item in objects
+                if not (
+                    isinstance(item, dict)
+                    and item.get("status") == "object_tracking"
+                )
+            ]
+            incident_meta = {
+                "status": "native_incident",
+                "native_incident": {
+                    key: lifecycle.get(key)
+                    for key in (
+                        "implementation",
+                        "state",
+                        "completion_reason",
+                        "updated_at",
+                        "incident_id",
+                        "observation_count",
+                        "frame_width",
+                        "frame_height",
+                        "source",
+                        "native_session",
+                        "sample_fps",
+                        "recording_overlay_compatible",
+                        "episode_counts",
+                    )
+                    if key in lifecycle or key in {
+                        "implementation",
+                        "state",
+                        "updated_at",
+                        "incident_id",
+                    }
+                },
+            }
+            objects.append(incident_meta)
             conn.execute(
                 "update events set objects_json = ? where id = ?",
                 (json.dumps(objects, separators=(",", ":")), event_id),
             )
+            incident_id = lifecycle.get("incident_id")
+            if type(incident_id) is int and incident_id > 0:
+                participants_json = json.dumps(
+                    inventory_objects,
+                    separators=(",", ":"),
+                )
+                now = datetime.now(timezone.utc).isoformat()
+                state = str(lifecycle.get("state") or "active")
+                if state == "active":
+                    conn.execute(
+                        """
+                        update incidents
+                        set participants_json = ?, updated_at = ?, state = 'active',
+                            end_at = null, completion_reason = ''
+                        where id = ?
+                        """,
+                        (participants_json, now, incident_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        update incidents
+                        set participants_json = ?, updated_at = ?, state = ?,
+                            end_at = ?, completion_reason = ?
+                        where id = ?
+                        """,
+                        (
+                            participants_json,
+                            now,
+                            state,
+                            str(
+                                lifecycle.get("updated_at")
+                                or lifecycle.get("end_at")
+                                or now
+                            ),
+                            str(lifecycle.get("completion_reason") or ""),
+                            incident_id,
+                        ),
+                    )
             updated = self._finish_evidence_commit(
                 conn,
                 event_id,
                 row,
-                reason="tracking_updated",
+                reason="incident_updated",
             )
         return dict(updated) if updated is not None else None
 

@@ -35,7 +35,28 @@ def event_tracking(event):
     values = event.get("objects")
     if not isinstance(values, list):
         values = json.loads(event.get("objects_json") or "[]")
-    tracking = event.get("object_tracking") or next((x.get("object_tracking", {}) for x in values if x.get("status") == "object_tracking"), {})
+    from .native_evidence_common import native_lifecycle_from_objects
+
+    lifecycle = event.get("object_tracking")
+    if not isinstance(lifecycle, dict):
+        lifecycle = event.get("native_incident")
+    if not isinstance(lifecycle, dict):
+        lifecycle = native_lifecycle_from_objects(values) or {}
+    tracking = event.get("object_tracking") if isinstance(event.get("object_tracking"), dict) else {}
+    if not tracking and isinstance(lifecycle, dict):
+        tracking = {
+            **lifecycle,
+            "tracks": lifecycle.get("tracks") or [],
+        }
+    if not tracking:
+        tracking = next(
+            (
+                x.get("object_tracking", {})
+                for x in values
+                if x.get("status") == "object_tracking"
+            ),
+            {},
+        )
     return values, tracking
 
 

@@ -24,10 +24,11 @@ Live/substream RTSP
           → gvatrack: short-term-imageless
           → gvaanalytics: live-coordinate zone membership
           → bounded metadata delivery
-          → session-qualified native observation consumer
-              → class confidence + zone admission policy
-              → fresh-observation confirmation
-              → presence episode → event database, incident updates, MQTT/SSE
+              → session-qualified native observation consumer
+                  → class confidence + zone admission policy
+                  → fresh-observation confirmation
+                  → multi-object incident time range
+                      → incidents + observations tables, compat event row, MQTT/SSE
 
 Main stream → existing continuous recorder → incident video/playback
 ```
@@ -45,22 +46,46 @@ before the leaky metadata queue so delivery drops do not skip tracker updates.
 OpenVINO remains the inference engine inside `gvadetect`.
 
 `NativeCameraWorker` owns capture and one metadata consumer. `NativeObjectRegistry`
-is the single owner of native object identity, temporal confirmation and history.
-`NativeActivity` owns incident admission/lifecycle policy, while
-`NativeIncidentInventory` owns the credible objects observed during an episode.
-Fallback spatial association may describe untracked context but cannot admit or
-extend an incident. Metadata processing does not wait for a matching Python pixel
-frame. Only snapshot creation requires an exact session/PTS match. There is no
-on-demand live detection when metadata is missing.
+owns soft spatial/temporal association, confirmation, and short live history.
+`NativeActivity` owns multi-object incident admission and time-range lifecycle, while
+`NativeIncidentInventory` owns the participants observed during an open incident.
+Track IDs from `gvatrack` are ignored for admit/extend/close; detections without a
+native ID still confirm by consecutive fresh label+spatial association. Metadata
+processing does not wait for a matching Python pixel frame. Only snapshot creation
+requires an exact session/PTS match. There is no on-demand live detection when
+metadata is missing.
+
+## Incident model
+
+An **incident** is the durable unit: one camera, an open `[start, end]` time range,
+multi-object **participants**, and an ordered sequence of **observations** (per-frame
+detection bags). Lifecycle ownership lives in the `incidents` /
+`incident_observations` tables. A thin compatibility `events` row remains so existing
+list/detail APIs keep working; it no longer stores `object_tracking` as truth.
+
+- Opening records every currently credible detection as a participant (no
+  primary/context split for membership).
+- While open, fresh samples append observations and may add participants. A second
+  moving object on the same camera joins the same incident rather than splitting a
+  sibling episode.
+- Closing is time-range completion (inactivity, coverage loss, or stop), not track
+  disappearance.
+- Persist updates use `implementation: native_observations` metadata. Cover/evidence
+  may still use boxes from observations.
 
 ## Presence semantics
 
 - Default confirmation: two consecutive fresh, eligible observations of the same
-  native ID and class. Empty fresh results break tentative confirmation.
-- Native IDs are scoped to camera + stream session + geometry generation. Reconnects,
-  resolution changes and graph rebuilds
-  start new identities; the application does not claim cross-camera identity or
-  re-identification after disappearance.
+  soft-associated identity and class. Empty fresh results break tentative confirmation.
+- Soft association is scoped to camera + stream session + geometry generation.
+  Reconnects, resolution changes and graph rebuilds start new associations; the
+  application does not claim cross-camera identity or re-identification after
+  disappearance. `gvatrack` IDs are not part of the live incident contract.
+- Configured `detector.tracking.camera_transition_routes` are advisory adjacency
+  only under native-first: an upstream incident opens a timed watch on the next
+  camera, and a later normally admitted target may stamp route provenance / chain
+  the next hop. Watches never bypass zones or create incidents by themselves.
+  Related-incident and cross-camera trace surfaces may bias expected handoffs.
 - `gvatrack` can append predicted ROIs even to a fresh detector frame. Exact
   pre-tracker ROI evidence distinguishes these from fresh observations. Predicted
   confidence never admits an object, increments observations, or extends presence.
@@ -68,9 +93,9 @@ on-demand live detection when metadata is missing.
   invalid metadata ends activity with a coverage-loss reason, not evidence that
   the scene was empty. Persistent metadata stalls rebuild the native stream after
   15 seconds; failed graph shutdown is reported rather than starting a second graph.
-- **Configured stationary classes remain tracked but do not create or extend incidents while stationary.**
+- **Configured stationary classes remain associated but do not create or extend incidents while stationary.**
   The default includes people and common vehicle classes. New stationary-policy
-  tracks start uncertain and must demonstrate movement before activity is admitted. After eight seconds
+  objects start uncertain and must demonstrate movement before activity is admitted. After eight seconds
   of stable evidence, moving vehicles become stationary; the normal five-second
   activity timeout then completes the incident when no other object is active.
   People and other unlisted classes retain presence-based admission.
@@ -85,16 +110,17 @@ on-demand live detection when metadata is missing.
   `window_seconds`, `moving_threshold`, and `stationary_threshold`. Disabling it
   restores presence-based admission for every class. All detector/tracker work
   continues; suppression saves incident work, not inference work.
-- Incident completion preserves live stationary context. Track disappearance,
-  long observation gaps, native ID changes, reconnects and resolution changes
-  require new evidence; there is no cross-ID appearance matching. A vehicle
-  already parked at startup does not alert merely because it received a new ID.
-- Track history is bounded to 150 observations per track and 128 tracks per
-  live camera and 128 archived tracks per episode by default. Expired live tracks
-  are evicted independently of incident history. Capacity drops are counted.
+- Incident completion preserves live stationary context. Object disappearance,
+  long observation gaps, reconnects and resolution changes require new evidence;
+  there is no cross-ID appearance matching. A vehicle already parked at startup does
+  not alert merely because association restarted.
+- Live association history is bounded to 150 observations per object and 128 objects
+  per live camera, with 128 archived participants per incident by default. Expired
+  live associations are evicted independently of incident history. Capacity drops
+  are counted.
 - Updates persist at most once per second after admission, plus completion.
-  Each episode is one incident, even when another starts within the old gap window.
-  Native completion explicitly settles incident notifications. Native track times
+  Each open time range is one incident; additional concurrent objects join it.
+  Native completion explicitly settles incident notifications. Observation times
   extend incident duration and recording windows.
 
 ## Test configuration

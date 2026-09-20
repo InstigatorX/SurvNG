@@ -70,6 +70,8 @@ class NativeCameraWorker:
         )
         self.activity = NativeActivity(camera, config, events, publish, self._evidence, native_zones=True)
         self.activity.offer_evidence = self._offer_evidence
+        self.activity.route_watch_match = None
+        self.activity.consume_route_watch = None
         if evidence_service is not None:
             self.activity.admission = evidence_service.admission
             self.activity.nominate = self._nominate
@@ -117,6 +119,18 @@ class NativeCameraWorker:
     def _image(self, source="live"):
         frame = self.capture.request_frame(self.camera.normalized_source(source))
         return frame.image if frame else None
+
+    def consider_route_detection_watch(self, watch) -> bool:
+        """Soft-signal an expected upstream handoff without changing admission.
+
+        Native keeps zone/motion policy intact. The watch only informs status and
+        lets a later normally admitted incident stamp route provenance.
+        """
+        self.activity.note_expected_handoff(watch)
+        return self.runtime_state.phase in {
+            CameraLifecyclePhase.RUNNING,
+            CameraLifecyclePhase.STARTING,
+        }
 
     def start(self):
         with self._lock:

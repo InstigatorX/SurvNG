@@ -17,12 +17,34 @@ class Candidate:
 
 
 # Live persist historically wrote "gvatrack"; some recovered/older rows use "native".
-NATIVE_TRACKING_IMPLEMENTATIONS = frozenset({"gvatrack", "native"})
+# Mole-1 incidents persist lifecycle as native_observations without track blobs.
+NATIVE_TRACKING_IMPLEMENTATIONS = frozenset({"gvatrack", "native", "native_observations"})
 
 
 def is_native_tracking_implementation(value: object) -> bool:
-    """True when object_tracking.implementation is the native cover/evidence path."""
+    """True when native live evidence/lifecycle metadata is present."""
     return value in NATIVE_TRACKING_IMPLEMENTATIONS
+
+
+def native_lifecycle_from_objects(objects) -> dict | None:
+    """Extract native incident lifecycle metadata from an objects_json list."""
+    if not isinstance(objects, list):
+        return None
+    for item in reversed(objects):
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") == "native_incident" and isinstance(
+            item.get("native_incident"), dict
+        ):
+            return item["native_incident"]
+        tracking = item.get("object_tracking")
+        if (
+            item.get("status") == "object_tracking"
+            and isinstance(tracking, dict)
+            and is_native_tracking_implementation(tracking.get("implementation"))
+        ):
+            return tracking
+    return None
 
 
 def image_quality(image):
