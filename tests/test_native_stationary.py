@@ -38,8 +38,8 @@ def test_parked_vehicle_is_context_without_incident_at_different_rates(activity,
     for seq in range(1, 30 * fps):
         feed(activity, seq, seq / fps, [obj(x=10 + (seq % 3 - 1) * .1)])
     activity.events.add_event.assert_not_called()
-    assert activity.tracks[(7, "car")]["motion_state"] == "stationary"
-    assert activity.tracks[(7, "car")]["confirmed"]
+    assert next(t for t in activity.tracks.values() if t["label"] == "car")["motion_state"] == "stationary"
+    assert next(t for t in activity.tracks.values() if t["label"] == "car")["confirmed"]
     assert not activity.status()["tracks"][0]["activity_eligible"]
     assert activity.health == "healthy"
 
@@ -52,14 +52,14 @@ def test_moving_vehicle_parks_completes_and_departure_starts_new_episode(activit
         feed(activity, seq, seq / 5, [obj(x=30)])
     assert activity.event_id is None
     assert activity.events.add_event.call_count == 1
-    assert activity.tracks[(7, "car")]["motion_state"] == "stationary"
+    assert next(t for t in activity.tracks.values() if t["label"] == "car")["motion_state"] == "stationary"
     assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "complete"
     for seq in range(151, 161):
         feed(activity, seq, seq / 5, [obj(x=30 + seq - 150)])
     assert activity.event_id == 2
-    stored = activity.events.update_native_incident_state.call_args.args[1]["tracks"][0]
+    participants = activity.events.update_native_incident_state.call_args.args[2]
+    stored = next(item for item in participants if item["label"] == "car")
     assert stored["first_seen"] >= "1970-01-01T00:17:10"
-    assert stored["box_history"][0][0] >= 1030
 
 
 def test_moving_person_is_not_suppressed_or_polluted_by_parked_car(activity):
@@ -68,13 +68,13 @@ def test_moving_person_is_not_suppressed_or_polluted_by_parked_car(activity):
     for seq in range(61, 81):
         feed(activity, seq, seq / 5, [obj(), obj("person", x=10 + (seq - 60) * 2, native_id=8)])
     assert activity.event_id == 1
-    tracks = activity.events.update_native_incident_state.call_args.args[1]["tracks"]
-    assert {t["label"] for t in tracks} == {"person", "car"}
-    assert next(t for t in tracks if t["label"] == "car")["activity_eligible"] is False
+    participants = activity.events.update_native_incident_state.call_args.args[2]
+    assert {t["label"] for t in participants} == {"person", "car"}
+    assert next(t for t in participants if t["label"] == "car")["activity_eligible"] is False
     for seq in range(81, 121):
         feed(activity, seq, seq / 5, [obj()])
     assert activity.event_id is None
-    assert activity.tracks[(7, "car")]["motion_state"] == "stationary"
+    assert next(t for t in activity.tracks.values() if t["label"] == "car")["motion_state"] == "stationary"
     assert activity.events.add_event.call_count == 1
 
 
@@ -116,7 +116,7 @@ def test_stationary_person_tree_jitter_is_suppressed(activity):
         detected["box"] = tree_boxes[(seq - 1) % len(tree_boxes)]
         feed(activity, seq, seq / 5, [detected])
     activity.events.add_event.assert_not_called()
-    track = activity.tracks[(8, "person")]
+    track = next(t for t in activity.tracks.values() if t["label"] == "person")
     assert track["motion_state"] == "stationary"
     assert track["motion_extent"] <= activity.config.native.stationary.stationary_threshold
 

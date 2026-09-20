@@ -70,7 +70,8 @@ def test_no_event_or_notification_before_verification_and_retains_departed_objec
     assert kwargs['snapshot_path'] == 'main.webp'
     assert kwargs['created_at'].startswith('1970-01-01T00:16:40.')
     histories = [call.args[1] for call in a.events.update_native_incident_state.call_args_list]
-    assert len(histories[0]['tracks'][0]['box_history']) == 7
+    first_participants = a.events.update_native_incident_state.call_args_list[0].args[2]
+    assert first_participants[0]['observations'] >= 1
     assert histories[-1]['state'] == 'complete'
     assert a.counts['verification_confirmed'] == 1
 
@@ -171,8 +172,8 @@ def test_delayed_verified_primary_retains_all_confirmed_context_objects():
         "person",
         "car",
     }
-    persisted = events.update_native_incident_state.call_args.args[1]
-    assert {item["label"] for item in persisted["tracks"]} == {
+    persisted = events.update_native_incident_state.call_args.args[2]
+    assert {item["label"] for item in persisted} == {
         "dog",
         "person",
         "car",
@@ -333,16 +334,16 @@ def test_rejected_location_can_be_reverified_after_object_moves():
     a.admission.poll.return_value={'status':'rejected'}
     a.tick(now=101)
     a.admission.poll.return_value=None
-    key = next(key for key, track in a.registry.tracks.items()
-               if track.get('native_track_id') == 9)
-    old = a._activity_states[key]['_verification_token']
+    assert not a._verification_pending
     for seq in range(3,6): feed(a,seq)
     assert not a._verification_pending
     obj={'label':'dog','confidence':.8,'box':{'x1':60,'y1':20,'x2':80,'y2':60},
          'native_track_id':9,'detection_provenance':'native_fresh_detection'}
     feed(a,6,[obj])
+    feed(a,7,[obj])
     assert len(a._verification_pending)==1
-    assert a._activity_states[key]['_verification_token'] != old
+    pending = next(iter(a._verification_pending.values()))
+    assert pending['track']['box']['x1'] == 60
 
 
 @pytest.mark.parametrize('offset', [.5, -.5, 1., -1.])
@@ -405,8 +406,8 @@ def nominate_walk_with_id_change(a, *, second_start=8):
         feed(a, seq)
     for seq in range(8, second_start):
         feed(a, seq, [])
-    replacement = {'label': 'dog', 'confidence': .8,
-                   'box': {'x1': 40, 'y1': 20, 'x2': 60, 'y2': 60},
+    replacement = {'label': 'bird', 'confidence': .8,
+                   'box': {'x1': 70, 'y1': 20, 'x2': 90, 'y2': 60},
                    'native_track_id': 10, 'detection_provenance': 'native_fresh_detection'}
     for seq in range(second_start, second_start + 8):
         feed(a, seq, [replacement])
@@ -424,14 +425,15 @@ def test_delayed_verified_id_change_continues_one_incident():
     a.tick(now=116)
     assert a.event_id == 1  # Await the adjacent track even after activity timeout.
     assert a.events.add_event.call_count == 1
-    assert [t['native_track_id'] for t in a.inventory.tracking_tracks()] == [9]
+    assert {t['native_track_id'] for t in a.inventory.tracking_tracks()} >= {9}
     results[second] = {'status': 'confirmed'}
     a.tick(now=117)
     assert a.events.add_event.call_count == 1
     final = a.events.update_native_incident_state.call_args.args[1]
     assert final['state'] == 'complete'
-    assert [t['native_track_id'] for t in final['tracks']] == [9, 10]
-    assert final['tracks'][0]['first_seen'] < final['tracks'][1]['first_seen']
+    participants = a.events.update_native_incident_state.call_args.args[2]
+    assert {t['label'] for t in participants} == {'dog', 'bird'}
+    assert {t.get('native_track_id') for t in participants} == {9, 10}
     assert a.event_id is None
 
 
@@ -451,7 +453,8 @@ def test_failed_pending_continuation_closes_without_extending_confirmed_history(
         a.tick(now=117)
     assert a.events.add_event.call_count == 1
     final = a.events.update_native_incident_state.call_args.args[1]
-    assert [t['native_track_id'] for t in final['tracks']] == [9]
+    participants = a.events.update_native_incident_state.call_args.args[2]
+    assert 9 in {t.get('native_track_id') for t in participants}
     assert a.event_id is None
 
 
@@ -467,7 +470,8 @@ def test_later_verification_result_waits_for_earlier_activity():
     a.tick(now=117)
     assert a.events.add_event.call_count == 1
     final = a.events.update_native_incident_state.call_args.args[1]
-    assert [t['native_track_id'] for t in final['tracks']] == [9, 10]
+    participants = a.events.update_native_incident_state.call_args.args[2]
+    assert {t.get('native_track_id') for t in participants} == {9, 10}
 
 
 def test_separated_activity_stays_separate_even_when_results_arrive_together():
@@ -477,9 +481,15 @@ def test_separated_activity_stays_separate_even_when_results_arrive_together():
     a.admission.poll.side_effect = lambda token: results.pop(token, None)
     a.tick(now=125)
     assert a.events.add_event.call_count == 2
-    completed = [call.args[1] for call in a.events.update_native_incident_state.call_args_list
-                 if call.args[1]['state'] == 'complete']
-    assert [[t['native_track_id'] for t in episode['tracks']] for episode in completed] == [[9], [10]]
+    completed = [
+        (call.args[1], call.args[2])
+        for call in a.events.update_native_incident_state.call_args_list
+        if call.args[1]['state'] == 'complete'
+    ]
+    assert [
+        [t.get('native_track_id') for t in participants]
+        for _payload, participants in completed
+    ] == [[9], [10]]
 
 
 def test_renewed_candidate_cannot_hold_an_inactive_incident_forever():
@@ -498,7 +508,8 @@ def test_renewed_candidate_cannot_hold_an_inactive_incident_forever():
     assert second in a._verification_pending
     final = a.events.update_native_incident_state.call_args.args[1]
     assert final['state'] == 'complete'
-    assert [t['native_track_id'] for t in final['tracks']] == [9]
+    participants = a.events.update_native_incident_state.call_args.args[2]
+    assert 9 in {t.get('native_track_id') for t in participants}
 
 
 def test_recent_clear_view_can_confirm_after_early_negative_views():

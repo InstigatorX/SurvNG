@@ -37,7 +37,8 @@ def test_admission_requires_distinct_fresh_observations(activity):
     feed(activity, 2)
     assert activity.event_id == 1
     assert activity.events.add_event.call_count == 1
-    assert activity.tracks[(7, "person")]["observations"] == 2
+    person = next(track for track in activity.tracks.values() if track["label"] == "person")
+    assert person["observations"] == 2
 
 
 def test_effective_fps_tracks_live_policy_changes_without_stale_cache(activity):
@@ -137,12 +138,12 @@ def test_completion_wait_still_detects_metadata_loss(activity):
 def test_reconnect_restarts_confirmation_and_qualifies_identity(activity):
     feed(activity, 1)
     feed(activity, 2)
-    first = activity.tracks[(7, "person")]["native_identity"]
+    first = next(track for track in activity.tracks.values() if track["label"] == "person")["native_identity"]
     feed(activity, 1, session="stream-b")
     assert activity.event_id is None
     feed(activity, 2, session="stream-b")
     assert activity.event_id == 2
-    assert activity.tracks[(7, "person")]["native_identity"] != first
+    assert next(track for track in activity.tracks.values() if track["label"] == "person")["native_identity"] != first
 
 
 def test_missing_metadata_reports_health_and_settles(activity):
@@ -459,12 +460,16 @@ def test_zone_threshold_lowering_rebuilds_native_graph():
 def test_resolution_change_restarts_identity_and_confirmation(activity):
     feed(activity, 1)
     feed(activity, 2)
-    original = activity.tracks[(7, "person")]["native_identity"]
+    original = next(
+        track for track in activity.tracks.values() if track["label"] == "person"
+    )["native_identity"]
     activity.consume(replace(observation(3), width=200), now=100.6, epoch=1000.6)
     assert activity.event_id is None
     activity.consume(replace(observation(4), width=200), now=100.8, epoch=1000.8)
     assert activity.event_id == 2
-    assert activity.tracks[(7, "person")]["native_identity"] != original
+    assert next(
+        track for track in activity.tracks.values() if track["label"] == "person"
+    )["native_identity"] != original
 
 
 @pytest.mark.parametrize("new_session", [True, False])

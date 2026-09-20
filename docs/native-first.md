@@ -80,7 +80,14 @@ list/detail APIs keep working; it no longer stores `object_tracking` as truth.
 - Soft association is scoped to camera + stream session + geometry generation.
   Reconnects, resolution changes and graph rebuilds start new associations; the
   application does not claim cross-camera identity or re-identification after
-  disappearance. `gvatrack` IDs are not part of the live incident contract.
+  disappearance. `gvatrack` IDs are ignored for association keys and are never
+  required for admit/extend/close. Confirmation uses consecutive fresh
+  label+spatial overlap only.
+- Live status may still expose a compatibility `object_tracking` mirror of
+  `native_activity`. Native activity does not publish track-centric SSE lifecycle
+  events; terminal `incident` publishes settle notifications and cover work.
+  Cover nomination prefers durable `incident_observations` over track
+  `box_history` (legacy track history remains a recovery path for old rows).
 - Configured `detector.tracking.camera_transition_routes` are advisory adjacency
   only under native-first: an upstream incident opens a timed watch on the next
   camera, and a later normally admitted target may stamp route provenance / chain

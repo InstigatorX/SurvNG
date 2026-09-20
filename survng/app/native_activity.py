@@ -93,13 +93,7 @@ class NativeActivity:
             obj = self._activity_object(key, include_history=False)
             if obj is None:
                 continue
-            native_id = obj.get("native_track_id")
-            public_key = (
-                (native_id, obj["label"])
-                if type(native_id) is int and native_id >= 0
-                else (obj["track_id"], obj["label"])
-            )
-            result[public_key] = obj
+            result[(obj["track_id"], obj["label"])] = obj
         return result
 
     def _activity_state(self, key):
@@ -441,8 +435,11 @@ class NativeActivity:
             pending["activity"]["verification"] = {
                 name: value for name, value in result.items() if name != "cover"
             }
-            # Multi-object incidents stay open; a newly verified subject joins
-            # the current time range rather than splitting a sibling episode.
+            # Time-range membership only: a verified subject that does not
+            # overlap the open incident span starts a new incident. Concurrent
+            # subjects still join the same open range.
+            if self.event_id is not None and not self._joins_open_range(track):
+                self.finish("complete", now=now)
             self._activate(
                 [],
                 pending["observation"],
@@ -948,6 +945,27 @@ class NativeActivity:
             if enabled
             else self.config.live_sample_fps / self.config.native.inference_interval
         )
+
+    def _joins_open_range(self, track):
+        """Whether a subject overlaps the open incident time range."""
+        tracks = self.inventory.tracking_tracks()
+        if not tracks:
+            return False
+        try:
+            start = min(
+                datetime.fromisoformat(item["first_seen"]).timestamp()
+                for item in tracks
+            )
+            end = max(
+                datetime.fromisoformat(item["last_seen"]).timestamp()
+                for item in tracks
+            )
+            first = datetime.fromisoformat(track["first_seen"]).timestamp()
+            last = datetime.fromisoformat(track["last_seen"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            return False
+        timeout = self.config.native.activity_timeout_seconds
+        return first <= end + timeout and last >= start - timeout
 
     def tick(self, *, now: float):
         self._poll_verification(now)

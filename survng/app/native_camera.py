@@ -362,6 +362,8 @@ class NativeCameraWorker:
                 activity["health"] = "stopped"
             tracking = {**activity, "active": running, "running": running,
                         "presence_active": activity["active"]}
+            # Compat status key. Live incident lifecycle is native_activity;
+            # object_tracking is no longer a separate track-centric publisher.
             return {"id": self.camera.id, "name": self.camera.name,
                     "running": self.runtime_state.enabled, "connected": connected,
                     "capture_running": capture["live_running"],

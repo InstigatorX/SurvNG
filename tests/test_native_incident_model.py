@@ -169,6 +169,80 @@ def test_inactivity_close_then_reopen_creates_new_incident(tmp_path):
     assert activity.incident_id != first
 
 
+def test_registry_ignores_native_track_ids_for_association(tmp_path):
+    activity = _activity(tmp_path)
+    # Same box, flipping native IDs must stay one soft association.
+    for sequence, native_id in ((1, 7), (2, 99), (3, 7)):
+        _feed(
+            activity,
+            sequence,
+            [_detected("person", 12, native_id=native_id)],
+        )
+    assert len(activity.registry.tracks) == 1
+    person = next(iter(activity.registry.tracks.values()))
+    assert person["observations"] == 3
+    assert activity.incident_id is not None
+
+
+def test_evidence_nominates_from_incident_observations(tmp_path):
+    from survng.app.native_evidence import incident_observation_samples
+
+    store = EventStore(tmp_path)
+    event = store.add_event(
+        camera_id="yard",
+        kind="motion",
+        topic="native/object-presence",
+        created_at="2026-09-20T12:00:00+00:00",
+        objects_json="[]",
+    )
+    opened = store.open_incident(
+        camera_id="yard",
+        start_at="2026-09-20T12:00:00+00:00",
+        participants=[{"label": "person"}],
+        observation_objects=[
+            {
+                "label": "person",
+                "box": {"x1": 10, "y1": 10, "x2": 30, "y2": 40},
+            }
+        ],
+        seed_event_id=int(event["id"]),
+    )
+    store.append_incident_observation(
+        opened["id"],
+        observed_at="2026-09-20T12:00:02+00:00",
+        objects=[
+            {
+                "label": "person",
+                "box": {"x1": 12, "y1": 10, "x2": 32, "y2": 40},
+            },
+            {
+                "label": "dog",
+                "box": {"x1": 80, "y1": 10, "x2": 100, "y2": 40},
+            },
+        ],
+    )
+    store.update_native_incident_state(
+        int(event["id"]),
+        {
+            "implementation": "native_observations",
+            "state": "complete",
+            "incident_id": opened["id"],
+            "frame_width": 200,
+            "frame_height": 100,
+            "updated_at": "2026-09-20T12:00:02+00:00",
+        },
+        [{"label": "person"}, {"label": "dog"}],
+    )
+    samples = incident_observation_samples(
+        store,
+        store.get(int(event["id"])),
+        {"implementation": "native_observations", "incident_id": opened["id"]},
+    )
+    assert len(samples) == 2
+    assert {obj["label"] for obj in samples[1]["objects"]} == {"person", "dog"}
+    assert not any("box_history" in obj for sample in samples for obj in sample["objects"])
+
+
 def test_admission_without_native_track_ids(tmp_path):
     activity = _activity(tmp_path)
     objects = [_detected("person", 12), _detected("dog", 90)]

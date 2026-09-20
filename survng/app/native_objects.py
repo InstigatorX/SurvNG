@@ -1,7 +1,8 @@
-"""Shared native object identity and incident inventory state.
+"""Shared native object association and incident inventory state.
 
-The registry owns temporal identity/confirmation/history once. Activity policy
-and incident inventory consume that state independently.
+The registry owns soft spatial/temporal association, confirmation, and short live
+history. Activity policy and incident inventory consume that state independently.
+Native tracker IDs are never used as association keys.
 """
 from __future__ import annotations
 
@@ -81,7 +82,7 @@ def _association_score(previous, current):
 
 
 class NativeObjectRegistry:
-    """Single owner for native object identity, confirmation, and history."""
+    """Soft spatial/label association, confirmation, and short live history."""
 
     def __init__(self, camera_id, config):
         self.camera_id = camera_id
@@ -89,12 +90,12 @@ class NativeObjectRegistry:
         self.tracks: dict[NativeObjectKey, dict] = {}
         self.counts = Counter()
         self._next_track_id = 1
-        self._next_fallback_id = 1
+        self._next_assoc_id = 1
 
     def reset(self):
         self.tracks.clear()
         self._next_track_id = 1
-        self._next_fallback_id = 1
+        self._next_assoc_id = 1
 
     def _expire(self, now, fresh_fps):
         timeout = max(
@@ -106,13 +107,11 @@ class NativeObjectRegistry:
                 del self.tracks[key]
 
     def _key(self, obj, used):
-        native_id = obj.get("native_track_id")
-        if type(native_id) is int and native_id >= 0:
-            return ("native", native_id)
+        """Associate by compatible label and spatial overlap/nearness only."""
         label = str(obj.get("label") or "").strip()
         scored = []
         for key, track in self.tracks.items():
-            if key in used or key[0] != "fallback":
+            if key in used:
                 continue
             if not _compatible_labels(str(track.get("label") or ""), label):
                 continue
@@ -121,8 +120,8 @@ class NativeObjectRegistry:
                 scored.append((score, key))
         if scored:
             return max(scored)[1]
-        key = ("fallback", self._next_fallback_id)
-        self._next_fallback_id += 1
+        key = ("assoc", self._next_assoc_id)
+        self._next_assoc_id += 1
         return key
 
     @staticmethod
@@ -191,15 +190,18 @@ class NativeObjectRegistry:
                 if len(self.tracks) >= self.config.native.maximum_tracks:
                     self.counts["capacity_drops"] += 1
                     continue
-                native_id = obj.get("native_track_id")
                 identity = (
-                    f"{self.camera_id}/{session}/{identity_epoch}/{native_id}"
-                    if type(native_id) is int and native_id >= 0
-                    else f"{self.camera_id}/{session}/{identity_epoch}/fallback-{key[1]}"
+                    f"{self.camera_id}/{session}/{identity_epoch}/assoc-{key[1]}"
                 )
                 track = {
                     "track_id": self._next_track_id,
-                    "native_track_id": native_id if type(native_id) is int and native_id >= 0 else None,
+                    # Passthrough only — never used for association or lifecycle.
+                    "native_track_id": (
+                        obj.get("native_track_id")
+                        if type(obj.get("native_track_id")) is int
+                        and obj.get("native_track_id") >= 0
+                        else None
+                    ),
                     "native_identity": identity,
                     "label": label,
                     "first_seen": iso(epoch),
@@ -214,8 +216,7 @@ class NativeObjectRegistry:
                 }
                 self.tracks[key] = track
                 self._next_track_id += 1
-                if key[0] == "fallback":
-                    self.counts["fallback_identities"] += 1
+                self.counts["associations"] += 1
             if now - track["last_monotonic"] > max(
                 self.config.native.maximum_observation_age_seconds,
                 3 / max(.001, fresh_fps),

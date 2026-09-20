@@ -1,7 +1,8 @@
 """Bounded native incident cover selection from existing recordings.
 
-Native tracks nominate frames. Registration checks geometry, and a bounded native
-CPU detector confirms the subject in the full-resolution recording before promotion.
+Observation bags nominate frames. Registration checks geometry, and a bounded
+native CPU detector confirms the subject in the full-resolution recording before
+promotion.
 """
 from __future__ import annotations
 
@@ -129,16 +130,105 @@ def _object_identity_key(item):
     return None
 
 
-def concurrent_scene_objects(tracking, epoch, *, tolerance=0.5):
-    """Inventory boxes present near ``epoch`` from persisted track history.
+def _observation_epoch(value) -> float | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
 
-    Preserves each track's zone admission fields so cover matching can promote
+
+def incident_observation_samples(events, event, tracking=None):
+    """Load durable observation bags for cover nomination.
+
+    Prefers incident_observations. Falls back to legacy track box_history only
+    for historical events that never received the multi-object incident tables.
+    """
+    samples = []
+    incident_id = None
+    if isinstance(tracking, dict):
+        try:
+            incident_id = int(tracking.get("incident_id") or 0) or None
+        except (TypeError, ValueError):
+            incident_id = None
+    if incident_id is None and hasattr(events, "incident_for_event"):
+        try:
+            incident = events.incident_for_event(int(event["id"]))
+        except (TypeError, ValueError, KeyError):
+            incident = None
+        if incident is not None:
+            incident_id = int(incident["id"])
+    if incident_id is not None and hasattr(events, "list_incident_observations"):
+        for item in events.list_incident_observations(incident_id):
+            epoch = _observation_epoch(item.get("observed_at"))
+            objects = [
+                deepcopy(obj)
+                for obj in (item.get("objects") or ())
+                if isinstance(obj, dict) and obj.get("label") and obj.get("box")
+            ]
+            if epoch is None or not objects:
+                continue
+            samples.append({"epoch": epoch, "objects": objects})
+    if samples:
+        return samples
+    # Legacy recovery path for pre-mole-1 rows.
+    for track in (tracking or {}).get("tracks") or ():
+        if not isinstance(track, dict) or not track.get("label"):
+            continue
+        for point in track.get("box_history") or ():
+            if not point or len(point) < 5:
+                continue
+            try:
+                epoch, x1, y1, x2, y2 = point[:5]
+                epoch = float(epoch)
+            except (TypeError, ValueError):
+                continue
+            samples.append(
+                {
+                    "epoch": epoch,
+                    "objects": [
+                        {
+                            "label": track["label"],
+                            "confidence": track.get(
+                                "max_confidence", track.get("confidence", 0)
+                            ),
+                            "track_id": track.get("track_id"),
+                            "episode_identity": track.get("episode_identity"),
+                            "native_identity": track.get("native_identity"),
+                            "native_track_id": track.get("native_track_id"),
+                            "incident_eligible": track.get("incident_eligible")
+                            is not False,
+                            "zones": deepcopy(track.get("zones") or []),
+                            "zone_admission_reason": track.get("zone_admission_reason"),
+                            "box": dict(zip(("x1", "y1", "x2", "y2"), (x1, y1, x2, y2))),
+                        }
+                    ],
+                }
+            )
+    return samples
+
+
+def concurrent_scene_objects(tracking, epoch, *, tolerance=0.5, samples=None):
+    """Inventory boxes present near ``epoch`` from observation bags.
+
+    Preserves each object's zone admission fields so cover matching can promote
     outside-zone peers as witnesses without admitting them.
     """
-    from .native_episode_identity import (
-        annotate_tracks_with_episode_identities,
-        best_objects_by_episode_identity,
-    )
+    from .native_episode_identity import best_objects_by_episode_identity
+
+    objects = []
+    for sample in samples or ():
+        sample_epoch = float(sample.get("epoch") or 0)
+        if abs(sample_epoch - epoch) > tolerance:
+            continue
+        for item in sample.get("objects") or ():
+            if not isinstance(item, dict) or not item.get("label") or not item.get("box"):
+                continue
+            objects.append(deepcopy(item))
+    if objects:
+        return best_objects_by_episode_identity(objects)
+
+    # Legacy track-history path for recovered historical events.
+    from .native_episode_identity import annotate_tracks_with_episode_identities
 
     width = tracking.get("frame_width", 0)
     height = tracking.get("frame_height", 0)
@@ -147,7 +237,6 @@ def concurrent_scene_objects(tracking, epoch, *, tolerance=0.5):
         frame_width=width,
         frame_height=height,
     )
-    objects = []
     for track in tracks:
         if not isinstance(track, dict) or not track.get("label"):
             continue
@@ -181,6 +270,7 @@ def enrich_candidate_objects(
     *,
     live_size=None,
     tolerance=0.5,
+    samples=None,
 ):
     """Merge live nomination boxes with concurrent census peers at ``epoch``.
 
@@ -193,7 +283,9 @@ def enrich_candidate_objects(
         for item in (candidate_objects or ())
         if isinstance(item, dict) and item.get("label") and item.get("box")
     ]
-    census = concurrent_scene_objects(tracking, epoch, tolerance=tolerance)
+    census = concurrent_scene_objects(
+        tracking, epoch, tolerance=tolerance, samples=samples
+    )
     track_width = tracking.get("frame_width") or 0
     track_height = tracking.get("frame_height") or 0
     if (
@@ -217,19 +309,21 @@ def enrich_candidate_objects(
         key = _object_identity_key(item)
         if key is None or key in by_id:
             continue
-        by_id[key] = item
         order.append(key)
+        by_id[key] = item
     merged = []
     for entry in order:
-        merged.append(entry if isinstance(entry, dict) else by_id[entry])
-    merged.sort(
+        if isinstance(entry, dict):
+            merged.append(entry)
+        else:
+            merged.append(by_id[entry])
+    return sorted(
+        merged,
         key=lambda item: (
-            item.get("incident_eligible") is not False,
-            float(item.get("confidence") or 0.0),
+            0 if item.get("incident_eligible") is not False else 1,
+            str(item.get("label") or ""),
         ),
-        reverse=True,
     )
-    return merged
 
 
 def shortlist(candidates, limit=3):
@@ -242,20 +336,28 @@ def shortlist(candidates, limit=3):
     return selected
 
 
-def calibration_epochs(tracking, limit=9):
-    """Select bounded track-history timestamps independently of cover images."""
+def calibration_epochs(tracking, limit=9, samples=None):
+    """Select bounded observation timestamps independently of cover images."""
     epochs = []
-    for track in tracking.get("tracks") or []:
-        for sample in track.get("box_history") or []:
-            if len(sample) < 5:
-                continue
-            values = sample[:5]
-            if not all(isinstance(value, (int, float)) and np.isfinite(value) for value in values):
-                continue
-            epoch, x1, y1, x2, y2 = values
-            if x2 <= x1 or y2 <= y1:
-                continue
-            epochs.append(float(epoch))
+    for sample in samples or ():
+        try:
+            epoch = float(sample.get("epoch"))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(epoch):
+            epochs.append(epoch)
+    if not epochs:
+        for track in tracking.get("tracks") or []:
+            for sample in track.get("box_history") or []:
+                if len(sample) < 5:
+                    continue
+                values = sample[:5]
+                if not all(isinstance(value, (int, float)) and np.isfinite(value) for value in values):
+                    continue
+                epoch, x1, y1, x2, y2 = values
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                epochs.append(float(epoch))
     ordered = sorted(set(epochs))
     if len(ordered) <= limit:
         return ordered
@@ -428,27 +530,42 @@ class NativeEvidenceService:
             maximum_width=maximum_width,
         )
 
-    def recorded_candidates(self, event, tracking, retained=()):
-        # Replay metadata nominates a bounded set of timestamps. Native pixels
+    def recorded_candidates(self, event, tracking, retained=(), samples=None):
+        # Observation bags nominate a bounded set of timestamps. Native pixels
         # are unavailable for old incidents, so use recorded live evidence.
-        from .native_episode_identity import annotate_tracks_with_episode_identities
-
         width, height = tracking.get("frame_width", 0), tracking.get("frame_height", 0)
         if not width or not height:
             return [], False
-        nominated = {}
-        tracks, _identities, _counts = annotate_tracks_with_episode_identities(
-            tracking.get("tracks") or [],
-            frame_width=width,
-            frame_height=height,
+        observation_samples = list(
+            samples
+            if samples is not None
+            else incident_observation_samples(self.events, event, tracking)
         )
-        for track in tracks:
-            for sample in track.get("box_history") or []:
-                epoch, x1, y1, x2, y2 = sample[:5]
-                area = max(0, x2-x1)*max(0, y2-y1)
-                nominated[int(epoch)] = max(nominated.get(int(epoch), (0, epoch)), (area, epoch))
+        nominated = {}
+        for sample in observation_samples:
+            epoch = float(sample["epoch"])
+            area = 0.0
+            for obj in sample.get("objects") or ():
+                box = obj.get("box") or {}
+                try:
+                    area = max(
+                        area,
+                        max(0.0, float(box["x2"]) - float(box["x1"]))
+                        * max(0.0, float(box["y2"]) - float(box["y1"])),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+            nominated[int(epoch)] = max(
+                nominated.get(int(epoch), (0, epoch)),
+                (area, epoch),
+            )
         ordered = sorted(v[1] for v in nominated.values())
-        epochs = [ordered[i] for i in sorted(set(int(x) for x in np.linspace(0,len(ordered)-1,min(12,len(ordered)))))] if ordered else []
+        epochs = [
+            ordered[i]
+            for i in sorted(
+                set(int(x) for x in np.linspace(0, len(ordered) - 1, min(12, len(ordered))))
+            )
+        ] if ordered else []
         candidates = []
         missing = False
         for epoch in epochs:
@@ -456,8 +573,12 @@ class NativeEvidenceService:
                 continue
             if self._closed:
                 break
-            # Preserve zone admission so outside-zone peers stay witnesses.
-            objects = concurrent_scene_objects(tracking, epoch, tolerance=0.5)
+            objects = concurrent_scene_objects(
+                tracking,
+                epoch,
+                tolerance=0.5,
+                samples=observation_samples,
+            )
             if not objects:
                 continue
             live = self.read_frame(event["camera_id"], epoch, "live")
@@ -470,15 +591,20 @@ class NativeEvidenceService:
                 candidates.append(Candidate(epoch, live, objects, score))
         return candidates, missing
 
-    def replay_calibration_observations(self, event, tracking):
-        """Detect on bounded main-stream timestamps chosen from full track history."""
+    def replay_calibration_observations(self, event, tracking, samples=None):
+        """Detect on bounded main-stream timestamps chosen from observations."""
         width = tracking.get("frame_width", 0)
         height = tracking.get("frame_height", 0)
         if not width or not height:
             return [], False
+        observation_samples = list(
+            samples
+            if samples is not None
+            else incident_observation_samples(self.events, event, tracking)
+        )
         observations = []
         pending = False
-        for epoch in calibration_epochs(tracking):
+        for epoch in calibration_epochs(tracking, samples=observation_samples):
             if self._closed:
                 break
             main = self.read_frame(event["camera_id"], epoch, "main")
@@ -606,10 +732,15 @@ class NativeEvidenceService:
         _, tracking = event_tracking(event)
         if not is_native_tracking_implementation(tracking.get("implementation")):
             return {"event_id": event_id, "status": "not_native"}
+        observation_samples = incident_observation_samples(
+            self.events, event, tracking
+        )
         pending = False
         retained = list(candidates or [])
         if recorded_history or not retained:
-            recorded, pending = self.recorded_candidates(event, tracking, retained)
+            recorded, pending = self.recorded_candidates(
+                event, tracking, retained, samples=observation_samples
+            )
             candidates = [*retained, *recorded]
         else:
             candidates = retained
@@ -645,10 +776,14 @@ class NativeEvidenceService:
 
         # Main and live streams may have independent recording clocks. Cover
         # selection keeps only three live images, which is intentionally too
-        # small for trajectory calibration. Calibrate from the full persisted
-        # track history instead, then rerun cover promotion at the corrected
-        # main-stream timestamp.
-        epochs = calibration_epochs(tracking) if calibrate else []
+        # small for trajectory calibration. Calibrate from the durable
+        # observation sequence instead, then rerun cover promotion at the
+        # corrected main-stream timestamp.
+        epochs = (
+            calibration_epochs(tracking, samples=observation_samples)
+            if calibrate
+            else []
+        )
         details["calibration"] = "verified" if same_fov_aligned else "unverified"
         if calibrate and (len(epochs) < 5 or epochs[-1] - epochs[0] < 3):
             details["calibration"] = "insufficient_history"
@@ -656,7 +791,7 @@ class NativeEvidenceService:
         if calibrate:
             try:
                 timing_observations, calibration_pending = self.replay_calibration_observations(
-                    event, tracking
+                    event, tracking, samples=observation_samples
                 )
             except Exception as exc:
                 details["calibration"] = "unavailable"
@@ -699,6 +834,7 @@ class NativeEvidenceService:
                 tracking,
                 candidate.epoch,
                 live_size=live_size,
+                samples=observation_samples,
             )
             candidate = Candidate(
                 candidate.epoch,
