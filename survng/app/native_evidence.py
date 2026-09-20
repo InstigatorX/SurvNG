@@ -269,11 +269,20 @@ class NativeEvidenceService:
     def recorded_candidates(self, event, tracking, retained=()):
         # Replay metadata nominates a bounded set of timestamps. Native pixels
         # are unavailable for old incidents, so use recorded live evidence.
+        from .native_episode_identity import (
+            annotate_tracks_with_episode_identities,
+            best_objects_by_episode_identity,
+        )
+
         width, height = tracking.get("frame_width", 0), tracking.get("frame_height", 0)
         if not width or not height:
             return [], False
         nominated = {}
-        tracks = tracking.get("tracks") or []
+        tracks, _identities, _counts = annotate_tracks_with_episode_identities(
+            tracking.get("tracks") or [],
+            frame_width=width,
+            frame_height=height,
+        )
         for track in tracks:
             for sample in track.get("box_history") or []:
                 epoch, x1, y1, x2, y2 = sample[:5]
@@ -296,7 +305,17 @@ class NativeEvidenceService:
                 point = min(history, key=lambda x: abs(x[0]-epoch))
                 if abs(point[0]-epoch) > 0.5:
                     continue
-                objects.append({"label": track["label"], "confidence": track.get("max_confidence", track.get("confidence", 0)), "track_id": track.get("track_id"), "incident_eligible": True, "box": dict(zip(("x1","y1","x2","y2"), point[1:5]))})
+                objects.append({
+                    "label": track["label"],
+                    "confidence": track.get("max_confidence", track.get("confidence", 0)),
+                    "track_id": track.get("track_id"),
+                    "episode_identity": track.get("episode_identity"),
+                    "incident_eligible": True,
+                    "box": dict(zip(("x1","y1","x2","y2"), point[1:5])),
+                })
+            # One box per episode identity on this frame — concurrent people, not
+            # every fragment track that ever belonged to the episode.
+            objects = best_objects_by_episode_identity(objects)
             live = self.read_frame(event["camera_id"], epoch, "live")
             if live is None:
                 missing = True

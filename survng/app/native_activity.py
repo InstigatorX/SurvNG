@@ -647,12 +647,24 @@ class NativeActivity:
     ):
         if self.event_id is None:
             return
+        from .native_episode_identity import (
+            annotate_objects_with_episode_identities,
+            annotate_tracks_with_episode_identities,
+        )
+
         tracks = self.inventory.tracking_tracks()
+        annotated_tracks, identities, counts = annotate_tracks_with_episode_identities(
+            tracks,
+            frame_width=self.dimensions[0],
+            frame_height=self.dimensions[1],
+        )
         payload = {
             "implementation": "gvatrack",
             "state": state,
             "sample_fps": self.fresh_detection_fps,
-            "tracks": tracks,
+            "tracks": annotated_tracks,
+            "episode_identities": identities,
+            "episode_counts": counts,
             "updated_at": self.last_motion_at,
             "frame_width": self.dimensions[0],
             "frame_height": self.dimensions[1],
@@ -665,10 +677,16 @@ class NativeActivity:
         }
         if state != "active":
             payload["completion_reason"] = completion_reason or "unknown"
+        inventory_objects = annotate_objects_with_episode_identities(
+            self.inventory.objects(),
+            annotated_tracks,
+            frame_width=self.dimensions[0],
+            frame_height=self.dimensions[1],
+        )
         self.events.update_native_incident_state(
             self.event_id,
             payload,
-            self.inventory.objects(),
+            inventory_objects,
         )
         self.publish(
             "object_tracking",

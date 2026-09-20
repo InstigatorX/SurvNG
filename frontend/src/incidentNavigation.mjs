@@ -27,8 +27,9 @@ export function incidentSelectionHref(currentHref, eventId, basePath = "") {
 }
 
 function objectHasDetectionFrame(object) {
-  return Number(object?.detection_frame_width) > 0
-    && Number(object?.detection_frame_height) > 0;
+  const width = Number(object?.detection_frame_width);
+  const height = Number(object?.detection_frame_height);
+  return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
 }
 
 function detectionFrameFromObject(object) {

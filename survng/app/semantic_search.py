@@ -148,7 +148,18 @@ def semantic_query_plan(query: str) -> SemanticQueryPlan:
 
 
 def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return actual labeled detections, excluding motion/audit metadata."""
+    """Return labeled detections for semantic evidence.
+
+    Legacy behavior keeps cover-visible objects. When episode identities are
+    available (or can be derived from native tracks), collapse fragment tracks
+    to one best object per identity so census matches concurrent people rather
+    than raw track ID cardinality.
+    """
+    from .native_episode_identity import (
+        annotate_objects_with_episode_identities,
+        best_objects_by_episode_identity,
+    )
+
     raw_objects: object = event.get("objects")
     if not isinstance(raw_objects, list):
         try:
@@ -157,11 +168,37 @@ def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
             raw_objects = []
     if not isinstance(raw_objects, list):
         return []
-    return [
+    labeled = [
         item for item in raw_objects
         if isinstance(item, dict)
         and str(item.get("label") or "").strip()
-        and item.get("snapshot_visible") is not False
+        and not item.get("status")
+    ]
+    tracking = next(
+        (
+            item.get("object_tracking")
+            for item in raw_objects
+            if isinstance(item, dict) and item.get("status") == "object_tracking"
+        ),
+        None,
+    )
+    if not isinstance(tracking, dict):
+        tracking = event.get("object_tracking") if isinstance(event.get("object_tracking"), dict) else None
+    tracks = tracking.get("tracks") if isinstance(tracking, dict) else None
+    if isinstance(tracks, list) and tracks:
+        labeled = annotate_objects_with_episode_identities(
+            labeled,
+            tracks,
+            frame_width=tracking.get("frame_width") if isinstance(tracking, dict) else None,
+            frame_height=tracking.get("frame_height") if isinstance(tracking, dict) else None,
+        )
+    if any(item.get("episode_identity") for item in labeled):
+        # Identity roster: include the best crop per identity even when only one
+        # fragment was promoted onto the cover raster.
+        return best_objects_by_episode_identity(labeled)
+    return [
+        item for item in labeled
+        if item.get("snapshot_visible") is not False
     ]
 
 

@@ -37,6 +37,74 @@ class SemanticIndexTest(unittest.TestCase):
             [visible],
         )
 
+    def test_semantic_objects_collapse_episode_identity_fragments(self) -> None:
+        tracks = [
+            {
+                "label": "person",
+                "track_id": 400,
+                "confidence": 0.9,
+                "max_confidence": 0.9,
+                "detection_frame_width": 896,
+                "detection_frame_height": 512,
+                "box_history": [
+                    [100.0, 260, 140, 330, 250],
+                    [108.0, 270, 140, 340, 255],
+                ],
+            },
+            {
+                "label": "person",
+                "track_id": 415,
+                "confidence": 0.98,
+                "max_confidence": 0.98,
+                "detection_frame_width": 896,
+                "detection_frame_height": 512,
+                "box_history": [[112.0, 280, 135, 350, 250]],
+            },
+            {
+                "label": "person",
+                "track_id": 401,
+                "confidence": 0.92,
+                "max_confidence": 0.92,
+                "detection_frame_width": 896,
+                "detection_frame_height": 512,
+                "box_history": [[100.0, 80, 130, 120, 180]],
+            },
+        ]
+        objects = [
+            {
+                "label": "person",
+                "track_id": 400,
+                "confidence": 0.9,
+                "snapshot_visible": True,
+                "box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+            },
+            {
+                "label": "person",
+                "track_id": 415,
+                "confidence": 0.98,
+                "snapshot_visible": False,
+                "box": {"x1": 5, "y1": 6, "x2": 7, "y2": 8},
+            },
+            {
+                "label": "person",
+                "track_id": 401,
+                "confidence": 0.92,
+                "snapshot_visible": False,
+                "box": {"x1": 9, "y1": 10, "x2": 11, "y2": 12},
+            },
+            {
+                "status": "object_tracking",
+                "object_tracking": {
+                    "tracks": tracks,
+                    "frame_width": 896,
+                    "frame_height": 512,
+                },
+            },
+        ]
+        roster = semantic_event_objects({"objects": objects})
+        self.assertEqual(len(roster), 2)
+        self.assertEqual({item["track_id"] for item in roster}, {400, 401})
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.database_path = Path(self.temporary.name) / "events.db"

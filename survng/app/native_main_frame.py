@@ -292,6 +292,8 @@ class NativeMainFrameVerifier:
         cancelled=None,
     ):
         """Match projected inventory objects onto one verified main raster."""
+        from .native_episode_identity import best_objects_by_episode_identity
+
         if cancelled is not None and cancelled.is_set():
             return [deepcopy(primary)] if primary is not None else []
         if detections is None:
@@ -304,6 +306,8 @@ class NativeMainFrameVerifier:
         used_detection_ids = set()
 
         def identity(item):
+            if item.get("episode_identity"):
+                return ("episode", str(item["episode_identity"]))
             if item.get("track_id") is not None:
                 return ("track", item.get("track_id"))
             if item.get("native_identity"):
@@ -315,6 +319,14 @@ class NativeMainFrameVerifier:
                     item.get("native_track_id"),
                 )
             return None
+
+        # Match at most one box per episode identity on this cover frame.
+        scene_objects = list(aligned_objects or ())
+        if any(
+            isinstance(item, dict) and item.get("episode_identity")
+            for item in scene_objects
+        ):
+            scene_objects = best_objects_by_episode_identity(scene_objects)
 
         primary_key = identity(primary) if primary is not None else None
         if primary is not None:
@@ -330,7 +342,7 @@ class NativeMainFrameVerifier:
             )
             matched.append(item)
 
-        for obj in aligned_objects or ():
+        for obj in scene_objects:
             if not isinstance(obj, dict) or not obj.get("label") or not obj.get("box"):
                 continue
             key = identity(obj)
