@@ -47,6 +47,8 @@ so on). Several participants can share one incident for its whole time range.
 An **incident** is a stretch of related activity SurvNG kept for review. It has
 a start and end time, the participants that appeared during that span, an ordered
 sequence of observations, a representative picture, and links into recorded video.
+Incidents are stored as first-class records; they are not invented by grouping
+nearby events after the fact.
 
 ## Event
 

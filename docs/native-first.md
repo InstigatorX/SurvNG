@@ -60,7 +60,11 @@ An **incident** is the durable unit: one camera, an open `[start, end]` time ran
 multi-object **participants**, and an ordered sequence of **observations** (per-frame
 detection bags). Lifecycle ownership lives in the `incidents` /
 `incident_observations` tables. A thin compatibility `events` row remains so existing
-list/detail APIs keep working; it no longer stores `object_tracking` as truth.
+clients that key on event IDs keep working; it no longer stores `object_tracking` as
+truth. List/detail/search APIs read durable incidents first. The historical
+45-second event gap-group remains **legacy synthesis only** for rows that never
+received an `incidents` record — it is no longer the product definition of an
+incident.
 
 - Opening records every currently credible detection as a participant (no
   primary/context split for membership).

@@ -18,43 +18,55 @@ from survng.app.manager_access import ManagerAccessCoordinator
 
 
 class IncidentQueryRouterTest(unittest.TestCase):
-    def test_recent_feed_scans_past_grouping_boundary_before_paging(self) -> None:
-        def row(event_id: int, camera_id: str, second: int) -> dict:
-            return {
-                "id": event_id,
-                "camera_id": camera_id,
-                "kind": "motion",
-                "objects_json": "[]",
-                "created_at": (
-                    datetime(2026, 7, 30, tzinfo=timezone.utc)
-                    + timedelta(seconds=second)
-                ).isoformat(),
+    def test_recent_feed_prefers_durable_incidents_over_gap_groups(self) -> None:
+        durable = [
+            {
+                "id": 7,
+                "camera_id": "newer",
+                "start_at": "2026-07-30T02:46:38+00:00",
+                "end_at": "2026-07-30T02:46:50+00:00",
+                "state": "complete",
+                "completion_reason": "complete",
+                "participants": [{"label": "person"}],
+                "seed_event_id": 1001,
+                "observation_count": 2,
+                "snapshot_path": "",
             }
-
-        # The older incident remains active more recently than the newer one.
-        # Its first 499 events fill the initial compact page, while the event
-        # that establishes its true start is immediately across the page
-        # boundary. The scan must continue because it has not crossed the
-        # 45-second grouping gap.
-        older_events = [
-            row(1000 - offset, "older", 9999 - offset)
-            for offset in range(499)
         ]
-        newer_incident = row(1001, "newer", 9998)
-        first_batch = [older_events[0], newer_incident, *older_events[1:]]
-        final_older_event = row(501, "older", 9500)
-        calls: list[tuple[int, int | None]] = []
-
-        def recent_compact(limit: int, _before_created_at=None, before_id=None, *_args):
-            calls.append((limit, before_id))
-            if before_id is None:
-                return first_batch
-            if before_id == 502:
-                return [final_older_event]
-            return []
+        legacy_rows = [
+            {
+                "id": 500,
+                "camera_id": "older",
+                "kind": "motion",
+                "objects_json": '[{"label":"car"}]',
+                "created_at": "2026-07-30T02:30:00+00:00",
+            },
+            {
+                "id": 501,
+                "camera_id": "older",
+                "kind": "motion",
+                "objects_json": '[{"label":"car"}]',
+                "created_at": "2026-07-30T02:30:10+00:00",
+            },
+        ]
 
         manager = SimpleNamespace(
-            events=SimpleNamespace(recent_compact=recent_compact)
+            events=SimpleNamespace(
+                list_incidents=lambda **kwargs: durable,
+                get_many=lambda ids: [
+                    {
+                        "id": 1001,
+                        "camera_id": "newer",
+                        "kind": "motion",
+                        "objects_json": '[{"label":"person"}]',
+                        "created_at": "2026-07-30T02:46:38+00:00",
+                    }
+                ]
+                if 1001 in {int(value) for value in ids}
+                else [],
+                recent_compact=lambda *args, **kwargs: legacy_rows,
+                seed_event_ids_with_incidents=lambda ids: {1001},
+            )
         )
 
         page, has_more, scanned = IncidentQueryService.recent_filtered_summaries(
@@ -65,12 +77,10 @@ class IncidentQueryRouterTest(unittest.TestCase):
             event_type="all",
         )
 
-        self.assertEqual([item["camera_id"] for item in page], ["newer"])
+        self.assertEqual(page[0]["camera_id"], "newer")
+        self.assertEqual(page[0]["durable_incident_id"], 7)
         self.assertTrue(has_more)
         self.assertEqual([item["camera_id"] for item in scanned], ["newer", "older"])
-        self.assertEqual(scanned[1]["id"], "incident-older-501")
-        self.assertEqual(scanned[1]["event_count"], 500)
-        self.assertEqual(len(calls), 2)
 
     def test_search_keeps_full_day_facets_when_results_are_camera_filtered(self) -> None:
         rows = [

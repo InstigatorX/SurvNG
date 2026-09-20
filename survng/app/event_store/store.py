@@ -1969,6 +1969,110 @@ class EventStore(
             ).fetchall()
         return [self._observation_view(row) for row in rows]
 
+    def list_incidents(
+        self,
+        limit: int = 200,
+        *,
+        camera_id: str = "",
+        before_start_at: str | None = None,
+        before_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return durable incidents newest-first for API list/feed surfaces."""
+        bounded = max(1, min(int(limit), 5000))
+        camera = str(camera_id or "").strip()
+        clauses = ["1 = 1"]
+        params: list[Any] = []
+        if camera:
+            clauses.append("camera_id = ?")
+            params.append(camera)
+        if before_start_at is not None and before_id is not None:
+            clauses.append("(start_at < ? or (start_at = ? and id < ?))")
+            params.extend([before_start_at, before_start_at, int(before_id)])
+        params.append(bounded)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select incidents.*,
+                       (
+                           select count(*)
+                           from incident_observations
+                           where incident_observations.incident_id = incidents.id
+                       ) as observation_count
+                from incidents
+                where {' and '.join(clauses)}
+                order by start_at desc, id desc
+                limit ?
+                """,
+                params,
+            ).fetchall()
+        return [
+            self._incident_view(
+                row,
+                observation_count=int(row["observation_count"] or 0),
+            )
+            for row in rows
+        ]
+
+    def incidents_between(
+        self,
+        start_at: str,
+        end_at: str,
+        camera_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return durable incidents overlapping an inclusive UTC window."""
+        camera = str(camera_id or "").strip()
+        clauses = [
+            "start_at < ?",
+            "(end_at is null or end_at >= ?)",
+        ]
+        params: list[Any] = [end_at, start_at]
+        if camera:
+            clauses.append("camera_id = ?")
+            params.append(camera)
+        params.append(self.MAX_COMPACT_WINDOW_ROWS)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select incidents.*,
+                       (
+                           select count(*)
+                           from incident_observations
+                           where incident_observations.incident_id = incidents.id
+                       ) as observation_count
+                from incidents
+                where {' and '.join(clauses)}
+                order by start_at desc, id desc
+                limit ?
+                """,
+                params,
+            ).fetchall()
+        return [
+            self._incident_view(
+                row,
+                observation_count=int(row["observation_count"] or 0),
+            )
+            for row in rows
+        ]
+
+    def seed_event_ids_with_incidents(self, event_ids: list[int]) -> set[int]:
+        """Return seed event ids that already have a durable incident row."""
+        ids = [int(value) for value in event_ids if int(value) > 0]
+        if not ids:
+            return set()
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select seed_event_id from incidents
+                where seed_event_id in ({','.join('?' for _ in ids)})
+                """,
+                ids,
+            ).fetchall()
+        return {
+            int(row["seed_event_id"])
+            for row in rows
+            if row["seed_event_id"] is not None
+        }
+
     @staticmethod
     def _incident_view(row, *, observation_count: int = 0) -> dict[str, Any]:
         try:

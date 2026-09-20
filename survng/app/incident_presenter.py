@@ -188,10 +188,124 @@ def _best_incident_event(events: list[dict]) -> dict:
 
 
 def _incident_rows(rows: list[dict], gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> list[dict]:
+    """Legacy synthesis: gap-group event rows into incident summaries.
+
+    New native incidents should use ``summary_from_durable`` instead. Gap
+    grouping remains only for historical events that never received an
+    ``incidents`` row.
+    """
     return [
         _incident_row(camera_id, events)
         for camera_id, events in incident_event_groups(rows, gap_seconds)
     ]
+
+
+def summary_from_durable(incident: dict, seed_event: dict | None = None) -> dict:
+    """Build the public incident summary from a durable incidents-table row.
+
+    When a seed event exists it supplies media/objects for the representative
+    card. Time range, state, participants, and identity come from the durable
+    incident so gap-grouping is not the definition of the incident.
+    """
+    camera_id = str(incident.get("camera_id") or "")
+    seed = dict(seed_event) if isinstance(seed_event, dict) else {}
+    seed_id = incident.get("seed_event_id")
+    if seed_id is None:
+        seed_id = seed.get("id")
+    try:
+        seed_id = int(seed_id) if seed_id is not None else 0
+    except (TypeError, ValueError):
+        seed_id = 0
+    participants = incident.get("participants") or []
+    if not isinstance(participants, list):
+        participants = []
+    labels = sorted(
+        {
+            str(item.get("label"))
+            for item in participants
+            if isinstance(item, dict) and item.get("label")
+        }
+    )
+    zones = sorted(
+        {
+            str(zone)
+            for item in participants
+            if isinstance(item, dict)
+            for zone in item.get("zones", [])
+            if zone
+        }
+    )
+    if not labels and seed:
+        labels = sorted({str(label) for label in seed.get("labels", []) if label})
+        zones = sorted({str(zone) for zone in seed.get("zones", []) if zone})
+    start_at = incident.get("start_at") or seed.get("created_at")
+    end_at = incident.get("end_at") or incident.get("updated_at") or start_at
+    start_epoch = event_epoch({"created_at": start_at})
+    last_epoch = event_epoch({"created_at": end_at})
+    if last_epoch < start_epoch:
+        last_epoch = start_epoch
+    representative = _incident_event_payload(seed) if seed else {
+        "id": seed_id or None,
+        "camera_id": camera_id,
+        "kind": "motion",
+        "created_at": start_at,
+        "objects": [
+            {
+                key: item[key]
+                for key in ("label", "confidence", "box", "zones", "track_id")
+                if key in item
+            }
+            for item in participants
+            if isinstance(item, dict) and item.get("label")
+        ],
+        "labels": labels,
+        "zones": zones,
+        "has_objects": bool(labels),
+    }
+    events = [representative] if seed or representative.get("id") else []
+    return {
+        **representative,
+        "id": (
+            stable_incident_id(camera_id, seed_id)
+            if seed_id > 0
+            else f"incident-{int(incident['id'])}"
+        ),
+        "incident_id": (
+            stable_incident_key(camera_id, seed_id)
+            if seed_id > 0
+            else str(int(incident["id"]))
+        ),
+        "durable_incident_id": int(incident["id"]),
+        "representative_event_id": seed_id or None,
+        "camera_id": camera_id,
+        "kind": "motion",
+        "created_at": representative.get("created_at") or start_at,
+        "start_at": start_at,
+        "end_at": end_at,
+        "start_epoch": start_epoch,
+        "last_epoch": last_epoch,
+        "duration_seconds": max(0.0, last_epoch - start_epoch),
+        "event_count": max(1, len(events)),
+        "motion_observation_count": 0,
+        "object_event_count": 1 if labels else 0,
+        "trigger_source": seed.get("trigger_source", "camera"),
+        "has_objects": bool(labels),
+        "labels": labels,
+        "zones": zones,
+        "events": events,
+        "motion_observations": [],
+        "object_tracking": seed.get("object_tracking"),
+        "camera_semantics": seed.get("camera_semantics") or {"reports": []},
+        "state": incident.get("state"),
+        "completion_reason": incident.get("completion_reason") or "",
+        "observation_count": int(incident.get("observation_count") or 0),
+        "participants": participants,
+        "snapshot_path": (
+            "available"
+            if incident.get("snapshot_path") or seed.get("snapshot_path")
+            else ""
+        ),
+    }
 
 
 def _incident_event_payload(event: dict) -> dict:

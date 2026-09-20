@@ -23,6 +23,7 @@ from .incident_presenter import (
     _incident_list_payload,
     _incident_row,
     _incident_rows,
+    summary_from_durable,
 )
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
@@ -137,7 +138,11 @@ def _incident_page_boundary_is_closed(
 
 
 class IncidentQueryService:
-    """Read, group, hydrate, and present incidents for one manager generation."""
+    """Read, hydrate, and present incidents for one manager generation.
+
+    Durable ``incidents`` rows are the product definition. Gap-grouping remains
+    only as legacy synthesis for events that never received an incidents row.
+    """
 
     @staticmethod
     def events(manager: AppManager, limit: int = 100) -> list[dict[str, Any]]:
@@ -151,31 +156,83 @@ class IncidentQueryService:
         ]
 
     @staticmethod
+    def _durable_summaries(
+        manager: AppManager,
+        durable_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not durable_rows:
+            return []
+        seed_ids = [
+            int(row["seed_event_id"])
+            for row in durable_rows
+            if row.get("seed_event_id")
+        ]
+        events_by_id: dict[int, dict[str, Any]] = {}
+        if seed_ids and hasattr(manager.events, "get_many"):
+            events_by_id = {
+                int(event["id"]): _event_row(event)
+                for event in manager.events.get_many(seed_ids)
+            }
+        return [
+            summary_from_durable(
+                row,
+                events_by_id.get(int(row["seed_event_id"]))
+                if row.get("seed_event_id")
+                else None,
+            )
+            for row in durable_rows
+        ]
+
+    @staticmethod
+    def _legacy_event_summaries(
+        manager: AppManager,
+        event_rows: list[dict[str, Any]],
+        gap_seconds: int,
+        *,
+        covered_seed_ids: set[int],
+    ) -> list[dict[str, Any]]:
+        legacy = [
+            row
+            for row in event_rows
+            if int(row.get("id") or 0) not in covered_seed_ids
+        ]
+        if not legacy:
+            return []
+        return _incident_rows(legacy, gap_seconds)
+
+    @staticmethod
+    def _merge_summaries(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged = [item for group in groups for item in group]
+        merged.sort(
+            key=lambda item: (
+                -float(item.get("start_epoch") or 0.0),
+                -int(item.get("durable_incident_id") or item.get("representative_event_id") or 0),
+            )
+        )
+        return merged
+
+    @staticmethod
     def recent_summaries(
         manager: AppManager, limit: int, gap_seconds: int
     ) -> list[dict[str, Any]]:
+        durable_rows = []
+        if hasattr(manager.events, "list_incidents"):
+            durable_rows = manager.events.list_incidents(limit=max(limit * 2, limit))
+        durable = IncidentQueryService._durable_summaries(manager, durable_rows)
+        covered = {
+            int(row["seed_event_id"])
+            for row in durable_rows
+            if row.get("seed_event_id")
+        }
+        # Pull a compact event page for legacy synthesis only.
         batch_size = max(500, min(5000, limit * 8))
-        compact_rows: list[dict[str, Any]] = []
-        before_created_at: str | None = None
-        before_id: int | None = None
-
-        while True:
-            batch = manager.events.recent_compact(
-                batch_size, before_created_at, before_id
-            )
-            if not batch:
-                return _incident_rows(compact_rows, gap_seconds)[:limit]
-            compact_rows.extend(_event_row(row) for row in batch)
-            summaries = _incident_rows(compact_rows, gap_seconds)
-            if len(batch) < batch_size:
-                return summaries[:limit]
-            oldest = batch[-1]
-            if _incident_page_boundary_is_closed(
-                summaries, limit, oldest, gap_seconds
-            ):
-                return summaries[:limit]
-            before_created_at = str(oldest["created_at"])
-            before_id = int(oldest["id"])
+        compact_rows = [
+            _event_row(row) for row in manager.events.recent_compact(batch_size)
+        ]
+        legacy = IncidentQueryService._legacy_event_summaries(
+            manager, compact_rows, gap_seconds, covered_seed_ids=covered
+        )
+        return IncidentQueryService._merge_summaries(durable, legacy)[:limit]
 
     @staticmethod
     def recent_filtered_summaries(
@@ -190,39 +247,34 @@ class IncidentQueryService:
         zone: str = "",
     ) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
         desired = offset + limit + 1
-        compact_rows: list[dict[str, Any]] = []
-        before_created_at: str | None = None
-        before_id: int | None = None
+        durable_rows = []
+        if hasattr(manager.events, "list_incidents"):
+            durable_rows = manager.events.list_incidents(
+                limit=max(desired * 4, 200),
+                camera_id=camera_id,
+            )
+        durable = IncidentQueryService._durable_summaries(manager, durable_rows)
+        covered = {
+            int(row["seed_event_id"])
+            for row in durable_rows
+            if row.get("seed_event_id")
+        }
         batch_size = max(500, min(5000, desired * 16))
-
-        while True:
-            batch = manager.events.recent_compact(
-                batch_size, before_created_at, before_id, camera_id
+        compact_rows = [
+            _event_row(row)
+            for row in manager.events.recent_compact(
+                batch_size, None, None, camera_id
             )
-            if not batch:
-                summaries = _incident_rows(compact_rows, gap_seconds)
-                filtered = _filter_incident_summaries(
-                    summaries, event_type, camera_id, object_label, zone
-                )
-                return filtered[offset : offset + limit], False, summaries
-            compact_rows.extend(_event_row(row) for row in batch)
-            summaries = _incident_rows(compact_rows, gap_seconds)
-            filtered = _filter_incident_summaries(
-                summaries, event_type, camera_id, object_label, zone
-            )
-            if len(batch) < batch_size:
-                return (
-                    filtered[offset : offset + limit],
-                    len(filtered) >= desired,
-                    summaries,
-                )
-            oldest = batch[-1]
-            if _incident_page_boundary_is_closed(
-                filtered, desired, oldest, gap_seconds
-            ):
-                return filtered[offset : offset + limit], True, summaries
-            before_created_at = str(oldest["created_at"])
-            before_id = int(oldest["id"])
+        ]
+        legacy = IncidentQueryService._legacy_event_summaries(
+            manager, compact_rows, gap_seconds, covered_seed_ids=covered
+        )
+        summaries = IncidentQueryService._merge_summaries(durable, legacy)
+        filtered = _filter_incident_summaries(
+            summaries, event_type, camera_id, object_label, zone
+        )
+        page = filtered[offset : offset + limit]
+        return page, len(filtered) >= desired, summaries
 
     @staticmethod
     def hydrate(
@@ -248,6 +300,21 @@ class IncidentQueryService:
             event["motion_observations"] = observations_by_event.get(event_id, [])
         hydrated: list[dict[str, Any]] = []
         for summary in summaries:
+            durable_id = summary.get("durable_incident_id")
+            if durable_id and hasattr(manager.events, "get_incident"):
+                durable = manager.events.get_incident(int(durable_id))
+                if durable is not None:
+                    seed_id = int(durable.get("seed_event_id") or 0)
+                    seed = full_events.get(seed_id)
+                    if seed is None and seed_id:
+                        fetched = manager.events.get(seed_id)
+                        seed = _event_row(fetched) if fetched is not None else None
+                    if seed is not None:
+                        seed["motion_observations"] = observations_by_event.get(
+                            seed_id, []
+                        )
+                    hydrated.append(summary_from_durable(durable, seed))
+                    continue
             events = [
                 full_events[int(event["id"])]
                 for event in summary.get("events", [])
@@ -468,6 +535,37 @@ class IncidentQueryService:
         rows = manager.events.get_many(requested_ids)
         if {int(row["id"]) for row in rows} != set(requested_ids):
             raise HTTPException(status_code=404, detail="incident events were not found")
+
+        if hasattr(manager.events, "incident_for_event"):
+            durable = None
+            for event_id in requested_ids:
+                found = manager.events.incident_for_event(event_id)
+                if found is None:
+                    continue
+                if durable is None:
+                    durable = found
+                elif int(found["id"]) != int(durable["id"]):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="event_ids do not identify one incident",
+                    )
+            if durable is not None:
+                seed = None
+                seed_id = durable.get("seed_event_id")
+                if seed_id:
+                    seed_row = next(
+                        (row for row in rows if int(row["id"]) == int(seed_id)),
+                        None,
+                    )
+                    if seed_row is None:
+                        seed_row = manager.events.get(int(seed_id))
+                    seed = _event_row(seed_row) if seed_row is not None else None
+                summary = summary_from_durable(durable, seed)
+                hydrated = self.with_faces(manager, self.hydrate(manager, [summary]))
+                if not hydrated:
+                    raise HTTPException(status_code=404, detail="incident was not found")
+                return hydrated[0]
+
         bounded_gap = max(5, min(gap_seconds, 300))
         summaries = _incident_rows([_event_row(row) for row in rows], bounded_gap)
         if len(summaries) != 1:
@@ -532,15 +630,50 @@ class IncidentQueryService:
             ]
         day_start_epoch = day_start.timestamp()
         day_end_epoch = day_end.timestamp()
+        durable_rows = []
+        if hasattr(manager.events, "incidents_between"):
+            durable_rows = manager.events.incidents_between(
+                query_start.isoformat(),
+                query_end.isoformat(),
+                camera_id,
+            )
+        durable = IncidentQueryService._durable_summaries(manager, durable_rows)
+        covered = {
+            int(row["seed_event_id"])
+            for row in durable_rows
+            if row.get("seed_event_id")
+        }
+        legacy = IncidentQueryService._legacy_event_summaries(
+            manager, compact_rows, bounded_gap, covered_seed_ids=covered
+        )
         day_incidents = [
             incident
-            for incident in _incident_rows(compact_rows, gap_seconds=bounded_gap)
+            for incident in IncidentQueryService._merge_summaries(durable, legacy)
             if incident["last_epoch"] >= day_start_epoch
             and incident["start_epoch"] < day_end_epoch
         ]
+        facet_durable_rows = durable_rows
+        if camera_id and hasattr(manager.events, "incidents_between"):
+            facet_durable_rows = manager.events.incidents_between(
+                query_start.isoformat(),
+                query_end.isoformat(),
+            )
+        facet_durable = IncidentQueryService._durable_summaries(
+            manager, facet_durable_rows
+        )
+        facet_covered = {
+            int(row["seed_event_id"])
+            for row in facet_durable_rows
+            if row.get("seed_event_id")
+        }
+        facet_legacy = IncidentQueryService._legacy_event_summaries(
+            manager, facet_rows, bounded_gap, covered_seed_ids=facet_covered
+        )
         facet_incidents = [
             incident
-            for incident in _incident_rows(facet_rows, gap_seconds=bounded_gap)
+            for incident in IncidentQueryService._merge_summaries(
+                facet_durable, facet_legacy
+            )
             if incident["last_epoch"] >= day_start_epoch
             and incident["start_epoch"] < day_end_epoch
         ]
@@ -595,6 +728,18 @@ class IncidentQueryService:
     def resolve_event(
         self, manager: AppManager, event_id: int
     ) -> dict[str, Any] | None:
+        if hasattr(manager.events, "incident_for_event"):
+            durable = manager.events.incident_for_event(event_id)
+            if durable is not None:
+                seed = None
+                seed_id = durable.get("seed_event_id")
+                if seed_id:
+                    seed_row = manager.events.get(int(seed_id))
+                    seed = _event_row(seed_row) if seed_row is not None else None
+                summary = summary_from_durable(durable, seed)
+                hydrated = self.with_faces(manager, self.hydrate(manager, [summary]))
+                return hydrated[0] if hydrated else summary
+
         row = manager.events.get(event_id)
         if row is None:
             return None
