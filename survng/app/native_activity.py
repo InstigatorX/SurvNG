@@ -11,6 +11,7 @@ from collections import Counter, deque
 from copy import deepcopy
 from datetime import datetime
 import json
+import logging
 import time
 import uuid
 from typing import Callable
@@ -20,6 +21,8 @@ from .native_motion import NativeMotion
 from .native_objects import NativeIncidentInventory, NativeObjectRegistry, compact_history, iso
 from .zones import apply_detection_zones
 from survng.native_spatial import spatial_plan
+
+LOGGER = logging.getLogger(__name__)
 
 
 _INTERRUPTED_REASONS = frozenset({
@@ -165,18 +168,7 @@ class NativeActivity:
                 if zone.enabled and len(zone.points) >= 3
             }
             if observation.zone_revision != revision or any(
-                (
-                    type(obj.get("native_track_id")) is int
-                    and obj.get("native_track_id") >= 0
-                )
-                and (
-                    obj.get("native_zone_revision") != revision
-                    or not isinstance(obj.get("native_zone_ids"), list)
-                    or any(
-                        not isinstance(zone_id, str) or zone_id not in valid_ids
-                        for zone_id in obj.get("native_zone_ids", [])
-                    )
-                )
+                self._invalid_native_zone_object(obj, revision, valid_ids)
                 for obj in observation.objects
             ):
                 self.counts["invalid_zone_metadata"] += 1
@@ -685,6 +677,11 @@ class NativeActivity:
                     )
                     self.counts["incidents_created"] += 1
                 except (TypeError, ValueError, KeyError, AttributeError):
+                    LOGGER.exception(
+                        "open_incident failed camera=%s event=%s",
+                        self.camera.id,
+                        self.event_id,
+                    )
                     self.incident_id = None
                     self._observation_seq = 0
             if route_watch is not None and callable(self.consume_route_watch):
@@ -694,7 +691,11 @@ class NativeActivity:
                         int(route_watch.source_event_id),
                     )
                 except Exception:
-                    pass
+                    LOGGER.exception(
+                        "consume_route_watch failed camera=%s source_event=%s",
+                        self.camera.id,
+                        getattr(route_watch, "source_event_id", None),
+                    )
                 self._expected_handoffs.pop(int(route_watch.source_event_id), None)
                 self.counts["route_handoffs"] += 1
             self.publish(
@@ -739,7 +740,11 @@ class NativeActivity:
                 )
                 self._observation_seq += 1
             except (TypeError, ValueError, AttributeError):
-                pass
+                LOGGER.exception(
+                    "append_incident_observation failed camera=%s incident=%s",
+                    self.camera.id,
+                    self.incident_id,
+                )
 
         # Delayed results already carry their verified cover. Never pair
         # current-registry boxes with an older nomination observation.
@@ -860,7 +865,11 @@ class NativeActivity:
                 )
                 self._observation_seq += 1
             except (TypeError, ValueError, AttributeError):
-                pass
+                LOGGER.exception(
+                    "append_incident_observation failed camera=%s incident=%s",
+                    self.camera.id,
+                    self.incident_id,
+                )
         observation_count = self._observation_seq
         if (
             observation_count <= 0
@@ -872,7 +881,11 @@ class NativeActivity:
                 if incident is not None:
                     observation_count = int(incident.get("observation_count") or 0)
             except (TypeError, ValueError, AttributeError):
-                pass
+                LOGGER.exception(
+                    "get_incident failed camera=%s incident=%s",
+                    self.camera.id,
+                    self.incident_id,
+                )
         payload = {
             "implementation": "native_observations",
             "state": state,
@@ -905,7 +918,11 @@ class NativeActivity:
                     participants=participants,
                 )
             except (TypeError, ValueError, AttributeError):
-                pass
+                LOGGER.exception(
+                    "close_incident failed camera=%s incident=%s",
+                    self.camera.id,
+                    self.incident_id,
+                )
         self.events.update_native_incident_state(
             self.event_id,
             payload,
@@ -944,6 +961,28 @@ class NativeActivity:
             idle_fps
             if enabled
             else self.config.live_sample_fps / self.config.native.inference_interval
+        )
+
+    @staticmethod
+    def _invalid_native_zone_object(obj, revision, valid_ids) -> bool:
+        """Reject objects that claim native zone membership inconsistently.
+
+        Zone fields are validated whether or not a tracker id is present. The
+        live graph no longer inserts gvatrack, so gating on native_track_id
+        would skip fail-closed checks for ordinary detections.
+        """
+        if not isinstance(obj, dict):
+            return True
+        if "native_zone_ids" not in obj and "native_zone_revision" not in obj:
+            return False
+        if obj.get("native_zone_revision") != revision:
+            return True
+        ids = obj.get("native_zone_ids")
+        if not isinstance(ids, list):
+            return True
+        return any(
+            not isinstance(zone_id, str) or zone_id not in valid_ids
+            for zone_id in ids
         )
 
     def _joins_open_range(self, track):

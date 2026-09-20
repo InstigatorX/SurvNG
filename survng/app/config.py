@@ -849,9 +849,11 @@ class NativeTrackingConfig(BaseModel):
     @classmethod
     def normalize_mode(cls, value: object) -> str:
         mode = str(value or "off").strip().lower()
-        if mode in {"dlstreamer_deep_sort", "deep_sort", "deepsort"}:
-            return "deep-sort"
         if mode in {
+            "dlstreamer_deep_sort",
+            "deep_sort",
+            "deepsort",
+            "deep-sort",
             "survng_hybrid",
             "short-term",
             "short_term_imageless",
@@ -869,15 +871,7 @@ class NativeTrackingConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_reid(self):
-        if self.mode == "deep-sort":
-            if not self.reid_enabled:
-                raise ValueError(
-                    "native Deep SORT requires native.tracking.reid_enabled=true"
-                )
-            if not self.reid_model_path.strip():
-                raise ValueError(
-                    "native Deep SORT requires native.tracking.reid_model_path"
-                )
+        # Deep SORT settings are retained for config compatibility only.
         return self
 
     def resolved_reid_device(self) -> str:
@@ -1030,16 +1024,8 @@ class DetectorConfig(BaseModel):
                     "deep_sort",
                     "deepsort",
                 }:
-                    native["tracking"] = {
-                        "mode": "deep-sort",
-                        "reid_enabled": bool(legacy.get("reid_enabled")),
-                        "reid_model_path": str(
-                            legacy.get("reid_model_path") or ""
-                        ),
-                        "reid_device": str(
-                            legacy.get("reid_device") or "CPU"
-                        ),
-                    }
+                    # Live detection no longer inserts gvatrack; migrate quietly.
+                    native["tracking"] = {"mode": "off"}
                     data["native"] = native
         return data
 

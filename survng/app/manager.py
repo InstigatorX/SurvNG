@@ -1394,6 +1394,8 @@ class AppManager:
                 self.native_evidence.enqueue(event_id)
             if event_id:
                 self.incidents.complete_event(event_id)
+        # Legacy Python object_track sessions may still publish object_tracking
+        # terminals. Native-first settle uses terminal incident above.
         if event_type == "object_tracking" and payload.get("state") != "active" and getattr(self, "native_evidence", None) is not None:
             self.native_evidence.enqueue(int(payload.get("event_id") or 0))
         if event_type == "incident_update":

@@ -35,19 +35,14 @@ def _tracking_classes(native) -> tuple[str, ...] | None:
 
 
 def resolve_native_tracking(detector) -> NativeTrackingPlan:
-    """Resolve live-graph tracking. The incident path no longer inserts gvatrack.
+    """Resolve live-graph tracking. SurvNG never inserts gvatrack.
 
     ``tracking_classes`` still selects which labels may admit/extend activity in
-    the application. Deep SORT remains rejected because it requires gvatrack.
+    the application. Config modes that formerly selected a tracker normalize to
+    ``off`` before this helper runs.
     """
     native = detector.native
-    tracking = native.tracking
     classes = _tracking_classes(native)
-    if tracking.mode == "deep-sort":
-        raise ValueError(
-            "DL Streamer Deep SORT is unavailable; "
-            "native live detection runs without gvatrack"
-        )
     return NativeTrackingPlan(
         mode="off",
         tracking_classes=classes,

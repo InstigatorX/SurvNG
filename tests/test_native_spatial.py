@@ -110,6 +110,37 @@ def test_revision_mismatch_cannot_admit_or_supply_empty_coverage():
     assert activity.last_fresh == 100
 
 
+def test_per_object_invalid_zone_ids_rejected_without_track_id():
+    """Fail closed on bad native zone fields even when gvatrack IDs are absent."""
+    c = camera()
+    activity = NativeActivity(c, DetectorConfig(enabled=True), Mock(), Mock(), Mock(), native_zones=True)
+    revision = spatial_plan(c)["revision"]
+    bad = {
+        "label": "person",
+        "confidence": 0.9,
+        "box": {"x1": 25, "x2": 35, "y1": 50, "y2": 60},
+        "native_zone_revision": revision,
+        "native_zone_ids": ["999"],
+    }
+    observation = DetectionSnapshot(
+        1, 1, 100, 100, (bad,), "session", "native_fresh_detection", 100, revision
+    )
+    activity.consume(observation, now=100, epoch=1000)
+    assert activity.last_fresh == 0
+    assert activity.health == "zone_metadata_invalid"
+    assert activity.counts["invalid_zone_metadata"] == 1
+    assert "native_track_id" not in bad
+
+    good = {**bad, "native_zone_ids": ["0"]}
+    activity.consume(
+        replace(observation, source_pts=2, inference_sequence=2, objects=(good,)),
+        now=100,
+        epoch=1000,
+    )
+    assert activity.last_fresh == 100
+    assert activity.health == "healthy"
+
+
 @pytest.mark.parametrize("kwargs", [{"padding": -.1}, {"padding": .6}, {"full_frame_interval": 0}, {"full_frame_interval": 31}])
 def test_invalid_roi_configuration(kwargs):
     with pytest.raises(ValueError):
