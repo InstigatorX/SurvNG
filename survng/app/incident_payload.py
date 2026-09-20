@@ -22,7 +22,9 @@ class IncidentPayloadBuilder:
             return []
         native = next((item.get("object_tracking", {}) for item in raw
                        if isinstance(item, dict) and item.get("status") == "object_tracking"), {})
-        if native.get("implementation") == "gvatrack":
+        from .native_evidence_common import is_native_tracking_implementation
+
+        if is_native_tracking_implementation(native.get("implementation")):
             raw = [dict(track, confidence=track.get("max_confidence", track.get("confidence", 0)))
                    for track in native.get("tracks", []) if track.get("confirmed")]
         detected: list[dict[str, Any]] = []

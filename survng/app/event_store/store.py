@@ -1721,7 +1721,9 @@ class EventStore(
             objects = json.loads(row["objects_json"] or "[]")
             tracking = next((item.get("object_tracking") for item in reversed(objects)
                              if item.get("status") == "object_tracking"), None)
-            if (not tracking or tracking.get("implementation") != "gvatrack"
+            from ..native_evidence_common import is_native_tracking_implementation
+
+            if (not tracking or not is_native_tracking_implementation(tracking.get("implementation"))
                     or tracking.get("state") != "complete" or tracking.get("native_session") != session):
                 return None
             previous = tracking.get("recording_alignment") or {}

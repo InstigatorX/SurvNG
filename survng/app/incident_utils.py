@@ -81,7 +81,11 @@ def event_end_epoch(event: dict[str, Any]) -> float:
     if not isinstance(tracking, dict):
         tracking = next((item.get("object_tracking") for item in raw or []
                          if isinstance(item, dict) and item.get("status") == "object_tracking"), {})
-    if not isinstance(tracking, dict) or tracking.get("implementation") != "gvatrack":
+    from .native_evidence_common import is_native_tracking_implementation
+
+    if not isinstance(tracking, dict) or not is_native_tracking_implementation(
+        tracking.get("implementation")
+    ):
         return start
     try:
         return max(start, datetime.fromisoformat(str(tracking.get("updated_at"))).timestamp())
@@ -90,10 +94,14 @@ def event_end_epoch(event: dict[str, Any]) -> float:
 
 
 def native_presence_event(event: dict[str, Any]) -> bool:
+    from .native_evidence_common import is_native_tracking_implementation
+
     if event.get("topic") == "native/object-presence":
         return True
     tracking = event.get("object_tracking")
-    if isinstance(tracking, dict) and tracking.get("implementation") == "gvatrack":
+    if isinstance(tracking, dict) and is_native_tracking_implementation(
+        tracking.get("implementation")
+    ):
         return True
     raw = event.get("objects")
     if raw is None:

@@ -130,7 +130,7 @@ def _continuity_score(
 def stitch_motion_identities(
     tracks: list[dict[str, Any]],
     *,
-    max_gap_seconds: float = 4.0,
+    max_gap_seconds: float = 8.0,
     bin_seconds: float = 1.0,
     min_iou: float = 0.05,
     max_center_distance_ratio: float = 0.35,

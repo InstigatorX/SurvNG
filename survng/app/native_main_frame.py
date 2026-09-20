@@ -291,7 +291,14 @@ class NativeMainFrameVerifier:
         priority="cover",
         cancelled=None,
     ):
-        """Match projected inventory objects onto one verified main raster."""
+        """Match projected inventory objects onto one verified main raster.
+
+        Extent matches remain preferred. When an episode identity is present on
+        the frame but its projected box misses the detector, fill that identity
+        slot from the nearest unused same-label detection within a bounded
+        center distance — never invent unpaired inventory beyond the scene
+        objects supplied for this frame.
+        """
         from .native_episode_identity import best_objects_by_episode_identity
 
         if cancelled is not None and cancelled.is_set():
@@ -304,6 +311,8 @@ class NativeMainFrameVerifier:
         main_height, main_width = main.shape[:2]
         matched = []
         used_detection_ids = set()
+        diagonal = max(1.0, (main_width ** 2 + main_height ** 2) ** 0.5)
+        slot_distance_limit = 0.35 * diagonal
 
         def identity(item):
             if item.get("episode_identity"):
@@ -320,6 +329,17 @@ class NativeMainFrameVerifier:
                 )
             return None
 
+        def center(box):
+            return (
+                (float(box["x1"]) + float(box["x2"])) * 0.5,
+                (float(box["y1"]) + float(box["y2"])) * 0.5,
+            )
+
+        def center_distance(left, right):
+            lx, ly = center(left)
+            rx, ry = center(right)
+            return ((lx - rx) ** 2 + (ly - ry) ** 2) ** 0.5
+
         # Match at most one box per episode identity on this cover frame.
         scene_objects = list(aligned_objects or ())
         if any(
@@ -331,6 +351,22 @@ class NativeMainFrameVerifier:
         primary_key = identity(primary) if primary is not None else None
         if primary is not None:
             item = deepcopy(primary)
+            threshold = self._object_threshold(camera_id, item)
+            for index, detected in enumerate(detections or ()):
+                if detected.get("label") != item.get("label"):
+                    continue
+                if float(detected.get("confidence") or 0) < threshold:
+                    continue
+                actual = detected.get("box") or {}
+                if not all(name in actual for name in ("x1", "y1", "x2", "y2")):
+                    continue
+                if not matches_object_extent(item.get("box") or {}, actual):
+                    continue
+                item["box"] = deepcopy(actual)
+                item["confidence"] = detected["confidence"]
+                item["box_provenance"] = "detected_in_main"
+                used_detection_ids.add(index)
+                break
             item.update(
                 detection_frame_width=main_width,
                 detection_frame_height=main_height,
@@ -342,6 +378,7 @@ class NativeMainFrameVerifier:
             )
             matched.append(item)
 
+        unmatched = []
         for obj in scene_objects:
             if not isinstance(obj, dict) or not obj.get("label") or not obj.get("box"):
                 continue
@@ -373,6 +410,7 @@ class NativeMainFrameVerifier:
                 if matches_object_extent(obj["box"], actual):
                     candidates.append((index, detected))
             if not candidates:
+                unmatched.append(obj)
                 continue
             index, detected = max(
                 candidates,
@@ -391,6 +429,47 @@ class NativeMainFrameVerifier:
                 native_cover_verified=True,
                 box_provenance="detected_in_main",
                 verification={"status": "confirmed", "source": "main"},
+            )
+            matched.append(item)
+
+        # Identity-slot fill: projected track missed, but a same-label detection
+        # remains near this identity's expected center.
+        for obj in unmatched:
+            key = identity(obj)
+            if key is None:
+                continue
+            threshold = self._object_threshold(camera_id, obj)
+            slot_candidates = []
+            for index, detected in enumerate(detections or ()):
+                if index in used_detection_ids:
+                    continue
+                if detected.get("label") != obj["label"]:
+                    continue
+                if float(detected.get("confidence") or 0) < threshold:
+                    continue
+                actual = detected.get("box") or {}
+                if not all(name in actual for name in ("x1", "y1", "x2", "y2")):
+                    continue
+                distance = center_distance(obj["box"], actual)
+                if distance > slot_distance_limit:
+                    continue
+                slot_candidates.append((distance, index, detected))
+            if not slot_candidates:
+                continue
+            _distance, index, detected = min(slot_candidates, key=lambda item: item[0])
+            used_detection_ids.add(index)
+            item = deepcopy(obj)
+            item.update(
+                box=deepcopy(detected["box"]),
+                confidence=detected["confidence"],
+                detection_frame_width=main_width,
+                detection_frame_height=main_height,
+                frame_source="recorded_main",
+                frame_captured_at_epoch=frame_epoch,
+                snapshot_visible=True,
+                native_cover_verified=True,
+                box_provenance="identity_slot_from_main",
+                verification={"status": "confirmed", "source": "main_identity_slot"},
             )
             matched.append(item)
         return matched

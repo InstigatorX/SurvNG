@@ -1188,7 +1188,9 @@ class AppManager:
                     # the newly promoted cover, not the original early sample.
                     self.semantic_search.refresh_event(event)
             self._refresh_incident_notification(camera_id, int(payload.get("event_id") or 0))
-            if payload.get("implementation") == "gvatrack":
+            from .native_evidence_common import is_native_tracking_implementation
+
+            if is_native_tracking_implementation(payload.get("implementation")):
                 self.incidents.complete_event(int(payload.get("event_id") or 0))
             # Existing incident clients already use this event to coalesce refreshes.
             self.state_events.publish("incident", {

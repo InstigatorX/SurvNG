@@ -248,8 +248,11 @@ def apply_native_replay_geometry(incident: dict, cameras: dict) -> None:
     for item in [incident, *incident.get("events", [])]:
         camera = cameras.get(str(item.get("camera_id") or incident.get("camera_id") or ""))
         tracking = item.get("object_tracking")
+        from .native_evidence_common import is_native_tracking_implementation
+
         if (getattr(camera, "native_same_field_of_view", False) is True
-                and isinstance(tracking, dict) and tracking.get("implementation") == "gvatrack"):
+                and isinstance(tracking, dict)
+                and is_native_tracking_implementation(tracking.get("implementation"))):
             item["object_tracking"] = {**tracking, "recording_overlay_compatible": True}
 
 

@@ -22,6 +22,7 @@ from .stream_alignment import estimate_stream_alignment
 from .native_evidence_common import (
     Candidate,
     image_quality as _common_image_quality,
+    is_native_tracking_implementation,
     matches_object_extent,
     resize_objects,
 )
@@ -460,7 +461,7 @@ class NativeEvidenceService:
         if not event:
             return {"event_id": event_id, "status": "event_missing"}
         _, tracking = event_tracking(event)
-        if tracking.get("implementation") != "gvatrack":
+        if not is_native_tracking_implementation(tracking.get("implementation")):
             return {"event_id": event_id, "status": "not_native"}
         pending = False
         retained = list(candidates or [])

@@ -77,6 +77,85 @@ def test_match_scene_detections_promotes_siblings_onto_main():
     assert car_item["box"]["x1"] == 610
 
 
+def test_match_scene_identity_slot_fill_when_projection_misses():
+    """Projected track can miss OD; still fill the identity from nearest detection."""
+    verifier, _ = _verifier()
+    main = np.zeros((1440, 2560, 3), dtype=np.uint8)
+    primary = {
+        "label": "person",
+        "track_id": 400,
+        "episode_identity": "person:393",
+        "confidence": 0.97,
+        "box": {"x1": 965.0, "y1": 362.0, "x2": 1191.0, "y2": 1040.0},
+        "zones": [],
+    }
+    # Projection is left of the true person; extent match fails.
+    person_b = {
+        "label": "person",
+        "track_id": 402,
+        "episode_identity": "person:401",
+        "confidence": 0.91,
+        "box": {"x1": 497.0, "y1": 331.0, "x2": 574.0, "y2": 464.0},
+        "zones": [],
+    }
+    car = {
+        "label": "car",
+        "track_id": 390,
+        "episode_identity": "car:390",
+        "confidence": 0.98,
+        "box": {"x1": 0.0, "y1": 435.0, "x2": 948.0, "y2": 1440.0},
+        "zones": [],
+    }
+    detections = [
+        {"label": "car", "confidence": 0.981, "box": {"x1": 0, "y1": 424, "x2": 943, "y2": 1439}},
+        {"label": "person", "confidence": 0.969, "box": {"x1": 926, "y1": 335, "x2": 1164, "y2": 888}},
+        {"label": "person", "confidence": 0.716, "box": {"x1": 742, "y1": 309, "x2": 833, "y2": 475}},
+    ]
+    scene = verifier.match_scene_detections(
+        "test",
+        [primary, person_b, car],
+        main,
+        1234.5,
+        primary=dict(primary),
+        detections=detections,
+    )
+    assert len(scene) == 3
+    by_id = {item["episode_identity"]: item for item in scene}
+    assert by_id["person:393"]["box"]["x1"] == 926
+    assert by_id["person:393"]["box_provenance"] == "detected_in_main"
+    assert by_id["person:401"]["box"]["x1"] == 742
+    assert by_id["person:401"]["box_provenance"] == "identity_slot_from_main"
+    assert by_id["car:390"]["box"]["x1"] == 0
+
+
+def test_match_scene_slot_fill_does_not_invent_unpaired_detections():
+    verifier, _ = _verifier()
+    main = np.zeros((720, 1280, 3), dtype=np.uint8)
+    primary = {
+        "label": "person",
+        "track_id": 1,
+        "episode_identity": "person:1",
+        "confidence": 0.9,
+        "box": {"x1": 100.0, "y1": 100.0, "x2": 200.0, "y2": 400.0},
+        "zones": [],
+    }
+    detections = [
+        {"label": "person", "confidence": 0.92, "box": {"x1": 105, "y1": 105, "x2": 195, "y2": 395}},
+        # Extra unpaired person far away — must not be added without an identity slot.
+        {"label": "person", "confidence": 0.88, "box": {"x1": 900, "y1": 100, "x2": 980, "y2": 380}},
+    ]
+    scene = verifier.match_scene_detections(
+        "test",
+        [primary],
+        main,
+        10.0,
+        primary=dict(primary),
+        detections=detections,
+    )
+    assert len(scene) == 1
+    assert scene[0]["track_id"] == 1
+
+
 def test_project_main_keeps_edge_clipped_siblings(monkeypatch):
     verifier, _ = _verifier()
     live = np.zeros((512, 896, 3), dtype=np.uint8)

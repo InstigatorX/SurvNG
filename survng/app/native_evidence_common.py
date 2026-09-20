@@ -16,6 +16,15 @@ class Candidate:
     score: float
 
 
+# Live persist historically wrote "gvatrack"; some recovered/older rows use "native".
+NATIVE_TRACKING_IMPLEMENTATIONS = frozenset({"gvatrack", "native"})
+
+
+def is_native_tracking_implementation(value: object) -> bool:
+    """True when object_tracking.implementation is the native cover/evidence path."""
+    return value in NATIVE_TRACKING_IMPLEMENTATIONS
+
+
 def image_quality(image):
     """Reject uniform/corrupt-looking frames without rejecting night exposure."""
     if image is None or image.size == 0:
