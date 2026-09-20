@@ -74,13 +74,15 @@ list/detail APIs keep working; it no longer stores `object_tracking` as truth.
 
 ## Presence semantics
 
-- Default confirmation: two consecutive fresh, eligible observations of the same
-  soft-associated identity and class. Empty fresh results break tentative confirmation.
+- Minimal scene-activity policy: a fresh detection with a label, detector
+  confidence floor, optional `tracking_classes` allow-list, and no ignore-zone
+  suppression opens or extends an incident on the first eligible observation.
+  Confirmation frames, stationary motion, incident-polygon membership, and
+  main-stream verification are not admission gates.
 - Soft association is scoped to camera + stream session + geometry generation.
   Reconnects, resolution changes and graph rebuilds start new associations; the
   application does not claim cross-camera identity or re-identification after
-  disappearance. The live graph does not insert `gvatrack`; confirmation uses
-  consecutive fresh label+spatial overlap only.
+  disappearance. The live graph does not insert `gvatrack`.
 - Live status may still expose a compatibility `object_tracking` mirror of
   `native_activity`. Native activity does not publish track-centric SSE lifecycle
   events; terminal `incident` publishes settle notifications and cover work.
@@ -97,27 +99,11 @@ list/detail APIs keep working; it no longer stores `object_tracking` as truth.
   invalid metadata ends activity with a coverage-loss reason, not evidence that
   the scene was empty. Persistent metadata stalls rebuild the native stream after
   15 seconds; failed graph shutdown is reported rather than starting a second graph.
-- **Configured stationary classes remain associated but do not create or extend incidents while stationary.**
-  The default includes people and common vehicle classes. New stationary-policy
-  objects start uncertain and must demonstrate movement before activity is admitted. After eight seconds
-  of stable evidence, moving vehicles become stationary; the normal five-second
-  activity timeout then completes the incident when no other object is active.
-  People and other unlisted classes retain presence-based admission.
-- Motion uses fresh native boxes and elapsed stream time, a bounded two-second
-  window, trimmed coordinate spread and accumulated drift relative to box size.
-  Movement requires 0.15 box-width/height displacement; the stability threshold
-  is 0.05. At least five observations spanning 0.4 seconds are required; at low FPS the
-  window retains five observations even when they span more than two seconds. This
-  hysteresis tolerates jitter; it is image-space motion, not calibrated speed.
-- Default stationary labels: person, car, truck, bus, van, suv, motorcycle.
-  Configure `detector.native.stationary` with `enabled`, `labels`, `stationary_seconds`,
-  `window_seconds`, `moving_threshold`, and `stationary_threshold`. Disabling it
-  restores presence-based admission for every class. All detector/tracker work
-  continues; suppression saves incident work, not inference work.
-- Incident completion preserves live stationary context. Object disappearance,
-  long observation gaps, reconnects and resolution changes require new evidence;
-  there is no cross-ID appearance matching. A vehicle already parked at startup does
-  not alert merely because association restarted.
+- Zone polygons remain observation metadata for presentation and ignore-zone
+  suppression. They do not require an object to sit inside an incident polygon
+  before a scene incident can open.
+- Stationary-motion helpers remain available for diagnostics but no longer gate
+  whether a detection is scene activity.
 - Live association history is bounded to 150 observations per object and 128 objects
   per live camera, with 128 archived participants per incident by default. Expired
   live associations are evicted independently of incident history. Capacity drops

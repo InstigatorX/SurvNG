@@ -39,164 +39,114 @@ def admission_from_evidence(evidence):
     return NativeAdmission(main_frames)
 
 
-def setup_activity():
-    events = Mock(); events.add_event.side_effect = [{'id': 1}, {'id': 2}]
-    a = NativeActivity(CameraConfig(id='front', name='Front', stream_url='rtsp://unused.invalid'),
-                       DetectorConfig(), events, Mock(), Mock(return_value='preview'))
-    a.admission = Mock(); a.admission.poll.return_value = None
-    a.nominate = Mock(); a.verified_snapshot = Mock(return_value='main.webp')
-    return a
-
-
-def feed(a, seq, objects=None):
-    obj = {'label': 'dog', 'confidence': .8, 'box': {'x1': 20, 'y1': 20, 'x2': 40, 'y2': 60},
-           'native_track_id': 9, 'detection_provenance': 'native_fresh_detection'}
-    now = 100+seq/5
-    a.consume(DetectionSnapshot(seq/5,seq,100,100,tuple([obj] if objects is None else objects),'session', 'native_fresh_detection',now), now=now, epoch=1000+seq/5)
-
-
-def test_no_event_or_notification_before_verification_and_retains_departed_object():
-    a = setup_activity()
-    for seq in range(1, 8): feed(a, seq)
-    a.events.add_event.assert_not_called(); a.publish.assert_not_called()
-    assert len(a._verification_pending) == 1
-    for seq in range(8, 70): feed(a, seq, [])
-    assert not a.tracks  # Awaiting verification outlives live tracking context.
-    a.admission.poll.return_value = {'status': 'confirmed', 'votes': ['confirmed','confirmed','negative'],
-                                   'cover': (None, {'label':'dog','box':{}},1000.4)}
-    a.tick(now=114)
-    assert a.events.add_event.call_count == 1
-    kwargs = a.events.add_event.call_args.kwargs
-    assert kwargs['snapshot_path'] == 'main.webp'
-    assert kwargs['created_at'].startswith('1970-01-01T00:16:40.')
-    histories = [call.args[1] for call in a.events.update_native_incident_state.call_args_list]
-    first_participants = a.events.update_native_incident_state.call_args_list[0].args[2]
-    assert first_participants[0]['observations'] >= 1
-    assert histories[-1]['state'] == 'complete'
-    assert a.counts['verification_confirmed'] == 1
-
-
-def test_delayed_verified_primary_retains_all_confirmed_context_objects():
+def setup_activity(**detector_kwargs):
     events = Mock()
-    events.add_event.return_value = {"id": 1}
-    config = DetectorConfig(
-        native={"tracking_classes": ["dog"]},
+    events.add_event.side_effect = [{"id": 1}, {"id": 2}]
+    events.open_incident = Mock(
+        side_effect=[{"id": 10, "observation_count": 1}, {"id": 11, "observation_count": 1}]
     )
-    activity = NativeActivity(
-        CameraConfig(
-            id="front",
-            name="Front",
-            stream_url="rtsp://unused.invalid",
-        ),
-        config,
+    a = NativeActivity(
+        CameraConfig(id="front", name="Front", stream_url="rtsp://unused.invalid"),
+        DetectorConfig(**detector_kwargs),
         events,
         Mock(),
         Mock(return_value="preview"),
     )
-    activity.admission = Mock()
-    activity.admission.poll.return_value = None
-    activity.nominate = Mock()
-    activity.verified_snapshot = Mock(return_value="main.webp")
+    a.admission = Mock()
+    a.nominate = Mock()
+    a.verified_snapshot = Mock(return_value="main.webp")
+    return a
 
-    def scene(sequence, objects):
-        now = 100 + sequence / 5
-        activity.consume(
-            DetectionSnapshot(
-                sequence / 5,
-                sequence,
-                200,
-                100,
-                tuple(objects),
-                "session",
-                "native_fresh_detection",
-                now,
-            ),
-            now=now,
-            epoch=1000 + sequence / 5,
-        )
 
-    for sequence in (1, 2, 3):
-        scene(
-            sequence,
-            [
-                {
-                    "label": "dog",
-                    "confidence": .9,
-                    "box": {
-                        "x1": 20 + sequence,
-                        "y1": 20,
-                        "x2": 40 + sequence,
-                        "y2": 60,
-                    },
-                    "native_track_id": 9,
-                    "detection_provenance": "native_fresh_detection",
-                },
-                {
-                    "label": "person",
-                    "confidence": .88,
-                    "box": {"x1": 70, "y1": 10, "x2": 90, "y2": 80},
-                    "native_track_id": 10,
-                    "detection_provenance": "native_fresh_detection",
-                },
-                {
-                    "label": "car",
-                    "confidence": .92,
-                    "box": {"x1": 110, "y1": 30, "x2": 180, "y2": 75},
-                    "native_track_id": 11,
-                    "detection_provenance": "native_fresh_detection",
-                },
-            ],
-        )
-
-    assert len(activity._verification_pending) == 1
-    pending = next(iter(activity._verification_pending.values()))
-    assert {
-        item["label"] for item in pending["context_tracks"].values()
-    } == {"dog", "person", "car"}
-
-    # Let the live registry age out before main-recording verification returns.
-    for sequence in range(4, 45):
-        scene(sequence, [])
-    assert not activity.registry.tracks
-
-    activity.admission.poll.return_value = {
-        "status": "confirmed",
-        "votes": ["confirmed"],
+def feed(a, seq, objects=None):
+    obj = {
+        "label": "dog",
+        "confidence": 0.8,
+        "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 60},
+        "detection_provenance": "native_fresh_detection",
     }
-    activity.tick(now=110)
-
-    assert events.add_event.call_count == 1
-    created = json.loads(events.add_event.call_args.kwargs["objects_json"])
-    assert {item["label"] for item in created if item.get("label")} == {
-        "dog",
-        "person",
-        "car",
-    }
-    persisted = events.update_native_incident_state.call_args.args[2]
-    assert {item["label"] for item in persisted} == {
-        "dog",
-        "person",
-        "car",
-    }
-
-
-@pytest.mark.parametrize('status', ['rejected', 'unverified'])
-def test_negative_or_unavailable_never_alerts(status):
-    a=setup_activity(); feed(a,1); feed(a,2)
-    a.admission.poll.return_value={'status':status}
-    a.tick(now=101)
-    for seq in range(3,12): feed(a,seq)
-    a.events.add_event.assert_not_called(); a.publish.assert_not_called()
-    assert a.counts['verification_'+status] == 1
+    now = 100 + seq / 5
+    a.consume(
+        DetectionSnapshot(
+            seq / 5,
+            seq,
+            100,
+            100,
+            tuple([obj] if objects is None else objects),
+            "session",
+            "native_fresh_detection",
+            now,
+        ),
+        now=now,
+        epoch=1000 + seq / 5,
+    )
 
 
-def test_reset_cancels_pending_and_late_results_cannot_create_incident():
-    a=setup_activity(); feed(a,1); feed(a,2)
-    a.finish('policy_changed',now=101)
-    a.admission.cancel.assert_called_once()
-    a.admission.poll.return_value={'status':'confirmed'}
-    a.tick(now=102)
+def test_scene_activity_opens_incident_on_first_fresh_detection():
+    a = setup_activity()
+    feed(a, 1)
+    assert a.events.add_event.call_count == 1
+    assert a.event_id == 1
+    assert a.incident_id == 10
+    assert a.status()["active"] is True
+
+
+def test_tracking_classes_filter_scene_activity():
+    a = setup_activity(native={"tracking_classes": ["person"]})
+    feed(a, 1)  # dog
     a.events.add_event.assert_not_called()
+    person = {
+        "label": "person",
+        "confidence": 0.9,
+        "box": {"x1": 10, "y1": 10, "x2": 30, "y2": 50},
+        "detection_provenance": "native_fresh_detection",
+    }
+    feed(a, 2, [person])
+    assert a.events.add_event.call_count == 1
+
+
+def test_multi_object_scene_joins_one_incident():
+    a = setup_activity()
+    feed(
+        a,
+        1,
+        [
+            {
+                "label": "dog",
+                "confidence": 0.9,
+                "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 60},
+                "detection_provenance": "native_fresh_detection",
+            },
+            {
+                "label": "person",
+                "confidence": 0.88,
+                "box": {"x1": 70, "y1": 10, "x2": 90, "y2": 80},
+                "detection_provenance": "native_fresh_detection",
+            },
+        ],
+    )
+    assert a.events.add_event.call_count == 1
+    participants = a.events.update_native_incident_state.call_args.args[2]
+    assert {item["label"] for item in participants} == {"dog", "person"}
+
+
+def test_inactivity_closes_scene_incident():
+    a = setup_activity()
+    feed(a, 1)
+    assert a.event_id == 1
+    for seq in range(2, 40):
+        feed(a, seq, [])
+    assert a.event_id is None
+    final = a.events.update_native_incident_state.call_args.args[1]
+    assert final["state"] == "complete"
+
+
+def test_policy_reset_clears_open_scene_incident():
+    a = setup_activity()
+    feed(a, 1)
+    assert a.event_id == 1
+    a.finish("policy_changed", now=101)
+    assert a.event_id is None
 
 
 def test_verifier_requires_multiple_clear_views_and_spatial_match():
@@ -329,23 +279,6 @@ def test_nomination_shares_immutable_frames_but_owns_mutable_inputs():
         assert service.jobs[token]['samples'][0].image is immutable
 
 
-def test_rejected_location_can_be_reverified_after_object_moves():
-    a=setup_activity(); feed(a,1); feed(a,2)
-    a.admission.poll.return_value={'status':'rejected'}
-    a.tick(now=101)
-    a.admission.poll.return_value=None
-    assert not a._verification_pending
-    for seq in range(3,6): feed(a,seq)
-    assert not a._verification_pending
-    obj={'label':'dog','confidence':.8,'box':{'x1':60,'y1':20,'x2':80,'y2':60},
-         'native_track_id':9,'detection_provenance':'native_fresh_detection'}
-    feed(a,6,[obj])
-    feed(a,7,[obj])
-    assert len(a._verification_pending)==1
-    pending = next(iter(a._verification_pending.values()))
-    assert pending['track']['box']['x1'] == 60
-
-
 @pytest.mark.parametrize('offset', [.5, -.5, 1., -1.])
 def test_verification_finds_time_skewed_main_pose_and_preserves_frame_time(offset):
     main = np.random.default_rng(9).integers(0, 255, (600, 800, 3), dtype=np.uint8)
@@ -399,117 +332,6 @@ def test_cancel_during_time_window_decode_stops_before_matching_or_inference():
     assert evidence.read_frame.call_count == 2
     evidence.project_main.assert_called_once()
     evidence.verifier.detect.assert_not_called()
-
-
-def nominate_walk_with_id_change(a, *, second_start=8):
-    for seq in range(1, 8):
-        feed(a, seq)
-    for seq in range(8, second_start):
-        feed(a, seq, [])
-    replacement = {'label': 'bird', 'confidence': .8,
-                   'box': {'x1': 70, 'y1': 20, 'x2': 90, 'y2': 60},
-                   'native_track_id': 10, 'detection_provenance': 'native_fresh_detection'}
-    for seq in range(second_start, second_start + 8):
-        feed(a, seq, [replacement])
-    tokens = list(a._verification_pending)
-    for seq in range(second_start + 8, second_start + 70):
-        feed(a, seq, [])
-    return tokens
-
-
-def test_delayed_verified_id_change_continues_one_incident():
-    a = setup_activity()
-    first, second = nominate_walk_with_id_change(a)
-    results = {first: {'status': 'confirmed'}}
-    a.admission.poll.side_effect = lambda token: results.pop(token, None)
-    a.tick(now=116)
-    assert a.event_id == 1  # Await the adjacent track even after activity timeout.
-    assert a.events.add_event.call_count == 1
-    assert {t['native_track_id'] for t in a.inventory.tracking_tracks()} >= {9}
-    results[second] = {'status': 'confirmed'}
-    a.tick(now=117)
-    assert a.events.add_event.call_count == 1
-    final = a.events.update_native_incident_state.call_args.args[1]
-    assert final['state'] == 'complete'
-    participants = a.events.update_native_incident_state.call_args.args[2]
-    assert {t['label'] for t in participants} == {'dog', 'bird'}
-    assert {t.get('native_track_id') for t in participants} == {9, 10}
-    assert a.event_id is None
-
-
-@pytest.mark.parametrize('status', ['rejected', 'unverified', 'deadline'])
-def test_failed_pending_continuation_closes_without_extending_confirmed_history(status):
-    a = setup_activity()
-    first, second = nominate_walk_with_id_change(a)
-    results = {first: {'status': 'confirmed'}}
-    a.admission.poll.side_effect = lambda token: results.pop(token, None)
-    a.tick(now=116)
-    assert a.event_id == 1
-    if status == 'deadline':
-        a.tick(now=300)
-        a.admission.cancel.assert_called_with(second)
-    else:
-        results[second] = {'status': status}
-        a.tick(now=117)
-    assert a.events.add_event.call_count == 1
-    final = a.events.update_native_incident_state.call_args.args[1]
-    participants = a.events.update_native_incident_state.call_args.args[2]
-    assert 9 in {t.get('native_track_id') for t in participants}
-    assert a.event_id is None
-
-
-def test_later_verification_result_waits_for_earlier_activity():
-    a = setup_activity()
-    first, second = nominate_walk_with_id_change(a)
-    results = {second: {'status': 'confirmed'}}
-    a.admission.poll.side_effect = lambda token: results.pop(token, None)
-    a.tick(now=116)
-    a.events.add_event.assert_not_called()
-    assert second in results
-    results[first] = {'status': 'confirmed'}
-    a.tick(now=117)
-    assert a.events.add_event.call_count == 1
-    final = a.events.update_native_incident_state.call_args.args[1]
-    participants = a.events.update_native_incident_state.call_args.args[2]
-    assert {t.get('native_track_id') for t in participants} == {9, 10}
-
-
-def test_separated_activity_stays_separate_even_when_results_arrive_together():
-    a = setup_activity()
-    first, second = nominate_walk_with_id_change(a, second_start=50)
-    results = {first: {'status': 'confirmed'}, second: {'status': 'confirmed'}}
-    a.admission.poll.side_effect = lambda token: results.pop(token, None)
-    a.tick(now=125)
-    assert a.events.add_event.call_count == 2
-    completed = [
-        (call.args[1], call.args[2])
-        for call in a.events.update_native_incident_state.call_args_list
-        if call.args[1]['state'] == 'complete'
-    ]
-    assert [
-        [t.get('native_track_id') for t in participants]
-        for _payload, participants in completed
-    ] == [[9], [10]]
-
-
-def test_renewed_candidate_cannot_hold_an_inactive_incident_forever():
-    a = setup_activity()
-    first, second = nominate_walk_with_id_change(a)
-    results = {first: {'status': 'confirmed'}}
-    a.admission.poll.side_effect = lambda token: results.pop(token, None)
-    a.tick(now=116)
-    assert a.event_id == 1
-    # A fresh retry of an old track must not restart the episode's hold limit.
-    a._verification_pending[second]['started'] = 240
-    a.last_fresh = 252
-    a.health = 'healthy'
-    a.tick(now=252)
-    assert a.event_id is None
-    assert second in a._verification_pending
-    final = a.events.update_native_incident_state.call_args.args[1]
-    assert final['state'] == 'complete'
-    participants = a.events.update_native_incident_state.call_args.args[2]
-    assert 9 in {t.get('native_track_id') for t in participants}
 
 
 def test_recent_clear_view_can_confirm_after_early_negative_views():

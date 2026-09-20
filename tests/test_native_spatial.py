@@ -113,7 +113,12 @@ def test_revision_mismatch_cannot_admit_or_supply_empty_coverage():
 def test_per_object_invalid_zone_ids_rejected_without_track_id():
     """Fail closed on bad native zone fields even when gvatrack IDs are absent."""
     c = camera()
-    activity = NativeActivity(c, DetectorConfig(enabled=True), Mock(), Mock(), Mock(), native_zones=True)
+    events = Mock()
+    events.add_event.side_effect = [{"id": 1}]
+    events.open_incident = Mock(return_value={"id": 10, "observation_count": 1})
+    activity = NativeActivity(
+        c, DetectorConfig(enabled=True), events, Mock(), Mock(), native_zones=True
+    )
     revision = spatial_plan(c)["revision"]
     bad = {
         "label": "person",

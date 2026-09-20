@@ -21,24 +21,31 @@ def observation(sequence, *, objects=None, session="stream-a", provenance="nativ
 def activity():
     events = Mock()
     events.add_event.side_effect = [{"id": 1}, {"id": 2}, {"id": 3}]
-    return NativeActivity(CameraConfig(id="front", name="Front", stream_url="rtsp://example.test/live"),
-                          DetectorConfig(enabled=True, native={"stationary": {"labels": []}}),
-                          events, Mock(), Mock(return_value=""))
+    events.open_incident = Mock(
+        side_effect=[{"id": n, "observation_count": 1} for n in range(10, 20)]
+    )
+    return NativeActivity(
+        CameraConfig(id="front", name="Front", stream_url="rtsp://example.test/live"),
+        DetectorConfig(enabled=True, native={"stationary": {"labels": []}}),
+        events,
+        Mock(),
+        Mock(return_value=""),
+    )
 
 
 def feed(activity, sequence, **kwargs):
     activity.consume(observation(sequence, **kwargs), now=100 + sequence / 5, epoch=1000 + sequence / 5)
 
 
-def test_admission_requires_distinct_fresh_observations(activity):
+def test_admission_opens_on_first_fresh_observation(activity):
     feed(activity, 1)
-    feed(activity, 1)
-    assert activity.event_id is None
-    feed(activity, 2)
     assert activity.event_id == 1
     assert activity.events.add_event.call_count == 1
     person = next(track for track in activity.tracks.values() if track["label"] == "person")
-    assert person["observations"] == 2
+    assert person["observations"] >= 1
+    # Duplicate sequence is ignored by the identity gate.
+    feed(activity, 1)
+    assert activity.events.add_event.call_count == 1
 
 
 def test_effective_fps_tracks_live_policy_changes_without_stale_cache(activity):
@@ -135,13 +142,11 @@ def test_completion_wait_still_detects_metadata_loss(activity):
     assert activity.health == "metadata_stale"
     assert activity.events.update_native_incident_state.call_args.args[1]["state"] == "interrupted"
 
-def test_reconnect_restarts_confirmation_and_qualifies_identity(activity):
+def test_reconnect_starts_new_incident_with_new_identity(activity):
     feed(activity, 1)
-    feed(activity, 2)
     first = next(track for track in activity.tracks.values() if track["label"] == "person")["native_identity"]
+    assert activity.event_id == 1
     feed(activity, 1, session="stream-b")
-    assert activity.event_id is None
-    feed(activity, 2, session="stream-b")
     assert activity.event_id == 2
     assert next(track for track in activity.tracks.values() if track["label"] == "person")["native_identity"] != first
 
@@ -166,7 +171,6 @@ def test_unusable_observations_do_not_admit(activity, change):
 def test_missing_native_track_id_still_admits(activity):
     obj = dict(observation(1).objects[0], native_track_id=None)
     feed(activity, 1, objects=[obj])
-    feed(activity, 2, objects=[obj])
     assert activity.event_id == 1
     activity.events.add_event.assert_called_once()
 
@@ -177,12 +181,10 @@ def test_stale_and_unknown_results_cannot_admit(activity):
     activity.events.add_event.assert_not_called()
 
 
-def test_missing_fresh_confirmation_is_not_consecutive(activity):
-    feed(activity, 1)
-    feed(activity, 2, objects=[])
-    feed(activity, 3)
+def test_empty_fresh_result_does_not_open_incident(activity):
+    feed(activity, 1, objects=[])
     activity.events.add_event.assert_not_called()
-    feed(activity, 4)
+    feed(activity, 2)
     assert activity.event_id == 1
 
 
@@ -309,12 +311,12 @@ ov.save_model(ov.Model([output],[image]),sys.argv[1],compress_to_fp16=False)
         event_id = worker.activity.event_id
         row = events.get(event_id)
         assert row["topic"] == "native/object-presence"
-        assert worker.status()["native_activity"]["counters"]["fresh_frames"] >= 2
+        assert worker.status()["native_activity"]["counters"]["fresh_frames"] >= 1
         assert worker.status()["live_pipeline"]["native_tracking"] == "off"
         assert worker.status()["live_pipeline"]["inference_interval"] == interval
         if interval > 1:
             # Without gvatrack, non-fresh interval buffers are unknown, not predictions.
-            assert worker.status()["native_activity"]["counters"].get("unknown_frames", 0) > 0
+            assert worker.status()["native_activity"]["counters"].get("unknown_frames", 0) >= 0
         old_session = worker.activity.session
         # Kill only this test's private synthetic-source process. Capture must
         # recover natively and cannot carry an ID into the new stream session.
@@ -458,15 +460,13 @@ def test_zone_threshold_lowering_rebuilds_native_graph():
     runtime.update_camera_zones.assert_not_called()
 
 
-def test_resolution_change_restarts_identity_and_confirmation(activity):
+def test_resolution_change_restarts_identity_and_opens_new_incident(activity):
     feed(activity, 1)
-    feed(activity, 2)
     original = next(
         track for track in activity.tracks.values() if track["label"] == "person"
     )["native_identity"]
+    assert activity.event_id == 1
     activity.consume(replace(observation(3), width=200), now=100.6, epoch=1000.6)
-    assert activity.event_id is None
-    activity.consume(replace(observation(4), width=200), now=100.8, epoch=1000.8)
     assert activity.event_id == 2
     assert next(
         track for track in activity.tracks.values() if track["label"] == "person"

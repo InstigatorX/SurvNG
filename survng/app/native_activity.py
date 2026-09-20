@@ -1,9 +1,9 @@
 """Native observations own admission and activity; no pixels or model calls.
 
-NativeObjectRegistry owns soft spatial/temporal association and confirmation.
-Activity policy decides whether confirmed objects start or extend an incident;
-NativeIncidentInventory records multi-object participants for the open time range.
-Track IDs never admit, extend, or split incidents.
+NativeObjectRegistry owns soft spatial/temporal association for presentation.
+A minimal scene-activity policy opens and extends multi-object incidents from
+fresh detections. Track IDs, confirmation frames, stationary motion, and
+main-stream verification never admit or block an incident.
 """
 from __future__ import annotations
 
@@ -212,53 +212,16 @@ class NativeActivity:
             if key not in self.registry.tracks:
                 del self._activity_states[key]
 
-        confirmed_activity = []
-        for key in self._seen_keys:
-            track = self.registry.get(key)
-            if track is None or not track.get("incident_eligible"):
-                continue
-            label = str(track.get("label") or "").strip().lower()
-            selected = self.config.native.tracking_classes
-            if selected is not None and label not in selected:
-                continue
-
+        activity_keys = self._scene_activity_keys(self._seen_keys)
+        for key in activity_keys:
             state = self._activity_state(key)
-            previous_motion = state.get("motion_state", "uncertain")
-            policy = self.config.native.stationary
-            applies = policy.enabled and label in policy.labels
-            if applies:
-                motion_state = state["_motion"].update(
-                    track["box"],
-                    observation.source_pts,
-                    policy,
-                    max(
-                        self.config.native.maximum_observation_age_seconds,
-                        3 / self.fresh_detection_fps,
-                    ),
-                )
-                motion_extent = round(state["_motion"].extent, 4)
-            else:
-                motion_state, motion_extent = "presence", None
             state.update(
-                motion_state=motion_state,
-                motion_extent=motion_extent,
-                activity_eligible=motion_state in {"moving", "presence"},
+                motion_state="presence",
+                motion_extent=None,
+                activity_eligible=True,
             )
-            if applies and motion_state != previous_motion:
-                self.counts[f"{motion_state}_transitions"] += 1
-            if applies and not state["activity_eligible"]:
-                self.counts[f"{motion_state}_vehicle_observations"] += 1
-
-            if track.get("state") == "confirmed" and state["activity_eligible"]:
-                confirmed_activity.append(key)
-
-        if self.admission is not None and self.config.native.verification_enabled:
-            confirmed_activity = self._gate(
-                confirmed_activity, observation, epoch, now
-            )
-            self._capture_pending_context(now)
-        if confirmed_activity:
-            self._activate(confirmed_activity, observation, epoch, now)
+        if activity_keys:
+            self._activate(activity_keys, observation, epoch, now)
 
         if self.incident_id is not None or self.event_id is not None:
             self._capture_inventory()
@@ -267,6 +230,32 @@ class NativeActivity:
                 self.persist("active", now=now, append_observation=True)
 
         self.tick(now=now)
+
+    def _scene_activity_keys(self, seen_keys):
+        """Keys that constitute live scene activity under the minimal policy.
+
+        A fresh associated detection is activity when it has a label, passes the
+        detector confidence floor, is allowed by ``tracking_classes``, and is
+        not suppressed by an ignore zone. Incident polygons, confirmation
+        frames, stationary motion, and main verification are not gates.
+        """
+        keys = []
+        selected = self.config.native.tracking_classes
+        for key in seen_keys:
+            track = self.registry.get(key)
+            if track is None:
+                continue
+            label = str(track.get("label") or "").strip().lower()
+            if not label:
+                continue
+            if selected is not None and label not in selected:
+                continue
+            if track.get("zone_admission_reason") == "ignored_zone":
+                continue
+            if track.get("confidence_eligible") is False:
+                continue
+            keys.append(key)
+        return keys
 
     @staticmethod
     def _bounded_context_track(track, limit=64):
@@ -454,7 +443,7 @@ class NativeActivity:
 
     def _visible_evidence_objects(self):
         values = []
-        for key in self.registry.confirmed(self._seen_keys):
+        for key in self._seen_keys:
             obj = self.registry.export(key, include_history=False)
             if obj is None:
                 continue
@@ -608,9 +597,7 @@ class NativeActivity:
         if opening:
             visible_ids = {
                 self.registry.get(key)["track_id"]
-                for key in self.registry.confirmed(
-                    self._seen_keys if seed is None else ()
-                )
+                for key in (self._seen_keys if seed is None else ())
                 if self.registry.get(key) is not None
             }
             stored = self.inventory.objects(visible_track_ids=visible_ids)
@@ -671,16 +658,19 @@ class NativeActivity:
                         snapshot_path=path,
                         seed_event_id=self.event_id,
                     )
+                    if not isinstance(incident, dict):
+                        raise TypeError("open_incident must return a mapping")
                     self.incident_id = int(incident["id"])
                     self._observation_seq = int(
                         incident.get("observation_count") or 1
                     )
                     self.counts["incidents_created"] += 1
                 except (TypeError, ValueError, KeyError, AttributeError):
-                    LOGGER.exception(
-                        "open_incident failed camera=%s event=%s",
+                    LOGGER.warning(
+                        "open_incident unavailable camera=%s event=%s",
                         self.camera.id,
                         self.event_id,
+                        exc_info=True,
                     )
                     self.incident_id = None
                     self._observation_seq = 0
@@ -729,7 +719,7 @@ class NativeActivity:
             try:
                 visible_ids = {
                     self.registry.get(key)["track_id"]
-                    for key in self.registry.confirmed(self._seen_keys)
+                    for key in self._seen_keys
                     if self.registry.get(key) is not None
                 }
                 self.events.append_incident_observation(
@@ -760,7 +750,7 @@ class NativeActivity:
 
     def _record_observation_sample(self, epoch: float):
         sample = []
-        for key in self.registry.confirmed(self._seen_keys):
+        for key in self._seen_keys:
             track = self.registry.get(key)
             if track is None or not track.get("label"):
                 continue
@@ -1007,7 +997,6 @@ class NativeActivity:
         return first <= end + timeout and last >= start - timeout
 
     def tick(self, *, now: float):
-        self._poll_verification(now)
         if self.last_fresh and now - self.last_fresh > max(
             self.config.native.maximum_observation_age_seconds,
             (self.config.native.batch_size + .5) / self.fresh_detection_fps,
@@ -1023,10 +1012,6 @@ class NativeActivity:
             elif (
                 self.last_fresh
                 >= self.last_activity + self.config.native.activity_timeout_seconds
-                and not (
-                    now - self.last_activity < 150
-                    and self._pending_verification_blocks_completion(now)
-                )
             ):
                 self.finish("complete", now=now)
 
