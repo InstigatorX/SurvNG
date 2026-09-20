@@ -270,7 +270,13 @@ ov.save_model(ov.Model([output],[image]),sys.argv[1],compress_to_fp16=False)
     manager = AppManager(AppConfig(
         storage_dir=str(tmp_path), database_dir=str(tmp_path / "db"),
         recording_index_dir=str(tmp_path / "recording-index"),
-        detector=DetectorConfig(enabled=True, model_path=str(model), native={"inference_interval": interval, "verification_enabled": False}),
+        detector=DetectorConfig(enabled=True, model_path=str(model), native={
+            "inference_interval": interval,
+            "verification_enabled": False,
+            # Fixture detector emits a fixed box every frame; keep stationary
+            # suppression off so presence still admits an incident.
+            "stationary": {"labels": []},
+        }),
         cameras=[CameraConfig(id="front", name="Front", stream_url="rtsp://unused.invalid/live", record=False)],
         retention={"enabled": False},
     ))
