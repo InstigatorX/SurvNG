@@ -1,8 +1,8 @@
-# Sparse Identity (offline candidate)
+# Sparse Identity (production default)
 
-`survng_sparse_identity` is SurvNG's offline identity-retention candidate. Production
-always runs Hybrid; Compare and `tracking_evaluation` can score Sparse Identity on
-the same saved detections and embeddings.
+`survng_sparse_identity` is SurvNG's promoted production tracker for identity
+retention testing. Hybrid remains selectable. Compare and `tracking_evaluation`
+still score both engines on the same saved detections and embeddings.
 
 ## Behavior
 

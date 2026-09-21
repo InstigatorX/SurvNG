@@ -239,6 +239,10 @@ def test_class_mismatch_and_true_absence_have_explicit_metric_effects():
     assert score["idtp"] == 1 and score["idfp"] == 1 and score["idfn"] == 1
 
 
-@pytest.mark.parametrize("implementation", ["survng_hybrid_candidate", "survng_sparse_identity", "ultralytics_tracktrack", "ultralytics_botsort"])
+@pytest.mark.parametrize("implementation", ["survng_hybrid_candidate", "ultralytics_tracktrack", "ultralytics_botsort"])
 def test_evaluation_engines_cannot_be_selected_by_production_config(implementation):
     assert ObjectTrackingConfig(implementation=implementation).implementation == "survng_hybrid"
+
+
+def test_sparse_identity_remains_selectable_for_production():
+    assert ObjectTrackingConfig(implementation="survng_sparse_identity").implementation == "survng_sparse_identity"

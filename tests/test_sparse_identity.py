@@ -44,9 +44,14 @@ class SparseIdentityTrackerTest(unittest.TestCase):
         )
         self.assertIsInstance(tracker, SparseIdentityObjectTracker)
 
-    def test_production_config_cannot_select_sparse_identity(self) -> None:
-        config = ObjectTrackingConfig(implementation="survng_sparse_identity")
-        self.assertEqual(config.implementation, "survng_hybrid")
+    def test_production_config_can_select_sparse_identity(self) -> None:
+        config = ObjectTrackingConfig(
+            implementation="survng_sparse_identity",
+            reid_enabled=True,
+            reid_model_path="person.xml",
+        )
+        self.assertEqual(config.implementation, "survng_sparse_identity")
+        self.assertEqual(ObjectTrackingConfig().implementation, "survng_sparse_identity")
 
     def test_short_occlusion_resumes_same_track(self) -> None:
         tracker = self.tracker(lost_timeout_seconds=0.5)

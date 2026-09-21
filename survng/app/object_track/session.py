@@ -881,7 +881,10 @@ class ObjectTrackingSession:
                 self._annotate_appearances(
                     initial_frame,
                     initial_objects,
-                    lazy=self.config.implementation == "survng_hybrid",
+                    lazy=self.config.implementation in {
+                        "survng_hybrid",
+                        "survng_sparse_identity",
+                    },
                 )
             # Preserve the actual selected recording sample time. Consensus may
             # choose a frame up to one second on either side of the event.
@@ -994,7 +997,10 @@ class ObjectTrackingSession:
                 self._annotate_appearances(
                     frame,
                     objects,
-                    lazy=self.config.implementation == "survng_hybrid",
+                    lazy=self.config.implementation in {
+                        "survng_hybrid",
+                        "survng_sparse_identity",
+                    },
                 )
                 _rescale_detection_boxes(
                     objects,

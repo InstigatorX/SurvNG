@@ -107,7 +107,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertFalse(tracking.reid_enabled_for_label("person"))
 
     def test_legacy_bytetrack_name_migrates_to_survng_hybrid(self) -> None:
-        self.assertEqual(ObjectTrackingConfig().implementation, "survng_hybrid")
+        self.assertEqual(ObjectTrackingConfig().implementation, "survng_sparse_identity")
         self.assertEqual(
             ObjectTrackingConfig(implementation="ByteTrack").implementation,
             "survng_hybrid",
@@ -119,6 +119,10 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(
             ObjectTrackingConfig(implementation="ultralytics_deepocsort").implementation,
             "survng_hybrid",
+        )
+        self.assertEqual(
+            ObjectTrackingConfig(implementation="survng_sparse_identity").implementation,
+            "survng_sparse_identity",
         )
     def test_base_path_defaults_to_survng(self) -> None:
         self.assertEqual(AppConfig().base_path, "/survng")

@@ -640,7 +640,7 @@ class DepthConfig(BaseModel):
 
 class ObjectTrackingConfig(BaseModel):
     enabled: bool = True
-    implementation: str = Field(default="survng_hybrid", min_length=1, max_length=64)
+    implementation: str = Field(default="survng_sparse_identity", min_length=1, max_length=64)
     excluded_labels: list[str] = Field(default_factory=lambda: ["face"], max_length=128)
     sample_fps: float = Field(default=2.0, ge=0.5, le=5.0)
     adaptive_sampling_enabled: bool = True
@@ -699,7 +699,6 @@ class ObjectTrackingConfig(BaseModel):
         implementation = str(value or "").strip().lower()
         if implementation in {
             "survng_hybrid_candidate",
-            "survng_sparse_identity",
             "ultralytics_tracktrack",
             "bytetrack",
             "ultralytics_botsort",

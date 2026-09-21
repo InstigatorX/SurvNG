@@ -1,13 +1,13 @@
 # Evaluate identity stability before changing production
 
-Production remains SurvNG Hybrid. Compare evaluates current Hybrid, offline
-Sparse Identity (`survng_sparse_identity`), TrackTrack and BoT-SORT against the
-same detector output. Sparse Identity is the active offline candidate for
-identity-retention work; see [tracking-corpus.md](tracking-corpus.md) for the
-collection and promotion checklist.
+Production currently defaults to SurvNG Sparse Identity. Compare evaluates
+Hybrid, Sparse Identity, TrackTrack and BoT-SORT against the same detector
+output. Roll back to Hybrid from Detection → Continuous tracking if needed.
+See [tracking-corpus.md](tracking-corpus.md) and
+[tracking-sparse-identity.md](tracking-sparse-identity.md).
 
 Historic Hybrid-candidate results remain readable. The candidate alias still
-maps to production Hybrid behavior and is not a separate live engine.
+maps to Hybrid behavior and is not a separate live engine.
 
 ## Collect a representative set
 

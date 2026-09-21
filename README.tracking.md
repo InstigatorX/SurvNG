@@ -2,10 +2,11 @@
 
 SurvNG uses one production tracker and an offline evaluation workflow:
 
-- **SurvNG Hybrid** (`survng_hybrid`) is the default.
-- **Sparse Identity** (`survng_sparse_identity`) is the offline identity-retention
-  candidate. It adds cascaded association, buffered IoU, quality-gated ReID
-  galleries, and entity relink hooks. Production config cannot select it.
+- **SurvNG Sparse Identity** (`survng_sparse_identity`) is the production default
+  for identity-retention testing. It adds cascaded association, buffered IoU,
+  quality-gated ReID galleries, and entity relink.
+- **SurvNG Hybrid** (`survng_hybrid`) remains selectable as the prior production
+  engine.
 - **TrackTrack** and **BoT-SORT** remain offline comparison engines.
 - Historic Hybrid-candidate, FastTrack, and Deep OC-SORT results remain readable.
 
