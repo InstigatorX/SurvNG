@@ -1950,6 +1950,106 @@ class EventStore(
             observation_count=int(count["n"] if count is not None else 0),
         )
 
+    def link_incidents(
+        self,
+        *,
+        from_incident_id: int,
+        to_incident_id: int,
+        relation_type: str = "route_handoff",
+        route_name: str = "",
+        from_camera_id: str = "",
+        to_camera_id: str = "",
+        from_seed_event_id: int | None = None,
+        to_seed_event_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist advisory relatedness between durable incidents (not identity)."""
+        source = int(from_incident_id or 0)
+        target = int(to_incident_id or 0)
+        relation = str(relation_type or "").strip() or "route_handoff"
+        if source <= 0 or target <= 0 or source == target:
+            return None
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            exists = conn.execute(
+                "select id from incidents where id in (?, ?)",
+                (source, target),
+            ).fetchall()
+            if len(exists) < 2:
+                return None
+            conn.execute(
+                """
+                insert or ignore into incident_links (
+                    from_incident_id, to_incident_id, relation_type, route_name,
+                    from_camera_id, to_camera_id, from_seed_event_id, to_seed_event_id,
+                    created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source,
+                    target,
+                    relation,
+                    str(route_name or ""),
+                    str(from_camera_id or ""),
+                    str(to_camera_id or ""),
+                    int(from_seed_event_id) if from_seed_event_id else None,
+                    int(to_seed_event_id) if to_seed_event_id else None,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                select * from incident_links
+                where from_incident_id = ? and to_incident_id = ? and relation_type = ?
+                """,
+                (source, target, relation),
+            ).fetchone()
+        return self._incident_link_view(row) if row is not None else None
+
+    def list_incident_links(
+        self,
+        incident_id: int,
+        *,
+        limit: int = 64,
+    ) -> list[dict[str, Any]]:
+        """Return durable links involving an incident, newest first."""
+        bounded = max(1, min(int(limit), 500))
+        incident = int(incident_id or 0)
+        if incident <= 0:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select * from incident_links
+                where from_incident_id = ? or to_incident_id = ?
+                order by created_at desc, id desc
+                limit ?
+                """,
+                (incident, incident, bounded),
+            ).fetchall()
+        return [self._incident_link_view(row) for row in rows]
+
+    def _incident_link_view(self, row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "from_incident_id": int(row["from_incident_id"]),
+            "to_incident_id": int(row["to_incident_id"]),
+            "relation_type": str(row["relation_type"] or ""),
+            "route_name": str(row["route_name"] or ""),
+            "from_camera_id": str(row["from_camera_id"] or ""),
+            "to_camera_id": str(row["to_camera_id"] or ""),
+            "from_seed_event_id": (
+                int(row["from_seed_event_id"])
+                if row["from_seed_event_id"] is not None
+                else None
+            ),
+            "to_seed_event_id": (
+                int(row["to_seed_event_id"])
+                if row["to_seed_event_id"] is not None
+                else None
+            ),
+            "created_at": str(row["created_at"] or ""),
+        }
+
     def list_incident_observations(
         self,
         incident_id: int,

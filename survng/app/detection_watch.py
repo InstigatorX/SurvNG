@@ -23,6 +23,8 @@ class DetectionWatch:
     route_path: tuple[str, ...] = ()
     origin_camera_id: str = ""
     origin_event_id: int = 0
+    source_incident_id: int = 0
+    origin_incident_id: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -40,6 +42,8 @@ class DetectionWatch:
             "route_path": list(self.route_path),
             "origin_camera_id": self.origin_camera_id,
             "origin_event_id": self.origin_event_id,
+            "source_incident_id": self.source_incident_id,
+            "origin_incident_id": self.origin_incident_id,
         }
 
 
@@ -93,6 +97,8 @@ class RouteDetectionWatch:
         route_path: Iterable[str] = (),
         origin_camera_id: str = "",
         origin_event_id: int = 0,
+        incident_id: int = 0,
+        origin_incident_id: int = 0,
     ) -> tuple[DetectionWatch, ...]:
         labels = tuple(sorted({
             str(item.get("label") or "").strip().lower()
@@ -132,6 +138,8 @@ class RouteDetectionWatch:
                 return ()
             origin_camera = str(origin_camera_id or camera_id).strip()
             origin_event = int(origin_event_id or event_id)
+            source_incident = int(incident_id or 0)
+            origin_incident = int(origin_incident_id or incident_id or 0)
             created: list[DetectionWatch] = []
             for route in self._routes:
                 target = ""
@@ -156,6 +164,8 @@ class RouteDetectionWatch:
                     route_path=(*path, target),
                     origin_camera_id=origin_camera,
                     origin_event_id=origin_event,
+                    source_incident_id=source_incident,
+                    origin_incident_id=origin_incident,
                 ))
             self._watches.extend(created)
             self._counters["opened"] += len(created)

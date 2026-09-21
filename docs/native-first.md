@@ -97,10 +97,12 @@ incident.
   Cover nomination prefers durable `incident_observations` over track
   `box_history` (legacy track history remains a recovery path for old rows).
 - Configured `detector.tracking.camera_transition_routes` are advisory adjacency
-  only under native-first: an upstream incident opens a timed watch on the next
-  camera, and a later normally admitted target may stamp route provenance / chain
-  the next hop. Watches never bypass zones or create incidents by themselves.
-  Related-incident and cross-camera trace surfaces may bias expected handoffs.
+  only under native-first: an upstream durable incident opens a timed watch on
+  the next camera, and a later normally admitted target may stamp route
+  provenance, persist an `incident_links` row (`route_handoff`), and chain the
+  next hop. Watches never bypass zones or create incidents by themselves, and
+  they never claim track-ID identity across cameras. Related-incident and
+  cross-camera trace surfaces prefer durable links, then bias expected handoffs.
 - Predicted tracker ROIs are not produced on the live path. Only
   `native_fresh_detection` metadata can admit or extend presence.
 - Default completion: five seconds without fresh eligible presence. Missing or
@@ -110,8 +112,10 @@ incident.
 - Zone polygons remain observation metadata for presentation and ignore-zone
   suppression. They do not require an object to sit inside an incident polygon
   before a scene incident can open.
-- Stationary-motion helpers remain available for diagnostics but no longer gate
-  whether a detection is scene activity.
+- Stationary-motion policy gates scene activity for configured labels (default
+  includes person and common vehicles): only `moving` / non-gated `presence`
+  detections admit or extend incidents. Soft-assoc rematch carries motion
+  evidence so an open chase does not reset to cold `uncertain` mid-object.
 - Live association history is bounded to 150 observations per object and 128 objects
   per live camera, with 128 archived participants per incident by default. Expired
   live associations are evicted independently of incident history. Capacity drops

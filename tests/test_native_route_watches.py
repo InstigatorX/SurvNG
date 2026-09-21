@@ -72,6 +72,7 @@ class NativeRouteWatchTests(unittest.TestCase):
                 event_id=11,
                 event_at=50.0,
                 objects=[{"label": "car", "incident_eligible": True}],
+                incident_id=101,
             )[0]
             consumed = []
             activity.consume_route_watch = (
@@ -92,6 +93,7 @@ class NativeRouteWatchTests(unittest.TestCase):
             matched = activity._matching_route_watch(55.0, stored)
             self.assertIsNotNone(matched)
             self.assertEqual(matched.source_event_id, 11)
+            self.assertEqual(matched.source_incident_id, 101)
 
             # Outside-zone-only inventory must not consume a watch.
             self.assertIsNone(
@@ -117,6 +119,91 @@ class NativeRouteWatchTests(unittest.TestCase):
                 _route_eligible_objects([*stored, handoff])[0]["label"],
                 "car",
             )
+
+    def test_route_handoff_persists_incident_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            from survng.app.config import DetectorConfig
+            from survng.app.live_detections import DetectionSnapshot
+            from survng.native_spatial import spatial_plan
+
+            camera = CameraConfig(
+                id="lower-garage",
+                name="lower-garage",
+                stream_url="rtsp://example.invalid/live",
+            )
+            revision = spatial_plan(camera)["revision"]
+            config = DetectorConfig(
+                enabled=True,
+                event_confirmation_frames=1,
+                native={"stationary": {"labels": []}},
+            )
+            events = EventStore(root)
+            upstream_event = events.add_event(
+                camera_id="gate",
+                kind="motion",
+                topic="native/object-presence",
+                message="upstream",
+                created_at=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc).isoformat(),
+                objects_json=json.dumps(
+                    [{"label": "car", "confidence": 0.9, "incident_eligible": True}]
+                ),
+            )
+            upstream_incident = events.open_incident(
+                camera_id="gate",
+                start_at=upstream_event["created_at"],
+                participants=[{"label": "car", "confidence": 0.9}],
+                observation_objects=[{"label": "car", "confidence": 0.9}],
+                seed_event_id=int(upstream_event["id"]),
+            )
+            watch = RouteDetectionWatch(
+                [
+                    CameraTransitionRoute(
+                        from_camera="gate",
+                        to_camera="lower-garage",
+                        min_seconds=0,
+                        max_seconds=30,
+                    )
+                ]
+            ).observe_incident(
+                camera_id="gate",
+                event_id=int(upstream_event["id"]),
+                event_at=50.0,
+                objects=[{"label": "car", "incident_eligible": True}],
+                incident_id=int(upstream_incident["id"]),
+            )[0]
+            downstream = NativeActivity(
+                camera, config, events, Mock(), lambda *_args: "snap.webp"
+            )
+            downstream.route_watch_match = lambda epoch: watch
+            downstream.consume_route_watch = lambda *_args: True
+            obj = {
+                "label": "car",
+                "confidence": 0.95,
+                "incident_eligible": True,
+                "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 50},
+                "detection_provenance": "native_fresh_detection",
+            }
+            observation = DetectionSnapshot(
+                1.0,
+                1,
+                100,
+                100,
+                (obj,),
+                "s1",
+                "native_fresh_detection",
+                100.0,
+                zone_revision=revision,
+            )
+            downstream.consume(observation, now=55.0, epoch=55.0)
+            self.assertIsNotNone(downstream.incident_id)
+            links = events.list_incident_links(int(upstream_incident["id"]))
+            self.assertEqual(len(links), 1)
+            self.assertEqual(links[0]["relation_type"], "route_handoff")
+            self.assertEqual(links[0]["from_incident_id"], int(upstream_incident["id"]))
+            self.assertEqual(links[0]["to_incident_id"], int(downstream.incident_id))
+            self.assertEqual(links[0]["from_camera_id"], "gate")
+            self.assertEqual(links[0]["to_camera_id"], "lower-garage")
 
     def test_cross_camera_trace_biases_configured_route(self) -> None:
         anchor = {

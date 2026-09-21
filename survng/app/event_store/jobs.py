@@ -392,6 +392,33 @@ class EventStoreJobsMixin:
                 "on incident_observations(incident_id, seq)"
             )
             conn.execute(
+                """
+                create table if not exists incident_links (
+                    id integer primary key autoincrement,
+                    from_incident_id integer not null,
+                    to_incident_id integer not null,
+                    relation_type text not null,
+                    route_name text not null default '',
+                    from_camera_id text not null default '',
+                    to_camera_id text not null default '',
+                    from_seed_event_id integer,
+                    to_seed_event_id integer,
+                    created_at text not null,
+                    unique(from_incident_id, to_incident_id, relation_type),
+                    foreign key(from_incident_id) references incidents(id) on delete cascade,
+                    foreign key(to_incident_id) references incidents(id) on delete cascade
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_incident_links_from "
+                "on incident_links(from_incident_id, created_at desc)"
+            )
+            conn.execute(
+                "create index if not exists idx_incident_links_to "
+                "on incident_links(to_incident_id, created_at desc)"
+            )
+            conn.execute(
                 "create index if not exists idx_events_created_at on events(created_at desc)"
             )
             conn.execute(

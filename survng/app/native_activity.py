@@ -2,9 +2,9 @@
 
 NativeObjectRegistry owns soft spatial/temporal association for presentation.
 Scene activity opens and extends multi-object incidents from fresh detections
-that clear class, ignore-zone, confidence/incident-zone eligibility, and
-confirmation-frame requirements. Main-stream cover verification still runs
-after creation via NativeEvidenceService.
+that clear class, ignore-zone, confidence/incident-zone eligibility,
+confirmation-frame requirements, and configured stationary-motion policy.
+Main-stream cover verification still runs after creation via NativeEvidenceService.
 """
 from __future__ import annotations
 
@@ -16,7 +16,14 @@ import time
 from typing import Callable
 
 from .live_detections import DetectionSnapshot
-from .native_objects import NativeIncidentInventory, NativeObjectRegistry, iso
+from .native_motion import NativeMotion
+from .native_objects import (
+    NativeIncidentInventory,
+    NativeObjectRegistry,
+    iso,
+    labels_compatible,
+    motion_rematch_score,
+)
 from .zones import apply_detection_zones
 from survng.native_spatial import spatial_plan
 
@@ -96,6 +103,7 @@ class NativeActivity:
         state = self._activity_states.get(key)
         if state is None:
             state = {
+                "_motion": NativeMotion(),
                 "motion_state": "uncertain",
                 "motion_extent": None,
                 "activity_eligible": False,
@@ -197,18 +205,13 @@ class NativeActivity:
             dimensions=self.dimensions,
             fresh_fps=self.fresh_detection_fps,
         )
+        self._adopt_motion_across_rematch()
         for key in list(self._activity_states):
             if key not in self.registry.tracks:
                 del self._activity_states[key]
 
+        self._update_motion_states(observation)
         activity_keys = self._scene_activity_keys(self._seen_keys)
-        for key in activity_keys:
-            state = self._activity_state(key)
-            state.update(
-                motion_state="presence",
-                motion_extent=None,
-                activity_eligible=True,
-            )
         if activity_keys:
             self._activate(activity_keys, observation, epoch, now)
 
@@ -220,14 +223,107 @@ class NativeActivity:
 
         self.tick(now=now)
 
+    def _adopt_motion_across_rematch(self):
+        """Carry motion evidence when soft-assoc issues a new key mid-object.
+
+        Identity rematch must not reset a chase to cold ``uncertain``: that
+        drops ``activity_eligible`` and can time out an open incident while the
+        subject is still moving. Parked donors stay suppressed because their
+        inherited state remains non-eligible.
+        """
+        unmatched = {
+            key: state
+            for key, state in self._activity_states.items()
+            if key not in self._seen_keys
+        }
+        if not unmatched:
+            return
+        for key in self._seen_keys:
+            if key in self._activity_states:
+                continue
+            track = self.registry.get(key)
+            if track is None:
+                continue
+            donor_key = None
+            donor_score = None
+            for orphan_key, orphan_state in unmatched.items():
+                orphan_track = self.registry.get(orphan_key)
+                if orphan_track is None:
+                    continue
+                if not labels_compatible(
+                    str(orphan_track.get("label") or ""),
+                    str(track.get("label") or ""),
+                ):
+                    continue
+                score = motion_rematch_score(orphan_track, track)
+                if score is None:
+                    continue
+                if donor_score is None or score > donor_score:
+                    donor_key, donor_score = orphan_key, score
+            if donor_key is None:
+                continue
+            donor_state = unmatched.pop(donor_key)
+            self._activity_states[key] = donor_state
+            del self._activity_states[donor_key]
+            donor_track = self.registry.get(donor_key)
+            if (
+                self.event_id is not None
+                and donor_track is not None
+                and donor_track.get("confirmed")
+            ):
+                # Sticky confirmation follows the continuing object across the
+                # rematch so an open incident does not re-earn frames mid-chase.
+                track["confirmed"] = True
+            self.counts["motion_rematch_adoptions"] += 1
+
+    def _update_motion_states(self, observation):
+        """Refresh stationary-policy motion for every currently seen association."""
+        policy = self.config.native.stationary
+        maximum_gap = max(
+            self.config.native.maximum_observation_age_seconds,
+            3 / max(0.001, self.fresh_detection_fps),
+        )
+        for key in self._seen_keys:
+            track = self.registry.get(key)
+            if track is None:
+                continue
+            label = str(track.get("label") or "").strip().lower()
+            if not label:
+                continue
+            selected = self.config.native.tracking_classes
+            if selected is not None and label not in selected:
+                continue
+            state = self._activity_state(key)
+            previous_motion = state.get("motion_state", "uncertain")
+            applies = bool(policy.enabled and label in policy.labels)
+            if applies:
+                motion_state = state["_motion"].update(
+                    track["box"],
+                    observation.source_pts,
+                    policy,
+                    maximum_gap,
+                )
+                motion_extent = round(state["_motion"].extent, 4)
+            else:
+                motion_state, motion_extent = "presence", None
+            state.update(
+                motion_state=motion_state,
+                motion_extent=motion_extent,
+                activity_eligible=motion_state in {"moving", "presence"},
+            )
+            if applies and motion_state != previous_motion:
+                self.counts[f"{motion_state}_transitions"] += 1
+            if applies and not state["activity_eligible"]:
+                self.counts[f"{motion_state}_vehicle_observations"] += 1
+
     def _scene_activity_keys(self, seen_keys):
-        """Keys that constitute live scene activity under the minimal policy.
+        """Keys that constitute live scene activity under the current policy.
 
         A fresh associated detection is activity when it has a label, is allowed
         by ``tracking_classes``, is not on an ignore zone, meets the configured
-        confidence / incident-zone eligibility, and has enough confirming
-        observations. Soft-association history alone cannot admit a spike that
-        has not cleared the confirmation floor on this association.
+        confidence / incident-zone eligibility, clears confirmation frames, and
+        is activity-eligible under the stationary-motion policy. Soft-association
+        history alone cannot admit a spike that has not cleared confirmation.
         """
         keys = []
         selected = self.config.native.tracking_classes
@@ -246,10 +342,17 @@ class NativeActivity:
                 continue
             if track.get("confidence_eligible") is False:
                 continue
+            state = self._activity_states.get(key)
+            if state is None or not state.get("activity_eligible"):
+                continue
             required = int(track.get("required_observations") or 1)
             confirming = int(track.get("confirming_observations") or 0)
             if confirming < required and track.get("state") != "confirmed":
-                continue
+                # Open incidents may continue on a soft-associated object that
+                # already earned confirmation earlier. New incidents still need
+                # fresh confirmation frames after a gap.
+                if not (self.event_id is not None and track.get("confirmed")):
+                    continue
             keys.append(key)
         return keys
 
@@ -446,6 +549,49 @@ class NativeActivity:
                     )
                     self.incident_id = None
                     self._observation_seq = 0
+            if (
+                route_watch is not None
+                and self.incident_id is not None
+                and hasattr(self.events, "link_incidents")
+            ):
+                source_incident_id = int(
+                    getattr(route_watch, "source_incident_id", 0) or 0
+                )
+                if source_incident_id <= 0 and hasattr(
+                    self.events, "incident_for_event"
+                ):
+                    try:
+                        upstream = self.events.incident_for_event(
+                            int(route_watch.source_event_id)
+                        )
+                    except (TypeError, ValueError, AttributeError):
+                        upstream = None
+                    if isinstance(upstream, dict):
+                        source_incident_id = int(upstream.get("id") or 0)
+                if source_incident_id > 0:
+                    try:
+                        self.events.link_incidents(
+                            from_incident_id=source_incident_id,
+                            to_incident_id=self.incident_id,
+                            relation_type="route_handoff",
+                            route_name=str(
+                                getattr(route_watch, "route_name", "") or ""
+                            ),
+                            from_camera_id=str(
+                                getattr(route_watch, "source_camera_id", "") or ""
+                            ),
+                            to_camera_id=self.camera.id,
+                            from_seed_event_id=int(route_watch.source_event_id),
+                            to_seed_event_id=self.event_id,
+                        )
+                    except (TypeError, ValueError, AttributeError):
+                        LOGGER.warning(
+                            "link_incidents unavailable camera=%s from=%s to=%s",
+                            self.camera.id,
+                            source_incident_id,
+                            self.incident_id,
+                            exc_info=True,
+                        )
             if route_watch is not None and callable(self.consume_route_watch):
                 try:
                     self.consume_route_watch(

@@ -667,6 +667,7 @@ class AppManager:
         event_id: int,
         objects,
         observed_at: float | None = None,
+        incident_id: int = 0,
     ) -> None:
         eligible = _route_eligible_objects(objects)
         if not eligible or event_id <= 0:
@@ -682,11 +683,29 @@ class AppManager:
                 ).timestamp()
             except (TypeError, ValueError):
                 observed_at = time.time()
+        source_incident_id = int(incident_id or 0)
+        if source_incident_id <= 0 and hasattr(self.events, "incident_for_event"):
+            try:
+                durable = self.events.incident_for_event(int(event_id))
+            except (TypeError, ValueError, AttributeError):
+                durable = None
+            if isinstance(durable, dict):
+                source_incident_id = int(durable.get("id") or 0)
+        origin_incident_id = 0
+        if origin_event_id > 0 and hasattr(self.events, "incident_for_event"):
+            try:
+                origin = self.events.incident_for_event(int(origin_event_id))
+            except (TypeError, ValueError, AttributeError):
+                origin = None
+            if isinstance(origin, dict):
+                origin_incident_id = int(origin.get("id") or 0)
         observe_kwargs = {
             "camera_id": camera_id,
             "event_id": int(event_id),
             "event_at": float(observed_at),
             "objects": eligible,
+            "incident_id": source_incident_id,
+            "origin_incident_id": origin_incident_id or source_incident_id,
         }
         if route_path:
             observe_kwargs["route_path"] = route_path
@@ -1434,6 +1453,7 @@ class AppManager:
                     event_id=int(event_id or 0),
                     objects=alert_objects,
                     observed_at=observed_at,
+                    incident_id=int(payload.get("incident_id") or 0),
                 )
             except Exception:
                 LOGGER.exception(

@@ -553,6 +553,81 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                 for match in visual_matches
                 if match.get("visually_similar")
             }
+            # Durable route links between incidents outrank heuristic adjacency.
+            anchor_incident = None
+            if hasattr(active_manager.events, "incident_for_event"):
+                try:
+                    anchor_incident = active_manager.events.incident_for_event(
+                        int(event_id)
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    anchor_incident = None
+            if (
+                isinstance(anchor_incident, dict)
+                and hasattr(active_manager.events, "list_incident_links")
+            ):
+                try:
+                    durable_links = active_manager.events.list_incident_links(
+                        int(anchor_incident.get("id") or 0),
+                        limit=bounded_limit * 2,
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    durable_links = []
+                for link in durable_links:
+                    if str(link.get("relation_type") or "") != "route_handoff":
+                        continue
+                    anchor_id = int(anchor_incident.get("id") or 0)
+                    peer_id = (
+                        int(link.get("to_incident_id") or 0)
+                        if int(link.get("from_incident_id") or 0) == anchor_id
+                        else int(link.get("from_incident_id") or 0)
+                    )
+                    if peer_id <= 0:
+                        continue
+                    peer = None
+                    if hasattr(active_manager.events, "get_incident"):
+                        try:
+                            peer = active_manager.events.get_incident(peer_id)
+                        except (TypeError, ValueError, AttributeError):
+                            peer = None
+                    if not isinstance(peer, dict):
+                        continue
+                    peer_event_id = int(peer.get("seed_event_id") or 0)
+                    if peer_event_id <= 0:
+                        continue
+                    peer_camera = str(peer.get("camera_id") or "")
+                    if peer_camera == str(event.get("camera_id") or ""):
+                        continue
+                    try:
+                        peer_at = datetime.fromisoformat(
+                            str(peer.get("start_at") or "").replace("Z", "+00:00")
+                        )
+                        if peer_at.tzinfo is None:
+                            peer_at = peer_at.replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        continue
+                    delta = abs((peer_at - anchor_at).total_seconds())
+                    visual = visual_by_event.get(peer_event_id)
+                    similar = bool(visual and visual.get("visually_similar"))
+                    families = sorted(anchor_families) or ["object"]
+                    combined[peer_event_id] = {
+                        **(visual or {}),
+                        "event_id": peer_event_id,
+                        "camera_id": peer_camera,
+                        "created_at": str(peer.get("start_at") or ""),
+                        "_created_at": peer_at,
+                        "_recording_path": str(peer.get("recording_path") or ""),
+                        "model_kind": families[0],
+                        "sequence_delta_seconds": round(delta, 3),
+                        "relation_type": (
+                            "appearance_route" if similar else "route_link"
+                        ),
+                        "visually_similar": similar,
+                        "route_name": str(link.get("route_name") or ""),
+                        "from_camera": str(link.get("from_camera_id") or ""),
+                        "to_camera": str(link.get("to_camera_id") or ""),
+                        "linked_incident_id": peer_id,
+                    }
             for candidate in temporal:
                 candidate_id = int(candidate.get("id") or 0)
                 if (
@@ -615,12 +690,14 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
                     0
                     if item.get("relation_type") == "appearance_route"
                     else 1
-                    if item.get("relation_type") == "appearance_sequence"
+                    if item.get("relation_type") == "route_link"
                     else 2
-                    if item.get("relation_type") == "expected_route"
+                    if item.get("relation_type") == "appearance_sequence"
                     else 3
+                    if item.get("relation_type") == "expected_route"
+                    else 4
                     if item.get("relation_type") == "appearance"
-                    else 4,
+                    else 5,
                     float(item.get("sequence_delta_seconds") or 1e12),
                     -float(item.get("similarity") or 0.0),
                 ),

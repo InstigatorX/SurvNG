@@ -49,7 +49,7 @@ def test_incident_inventory_keeps_context_objects_outside_tracking_classes():
     config = DetectorConfig(
         enabled=True,
         event_confirmation_frames=2,
-        native={"tracking_classes": ["person"]},
+        native={"tracking_classes": ["person"], "stationary": {"labels": []}},
     )
     activity = NativeActivity(
         CameraConfig(

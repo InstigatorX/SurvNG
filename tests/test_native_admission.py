@@ -44,6 +44,11 @@ def setup_activity(**detector_kwargs):
         side_effect=[{"id": 10, "observation_count": 1}, {"id": 11, "observation_count": 1}]
     )
     detector_kwargs.setdefault("event_confirmation_frames", 1)
+    native = dict(detector_kwargs.pop("native", {}) or {})
+    stationary = dict(native.get("stationary") or {})
+    stationary.setdefault("labels", [])
+    native["stationary"] = stationary
+    detector_kwargs["native"] = native
     return NativeActivity(
         CameraConfig(id="front", name="Front", stream_url="rtsp://unused.invalid"),
         DetectorConfig(**detector_kwargs),
@@ -174,6 +179,45 @@ def test_confirmation_frames_required_before_scene_activity():
     a.events.add_event.assert_not_called()
     feed(a, 2, [person])
     assert a.events.add_event.call_count == 1
+
+
+def test_open_incident_survives_brief_detection_gaps():
+    """Parked/continuous subjects must not flap when one frame misses."""
+    a = setup_activity(confidence_threshold=0.65, event_confirmation_frames=2)
+    person = {
+        "label": "person",
+        "confidence": 0.71,
+        "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 60},
+        "detection_provenance": "native_fresh_detection",
+    }
+    feed(a, 1, [person])
+    feed(a, 2, [person])
+    assert a.event_id == 1
+    feed(a, 3, [])
+    feed(a, 4, [person])
+    assert a.event_id == 1
+    assert a.events.add_event.call_count == 1
+
+
+def test_long_gap_must_reconfirm_before_new_scene_incident():
+    a = setup_activity(confidence_threshold=0.65, event_confirmation_frames=2)
+    person = {
+        "label": "person",
+        "confidence": 0.71,
+        "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 60},
+        "detection_provenance": "native_fresh_detection",
+    }
+    feed(a, 1, [person])
+    feed(a, 2, [person])
+    assert a.event_id == 1
+    for seq in range(3, 40):
+        feed(a, seq, [])
+    assert a.event_id is None
+    feed(a, 40, [person])
+    assert a.event_id is None
+    feed(a, 41, [person])
+    assert a.event_id == 2
+    assert a.events.add_event.call_count == 2
 
 
 def test_incident_zone_required_blocks_outside_zone_activity():

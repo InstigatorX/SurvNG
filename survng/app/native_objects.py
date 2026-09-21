@@ -57,7 +57,7 @@ def _box(item):
     return values
 
 
-def _association_score(previous, current):
+def _association_score(previous, current, *, max_distance: float = 0.65):
     before, after = _box(previous), _box(current)
     if before is None or after is None:
         return None
@@ -78,7 +78,26 @@ def _association_score(previous, current):
         math.hypot(bx2-bx1, by2-by1),
     )
     distance = math.hypot(acx-bcx, acy-bcy) / scale
-    return 1.0 - distance/.65 if distance <= .65 else None
+    if distance > max_distance:
+        return None
+    return 1.0 - distance / max_distance
+
+
+# Soft-assoc identity uses a tight nearness gate. Motion adoption after a
+# rematch may use a wider gate so a continuing chase does not restart cold.
+MOTION_REMATCH_MAX_DISTANCE = 2.0
+
+
+def motion_rematch_score(previous, current):
+    """Looser spatial score for carrying motion across a soft-assoc rematch."""
+    return _association_score(
+        previous, current, max_distance=MOTION_REMATCH_MAX_DISTANCE
+    )
+
+
+def labels_compatible(left: str, right: str) -> bool:
+    """Public wrapper for soft-assoc / motion rematch label families."""
+    return _compatible_labels(left, right)
 
 
 class NativeObjectRegistry:
@@ -221,8 +240,14 @@ class NativeObjectRegistry:
                 self.config.native.maximum_observation_age_seconds,
                 3 / max(.001, fresh_fps),
             ):
+                # A long absence must re-earn admission. Brief misses are handled
+                # below without clearing the sticky confirmed bit so an already
+                # open incident does not flap on single-frame detection drops.
                 track["consecutive"] = 0
                 track["_label_confirmations"].clear()
+                track["confirming_observations"] = 0
+                track["state"] = "tentative"
+                track["confirmed"] = False
             track["_label_votes"][label] += 1
             track["_label_confidences"].setdefault(label, []).append(confidence)
             if len(track["_label_confidences"][label]) > 32:
@@ -283,10 +308,12 @@ class NativeObjectRegistry:
                 track["consecutive"] = 0
                 track["_label_confirmations"].clear()
                 track["confirming_observations"] = 0
-                # A gap breaks confirmation. Soft association may retain the
-                # spatial key, but a later spike must re-earn admission.
+                # A gap breaks the in-progress confirmation counter. Soft
+                # association may retain the spatial key; opening a new
+                # incident still requires re-earning confirmation frames.
+                # Keep sticky ``confirmed`` so an already-open incident can
+                # extend across brief detection misses without flapping.
                 track["state"] = "tentative"
-                track["confirmed"] = False
         return seen
 
     def get(self, key):
