@@ -181,6 +181,39 @@ class SparseIdentityTrackerTest(unittest.TestCase):
         self.assertNotEqual(result[0]["track_id"], 1)
         self.assertEqual(result[0]["entity_id"], 1)
 
+    def test_geometry_keeps_ambiguous_match_when_reid_disabled(self) -> None:
+        tracker = SparseIdentityObjectTracker(
+            ObjectTrackingConfig(
+                min_confirmations=1,
+                reid_enabled=False,
+                match_iou_threshold=0.05,
+                match_center_distance_ratio=1.2,
+            ),
+            0.7,
+        )
+        seeded = tracker.update(
+            [
+                detection((100, 100, 140, 180)),
+                detection((180, 100, 220, 180)),
+            ],
+            10.0,
+            confirm_new=True,
+        )
+        self.assertEqual(len(seeded), 2)
+        continued = tracker.update(
+            [
+                detection((110, 100, 150, 180)),
+                detection((170, 100, 210, 180)),
+            ],
+            10.5,
+        )
+        self.assertEqual(len(continued), 2)
+        self.assertEqual(
+            {item["track_id"] for item in continued},
+            {item["track_id"] for item in seeded},
+        )
+        self.assertEqual(tracker.diagnostics()["association_counts"]["geometry"], 2)
+
     def test_person_retention_profile_raises_floors(self) -> None:
         config = ObjectTrackingConfig(
             tracking_profile="person_retention",

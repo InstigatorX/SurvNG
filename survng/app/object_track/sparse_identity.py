@@ -217,15 +217,24 @@ class SparseIdentityObjectTracker(HybridObjectTracker):
         if max(map(max, scores), default=0.0) <= 0.0:
             return
 
-        # Defer geometrically ambiguous columns to contested appearance.
-        for column in range(len(detections)):
-            column_scores = sorted(
-                (scores[row][column] for row in range(len(track_ids)) if scores[row][column] > 0),
-                reverse=True,
-            )
-            if len(column_scores) >= 2 and column_scores[0] - column_scores[1] < 0.35:
-                for row in range(len(track_ids)):
-                    scores[row][column] = 0.0
+        # Defer geometrically ambiguous columns to contested appearance only when
+        # ReID can break the tie. Without appearance, keep Hybrid-like geometry.
+        if self.config.appearance_reid_enabled:
+            for column in range(len(detections)):
+                label = _normalize_label(detections[column][1].get("label"))
+                if not self.config.reid_enabled_for_label(label):
+                    continue
+                column_scores = sorted(
+                    (
+                        scores[row][column]
+                        for row in range(len(track_ids))
+                        if scores[row][column] > 0
+                    ),
+                    reverse=True,
+                )
+                if len(column_scores) >= 2 and column_scores[0] - column_scores[1] < 0.35:
+                    for row in range(len(track_ids)):
+                        scores[row][column] = 0.0
 
         if max(map(max, scores), default=0.0) <= 0.0:
             return
