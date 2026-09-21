@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -12,6 +14,10 @@ MAXIMUM_MOVEMENT_RATIO = 0.02
 MOVEMENT_BOX_SCALE = 0.04
 MINIMUM_PATH_RATIO = 0.01
 PATH_MOVEMENT_SCALE = 2.5
+MOTION_CORRELATION_REASON = "object_not_motion_correlated"
+TRACKING_RESAMPLE_BUCKET = 8
+MINIMUM_TRACKING_OBSERVATIONS = 2 * TRACKING_RESAMPLE_BUCKET
+MINIMUM_TRACKING_MATCH_IOU = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +115,210 @@ def temporal_object_motion_evidence(
         ),
         zone_entry=bool(observation.get("temporal_zone_entry")),
     )
+
+
+def tracking_motion_promotions(
+    objects: Sequence[Any],
+    tracking: Mapping[str, Any],
+) -> dict[int, dict[str, Any]]:
+    """Re-check motion-demoted objects against whole-session tracking evidence.
+
+    Refinement decides motion correlation from roughly one second of samples,
+    so a subject that moves slowly can fail the path test and stay out of the
+    incident even though it is real. Tracking follows the same subject for the
+    whole incident, so apply the unchanged path threshold to that longer
+    trajectory. Raw path accumulates detector-box noise, and a median filter
+    does not remove a steady oscillation, so measure travel between resampled
+    bucket means and the widest center separation instead. Either may satisfy
+    the threshold: resampling catches a slow walker, while the separation
+    catches a fast transit that bucket averaging blurs. Both stay below the
+    threshold for jitter. Every other admission gate remains authoritative,
+    so only an object that failed motion correlation alone can be restored.
+    """
+    width = _positive_float(tracking.get("frame_width"))
+    height = _positive_float(tracking.get("frame_height"))
+    if width is None or height is None:
+        return {}
+    candidates = [
+        (index, item) for index, item in enumerate(objects) if _promotable(item)
+    ]
+    if not candidates:
+        return {}
+    tracks = [
+        summary
+        for summary in (tracking.get("tracks") or [])
+        if isinstance(summary, Mapping)
+        and str(summary.get("state") or "") == "confirmed"
+        and _integer(summary.get("observations")) >= MINIMUM_TRACKING_OBSERVATIONS
+    ]
+    promotions: dict[int, dict[str, Any]] = {}
+    claimed: set[int] = set()
+    for index, item in candidates:
+        box = _normalized_box(
+            item.get("box"),
+            _positive_float(item.get("detection_frame_width")),
+            _positive_float(item.get("detection_frame_height")),
+        )
+        if box is None:
+            continue
+        threshold = max(
+            MINIMUM_PATH_RATIO,
+            _movement_threshold(box) * PATH_MOVEMENT_SCALE,
+        )
+        matched: tuple[float, Mapping[str, Any]] | None = None
+        for summary in tracks:
+            if _integer(summary.get("track_id")) in claimed:
+                continue
+            if str(summary.get("label") or "") != str(item.get("label") or ""):
+                continue
+            anchor = _track_anchor_box(summary, width, height)
+            if anchor is None:
+                continue
+            overlap = _intersection_over_union(box, anchor)
+            if overlap < MINIMUM_TRACKING_MATCH_IOU:
+                continue
+            if matched is None or overlap > matched[0]:
+                matched = (overlap, summary)
+        if matched is None:
+            continue
+        overlap, summary = matched
+        path, span = _resampled_motion_ratios(
+            summary.get("trajectory"), width, height
+        )
+        if path < threshold and span < threshold:
+            continue
+        track_id = _integer(summary.get("track_id"))
+        claimed.add(track_id)
+        observations = _integer(summary.get("observations"))
+        promotions[index] = {
+            "incident_eligible": True,
+            "incident_ineligible_reasons": [],
+            "motion_correlated": True,
+            "motion_correlation": "tracking_path",
+            "motion_correlation_eligible": True,
+            "track_id": track_id,
+            "track_state": "confirmed",
+            "track_observations": observations,
+            "tracking_motion_promotion": {
+                "track_id": track_id,
+                "observations": observations,
+                "match_iou": round(overlap, 3),
+                "resampled_path_ratio": round(path, 5),
+                "trajectory_span_ratio": round(span, 5),
+                "path_threshold": round(threshold, 5),
+                "resample_bucket": TRACKING_RESAMPLE_BUCKET,
+            },
+        }
+    return promotions
+
+
+def _promotable(item: Any) -> bool:
+    if not isinstance(item, Mapping) or not item.get("label"):
+        return False
+    if item.get("incident_eligible") is not False:
+        return False
+    if item.get("auxiliary_detection") is True:
+        return False
+    reasons = item.get("incident_ineligible_reasons")
+    if not isinstance(reasons, list):
+        return False
+    if [str(value) for value in reasons] != [MOTION_CORRELATION_REASON]:
+        return False
+    return bool(
+        item.get("confidence_eligible") is True
+        and item.get("spatial_zone_eligible") is True
+        and item.get("temporal_eligible") is True
+        and item.get("temporal_consensus") is True
+        and str(item.get("activity_role") or "") != "scene_context"
+    )
+
+
+def _track_anchor_box(
+    summary: Mapping[str, Any],
+    width: float,
+    height: float,
+) -> tuple[float, float, float, float] | None:
+    """Anchor on the first tracked box, which shares the event's frame."""
+    history = summary.get("box_history")
+    if isinstance(history, Sequence) and not isinstance(history, (str, bytes)):
+        for entry in history:
+            if (
+                isinstance(entry, Sequence)
+                and not isinstance(entry, (str, bytes))
+                and len(entry) >= 5
+            ):
+                return _normalized_box(
+                    {
+                        "x1": entry[1],
+                        "y1": entry[2],
+                        "x2": entry[3],
+                        "y2": entry[4],
+                    },
+                    width,
+                    height,
+                )
+    return _normalized_box(summary.get("box"), width, height)
+
+
+def _intersection_over_union(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> float:
+    overlap_width = min(first[2], second[2]) - max(first[0], second[0])
+    overlap_height = min(first[3], second[3]) - max(first[1], second[1])
+    if overlap_width <= 0.0 or overlap_height <= 0.0:
+        return 0.0
+    intersection = overlap_width * overlap_height
+    union = (
+        (first[2] - first[0]) * (first[3] - first[1])
+        + (second[2] - second[0]) * (second[3] - second[1])
+        - intersection
+    )
+    return intersection / union if union > 0.0 else 0.0
+
+
+def _resampled_motion_ratios(
+    trajectory: object,
+    width: float,
+    height: float,
+) -> tuple[float, float]:
+    """Return travel between bucket means and the widest center separation."""
+    if not isinstance(trajectory, Sequence) or isinstance(trajectory, (str, bytes)):
+        return 0.0, 0.0
+    centers: list[tuple[float, float]] = []
+    for entry in trajectory:
+        if (
+            not isinstance(entry, Sequence)
+            or isinstance(entry, (str, bytes))
+            or len(entry) < 3
+        ):
+            continue
+        try:
+            point = (float(entry[1]) / width, float(entry[2]) / height)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        if all(math.isfinite(value) for value in point):
+            centers.append(point)
+    if len(centers) < 2:
+        return 0.0, 0.0
+    means = [
+        (
+            statistics.fmean(point[0] for point in bucket),
+            statistics.fmean(point[1] for point in bucket),
+        )
+        for index in range(0, len(centers), TRACKING_RESAMPLE_BUCKET)
+        if (bucket := centers[index:index + TRACKING_RESAMPLE_BUCKET])
+    ]
+    path = sum(
+        math.dist(previous, current)
+        for previous, current in zip(means, means[1:])
+    )
+    span = max(
+        math.dist(first, second)
+        for index, first in enumerate(centers)
+        for second in centers[index + 1:]
+    )
+    return path, span
 
 
 def _movement_threshold(

@@ -14,6 +14,7 @@ from ..durable_payload import durable_json_dumps
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry
+from ..object_motion import tracking_motion_promotions
 from .calibration import EventStoreCalibrationMixin
 from .jobs import EventStoreJobsMixin
 from .evidence import EventStoreEvidenceMixin, EventSnapshotChangedError
@@ -1713,6 +1714,11 @@ class EventStore(
                         item["track_id"] = assigned["track_id"]
                         item["track_state"] = assigned.get("track_state")
                         item["track_observations"] = assigned.get("track_observations")
+            # Whole-session movement can restore a subject that refinement
+            # demoted on about a second of samples. Commit that with the
+            # tracking metadata so eligibility and evidence stay consistent.
+            for index, fields in tracking_motion_promotions(objects, tracking).items():
+                objects[index].update(fields)
             objects.append({"status": "object_tracking", "object_tracking": tracking})
             objects_json = json.dumps(objects, separators=(",", ":"))
             conn.execute(

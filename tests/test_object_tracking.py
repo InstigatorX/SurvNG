@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import random
 import tempfile
 import threading
 import time
@@ -22,6 +24,7 @@ from survng.app.object_tracking import (
     ultralytics_deepocsort_dependency_status,
     ultralytics_fasttrack_dependency_status,
 )
+from survng.app.object_motion import tracking_motion_promotions
 from survng.app.object_track.session import (
     _adaptive_tracking_fps,
     _tracking_persistence_due,
@@ -2262,6 +2265,209 @@ class ObjectTrackingPersistenceTest(unittest.TestCase):
             tracking[0]["object_tracking"]["tracks"][0]["reid_recovery_history"][0]["similarity"],
             0.91,
         )
+
+
+class TrackingMotionPromotionTest(unittest.TestCase):
+    """Whole-session movement may restore a subject refinement demoted."""
+
+    FRAME_WIDTH = 2560
+    FRAME_HEIGHT = 1920
+
+    def demoted(self, **overrides) -> dict:
+        item = {
+            "label": "person",
+            "confidence": 0.86,
+            "box": {"x1": 780.0, "y1": 782.0, "x2": 930.0, "y2": 1014.0},
+            "detection_frame_width": self.FRAME_WIDTH,
+            "detection_frame_height": self.FRAME_HEIGHT,
+            "incident_eligible": False,
+            "incident_ineligible_reasons": ["object_not_motion_correlated"],
+            "confidence_eligible": True,
+            "spatial_zone_eligible": True,
+            "temporal_eligible": True,
+            "temporal_consensus": True,
+            "activity_role": "indeterminate",
+        }
+        item.update(overrides)
+        return item
+
+    def tracking(self, centers: list[tuple[float, float]], **overrides) -> dict:
+        track = {
+            "track_id": 2,
+            "label": "person",
+            "state": "confirmed",
+            "observations": len(centers),
+            "box_history": [[10.0, 784.0, 780.0, 928.0, 1016.0]],
+            "trajectory": [
+                [10.0 + index * 0.4, x, y]
+                for index, (x, y) in enumerate(centers)
+            ],
+        }
+        track.update(overrides)
+        return {
+            "frame_width": self.FRAME_WIDTH,
+            "frame_height": self.FRAME_HEIGHT,
+            "tracks": [track],
+        }
+
+    def drifting(self, count: int = 38) -> list[tuple[float, float]]:
+        """Steady travel that survives resampling."""
+        return [(855.0 + index * 5.12, 898.0) for index in range(count)]
+
+    def jittering(self, count: int = 38) -> list[tuple[float, float]]:
+        """Alternating detector-box noise with a large raw path."""
+        return [
+            (855.0 + (10.24 if index % 2 else -10.24), 898.0)
+            for index in range(count)
+        ]
+
+    def noisy(self, count: int = 38) -> list[tuple[float, float]]:
+        """Unbiased detector-box noise around a fixed center."""
+        generator = random.Random(7)
+        return [
+            (855.0 + generator.uniform(-8.0, 8.0), 898.0 + generator.uniform(-8.0, 8.0))
+            for _ in range(count)
+        ]
+
+    def test_sustained_tracking_movement_promotes_a_demoted_subject(self) -> None:
+        objects = [self.demoted()]
+
+        promotions = tracking_motion_promotions(
+            objects, self.tracking(self.drifting())
+        )
+
+        self.assertEqual(list(promotions), [0])
+        fields = promotions[0]
+        self.assertIs(fields["incident_eligible"], True)
+        self.assertEqual(fields["incident_ineligible_reasons"], [])
+        self.assertEqual(fields["motion_correlation"], "tracking_path")
+        self.assertEqual(fields["track_id"], 2)
+        evidence = fields["tracking_motion_promotion"]
+        self.assertGreater(
+            evidence["resampled_path_ratio"], evidence["path_threshold"]
+        )
+        self.assertGreaterEqual(evidence["match_iou"], 0.5)
+
+    def test_fast_transit_qualifies_on_separation_alone(self) -> None:
+        """Bucket averaging blurs a quick crossing; separation still shows it."""
+        centers = [
+            (855.0 if index % 2 else 855.0 + 120.0, 898.0)
+            for index in range(38)
+        ]
+
+        promotions = tracking_motion_promotions(
+            [self.demoted()], self.tracking(centers)
+        )
+
+        self.assertEqual(list(promotions), [0])
+        evidence = promotions[0]["tracking_motion_promotion"]
+        self.assertLess(
+            evidence["resampled_path_ratio"], evidence["path_threshold"]
+        )
+        self.assertGreater(
+            evidence["trajectory_span_ratio"], evidence["path_threshold"]
+        )
+
+    def test_detector_jitter_alone_never_promotes(self) -> None:
+        for centers in (self.jittering(), self.noisy()):
+            with self.subTest(centers=centers[:2]):
+                raw_path = sum(
+                    math.dist(centers[index], centers[index + 1]) / self.FRAME_WIDTH
+                    for index in range(len(centers) - 1)
+                )
+                # Raw accumulated path alone would clear the threshold.
+                self.assertGreater(raw_path, 0.05)
+                self.assertEqual(
+                    tracking_motion_promotions(
+                        [self.demoted()], self.tracking(centers)
+                    ),
+                    {},
+                )
+
+    def test_other_ineligibility_reasons_remain_authoritative(self) -> None:
+        for reasons in (
+            ["object_not_motion_correlated", "ignored_zone"],
+            ["temporal_unconfirmed"],
+            [],
+        ):
+            with self.subTest(reasons=reasons):
+                self.assertEqual(
+                    tracking_motion_promotions(
+                        [self.demoted(incident_ineligible_reasons=reasons)],
+                        self.tracking(self.drifting()),
+                    ),
+                    {},
+                )
+
+    def test_failed_gates_and_scene_context_are_never_promoted(self) -> None:
+        for overrides in (
+            {"confidence_eligible": False},
+            {"spatial_zone_eligible": False},
+            {"temporal_eligible": False},
+            {"temporal_consensus": False},
+            {"activity_role": "scene_context"},
+            {"auxiliary_detection": True},
+        ):
+            with self.subTest(overrides=overrides):
+                self.assertEqual(
+                    tracking_motion_promotions(
+                        [self.demoted(**overrides)],
+                        self.tracking(self.drifting()),
+                    ),
+                    {},
+                )
+
+    def test_unrelated_track_geometry_and_labels_do_not_promote(self) -> None:
+        elsewhere = self.tracking(
+            self.drifting(),
+            box_history=[[10.0, 100.0, 100.0, 240.0, 330.0]],
+        )
+        self.assertEqual(
+            tracking_motion_promotions([self.demoted()], elsewhere), {}
+        )
+        other_label = self.tracking(self.drifting(), label="dog")
+        self.assertEqual(
+            tracking_motion_promotions([self.demoted()], other_label), {}
+        )
+
+    def test_short_unconfirmed_or_unmeasurable_tracking_is_ignored(self) -> None:
+        self.assertEqual(
+            tracking_motion_promotions(
+                [self.demoted()], self.tracking(self.drifting(12))
+            ),
+            {},
+        )
+        self.assertEqual(
+            tracking_motion_promotions(
+                [self.demoted()], self.tracking(self.drifting(), state="lost")
+            ),
+            {},
+        )
+        unscaled = self.tracking(self.drifting())
+        unscaled.pop("frame_width")
+        self.assertEqual(
+            tracking_motion_promotions([self.demoted()], unscaled), {}
+        )
+
+    def test_already_eligible_objects_keep_their_existing_evidence(self) -> None:
+        promoted = self.demoted(
+            incident_eligible=True,
+            incident_ineligible_reasons=[],
+            motion_correlation="tracking_path",
+        )
+
+        self.assertEqual(
+            tracking_motion_promotions([promoted], self.tracking(self.drifting())),
+            {},
+        )
+
+    def test_one_track_cannot_promote_two_separate_objects(self) -> None:
+        promotions = tracking_motion_promotions(
+            [self.demoted(), self.demoted()],
+            self.tracking(self.drifting()),
+        )
+
+        self.assertEqual(list(promotions), [0])
 
 
 if __name__ == "__main__":

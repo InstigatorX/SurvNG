@@ -13,6 +13,7 @@ from unittest.mock import patch
 import numpy as np
 
 from survng.app.events import EventStore
+from survng.app.incident_presenter import _event_row
 
 
 class EventStoreTest(unittest.TestCase):
@@ -2687,6 +2688,108 @@ class EventStoreTest(unittest.TestCase):
 
             self.assertEqual(summary["verdicts"]["ultralytics_deepocsort"], 1)
             self.assertEqual(summary["verdicts"]["ultralytics_botsort"], 1)
+
+    def _motion_demoted_event(self, store: EventStore) -> dict:
+        return store.add_event(
+            camera_id="foyer",
+            kind="motion",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            snapshot_path="snapshots/foyer/frame.webp",
+            objects_json=json.dumps([
+                {
+                    "label": "person",
+                    "confidence": 0.86,
+                    "box": {"x1": 780.0, "y1": 782.0, "x2": 930.0, "y2": 1014.0},
+                    "detection_frame_width": 2560,
+                    "detection_frame_height": 1920,
+                    "incident_eligible": False,
+                    "incident_ineligible_reasons": ["object_not_motion_correlated"],
+                    "confidence_eligible": True,
+                    "spatial_zone_eligible": True,
+                    "temporal_eligible": True,
+                    "temporal_consensus": True,
+                    "activity_role": "indeterminate",
+                },
+            ]),
+        )
+
+    @staticmethod
+    def _tracking_payload(centers: list[tuple[float, float]]) -> dict:
+        return {
+            "state": "complete",
+            "frame_width": 2560,
+            "frame_height": 1920,
+            "tracks": [{
+                "track_id": 2,
+                "label": "person",
+                "state": "confirmed",
+                "observations": len(centers),
+                "box_history": [[10.0, 784.0, 780.0, 928.0, 1016.0]],
+                "trajectory": [
+                    [10.0 + index * 0.4, x, y]
+                    for index, (x, y) in enumerate(centers)
+                ],
+            }],
+        }
+
+    def test_tracking_movement_restores_a_demoted_object_and_advances_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            event = self._motion_demoted_event(store)
+            before = store.get(event["id"])
+            self.assertFalse(_event_row(dict(before))["has_objects"])
+
+            updated = store.update_object_tracking(
+                event["id"],
+                self._tracking_payload(
+                    [(855.0 + index * 5.12, 898.0) for index in range(38)]
+                ),
+            )
+
+            self.assertIsNotNone(updated)
+            promoted = _event_row(dict(updated))
+            self.assertTrue(promoted["has_objects"])
+            self.assertEqual(promoted["labels"], ["person"])
+            objects = json.loads(str(updated["objects_json"]))
+            restored = objects[0]
+            self.assertIs(restored["incident_eligible"], True)
+            self.assertEqual(restored["incident_ineligible_reasons"], [])
+            self.assertEqual(restored["motion_correlation"], "tracking_path")
+            self.assertEqual(restored["track_id"], 2)
+            self.assertEqual(
+                restored["tracking_motion_promotion"]["observations"], 38
+            )
+            # Eligibility is presentation evidence, so clients must observe a
+            # new revision rather than silently gaining an incident label.
+            self.assertGreater(
+                int(updated["evidence_revision"]),
+                int(before["evidence_revision"]),
+            )
+
+    def test_stationary_tracking_leaves_a_demoted_object_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            event = self._motion_demoted_event(store)
+            before = store.get(event["id"])
+
+            updated = store.update_object_tracking(
+                event["id"],
+                self._tracking_payload([
+                    (855.0 + (10.24 if index % 2 else -10.24), 898.0)
+                    for index in range(38)
+                ]),
+            )
+
+            objects = json.loads(str(updated["objects_json"]))
+            self.assertIs(objects[0]["incident_eligible"], False)
+            self.assertNotIn("tracking_motion_promotion", objects[0])
+            self.assertEqual(
+                int(updated["evidence_revision"]),
+                int(before["evidence_revision"]),
+            )
+            # A confirmed track still contributes its label, but the demoted
+            # object must not become qualifying incident evidence.
+            self.assertFalse(_event_row(dict(updated))["has_objects"])
 
 
 if __name__ == "__main__":
