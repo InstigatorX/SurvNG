@@ -1,5 +1,6 @@
 export const TRACKING_ENGINE_LABELS = {
   survng_hybrid: "Hybrid",
+  survng_sparse_identity: "Sparse Identity",
   survng_hybrid_candidate: "Hybrid candidate (historic)",
   ultralytics_tracktrack: "TrackTrack",
   ultralytics_botsort: "BoT-SORT",

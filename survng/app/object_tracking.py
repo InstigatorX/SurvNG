@@ -18,6 +18,7 @@ from .object_track.registry import (
     ultralytics_botsort_dependency_status,
     ultralytics_tracktrack_dependency_status,
 )
+from .object_track.sparse_identity import SparseIdentityObjectTracker
 from .object_track.session import (
     TRACKING_CATCHUP_RETRY_SECONDS,
     TRACKING_CATCHUP_SETTLE_SECONDS,
@@ -58,6 +59,7 @@ __all__ = [
     "ObjectTrackerRegistry",
     "ObjectTrackingSession",
     "ObjectTrackingSessionFactory",
+    "SparseIdentityObjectTracker",
     "TRACKING_CATCHUP_RETRY_SECONDS",
     "TRACKING_CATCHUP_SETTLE_SECONDS",
     "TRACKING_STOP_TIMEOUT_SECONDS",

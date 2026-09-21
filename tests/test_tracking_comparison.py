@@ -31,8 +31,8 @@ class Detector:
 
 
 class TrackingComparisonRunnerTest(unittest.TestCase):
-    def test_new_runs_and_default_replays_execute_only_three_engines(self) -> None:
-        expected = ("survng_hybrid", "ultralytics_tracktrack", "ultralytics_botsort")
+    def test_new_runs_and_default_replays_execute_active_comparison_engines(self) -> None:
+        expected = ("survng_hybrid", "survng_sparse_identity", "ultralytics_tracktrack", "ultralytics_botsort")
         registry = ObjectTrackerRegistry()
         for implementation in (*expected, "survng_hybrid_candidate"):
             registry.register(implementation, ByteTrackObjectTracker)
@@ -78,6 +78,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
 
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
+        registry.register("survng_sparse_identity", ByteTrackObjectTracker)
         registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
         registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
         registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
@@ -99,6 +100,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
     def test_runs_both_engines_on_the_same_detections_and_reports_metrics(self) -> None:
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
+        registry.register("survng_sparse_identity", ByteTrackObjectTracker)
         registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
         registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
         registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
@@ -132,6 +134,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
     def test_rejects_an_empty_or_unreadable_frame_sequence(self) -> None:
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
+        registry.register("survng_sparse_identity", ByteTrackObjectTracker)
         registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
         registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
         registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)
@@ -157,6 +160,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
 
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
+        registry.register("survng_sparse_identity", ByteTrackObjectTracker)
         registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
         registry.register("survng_hybrid_candidate", ByteTrackObjectTracker)
         registry.register("ultralytics_tracktrack", ByteTrackObjectTracker)

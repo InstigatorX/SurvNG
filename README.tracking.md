@@ -3,18 +3,22 @@
 SurvNG uses one production tracker and an offline evaluation workflow:
 
 - **SurvNG Hybrid** (`survng_hybrid`) is the default.
-- **Hybrid candidate**, **TrackTrack**, and **BoT-SORT** are offline comparison
-  engines. The candidate contains bounded ID-stability repairs; it is not live.
-- Existing FastTrack and Deep OC-SORT results remain readable.
+- **Sparse Identity** (`survng_sparse_identity`) is the offline identity-retention
+  candidate. It adds cascaded association, buffered IoU, quality-gated ReID
+  galleries, and entity relink hooks. Production config cannot select it.
+- **TrackTrack** and **BoT-SORT** remain offline comparison engines.
+- Historic Hybrid-candidate, FastTrack, and Deep OC-SORT results remain readable.
 
-See [the evaluation guide](docs/tracking-evaluation.md) for saved-input replay,
-annotation, scoring, sampling profiles, and the promotion criteria.
+See [the evaluation guide](docs/tracking-evaluation.md) and
+[corpus checklist](docs/tracking-corpus.md) for saved-input replay, annotation,
+scoring, sampling profiles, and the promotion criteria.
 
-All four comparison engines receive the same saved detections and available
+Comparison engines receive the same saved detections and available
 SurvNG person and vehicle embeddings. Missing optional engines are reported
-individually; Hybrid evaluation and input capture remain available. Compare never changes the production
-tracker. Historical verdicts remain readable. None of the comparison alternatives is
-selectable for production.
+individually; Hybrid and Sparse Identity evaluation and input capture remain
+available. Compare never changes the production tracker. Historical verdicts
+remain readable. None of the comparison alternatives is selectable for
+production.
 
 ## Why SurvNG Hybrid is the default
 
@@ -88,7 +92,7 @@ tracker internals from another package.
 
 The incident viewer's **Compare** action evaluates a bounded 30-second window.
 Detection and available appearance extraction run once. It retains their exact
-outputs in a checksummed replay bundle, then runs current Hybrid, repaired Hybrid,
+outputs in a checksummed replay bundle, then runs current Hybrid, Sparse Identity,
 TrackTrack and BoT-SORT independently. Download the replay inputs before leaving
 the viewer to preserve the full input data; history stores compact results only.
 

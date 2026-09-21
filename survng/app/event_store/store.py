@@ -44,6 +44,7 @@ class EventStore(
     TRACKING_COMPARISON_HISTORY_PER_CAMERA = 100
     TRACKING_COMPARISON_VERDICTS = {
         "survng_hybrid_candidate",
+        "survng_sparse_identity",
         "ultralytics_tracktrack",
         "survng_hybrid",
         "ultralytics_botsort",

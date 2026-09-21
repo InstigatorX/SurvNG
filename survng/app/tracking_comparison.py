@@ -31,6 +31,7 @@ from .video_frames import DecodedVideoFrame, VideoFrameReference
 
 TRACKING_COMPARISON_IMPLEMENTATIONS = (
     "survng_hybrid",
+    "survng_sparse_identity",
     "ultralytics_tracktrack",
     "ultralytics_botsort",
 )
@@ -498,8 +499,11 @@ class TrackingComparisonRunner:
                 "initialization_ms": round(initialization_ms, 2), "processing_ms": round(processing_ms, 2),
                 "average_ms_per_frame": round(processing_ms / len(samples), 3),
                 "track_count": len(tracks), "observations": sum(len(f["objects"]) for f in observations),
-                "reid_recoveries": (sum(int(t.get("reid_matches") or 0) for t in tracks)
-                                    if implementation.startswith("survng_hybrid") else None),
+                "reid_recoveries": (
+                    sum(int(t.get("reid_matches") or 0) for t in tracks)
+                    if implementation in {"survng_hybrid", "survng_sparse_identity", "survng_hybrid_candidate"}
+                    else None
+                ),
                 "appearance_input_count": sum(item.get("_tracking_embedding") is not None for f in samples for item in f["detections"]),
                 "fragmentation_proxy": sum(max(0, count - simultaneous[label]) for label, count in counts.items()),
                 "labels": dict(sorted(counts.items())), "tracks": tracks, "reid_diagnostics": diagnostics,

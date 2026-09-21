@@ -683,6 +683,15 @@ class ObjectTrackingConfig(BaseModel):
         default_factory=lambda: ["car", "truck", "bus", "motorcycle"],
         max_length=32,
     )
+    tracking_profile: Literal["default", "person_retention"] = "default"
+    reid_spatial_gate_ratio: float = Field(default=1.35, ge=0.2, le=4.0)
+    reid_top_two_margin: float = Field(default=0.05, ge=0.0, le=0.5)
+    reid_gallery_size: int = Field(default=5, ge=1, le=16)
+    reid_provisional_hits: int = Field(default=2, ge=0, le=10)
+    sparse_buffer_iou_small: float = Field(default=0.08, ge=0.0, le=0.5)
+    sparse_buffer_iou_large: float = Field(default=0.20, ge=0.0, le=0.8)
+    entity_relink_enabled: bool = False
+    ambiguity_min_person_tracks: int = Field(default=2, ge=1, le=32)
 
     @field_validator("implementation", mode="before")
     @classmethod
@@ -690,6 +699,7 @@ class ObjectTrackingConfig(BaseModel):
         implementation = str(value or "").strip().lower()
         if implementation in {
             "survng_hybrid_candidate",
+            "survng_sparse_identity",
             "ultralytics_tracktrack",
             "bytetrack",
             "ultralytics_botsort",
@@ -723,6 +733,16 @@ class ObjectTrackingConfig(BaseModel):
             raise ValueError(
                 "burst_max_active_cameras cannot be lower than max_active_cameras"
             )
+        if self.sparse_buffer_iou_large < self.sparse_buffer_iou_small:
+            raise ValueError(
+                "sparse_buffer_iou_large cannot be lower than sparse_buffer_iou_small"
+            )
+        if self.tracking_profile == "person_retention":
+            # Raise floors only; operators can still set higher values.
+            self.lost_timeout_seconds = max(self.lost_timeout_seconds, 5.0)
+            self.reid_max_age_seconds = max(self.reid_max_age_seconds, 30.0)
+            self.reid_match_threshold = max(self.reid_match_threshold, 0.72)
+            self.entity_relink_enabled = True
         return self
 
     def tracks_label(self, label: object) -> bool:

@@ -687,6 +687,31 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(uncertain_fps, 3.0)
         self.assertEqual(stable_frames, 0)
 
+    def test_adaptive_sampling_keeps_burst_rate_with_overlapping_people(self) -> None:
+        config = ObjectTrackingConfig(
+            sample_fps=3.0,
+            stable_sample_fps=0.75,
+            adaptive_stable_frames=1,
+            ambiguity_min_person_tracks=2,
+        )
+        tracked = [
+            {"track_id": 1, "label": "person", "track_state": "confirmed"},
+            {"track_id": 2, "label": "person", "track_state": "confirmed"},
+        ]
+        summaries = [
+            {"track_id": 1, "state": "confirmed"},
+            {"track_id": 2, "state": "confirmed"},
+        ]
+        fps, stable_frames = _adaptive_tracking_fps(
+            config,
+            tracked,
+            summaries,
+            important_transition=False,
+            stable_frames=5,
+        )
+        self.assertEqual(fps, 3.0)
+        self.assertEqual(stable_frames, 0)
+
     def test_tracking_persistence_uses_cadence_and_transitions(self) -> None:
         self.assertFalse(_tracking_persistence_due(
             1.0,
