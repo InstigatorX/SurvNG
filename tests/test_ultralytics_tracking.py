@@ -126,6 +126,23 @@ class UltralyticsDeepOCSortObjectTrackerTest(unittest.TestCase):
         self.assertEqual(recovered[0]["track_id"], first[0]["track_id"])
         self.assertNotIn("_tracking_embedding", recovered[0])
 
+    def test_reid_never_recovers_across_classes_when_proximity_is_disabled(self) -> None:
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(
+            reid_enabled=True,
+            reid_model_path="person-reid.xml",
+        ), 0.7)
+        first = tracker.update([
+            detection("person", 0.9, (10, 10, 40, 80), (1.0, 0.0)),
+        ], 10.0, confirm_new=True)
+        tracker.update([], 10.5)
+        car = detection("car", 0.9, (500, 300, 600, 700), (1.0, 0.0))
+
+        self.assertEqual(tracker.update([car], 11.0), [])
+        second = tracker.update([car], 11.5)
+
+        self.assertEqual(second[0]["label"], "car")
+        self.assertNotEqual(second[0]["track_id"], first[0]["track_id"])
+
     def test_dissimilar_person_starts_a_new_track(self) -> None:
         tracker = UltralyticsDeepOCSortObjectTracker(self.config(
             reid_enabled=True,

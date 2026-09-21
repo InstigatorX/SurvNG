@@ -94,8 +94,11 @@ jobs:
         run: |
           .venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           .venv/bin/pip install -r requirements-ultralytics-tracking.txt
-      - name: Run native replacement adapter tests
-        run: scripts/run-tests.sh tests/test_ultralytics_replacement_adapters.py
+      - name: Run optional tracker adapter tests
+        run: |
+          scripts/run-tests.sh \
+            tests/test_ultralytics_replacement_adapters.py \
+            tests/test_ultralytics_tracking.py
       - name: Run frontend unit tests
         run: node frontend/tests/run-tests.mjs unit
       - name: Post-job cleanup

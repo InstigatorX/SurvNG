@@ -63,6 +63,27 @@ class _ClassAwareDeepOCSORT(DeepOCSORT):
 
         self._session_track_type = SessionDeepOCSortTrack
 
+    def _fuse_appearance(
+        self,
+        distances: np.ndarray,
+        tracks: list[Any],
+        detections: list[Any],
+        iou_dists: np.ndarray | None = None,
+    ) -> np.ndarray:
+        fused = super()._fuse_appearance(
+            distances,
+            tracks,
+            detections,
+            iou_dists=iou_dists,
+        )
+        if fused.size:
+            track_classes = np.asarray([int(track.cls) for track in tracks])[:, None]
+            detection_classes = np.asarray(
+                [int(detection.cls) for detection in detections]
+            )[None, :]
+            fused[track_classes != detection_classes] = 1.0
+        return fused
+
     def init_track(
         self,
         results: Any,
@@ -500,7 +521,9 @@ class UltralyticsDeepOCSortObjectTracker(_UltralyticsObjectTrackerAdapter):
             inertia=0.2,
             use_byte=True,
             gmc_method="none",
-            proximity_thresh=0.1,
+            # Supplied ReID embeddings must be able to recover a subject after
+            # large displacement. _fuse_appearance still enforces class separation.
+            proximity_thresh=0.0,
             appearance_thresh=(appearance_threshold + 1.0) / 2.0,
             alpha_fixed_emb=0.95,
             with_reid=config.appearance_reid_enabled,

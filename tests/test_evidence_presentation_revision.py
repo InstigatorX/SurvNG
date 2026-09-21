@@ -36,7 +36,10 @@ def test_public_compact_and_notification_evidence_keeps_revision():
     }, "complete")
     assert notification["snapshot_url"].endswith("/7/snapshot.jpg?v=12")
     assert notification["evidence_revision"] == 12
-    assert notification["objects"][0]["label"] == "person"  # Preserve v1.2 notification policy.
+    # Provisional detections remain visible in the incident UI, but notification
+    # payloads wait for refined evidence before claiming an object.
+    assert notification["objects"] == []
+    assert notification["has_objects"] is False
 
 
 def _routes(tmp_path):
