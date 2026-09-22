@@ -19,6 +19,7 @@ import numpy as np
 from .ffmpeg_process import named_ffmpeg_executable
 from .media_sessions import (
     MediaResourceClass,
+    MediaSessionAdmissionError,
     MediaSessionKind,
     MediaSessionManager,
     MediaSessionRequest,
@@ -1018,12 +1019,40 @@ class CameraCaptureService:
                         self._stats[source]["last_open_timeout_ms"] = open_timeout_ms
                         if open_timeout_ms > self.initial_open_timeout_ms:
                             self._stats[source]["open_timeout_escalations"] += 1
-                    opened = self.backend.open(
-                        handle,
-                        self._source_url(source),
-                        lambda: self._cancelled(stop_event),
-                        open_timeout_ms=open_timeout_ms,
-                    )
+                    open_session = None
+                    if self._media_sessions is not None:
+                        while not self._cancelled(stop_event):
+                            try:
+                                open_session = self._media_sessions.acquire(
+                                    MediaSessionRequest(
+                                        MediaSessionKind.CAPTURE_OPEN,
+                                        camera_id=self.camera_id,
+                                        source=source,
+                                        resources={
+                                            MediaResourceClass.CAPTURE_OPEN: 1
+                                        },
+                                        owner_generation=self._owner_generation,
+                                    ),
+                                    timeout=0.1,
+                                )
+                                break
+                            except MediaSessionAdmissionError:
+                                continue
+                    if open_session is None:
+                        opened = self.backend.open(
+                            handle,
+                            self._source_url(source),
+                            lambda: self._cancelled(stop_event),
+                            open_timeout_ms=open_timeout_ms,
+                        )
+                    else:
+                        with open_session:
+                            opened = self.backend.open(
+                                handle,
+                                self._source_url(source),
+                                lambda: self._cancelled(stop_event),
+                                open_timeout_ms=open_timeout_ms,
+                            )
                     if self._cancelled(stop_event):
                         return
                     if not opened or not handle.is_opened():

@@ -140,6 +140,7 @@ class RecordingMediaRuntime:
                     path,
                     duration,
                     media_offset,
+                    active_manager=selected_manager,
                 )
             ),
         )
@@ -694,11 +695,20 @@ class RecordingMediaRuntime:
                     if self.recording_prewarm_process is process:
                         self.recording_prewarm_process = None
 
-    def _recording_fmp4_files(self, path: Path, duration: float, media_offset: float, origin: str='playback') -> tuple[Path, Path]:
+    def _recording_fmp4_files(
+        self,
+        path: Path,
+        duration: float,
+        media_offset: float,
+        origin: str = 'playback',
+        *,
+        active_manager: AppManager | None = None,
+    ) -> tuple[Path, Path]:
+        selected_manager = active_manager or self.manager
         stat = path.stat()
         fingerprint = f'v{RECORDING_FMP4_VERSION}:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}'
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:24]
-        cache_dir = self.manager.storage_dir / 'playback-cache' / 'fmp4' / cache_key
+        cache_dir = selected_manager.storage_dir / 'playback-cache' / 'fmp4' / cache_key
         init_path = cache_dir / 'init.mp4'
         media_path = cache_dir / 'media.m4s'
         if self._recording_cache_files_ready(init_path, media_path, touch=True):
@@ -721,12 +731,12 @@ class RecordingMediaRuntime:
             # own init (for example, after a codec change).
             # Preserve decoder preroll too: automatic negative-timestamp shifting
             # adds per-source A/V edit offsets that native HLS can turn into gaps.
-            command = [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
+            command = [selected_manager.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
             if codec in {'hevc', 'h265'}:
                 command.extend(['-tag:v', 'hvc1'])
             command.extend(['-f', 'hls', '-hls_time', '300', '-hls_list_size', '0', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'), str(temp_dir / 'index.m3u8')])
             try:
-                media_sessions = getattr(self.manager, 'media_sessions', None)
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
                 if media_sessions is None:
                     result = self._run_recording_remux(command, origin, None)
                 else:
@@ -739,7 +749,7 @@ class RecordingMediaRuntime:
                             ),
                             resources={MediaResourceClass.REMUX_PROCESS: 1},
                             owner_generation=getattr(
-                                self.manager,
+                                selected_manager,
                                 'media_session_generation',
                                 None,
                             ),
@@ -779,8 +789,8 @@ class RecordingMediaRuntime:
                 self._recording_cache_metric(origin, 'failures')
                 error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                if time.time() - stat.st_mtime >= float(self.config.recording_segment_seconds) * 2:
-                    self.manager.recorder.schedule_revalidation(path, error or 'recording fragment failed')
+                if time.time() - stat.st_mtime >= float(selected_manager.config.recording_segment_seconds) * 2:
+                    selected_manager.recorder.schedule_revalidation(path, error or 'recording fragment failed')
                 with self.recording_day_cache_lock:
                     self.recording_day_cache.clear()
                 raise HTTPException(status_code=500, detail=f'recording fragment failed: {error[-300:]}')
@@ -1151,7 +1161,12 @@ class RecordingMediaRuntime:
         expected_offset = sum((float(row['duration_seconds']) for row in rows[:segment_index]))
         if abs(media_offset - expected_offset) > 0.1:
             media_offset = expected_offset
-        return self._recording_fmp4_files(path, segment_duration, media_offset)
+        return self._recording_fmp4_files(
+            path,
+            segment_duration,
+            media_offset,
+            active_manager=selected_manager,
+        )
 
     def _recording_segment_path(self, camera_id: str, epoch: float, source: str='main', *, active_manager: AppManager | None=None) -> Path:
         """Resolve the indexed source MP4 containing an epoch for native playback."""

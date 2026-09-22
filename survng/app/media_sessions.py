@@ -17,6 +17,7 @@ class MediaSessionKind(StrEnum):
     GO2RTC_MSE = "go2rtc_mse"
     MJPEG = "mjpeg"
     SNAPSHOT = "snapshot"
+    CAPTURE_OPEN = "capture_open"
     CAPTURE_LIVE = "capture_live"
     CAPTURE_MAIN = "capture_main"
     RECORDING_REMUX = "recording_remux"
