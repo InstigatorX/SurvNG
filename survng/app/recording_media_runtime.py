@@ -756,7 +756,10 @@ class RecordingMediaRuntime:
                             ),
                         ),
                         blocking=origin != 'prewarm',
-                        timeout=3.0 if origin != 'prewarm' else None,
+                        # HLS init/media requests are required dependencies.
+                        # Queue cold playback behind bounded remux work rather
+                        # than turning transient contention into a failed seek.
+                        timeout=None,
                     )
                     with session:
                         result = self._run_recording_remux(

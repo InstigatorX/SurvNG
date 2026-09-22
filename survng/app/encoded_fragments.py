@@ -184,8 +184,7 @@ class IndexedMp4FragmentSource:
             identity = hashlib.sha256(
                 (
                     f"v{RECORDING_FMP4_VERSION}:{path.resolve()}:"
-                    f"{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:"
-                    f"{media_offset:.3f}"
+                    f"{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}"
                 ).encode("utf-8")
             ).hexdigest()[:24]
             discontinuity = (

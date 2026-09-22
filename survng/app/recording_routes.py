@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -204,6 +204,65 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             }
             for fragment in fragments
         ]
+
+    def materialize_fragment(
+        active_manager: Any,
+        camera_id: str,
+        segment_name: str,
+        start_epoch: float,
+        end_epoch: float,
+        source: str,
+        media_offset: float,
+        trim_end: bool,
+        fragment_id: str,
+    ):
+        if not math.isfinite(media_offset) or media_offset < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid recording media offset",
+            )
+        source_factory = getattr(deps, "encoded_fragment_source", None)
+        if source_factory is None:
+            return None
+        rows = fragment_rows(
+            active_manager,
+            camera_id,
+            start_epoch,
+            end_epoch,
+            source,
+            trim_end=trim_end,
+        ) or []
+        selected = next(
+            (
+                row.get("_encoded_fragment")
+                for row in rows
+                if row.get("name") == segment_name
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(
+                status_code=404,
+                detail="recording segment not found",
+            )
+        if fragment_id and fragment_id != selected.source_identity:
+            raise HTTPException(
+                status_code=409,
+                detail="recording fragment revision changed",
+                headers={"Cache-Control": "no-store"},
+            )
+        # The manifest owns the compact media timeline. Index changes between
+        # manifest and fragment requests must not silently move tfdt/sidx.
+        selected = replace(
+            selected,
+            media_start_seconds=media_offset,
+        )
+        try:
+            return source_factory(active_manager).materialize(selected)
+        except FragmentUnavailable as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FragmentSourceError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.get("/api/cameras/{camera_id}/recordings")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
@@ -951,7 +1010,15 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         for row, stream_fingerprint in zip(rows, fingerprints):
             row_start = float(row["start_epoch"])
             segment_name = quote(str(row["name"]), safe="")
-            segment_query = f"{query}&media_offset={media_offset:.3f}&v={RECORDING_FMP4_VERSION}"
+            encoded_fragment = row.get("_encoded_fragment")
+            fragment_id = str(
+                getattr(encoded_fragment, "source_identity", "") or ""
+            )
+            segment_query = (
+                f"{query}&media_offset={media_offset:.3f}"
+                f"&fragment_id={quote(fragment_id, safe='')}"
+                f"&v={RECORDING_FMP4_VERSION}"
+            )
             map_lines, previous_fingerprint = hls_map_transition(
                 previous_fingerprint,
                 stream_fingerprint,
@@ -986,39 +1053,21 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         source: str = "main",
         media_offset: float = 0.0,
         trim_end: bool = False,
+        fragment_id: str = "",
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
-        source_factory = getattr(deps, "encoded_fragment_source", None)
-        if source_factory is not None:
-            rows = fragment_rows(
-                active_manager,
-                camera_id,
-                start_epoch,
-                end_epoch,
-                source,
-                trim_end=trim_end,
-            ) or []
-            selected = next(
-                (
-                    row.get("_encoded_fragment")
-                    for row in rows
-                    if row.get("name") == segment_name
-                ),
-                None,
-            )
-            if selected is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail="recording segment not found",
-                )
-            try:
-                materialized = source_factory(active_manager).materialize(
-                    selected
-                )
-            except FragmentUnavailable as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            except FragmentSourceError as exc:
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        materialized = materialize_fragment(
+            active_manager,
+            camera_id,
+            segment_name,
+            start_epoch,
+            end_epoch,
+            source,
+            media_offset,
+            trim_end,
+            fragment_id,
+        )
+        if materialized is not None:
             if materialized.stream.init_path is None:
                 raise HTTPException(
                     status_code=500,
@@ -1052,39 +1101,21 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         source: str = "main",
         media_offset: float = 0.0,
         trim_end: bool = False,
+        fragment_id: str = "",
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
-        source_factory = getattr(deps, "encoded_fragment_source", None)
-        if source_factory is not None:
-            rows = fragment_rows(
-                active_manager,
-                camera_id,
-                start_epoch,
-                end_epoch,
-                source,
-                trim_end=trim_end,
-            ) or []
-            selected = next(
-                (
-                    row.get("_encoded_fragment")
-                    for row in rows
-                    if row.get("name") == segment_name
-                ),
-                None,
-            )
-            if selected is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail="recording segment not found",
-                )
-            try:
-                materialized = source_factory(active_manager).materialize(
-                    selected
-                )
-            except FragmentUnavailable as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            except FragmentSourceError as exc:
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        materialized = materialize_fragment(
+            active_manager,
+            camera_id,
+            segment_name,
+            start_epoch,
+            end_epoch,
+            source,
+            media_offset,
+            trim_end,
+            fragment_id,
+        )
+        if materialized is not None:
             if materialized.media_path is None:
                 raise HTTPException(
                     status_code=500,
@@ -1218,8 +1249,13 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         ):
             row_start = float(row["start_epoch"])
             segment_name = quote(str(row["name"]), safe="")
+            encoded_fragment = row.get("_encoded_fragment")
+            fragment_id = str(
+                getattr(encoded_fragment, "source_identity", "") or ""
+            )
             segment_query = (
                 f"{query}&media_offset={media_offset:.3f}&trim_end=true"
+                f"&fragment_id={quote(fragment_id, safe='')}"
                 f"&v={RECORDING_FMP4_VERSION}"
             )
             encoded_camera = quote(camera_id, safe="")

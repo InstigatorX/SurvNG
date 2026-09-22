@@ -63,6 +63,19 @@ def test_indexed_fragment_source_preserves_wall_time_and_compacts_media_time(
     assert materialized.media_path == tmp_path / "media.m4s"
     assert remuxed == [(second, 10.0, 10.0)]
 
+    shifted_source = IndexedMp4FragmentSource(
+        row_loader=lambda *_args: rows[1:],
+        path_resolver=lambda value: Path(str(value)),
+        remuxer=lambda *_args: (tmp_path / "init.mp4", tmp_path / "media.m4s"),
+    )
+    shifted = list(
+        shifted_source.fragments(
+            FragmentWindow("gate", "main", 120.0, 130.0)
+        )
+    )
+    assert shifted[0].media_start_seconds == 0.0
+    assert shifted[0].source_identity == fragments[1].source_identity
+
 
 def test_indexed_fragment_source_marks_unknown_and_changed_streams(
     tmp_path: Path,
