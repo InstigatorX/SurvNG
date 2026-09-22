@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterator
 import numpy as np
 import cv2
 
+from .activity_events import ActivityEventBus
 from .camera_capture import (
     CaptureBackend,
     CameraCaptureService,
@@ -163,6 +164,7 @@ class CameraWorker:
         storage_dir: Path,
         motion_config: MotionQualificationConfig | None = None,
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        activity_events: ActivityEventBus | None = None,
         *,
         motion_pipeline: MotionPipeline,
         motion_observation_pipeline: MotionPipeline,
@@ -200,6 +202,7 @@ class CameraWorker:
             camera_id=camera.id,
             camera_state=self.runtime_state,
             event_callback=event_callback,
+            activity_events=activity_events,
         )
         # Runtime-state reads are independent from tracking-session operations;
         # neither lock is held while camera lifecycle I/O is blocking.

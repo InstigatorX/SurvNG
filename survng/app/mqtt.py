@@ -458,12 +458,11 @@ class MqttService(IncidentPayloadBuilder):
                 ("binary_sensor", "motion", {
                     "name": "Motion",
                     "unique_id": f"survng_{camera_id}_motion",
-                    "state_topic": f"{state_topic}/motion",
-                    "value_template": "{{ 'ON' if value_json.camera_id else 'OFF' }}",
+                    "state_topic": f"{state_topic}/activity",
+                    "value_template": "{{ 'ON' if value_json.state == 'active' else 'OFF' }}",
                     "payload_on": "ON",
                     "payload_off": "OFF",
                     "device_class": "motion",
-                    "off_delay": 10,
                 }),
                 ("binary_sensor", "object", {
                     "name": "Object",

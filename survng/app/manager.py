@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .activity_events import ActivityEventBus, ActivityTransition
 from .camera import CameraWorker
 from .camera_capture import (
     CaptureOpenLimiter,
@@ -328,6 +329,7 @@ class AppManager:
             ),
         )
         self.state_events = StateEventBroker()
+        self.activity_events = ActivityEventBus(self._publish_activity_transition)
         try:
             self.incidents = IncidentLifecycle(
                 self._publish_incident_notification, self.database_dir / "incident_notifications.json",
@@ -348,6 +350,7 @@ class AppManager:
         except BaseException:
             for label, operation in (
                 ("recording lifecycle", self.recording.close),
+                ("activity event bus", self.activity_events.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -387,6 +390,7 @@ class AppManager:
             for label, operation in (
                 ("inference lifecycle", self.inference.close),
                 ("recording lifecycle", self.recording.close),
+                ("activity event bus", self.activity_events.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -441,6 +445,7 @@ class AppManager:
                 ("MQTT", self.mqtt.stop),
                 ("inference lifecycle", self.inference.close),
                 ("recording lifecycle", self.recording.close),
+                ("activity event bus", self.activity_events.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -479,6 +484,20 @@ class AppManager:
             state_path=self.database_dir / "runtime_state.json",
             legacy_state_paths=(self.storage_dir / "runtime_state.json",),
         )
+
+    def _publish_activity_transition(
+        self,
+        transition: ActivityTransition,
+    ) -> None:
+        payload = transition.to_payload()
+        self.state_events.publish("activity", payload)
+        mqtt = getattr(self, "mqtt", None)
+        if mqtt is not None:
+            mqtt.publish(
+                f"camera/{transition.camera_id}/activity",
+                payload,
+                retain=True,
+            )
 
     def _publish_identity_update(self, payload: dict) -> None:
         event = dict(payload)
@@ -737,6 +756,7 @@ class AppManager:
                 self.storage_dir,
                 motion_config,
                 self.publish_event,
+                activity_events=self.activity_events,
                 motion_pipeline=qualification_pipeline,
                 motion_observation_pipeline=observation_pipeline,
                 motion_fusion_pipeline=fusion_pipeline,
@@ -949,6 +969,7 @@ class AppManager:
         self.camera_controls.quiesce()
         self.ema_route_candidates.close_admission()
         self.mqtt.set_server_lifecycle("stopping", refresh_status=False)
+        attempt("activity event bus", self.activity_events.close)
         LOGGER.info(
             "SurvNG shutdown: cancelling camera admission and releasing ONVIF subscriptions"
         )
