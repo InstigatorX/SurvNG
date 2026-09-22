@@ -8,11 +8,27 @@ import time
 import unittest
 from unittest.mock import Mock
 
+from fastapi import FastAPI, WebSocketDisconnect
+from fastapi.testclient import TestClient
 import numpy as np
 
+from survng.app.config import DetectorConfig
 from survng.app.inference import InferenceWorkload
-from survng.app.inference_runtime.protocol import decode_packet, encode_packet
-from survng.app.inference_worker_routes import WebSocketRegistryTransport
+from survng.app.inference_runtime.protocol import (
+    WorkerRegistration,
+    decode_packet,
+    encode_packet,
+)
+from survng.app.inference_runtime.registry import RemoteInferenceRegistry
+from survng.app.inference_worker_routes import (
+    InferenceWorkerRouteDependencies,
+    WebSocketRegistryTransport,
+    create_inference_worker_router,
+)
+from survng.app.security import (
+    authenticate_inference_worker,
+    hash_api_token,
+)
 from survng.inference_worker import (
     InferenceWorkerClient,
     load_or_create_worker_id,
@@ -164,6 +180,74 @@ class WebSocketRegistryTransportTests(
 
         self.assertTrue(transport.deliver(response))
         self.assertEqual(await waiting, response)
+
+
+class InferenceWorkerRouteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = DetectorConfig(
+            enabled=False,
+            object_worker_count=1,
+            tracking={"enabled": False},
+        )
+        self.registry = RemoteInferenceRegistry(lambda: self.config)
+        token_hash = hash_api_token("worker-secret")
+        app = FastAPI()
+        app.include_router(create_inference_worker_router(
+            InferenceWorkerRouteDependencies(
+                registry=self.registry,
+                authenticate=lambda value: authenticate_inference_worker(
+                    value,
+                    token_hash,
+                ),
+            )
+        ))
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.registry.close()
+
+    def test_authenticated_worker_registers_and_renews_lease(self) -> None:
+        with self.client.websocket_connect(
+            "/api/inference/workers/connect",
+            headers={"Authorization": "Bearer worker-secret"},
+        ) as websocket:
+            websocket.send_text(WorkerRegistration(
+                worker_id="worker-a",
+                roles=["object"],
+            ).model_dump_json())
+            welcome = websocket.receive_json()
+            websocket.send_json({
+                "type": "ready",
+                "worker_id": "worker-a",
+                "connection_generation": (
+                    welcome["connection_generation"]
+                ),
+                "config_generation": welcome["config_generation"],
+                "statuses": {"object": {"ready": True}},
+            })
+            websocket.send_json({
+                "type": "heartbeat",
+                "worker_id": "worker-a",
+                "connection_generation": (
+                    welcome["connection_generation"]
+                ),
+                "pending_requests": 0,
+            })
+            heartbeat_ack = websocket.receive_json()
+
+            self.assertTrue(heartbeat_ack["accepted"])
+            self.assertEqual(self.registry.status()["ready"], 1)
+
+    def test_invalid_worker_credential_is_rejected(self) -> None:
+        with self.assertRaises(WebSocketDisconnect) as raised:
+            with self.client.websocket_connect(
+                "/api/inference/workers/connect",
+                headers={"Authorization": "Bearer wrong-secret"},
+            ):
+                pass
+
+        self.assertEqual(raised.exception.code, 1008)
 
 
 if __name__ == "__main__":
