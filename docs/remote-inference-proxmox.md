@@ -1,10 +1,10 @@
 # Remote inference on Proxmox
 
-Status: design accepted for incremental implementation. Milestone 1 is
-implemented: `InferenceSupervisor` constructs execution slots through the
-transport-neutral contracts in `inference_runtime/backend.py`. The repository
-still runs inference locally; remote registration and transport are the next
-milestone.
+Status: Milestones 1–4 are implemented. SurvNG defaults to local inference but
+can run in remote or hybrid mode through authenticated, self-registering worker
+connections. Proxmox appliance installation is documented in
+`docs/proxmox-inference-worker.md`. Operational dashboards and automatic
+Proxmox start/stop scaling remain later milestones.
 
 This document is the implementation handoff for moving SurvNG's model execution
 to self-registering workers in Proxmox LXC guests. It records the intended
@@ -279,12 +279,16 @@ of prepared guests that are running.
 
 ### Milestone 1: local backend boundary
 
+Implemented.
+
 - Define the worker/backend protocol used by `InferenceSupervisor`.
 - Adapt `_InferenceWorker` without changing behavior.
 - Keep configuration and runtime local-only.
 - Add contract tests and run the existing inference lifecycle suite.
 
 ### Milestone 2: remote protocol and registry
+
+Implemented.
 
 - Add protocol envelopes and bounded binary serialization.
 - Add authenticated worker registration, heartbeats, leases, and fencing.
@@ -293,12 +297,18 @@ of prepared guests that are running.
 
 ### Milestone 3: worker daemon
 
+Implemented.
+
 - Add the worker entry point and role dispatch.
 - Reuse existing OpenVINO engine loading and operation implementations.
 - Add model warmup and fingerprint reporting.
 - Package a systemd service and health command.
 
 ### Milestone 4: runtime integration
+
+Implemented. Execution-mode changes intentionally use a full manager reload so
+local process ownership changes atomically; the process-scoped remote registry
+and worker connections survive that generation replacement.
 
 - Add local, remote, and hybrid modes.
 - Add remote object, face, ReID, and depth routing.
