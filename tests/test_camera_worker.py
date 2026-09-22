@@ -510,6 +510,8 @@ class CameraWorkerTest(unittest.TestCase):
         assert trusted is not None
         self.assertTrue(trusted["reliable"])
         self.assertEqual(alignment.status(trusted)["reference_source"], "recording")
+        self.assertEqual(trusted.get("reference_width"), 8)
+        self.assertEqual(trusted.get("reference_height"), 8)
 
     def test_startup_spatial_alignment_uses_recording_still(self) -> None:
         camera = CameraConfig(

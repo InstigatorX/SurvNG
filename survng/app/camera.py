@@ -125,18 +125,28 @@ class _AutoStreamAlignment:
         self._failures = 0
         self._streams_ready = False
         self._reference_source = ""
+        self._reference_width = 0
+        self._reference_height = 0
 
     @property
     def streams_ready(self) -> bool:
         return self._streams_ready
 
     def status(self, alignment: dict[str, Any]) -> dict[str, Any]:
+        reference_width = int(alignment.get("reference_width") or self._reference_width or 0)
+        reference_height = int(alignment.get("reference_height") or self._reference_height or 0)
         return {
             **alignment,
             "stable_samples": len(self._samples),
             "failed_samples": self._failures,
             "streams_ready": self._streams_ready,
-            "reference_source": self._reference_source or None,
+            "reference_source": (
+                alignment.get("reference_source")
+                or self._reference_source
+                or None
+            ),
+            "reference_width": reference_width or None,
+            "reference_height": reference_height or None,
             "last_attempt_seconds_ago": round(max(0.0, time.monotonic() - self._last_attempt), 3)
             if self._last_attempt else None,
         }
@@ -155,6 +165,8 @@ class _AutoStreamAlignment:
         self._failures = 0
         self._last_attempt = 0.0
         self._reference_source = ""
+        self._reference_width = 0
+        self._reference_height = 0
 
     @staticmethod
     def _frame_usable(frame: CapturedFrame | None) -> bool:
@@ -180,7 +192,8 @@ class _AutoStreamAlignment:
             self._failures += 1
             if self._failures >= SPATIAL_ALIGNMENT_FAILURE_LIMIT:
                 return {"mode": "untrusted", "reliable": False, "confidence": 0.0,
-                        "scale_x": 1.0, "scale_y": 1.0, "offset_x": 0.0, "offset_y": 0.0}
+                        "scale_x": 1.0, "scale_y": 1.0, "offset_x": 0.0, "offset_y": 0.0,
+                        "reference_source": reference_source}
             return None
         self._failures = 0
         self._samples.append(estimate)
@@ -193,7 +206,7 @@ class _AutoStreamAlignment:
         if float(np.max(np.ptp(values, axis=0))) > 0.025:
             self._samples.clear()
             return None
-        return {
+        result = {
             "mode": "affine",
             "reliable": True,
             "confidence": 0.9,
@@ -201,7 +214,12 @@ class _AutoStreamAlignment:
             "scale_y": round(float(median[1]), 5),
             "offset_x": round(float(median[2]), 5),
             "offset_y": round(float(median[3]), 5),
+            "reference_source": reference_source,
         }
+        if self._reference_width > 0 and self._reference_height > 0:
+            result["reference_width"] = self._reference_width
+            result["reference_height"] = self._reference_height
+        return result
 
     def calibrate_with_main_image(
         self,
@@ -223,6 +241,8 @@ class _AutoStreamAlignment:
             return None
         self._frames["live"] = live
         self._streams_ready = True
+        self._reference_width = int(width)
+        self._reference_height = int(height)
         now = time.monotonic()
         if now - self._last_attempt < SPATIAL_ALIGNMENT_ATTEMPT_INTERVAL_SECONDS:
             return None
@@ -241,6 +261,8 @@ class _AutoStreamAlignment:
             # Boot/open races: keep Waiting/Checking without burning strikes.
             return None
         self._streams_ready = True
+        self._reference_width = int(main.width)
+        self._reference_height = int(main.height)
         now = time.monotonic()
         if (
             now - self._last_attempt < SPATIAL_ALIGNMENT_ATTEMPT_INTERVAL_SECONDS

@@ -5042,6 +5042,7 @@ function spatialAlignmentSummary(alignment = {}, { mainKnown = true } = {}) {
   const stableSamples = Number(alignment.stable_samples || 0);
   const failedSamples = Number(alignment.failed_samples || 0);
   const startupCalibration = Boolean(alignment.startup_calibration);
+  const referenceSource = String(alignment.reference_source || "");
   const scaleX = Number(alignment.scale_x ?? 1);
   const scaleY = Number(alignment.scale_y ?? 1);
   const offsetX = Number(alignment.offset_x ?? 0);
@@ -5056,7 +5057,9 @@ function spatialAlignmentSummary(alignment = {}, { mainKnown = true } = {}) {
     if (mode === "identity" || nearIdentity) {
       return {
         label: "Trusted",
-        detail: "Live and main share the same field of view",
+        detail: referenceSource === "recording"
+          ? "Live matches the latest main recording field of view"
+          : "Live and main share the same field of view",
         warning: false,
       };
     }
@@ -5105,6 +5108,7 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
     && Number(status.onvif_motion_events_received || 0) === 0;
   const missingCameraTrigger = cameraAlertsOnly && !status.onvif_enabled;
   const streamDimensions = status.stream_dimensions || {};
+  const alignment = status.spatial_alignment || {};
   const liveSize = streamDimensions.live;
   const mainSize = streamDimensions.main;
   const liveSizeLabel = liveSize?.width && liveSize?.height
@@ -5113,8 +5117,19 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
   const mainSizeLabel = mainSize?.width && mainSize?.height
     ? `${mainSize.width}×${mainSize.height}`
     : null;
-  const fovAlignment = spatialAlignmentSummary(status.spatial_alignment || {}, {
-    mainKnown: Boolean(mainSizeLabel),
+  const referenceWidth = Number(alignment.reference_width || 0);
+  const referenceHeight = Number(alignment.reference_height || 0);
+  const referenceSizeLabel = referenceWidth > 0 && referenceHeight > 0
+    ? `${referenceWidth}×${referenceHeight}`
+    : null;
+  const referenceSource = String(alignment.reference_source || "");
+  const mainSideLabel = mainSizeLabel
+    || (referenceSource === "recording" && referenceSizeLabel
+      ? `recording ${referenceSizeLabel}`
+      : null)
+    || (referenceSource === "recording" ? "recording" : null);
+  const fovAlignment = spatialAlignmentSummary(alignment, {
+    mainKnown: Boolean(mainSizeLabel || mainSideLabel),
   });
   return (
     <div className="probe-result runtime-result">
@@ -5126,8 +5141,8 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       {status.onvif_enabled ? <span>{status.onvif_notifications_received || 0} notifications · {status.onvif_motion_events_received || 0} active motion · {status.onvif_inactive_motion_events || 0} inactive motion · {status.onvif_renewals || 0} subscription renewals</span> : null}
       <span className={fovAlignment.warning ? "motion-runtime-warning" : undefined}>
         Live ↔ main FOV: {fovAlignment.label}
-        {liveSizeLabel || mainSizeLabel
-          ? ` · live ${liveSizeLabel || "unknown"} / main ${mainSizeLabel || "unknown"}`
+        {liveSizeLabel || mainSideLabel
+          ? ` · live ${liveSizeLabel || "unknown"} / ${mainSideLabel ? (mainSizeLabel ? `main ${mainSizeLabel}` : mainSideLabel) : "main unknown"}`
           : ""}
       </span>
       <span>{fovAlignment.detail}</span>
