@@ -58,13 +58,21 @@ from .motion_pipeline.object_detection import TimestampedLiveFrame
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
-SPATIAL_ALIGNMENT_STARTUP_BUDGET_SECONDS = 20.0
+# Wait for live/main to publish real frames before burning the scoring budget.
+SPATIAL_ALIGNMENT_STARTUP_READY_SECONDS = 30.0
+SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS = 20.0
 SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS = 0.5
+SPATIAL_ALIGNMENT_REQUIRED_STABLE_SAMPLES = 3
+SPATIAL_ALIGNMENT_FAILURE_LIMIT = 3
 LOGGER = logging.getLogger(__name__)
 
 
 class _AutoStreamAlignment:
-    """Bounded, fail-closed live-to-main registration for one camera."""
+    """Bounded live-to-main registration for one camera.
+
+    Boot-time streams are noisy: wait for real frames before scoring, and only
+    count estimate failures toward untrusted after both sides look healthy.
+    """
 
     def __init__(self, camera: CameraConfig) -> None:
         self.enabled = (
@@ -75,12 +83,18 @@ class _AutoStreamAlignment:
         self._samples: deque[tuple[float, float, float, float]] = deque(maxlen=4)
         self._last_attempt = 0.0
         self._failures = 0
+        self._streams_ready = False
+
+    @property
+    def streams_ready(self) -> bool:
+        return self._streams_ready
 
     def status(self, alignment: dict[str, Any]) -> dict[str, Any]:
         return {
             **alignment,
             "stable_samples": len(self._samples),
             "failed_samples": self._failures,
+            "streams_ready": self._streams_ready,
             "last_attempt_seconds_ago": round(max(0.0, time.monotonic() - self._last_attempt), 3)
             if self._last_attempt else None,
         }
@@ -93,14 +107,36 @@ class _AutoStreamAlignment:
             return False
         return str(alignment.get("mode") or "") != "untrusted"
 
+    def reset_attempt_state(self) -> None:
+        """Clear sample/failure counters for a fresh calibration attempt."""
+        self._samples.clear()
+        self._failures = 0
+        self._last_attempt = 0.0
+
+    @staticmethod
+    def _frame_usable(frame: CapturedFrame | None) -> bool:
+        if frame is None:
+            return False
+        if int(frame.width) <= 0 or int(frame.height) <= 0:
+            return False
+        image = frame.image
+        if image is None or getattr(image, "size", 0) <= 0:
+            return False
+        height, width = image.shape[:2]
+        return int(height) > 0 and int(width) > 0
+
     def observe(self, frame: CapturedFrame) -> dict[str, Any] | None:
         if not self.enabled or frame.source not in {"main", "live"}:
             return None
         self._frames[frame.source] = frame
         main, live = self._frames.get("main"), self._frames.get("live")
+        if not (self._frame_usable(main) and self._frame_usable(live)):
+            # Boot/open races: keep Waiting/Checking without burning strikes.
+            return None
+        self._streams_ready = True
         now = time.monotonic()
         if (
-            main is None or live is None or now - self._last_attempt < 3.0
+            now - self._last_attempt < 3.0
             or abs(main.captured_at_epoch - live.captured_at_epoch) > 0.75
         ):
             return None
@@ -109,13 +145,13 @@ class _AutoStreamAlignment:
         if estimate is None:
             self._samples.clear()
             self._failures += 1
-            if self._failures >= 3:
+            if self._failures >= SPATIAL_ALIGNMENT_FAILURE_LIMIT:
                 return {"mode": "untrusted", "reliable": False, "confidence": 0.0,
                         "scale_x": 1.0, "scale_y": 1.0, "offset_x": 0.0, "offset_y": 0.0}
             return None
         self._failures = 0
         self._samples.append(estimate)
-        if len(self._samples) < 3:
+        if len(self._samples) < SPATIAL_ALIGNMENT_REQUIRED_STABLE_SAMPLES:
             return None
         values = np.asarray(self._samples, dtype=np.float64)
         median = np.median(values, axis=0)
@@ -229,6 +265,8 @@ class CameraWorker:
         self._effective_spatial_alignment = self._motion_spatial_alignment(camera)
         self._spatial_alignment_startup_active = False
         self._spatial_alignment_startup_lock = threading.Lock()
+        self._spatial_alignment_recheck_armed = False
+        self._spatial_alignment_recheck_used = False
         effective_capture_backend = capture_backend or FfmpegCaptureBackend(
             CaptureOpenLimiter()
         )
@@ -520,10 +558,10 @@ class CameraWorker:
         return self.motion_analysis.consider_route_watch(watch)
 
     def _spawn_startup_spatial_alignment(self) -> None:
-        """One-shot main capture lease after worker start for FOV calibration.
+        """Lease main capture for FOV calibration (startup, or one healthy recheck).
 
         FFmpeg recording does not feed this path. Lease main only while the
-        startup budget is open, then let demand-driven capture idle again.
+        attempt budget is open, then let demand-driven capture idle again.
         """
         if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
             return
@@ -541,9 +579,11 @@ class CameraWorker:
         thread.start()
 
     def _run_startup_spatial_alignment(self, generation: int) -> None:
-        deadline = time.monotonic() + SPATIAL_ALIGNMENT_STARTUP_BUDGET_SECONDS
+        ready_deadline = time.monotonic() + SPATIAL_ALIGNMENT_STARTUP_READY_SECONDS
+        score_deadline: float | None = None
         try:
-            while time.monotonic() < deadline:
+            while True:
+                now = time.monotonic()
                 if self._stop.is_set() or self.runtime_state.generation != generation:
                     return
                 if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
@@ -557,6 +597,16 @@ class CameraWorker:
                         type(error).__name__,
                         redact_secret_text(error)[:300],
                     )
+                    # Open/request errors are boot noise — do not mark untrusted.
+                    break
+                if not self._stream_alignment.streams_ready:
+                    if now >= ready_deadline:
+                        break
+                    time.sleep(SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS)
+                    continue
+                if score_deadline is None:
+                    score_deadline = now + SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS
+                if now >= score_deadline:
                     break
                 time.sleep(SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS)
             if (
@@ -565,24 +615,51 @@ class CameraWorker:
                 or not self._stream_alignment.is_pending(self._effective_spatial_alignment)
             ):
                 return
-            failed = {
-                "mode": "untrusted",
-                "reliable": False,
-                "confidence": 0.0,
-                "scale_x": 1.0,
-                "scale_y": 1.0,
-                "offset_x": 0.0,
-                "offset_y": 0.0,
-            }
-            self._effective_spatial_alignment = failed
-            self.motion_decision_handler.spatial_alignment = dict(failed)
-            LOGGER.warning(
-                "startup FOV alignment timed out for %s; marking live/main geometry untrusted",
+            # Soft leave as Checking. Boot-time FOV is brittle; do not sticky-untrust
+            # on timeout. Arm at most one recheck once streams look healthy.
+            if not self._spatial_alignment_recheck_used:
+                self._spatial_alignment_recheck_armed = True
+            LOGGER.info(
+                "FOV alignment attempt timed out for %s; leaving Checking%s",
                 self.camera.id,
+                " (will recheck once when live/main are healthy)"
+                if self._spatial_alignment_recheck_armed
+                else "",
             )
         finally:
             with self._spatial_alignment_startup_lock:
                 self._spatial_alignment_startup_active = False
+            self._maybe_spawn_healthy_spatial_recheck()
+
+    def _maybe_spawn_healthy_spatial_recheck(self) -> None:
+        """One-shot follow-up lease after streams become healthy — not periodic."""
+        if not self._spatial_alignment_recheck_armed:
+            return
+        if self._spatial_alignment_recheck_used:
+            return
+        if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
+            self._spatial_alignment_recheck_armed = False
+            return
+        live = self._stream_alignment._frames.get("live")
+        # Recheck once live looks real; the lease wakes main if needed.
+        if not (
+            self._stream_alignment.streams_ready
+            or _AutoStreamAlignment._frame_usable(live)
+        ):
+            return
+        with self._spatial_alignment_startup_lock:
+            if self._spatial_alignment_startup_active:
+                return
+            if self._spatial_alignment_recheck_used:
+                return
+            self._spatial_alignment_recheck_armed = False
+            self._spatial_alignment_recheck_used = True
+        self._stream_alignment.reset_attempt_state()
+        LOGGER.info(
+            "FOV alignment rechecking once for %s after capture became healthy",
+            self.camera.id,
+        )
+        self._spawn_startup_spatial_alignment()
 
     def stop(self) -> None:
         self.lifecycle.stop()
@@ -708,6 +785,9 @@ class CameraWorker:
         if calibrated is not None:
             self._effective_spatial_alignment = calibrated
             self.motion_decision_handler.spatial_alignment = dict(calibrated)
+            self._spatial_alignment_recheck_armed = False
+        else:
+            self._maybe_spawn_healthy_spatial_recheck()
         if frame.source == "live":
             with self.runtime_state.lock:
                 lifecycle_generation = self.runtime_state.generation

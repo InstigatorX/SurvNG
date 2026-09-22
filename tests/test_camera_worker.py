@@ -376,6 +376,35 @@ class CameraWorkerTest(unittest.TestCase):
         )
         self.assertFalse(_AutoStreamAlignment(same).is_pending(pending))
 
+    def test_auto_stream_alignment_ignores_empty_boot_frames(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        alignment = _AutoStreamAlignment(camera)
+        empty = np.zeros((0, 0, 3), dtype=np.uint8)
+
+        def frame(source: str, image: np.ndarray, width: int, height: int) -> CapturedFrame:
+            return CapturedFrame(
+                source=source,
+                image=image,
+                captured_at_epoch=100.0,
+                captured_at_monotonic=100.0,
+                captured_at_iso="2026-01-01T00:00:00+00:00",
+                width=width,
+                height=height,
+                sequence=1,
+            )
+
+        with patch.object(_AutoStreamAlignment, "_estimate", return_value=None) as estimate:
+            self.assertIsNone(alignment.observe(frame("live", empty, 0, 0)))
+            self.assertIsNone(alignment.observe(frame("main", empty, 0, 0)))
+            estimate.assert_not_called()
+        self.assertFalse(alignment.streams_ready)
+        self.assertEqual(alignment._failures, 0)
+
     def test_startup_spatial_alignment_leases_main_once_then_stops(self) -> None:
         camera = CameraConfig(
             id="gate",
@@ -389,6 +418,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker.capture = Mock()
             worker.capture.request_frame = Mock(return_value=None)
             worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            worker._stream_alignment._streams_ready = True
 
             def settle(_source: str):
                 worker._effective_spatial_alignment = {
@@ -409,7 +439,7 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(worker._effective_spatial_alignment["reliable"])
             self.assertFalse(worker._spatial_alignment_startup_active)
 
-    def test_startup_spatial_alignment_timeout_marks_untrusted(self) -> None:
+    def test_startup_spatial_alignment_timeout_stays_checking(self) -> None:
         camera = CameraConfig(
             id="gate",
             name="Gate",
@@ -422,13 +452,42 @@ class CameraWorkerTest(unittest.TestCase):
             worker.capture = Mock()
             worker.capture.request_frame = Mock(return_value=None)
             worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
-            with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_BUDGET_SECONDS", 0.05):
+            worker._stream_alignment._streams_ready = True
+            worker._spawn_startup_spatial_alignment = Mock()
+            with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS", 0.05):
                 with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS", 0.01):
                     worker._run_startup_spatial_alignment(worker.runtime_state.generation)
-            self.assertEqual(worker._effective_spatial_alignment["mode"], "untrusted")
+            self.assertEqual(worker._effective_spatial_alignment["mode"], "auto")
             self.assertFalse(worker._effective_spatial_alignment["reliable"])
+            self.assertTrue(worker._spatial_alignment_recheck_used)
+            self.assertFalse(worker._spatial_alignment_recheck_armed)
+            worker._spawn_startup_spatial_alignment.assert_called_once()
             self.assertFalse(worker._spatial_alignment_startup_active)
-            self.assertGreaterEqual(worker.capture.request_frame.call_count, 1)
+
+    def test_startup_spatial_alignment_rechecks_once_when_healthy(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker._stop.clear()
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            worker._spatial_alignment_recheck_armed = True
+            worker._stream_alignment._streams_ready = True
+            spawned: list[bool] = []
+
+            def spawn() -> None:
+                spawned.append(True)
+
+            worker._spawn_startup_spatial_alignment = spawn  # type: ignore[method-assign]
+            worker._maybe_spawn_healthy_spatial_recheck()
+            worker._maybe_spawn_healthy_spatial_recheck()
+            self.assertEqual(spawned, [True])
+            self.assertTrue(worker._spatial_alignment_recheck_used)
+            self.assertFalse(worker._spatial_alignment_recheck_armed)
 
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
