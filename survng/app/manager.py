@@ -1763,9 +1763,14 @@ class AppManager:
             "recorded_decode": recorded_decode,
             "inference_mode": self.config.detector.inference_mode,
         }
-        if self.remote_inference_registry is not None:
+        remote_registry = getattr(
+            self,
+            "remote_inference_registry",
+            None,
+        )
+        if remote_registry is not None:
             status["remote_registry"] = (
-                self.remote_inference_registry.status()
+                remote_registry.status()
             )
         status["object_worker_recommendation"] = (
             object_worker_recommendation_from_status(
