@@ -89,6 +89,9 @@ class DummyRecorder:
     def recording_at(self, camera_id: str, epoch: float):
         return None
 
+    def recording_rows(self, camera_id, limit=1000, source="main"):
+        return []
+
     def recording_rows_between(self, camera_id, start_epoch, end_epoch, source="main", *, discover_missing=True):
         return []
 
@@ -405,7 +408,41 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertFalse(alignment.streams_ready)
         self.assertEqual(alignment._failures, 0)
 
-    def test_startup_spatial_alignment_leases_main_once_then_stops(self) -> None:
+    def test_auto_stream_alignment_calibrates_from_recording_still(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        alignment = _AutoStreamAlignment(camera)
+        blank = np.zeros((8, 8, 3), dtype=np.uint8)
+        live = CapturedFrame(
+            source="live",
+            image=blank,
+            captured_at_epoch=100.0,
+            captured_at_monotonic=100.0,
+            captured_at_iso="2026-01-01T00:00:00+00:00",
+            width=8,
+            height=8,
+            sequence=1,
+        )
+        clock = {"now": 3.0}
+        with patch.object(_AutoStreamAlignment, "_estimate", return_value=(1.0, 1.0, 0.0, 0.0)):
+            with patch("survng.app.camera.time.monotonic", side_effect=lambda: clock["now"]):
+                self.assertIsNone(alignment.calibrate_with_main_image(live, blank))
+                self.assertEqual(len(alignment._samples), 1)
+                clock["now"] = 7.0
+                self.assertIsNone(alignment.calibrate_with_main_image(live, blank))
+                self.assertEqual(len(alignment._samples), 2)
+                clock["now"] = 11.0
+                trusted = alignment.calibrate_with_main_image(live, blank)
+        self.assertIsNotNone(trusted)
+        assert trusted is not None
+        self.assertTrue(trusted["reliable"])
+        self.assertEqual(alignment.status(trusted)["reference_source"], "recording")
+
+    def test_startup_spatial_alignment_uses_recording_still(self) -> None:
         camera = CameraConfig(
             id="gate",
             name="Gate",
@@ -415,13 +452,29 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             worker = make_worker(camera, Path(temp_dir))
             worker._stop.clear()
+            blank = np.zeros((8, 8, 3), dtype=np.uint8)
+            live = CapturedFrame(
+                source="live",
+                image=blank,
+                captured_at_epoch=100.0,
+                captured_at_monotonic=100.0,
+                captured_at_iso="2026-01-01T00:00:00+00:00",
+                width=8,
+                height=8,
+                sequence=1,
+            )
             worker.capture = Mock()
-            worker.capture.request_frame = Mock(return_value=None)
+            worker.capture.request_frame = Mock(return_value=live)
             worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
-            worker._stream_alignment._streams_ready = True
+            worker._latest_stable_recording_still = Mock(return_value=blank)  # type: ignore[method-assign]
 
-            def settle(_source: str):
-                worker._effective_spatial_alignment = {
+            samples = {"n": 0}
+
+            def calibrate(live_frame, main_image, *, reference_source="recording"):
+                samples["n"] += 1
+                if samples["n"] < 3:
+                    return None
+                return {
                     "mode": "affine",
                     "reliable": True,
                     "confidence": 0.9,
@@ -430,13 +483,20 @@ class CameraWorkerTest(unittest.TestCase):
                     "offset_x": 0.0,
                     "offset_y": 0.0,
                 }
-                return None
 
-            worker.capture.request_frame.side_effect = settle
+            worker._stream_alignment.calibrate_with_main_image = calibrate  # type: ignore[method-assign]
+            worker._stream_alignment._streams_ready = True
             with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS", 0.01):
                 worker._run_startup_spatial_alignment(worker.runtime_state.generation)
-            self.assertEqual(worker.capture.request_frame.call_count, 1)
             self.assertTrue(worker._effective_spatial_alignment["reliable"])
+            worker.capture.request_frame.assert_called_with("live")
+            self.assertNotIn(
+                (("main",), {}),
+                [
+                    (call.args, call.kwargs)
+                    for call in worker.capture.request_frame.call_args_list
+                ],
+            )
             self.assertFalse(worker._spatial_alignment_startup_active)
 
     def test_startup_spatial_alignment_timeout_stays_checking(self) -> None:
@@ -453,6 +513,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker.capture.request_frame = Mock(return_value=None)
             worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
             worker._stream_alignment._streams_ready = True
+            worker._latest_stable_recording_still = Mock(return_value=None)  # type: ignore[method-assign]
             worker._spawn_startup_spatial_alignment = Mock()
             with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS", 0.05):
                 with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS", 0.01):

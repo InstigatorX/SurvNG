@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 import time
 from collections import deque
@@ -58,20 +59,59 @@ from .motion_pipeline.object_detection import TimestampedLiveFrame
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
-# Wait for live/main to publish real frames before burning the scoring budget.
-SPATIAL_ALIGNMENT_STARTUP_READY_SECONDS = 30.0
+# Wait for live + a stable recording still (or capture fallback) before scoring.
+SPATIAL_ALIGNMENT_STARTUP_READY_SECONDS = 45.0
 SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS = 20.0
 SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS = 0.5
 SPATIAL_ALIGNMENT_REQUIRED_STABLE_SAMPLES = 3
 SPATIAL_ALIGNMENT_FAILURE_LIMIT = 3
+SPATIAL_ALIGNMENT_ATTEMPT_INTERVAL_SECONDS = 3.0
+SPATIAL_ALIGNMENT_RECORDING_FINALIZE_GRACE_SECONDS = 2.0
 LOGGER = logging.getLogger(__name__)
+
+
+def _decode_recording_still(
+    path: Path,
+    *,
+    ffmpeg_path: str,
+    seek_seconds: float = 1.0,
+) -> np.ndarray | None:
+    """Decode one JPEG still from a closed recording segment via FFmpeg."""
+    if not ffmpeg_path or not path.is_file():
+        return None
+    command = [
+        ffmpeg_path,
+        "-nostdin",
+        "-v", "error",
+        "-ss", f"{max(0.0, float(seek_seconds)):.3f}",
+        "-i", str(path),
+        "-frames:v", "1",
+        "-f", "image2pipe",
+        "-vcodec", "mjpeg",
+        "pipe:1",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=12.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    image = cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None or getattr(image, "size", 0) <= 0:
+        return None
+    return image
 
 
 class _AutoStreamAlignment:
     """Bounded live-to-main registration for one camera.
 
-    Boot-time streams are noisy: wait for real frames before scoring, and only
-    count estimate failures toward untrusted after both sides look healthy.
+    Prefer a still from the latest closed main recording over waking main
+    capture. Boot-time open races should not burn untrusted strikes.
     """
 
     def __init__(self, camera: CameraConfig) -> None:
@@ -84,6 +124,7 @@ class _AutoStreamAlignment:
         self._last_attempt = 0.0
         self._failures = 0
         self._streams_ready = False
+        self._reference_source = ""
 
     @property
     def streams_ready(self) -> bool:
@@ -95,6 +136,7 @@ class _AutoStreamAlignment:
             "stable_samples": len(self._samples),
             "failed_samples": self._failures,
             "streams_ready": self._streams_ready,
+            "reference_source": self._reference_source or None,
             "last_attempt_seconds_ago": round(max(0.0, time.monotonic() - self._last_attempt), 3)
             if self._last_attempt else None,
         }
@@ -112,6 +154,7 @@ class _AutoStreamAlignment:
         self._samples.clear()
         self._failures = 0
         self._last_attempt = 0.0
+        self._reference_source = ""
 
     @staticmethod
     def _frame_usable(frame: CapturedFrame | None) -> bool:
@@ -125,23 +168,13 @@ class _AutoStreamAlignment:
         height, width = image.shape[:2]
         return int(height) > 0 and int(width) > 0
 
-    def observe(self, frame: CapturedFrame) -> dict[str, Any] | None:
-        if not self.enabled or frame.source not in {"main", "live"}:
-            return None
-        self._frames[frame.source] = frame
-        main, live = self._frames.get("main"), self._frames.get("live")
-        if not (self._frame_usable(main) and self._frame_usable(live)):
-            # Boot/open races: keep Waiting/Checking without burning strikes.
-            return None
-        self._streams_ready = True
-        now = time.monotonic()
-        if (
-            now - self._last_attempt < 3.0
-            or abs(main.captured_at_epoch - live.captured_at_epoch) > 0.75
-        ):
-            return None
-        self._last_attempt = now
-        estimate = self._estimate(live.image, main.image)
+    def _accept_estimate(
+        self,
+        estimate: tuple[float, float, float, float] | None,
+        *,
+        reference_source: str,
+    ) -> dict[str, Any] | None:
+        self._reference_source = reference_source
         if estimate is None:
             self._samples.clear()
             self._failures += 1
@@ -169,6 +202,56 @@ class _AutoStreamAlignment:
             "offset_x": round(float(median[2]), 5),
             "offset_y": round(float(median[3]), 5),
         }
+
+    def calibrate_with_main_image(
+        self,
+        live: CapturedFrame,
+        main_image: np.ndarray,
+        *,
+        reference_source: str = "recording",
+    ) -> dict[str, Any] | None:
+        """Score live against a main-space still (usually a closed recording frame).
+
+        Skips capture-time sync: FOV geometry does not need contemporaneous frames.
+        """
+        if not self.enabled or not self._frame_usable(live):
+            return None
+        if main_image is None or getattr(main_image, "size", 0) <= 0:
+            return None
+        height, width = main_image.shape[:2]
+        if int(height) <= 0 or int(width) <= 0:
+            return None
+        self._frames["live"] = live
+        self._streams_ready = True
+        now = time.monotonic()
+        if now - self._last_attempt < SPATIAL_ALIGNMENT_ATTEMPT_INTERVAL_SECONDS:
+            return None
+        self._last_attempt = now
+        return self._accept_estimate(
+            self._estimate(live.image, main_image),
+            reference_source=reference_source,
+        )
+
+    def observe(self, frame: CapturedFrame) -> dict[str, Any] | None:
+        if not self.enabled or frame.source not in {"main", "live"}:
+            return None
+        self._frames[frame.source] = frame
+        main, live = self._frames.get("main"), self._frames.get("live")
+        if not (self._frame_usable(main) and self._frame_usable(live)):
+            # Boot/open races: keep Waiting/Checking without burning strikes.
+            return None
+        self._streams_ready = True
+        now = time.monotonic()
+        if (
+            now - self._last_attempt < SPATIAL_ALIGNMENT_ATTEMPT_INTERVAL_SECONDS
+            or abs(main.captured_at_epoch - live.captured_at_epoch) > 0.75
+        ):
+            return None
+        self._last_attempt = now
+        return self._accept_estimate(
+            self._estimate(live.image, main.image),
+            reference_source="capture",
+        )
 
     @staticmethod
     def _estimate(live: np.ndarray, main: np.ndarray) -> tuple[float, float, float, float] | None:
@@ -558,10 +641,10 @@ class CameraWorker:
         return self.motion_analysis.consider_route_watch(watch)
 
     def _spawn_startup_spatial_alignment(self) -> None:
-        """Lease main capture for FOV calibration (startup, or one healthy recheck).
+        """Calibrate FOV at startup (or one healthy recheck) without periodic wake.
 
-        FFmpeg recording does not feed this path. Lease main only while the
-        attempt budget is open, then let demand-driven capture idle again.
+        Prefer a still from the latest closed main recording segment. Fall back
+        to a one-shot main capture lease only when no stable segment exists yet.
         """
         if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
             return
@@ -578,9 +661,73 @@ class CameraWorker:
         )
         thread.start()
 
+    def _apply_spatial_alignment(self, calibrated: dict[str, Any]) -> None:
+        self._effective_spatial_alignment = calibrated
+        self.motion_decision_handler.spatial_alignment = dict(calibrated)
+        if bool(calibrated.get("reliable")) or str(calibrated.get("mode") or "") == "untrusted":
+            self._spatial_alignment_recheck_armed = False
+
+    def _stable_recording_candidates(self) -> list[tuple[Path, float]]:
+        """Newest-first closed main recording paths with a seek offset."""
+        recorder = getattr(self.motion_object_detector, "recorder", None)
+        if recorder is None:
+            return []
+        rows_fn = getattr(recorder, "recording_rows", None)
+        if not callable(rows_fn):
+            return []
+        try:
+            rows = list(rows_fn(self.camera.id, limit=8, source="main") or [])
+        except Exception as error:
+            LOGGER.debug(
+                "FOV alignment could not list recordings for %s: %s: %s",
+                self.camera.id,
+                type(error).__name__,
+                redact_secret_text(error)[:200],
+            )
+            return []
+        now_epoch = time.time()
+        candidates: list[tuple[Path, float]] = []
+        for row in reversed(rows):
+            path = Path(str(row.get("path") or ""))
+            if not path.is_file():
+                continue
+            start_epoch = float(row.get("start_epoch") or 0.0)
+            duration = float(row.get("duration_seconds") or 0.0)
+            end_epoch = float(row.get("end_epoch") or (start_epoch + duration))
+            if end_epoch and now_epoch < end_epoch + SPATIAL_ALIGNMENT_RECORDING_FINALIZE_GRACE_SECONDS:
+                continue
+            is_stable = getattr(recorder, "_recording_file_is_stable", None)
+            if callable(is_stable):
+                try:
+                    if not bool(is_stable(path)):
+                        continue
+                except Exception:
+                    continue
+            seek = 1.0
+            if duration > 0:
+                seek = max(0.5, min(duration * 0.5, max(0.0, duration - 0.5)))
+            candidates.append((path, seek))
+        return candidates
+
+    def _latest_stable_recording_still(self) -> np.ndarray | None:
+        """Return one still from the newest closed, playable main recording."""
+        recorder = getattr(self.motion_object_detector, "recorder", None)
+        ffmpeg_path = str(getattr(recorder, "ffmpeg_path", "") or "ffmpeg")
+        for path, seek in self._stable_recording_candidates():
+            still = _decode_recording_still(
+                path,
+                ffmpeg_path=ffmpeg_path,
+                seek_seconds=seek,
+            )
+            if still is not None:
+                return still
+        return None
+
     def _run_startup_spatial_alignment(self, generation: int) -> None:
         ready_deadline = time.monotonic() + SPATIAL_ALIGNMENT_STARTUP_READY_SECONDS
         score_deadline: float | None = None
+        recording_still: np.ndarray | None = None
+        used_capture_fallback = False
         try:
             while True:
                 now = time.monotonic()
@@ -588,17 +735,47 @@ class CameraWorker:
                     return
                 if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
                     return
+                live: CapturedFrame | None = None
                 try:
-                    self.capture.request_frame("main")
+                    live = self.capture.request_frame("live")
                 except Exception as error:
                     LOGGER.warning(
-                        "startup FOV alignment could not sample main for %s: %s: %s",
+                        "startup FOV alignment could not sample live for %s: %s: %s",
                         self.camera.id,
                         type(error).__name__,
                         redact_secret_text(error)[:300],
                     )
-                    # Open/request errors are boot noise — do not mark untrusted.
-                    break
+                if recording_still is None:
+                    recording_still = self._latest_stable_recording_still()
+                if (
+                    recording_still is not None
+                    and live is not None
+                    and _AutoStreamAlignment._frame_usable(live)
+                ):
+                    calibrated = self._stream_alignment.calibrate_with_main_image(
+                        live,
+                        recording_still,
+                        reference_source="recording",
+                    )
+                    if calibrated is not None:
+                        self._apply_spatial_alignment(calibrated)
+                        if not self._stream_alignment.is_pending(calibrated):
+                            return
+                elif recording_still is None and now >= ready_deadline - (
+                    SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS * 0.25
+                ):
+                    # No closed segment yet — one-shot main capture fallback.
+                    used_capture_fallback = True
+                    try:
+                        self.capture.request_frame("main")
+                    except Exception as error:
+                        LOGGER.warning(
+                            "startup FOV alignment capture fallback failed for %s: %s: %s",
+                            self.camera.id,
+                            type(error).__name__,
+                            redact_secret_text(error)[:300],
+                        )
+                        break
                 if not self._stream_alignment.streams_ready:
                     if now >= ready_deadline:
                         break
@@ -616,13 +793,16 @@ class CameraWorker:
             ):
                 return
             # Soft leave as Checking. Boot-time FOV is brittle; do not sticky-untrust
-            # on timeout. Arm at most one recheck once streams look healthy.
+            # on timeout. Arm at most one recheck once a recording/live pair is healthy.
             if not self._spatial_alignment_recheck_used:
                 self._spatial_alignment_recheck_armed = True
             LOGGER.info(
-                "FOV alignment attempt timed out for %s; leaving Checking%s",
+                "FOV alignment attempt timed out for %s; leaving Checking%s%s",
                 self.camera.id,
-                " (will recheck once when live/main are healthy)"
+                " (recording still unavailable; used capture fallback)"
+                if used_capture_fallback and recording_still is None
+                else "",
+                " (will recheck once when live/recording are healthy)"
                 if self._spatial_alignment_recheck_armed
                 else "",
             )
@@ -632,7 +812,7 @@ class CameraWorker:
             self._maybe_spawn_healthy_spatial_recheck()
 
     def _maybe_spawn_healthy_spatial_recheck(self) -> None:
-        """One-shot follow-up lease after streams become healthy — not periodic."""
+        """One-shot follow-up after live/recording become healthy — not periodic."""
         if not self._spatial_alignment_recheck_armed:
             return
         if self._spatial_alignment_recheck_used:
@@ -641,10 +821,12 @@ class CameraWorker:
             self._spatial_alignment_recheck_armed = False
             return
         live = self._stream_alignment._frames.get("live")
-        # Recheck once live looks real; the lease wakes main if needed.
+        live_ok = _AutoStreamAlignment._frame_usable(live)
+        recording_ready = bool(self._stable_recording_candidates())
         if not (
             self._stream_alignment.streams_ready
-            or _AutoStreamAlignment._frame_usable(live)
+            or live_ok
+            or recording_ready
         ):
             return
         with self._spatial_alignment_startup_lock:
@@ -656,7 +838,7 @@ class CameraWorker:
             self._spatial_alignment_recheck_used = True
         self._stream_alignment.reset_attempt_state()
         LOGGER.info(
-            "FOV alignment rechecking once for %s after capture became healthy",
+            "FOV alignment rechecking once for %s after live/recording became healthy",
             self.camera.id,
         )
         self._spawn_startup_spatial_alignment()
@@ -783,9 +965,7 @@ class CameraWorker:
     def _capture_frame(self, frame: CapturedFrame) -> None:
         calibrated = self._stream_alignment.observe(frame)
         if calibrated is not None:
-            self._effective_spatial_alignment = calibrated
-            self.motion_decision_handler.spatial_alignment = dict(calibrated)
-            self._spatial_alignment_recheck_armed = False
+            self._apply_spatial_alignment(calibrated)
         else:
             self._maybe_spawn_healthy_spatial_recheck()
         if frame.source == "live":
