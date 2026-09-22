@@ -11,6 +11,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Callable, Mapping
 
+from .security import redact_secret_text
+
 
 class MediaSessionKind(StrEnum):
     GO2RTC_WEBRTC = "go2rtc_webrtc"
@@ -544,7 +546,7 @@ class MediaSessionManager:
                         max(0.0, time.monotonic() - record.acquired_at),
                         3,
                     ),
-                    "error": error,
+                    "error": redact_secret_text(error),
                 }
             )
             self._condition.notify_all()
