@@ -99,3 +99,20 @@ def test_activity_callback_failure_does_not_corrupt_later_state() -> None:
     assert calls == 2
     assert len(delivered) == 1
     assert delivered[0].transition.value == "stopped"
+
+
+def test_activity_snapshot_reconciles_retained_state_without_emitting() -> None:
+    transitions = []
+    bus = ActivityEventBus(transitions.append, idle_after_seconds=30)
+    bus.start_generation("gate", 4)
+
+    inactive = bus.snapshot("gate")
+    bus.observe(_observation(), 4)
+    active = bus.snapshot("gate")
+
+    assert inactive["state"] == "inactive"
+    assert inactive["reason"] == "state_snapshot"
+    assert active["state"] == "active"
+    assert active["activity_id"] == transitions[0].activity_id
+    assert len(transitions) == 1
+    bus.close()

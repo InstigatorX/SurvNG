@@ -1554,6 +1554,11 @@ class AppManager:
             self.mqtt.publish_camera_state(camera_id, bool(status.get("running")))
             self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(status.get("recording_enabled")))
             self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(status.get("detection_enabled")))
+            self.mqtt.publish(
+                f"camera/{camera_id}/activity",
+                self.activity_events.snapshot(camera_id),
+                retain=True,
+            )
 
     def incident_notification_allowed(self, payload: dict) -> bool:
         if not self.config.integration_notifications.enabled:

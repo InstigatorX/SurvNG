@@ -179,6 +179,29 @@ class ActivityEventBus:
             self._dispatch(transition)
         return transition
 
+    def snapshot(self, camera_id: str) -> dict[str, object]:
+        """Return current state for retained integrations without emitting an edge."""
+        with self._lock:
+            current = self._cameras.get(camera_id)
+            if current is None:
+                current = _CameraActivity(generation=0)
+            transition = self._transition(
+                camera_id,
+                current,
+                (
+                    ActivityTransitionKind.STARTED
+                    if current.active
+                    else ActivityTransitionKind.STOPPED
+                ),
+                (
+                    ActivityState.ACTIVE
+                    if current.active
+                    else ActivityState.INACTIVE
+                ),
+                reason="state_snapshot",
+            )
+        return transition.to_payload()
+
     def close(self) -> None:
         transitions: list[ActivityTransition] = []
         with self._operations:
