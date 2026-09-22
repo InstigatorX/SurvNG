@@ -959,6 +959,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         start_epoch: float,
         end_epoch: float,
         source: str = "main",
+        start: float | None = None,
     ) -> Response:
         active_manager = _require_recording_camera(deps, camera_id)
         _validate_recording_range(
@@ -1034,6 +1035,19 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 ]
             )
             media_offset += float(row["duration_seconds"])
+        # Native Safari applies EXT-X-START while building seekable ranges.
+        # Post-metadata currentTime seeks are raced and intermittent on iPhone.
+        if (
+            start is not None
+            and math.isfinite(start)
+            and start > 0
+            and media_offset > 0
+        ):
+            start_offset = min(float(start), max(0.0, media_offset - 0.01))
+            lines.insert(
+                5,
+                f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
+            )
         lines.append("#EXT-X-ENDLIST")
         return Response(
             "\n".join(lines) + "\n",

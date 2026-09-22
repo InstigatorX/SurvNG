@@ -167,6 +167,43 @@ class RecordingRouteLifecycleTests(TestCase):
             )
         self.assertEqual(stale.exception.status_code, 409)
 
+    def test_day_playlist_emits_ext_x_start_for_native_safari(self) -> None:
+        manager = _Manager("current")
+        rows = [{
+            "name": "segment.mp4",
+            "start_epoch": 100.0,
+            "end_epoch": 110.0,
+            "duration_seconds": 10.0,
+            "stream_fingerprint": "h264",
+        }]
+        handlers = create_recording_router(
+            replace(
+                _dependencies(lambda: manager),
+                recording_day_rows=lambda *_args, **_kwargs: rows,
+            )
+        ).handlers
+        body = handlers["recording_day_hls_playlist"](
+            "gate",
+            100,
+            110,
+            "main",
+            7.25,
+        ).body.decode()
+        self.assertIn("#EXT-X-START:TIME-OFFSET=7.250,PRECISE=YES", body)
+        # Keep the tag ahead of media so Safari can honor it during load.
+        self.assertLess(
+            body.index("#EXT-X-START:"),
+            body.index("#EXTINF:"),
+        )
+        clipped = handlers["recording_day_hls_playlist"](
+            "gate",
+            100,
+            110,
+            "main",
+            99.0,
+        ).body.decode()
+        self.assertIn("#EXT-X-START:TIME-OFFSET=9.990,PRECISE=YES", clipped)
+
     def test_day_and_event_playlists_version_every_fragment_url(self) -> None:
         manager = _Manager("current")
         manager.events.get = lambda _event_id: {
