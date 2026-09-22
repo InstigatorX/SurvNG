@@ -17,6 +17,12 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from .ffmpeg_process import named_ffmpeg_executable
+from .media_sessions import (
+    MediaResourceClass,
+    MediaSessionKind,
+    MediaSessionManager,
+    MediaSessionRequest,
+)
 from .security import redact_secret_text
 
 
@@ -575,6 +581,8 @@ class CameraCaptureService:
         retry_max_seconds: float = CAPTURE_RETRY_MAX_SECONDS,
         initial_open_timeout_ms: int = CAPTURE_OPEN_TIMEOUT_MS,
         reconnect_open_timeout_ms: int = CAPTURE_RECONNECT_OPEN_TIMEOUT_MS,
+        media_sessions: MediaSessionManager | None = None,
+        owner_generation: str | int | None = None,
     ) -> None:
         self.camera_id = camera_id
         self._source_url = source_url
@@ -592,6 +600,8 @@ class CameraCaptureService:
             self.initial_open_timeout_ms,
             int(reconnect_open_timeout_ms),
         )
+        self._media_sessions = media_sessions
+        self._owner_generation = owner_generation
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._stop.set()
@@ -971,6 +981,25 @@ class CameraCaptureService:
     def _run_source(self, source: str, stop_event: threading.Event) -> None:
         retry_delay = self.retry_initial_seconds
         consecutive_open_failures = 0
+        session = None
+        if self._media_sessions is not None:
+            session = self._media_sessions.acquire(
+                MediaSessionRequest(
+                    (
+                        MediaSessionKind.CAPTURE_LIVE
+                        if source == "live"
+                        else MediaSessionKind.CAPTURE_MAIN
+                    ),
+                    camera_id=self.camera_id,
+                    source=source,
+                    resources={MediaResourceClass.CAPTURE_PROCESS: 1},
+                    owner_generation=self._owner_generation,
+                ),
+                blocking=False,
+            )
+            session.cancellation.add_callback(
+                lambda _reason: stop_event.set()
+            )
         try:
             while not self._cancelled(stop_event):
                 if self._should_exit_for_idle(source, stop_event):
@@ -1085,6 +1114,8 @@ class CameraCaptureService:
                 retry_delay = min(retry_delay * 2.0, self.retry_max_seconds)
         finally:
             self._source_finished(source, stop_event)
+            if session is not None:
+                session.close()
 
     def _run_source_when_released(
         self,

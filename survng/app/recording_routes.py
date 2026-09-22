@@ -23,6 +23,13 @@ from .incident_presenter import (
     _recording_grid_incident_payload,
 )
 from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_epoch
+from .encoded_fragments import (
+    EncodedFragmentSource,
+    FragmentSourceError,
+    FragmentUnavailable,
+    FragmentWindow,
+    InvalidFragmentWindow,
+)
 from .media_exports import MediaExportManager
 from .manager_access import ManagerAccessCoordinator, guard_manager_generation
 from .recording_media import (
@@ -80,6 +87,9 @@ class RecordingRouteDependencies:
     ensure_event_clip: Callable[..., Path]
     manager_lock: threading.RLock | None = None
     manager_access: ManagerAccessCoordinator | None = None
+    encoded_fragment_source: (
+        Callable[[Any], EncodedFragmentSource] | None
+    ) = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +162,47 @@ def _recording_playback_window(epoch: float) -> tuple[float, float]:
 
 def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteBundle:
     router = APIRouter()
+
+    def fragment_rows(
+        active_manager: Any,
+        camera_id: str,
+        start_epoch: float,
+        end_epoch: float,
+        source: str,
+        *,
+        trim_end: bool,
+    ) -> list[dict] | None:
+        if deps.encoded_fragment_source is None:
+            return None
+        try:
+            fragments = list(
+                deps.encoded_fragment_source(active_manager).fragments(
+                    FragmentWindow(
+                        camera_id=camera_id,
+                        source=recording_source(source),
+                        start_epoch=start_epoch,
+                        end_epoch=end_epoch,
+                    ),
+                    trim_end=trim_end,
+                )
+            )
+        except InvalidFragmentWindow as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FragmentUnavailable as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FragmentSourceError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return [
+            {
+                "name": fragment.segment_name,
+                "start_epoch": fragment.wall_start_epoch,
+                "end_epoch": fragment.wall_end_epoch,
+                "duration_seconds": fragment.media_duration_seconds,
+                "stream_fingerprint": fragment.stream.fingerprint or "",
+                "_encoded_fragment": fragment,
+            }
+            for fragment in fragments
+        ]
 
     @router.get("/api/cameras/{camera_id}/recordings")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
@@ -857,14 +908,23 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "invalid recording day range",
         )
         selected_source = recording_source(source)
-        rows = deps.recording_day_rows(
+        rows = fragment_rows(
             active_manager,
             camera_id,
             start_epoch,
             end_epoch,
             selected_source,
-            fresh=True,
+            trim_end=False,
         )
+        if rows is None:
+            rows = deps.recording_day_rows(
+                active_manager,
+                camera_id,
+                start_epoch,
+                end_epoch,
+                selected_source,
+                fresh=True,
+            )
         if not rows:
             raise HTTPException(status_code=404, detail="no recordings found")
         target_duration = max(
@@ -927,6 +987,45 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         trim_end: bool = False,
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
+        if deps.encoded_fragment_source is not None:
+            rows = fragment_rows(
+                active_manager,
+                camera_id,
+                start_epoch,
+                end_epoch,
+                source,
+                trim_end=trim_end,
+            ) or []
+            selected = next(
+                (
+                    row.get("_encoded_fragment")
+                    for row in rows
+                    if row.get("name") == segment_name
+                ),
+                None,
+            )
+            if selected is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="recording segment not found",
+                )
+            try:
+                materialized = deps.encoded_fragment_source(
+                    active_manager
+                ).materialize(selected)
+            except FragmentUnavailable as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except FragmentSourceError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            if materialized.stream.init_path is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="recording initialization fragment is unavailable",
+                )
+            return deps.recording_file_response(
+                materialized.stream.init_path,
+                "video/mp4",
+            )
         init_path, _ = deps.recording_day_fmp4_paths(
             active_manager,
             camera_id,
@@ -953,6 +1052,45 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         trim_end: bool = False,
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
+        if deps.encoded_fragment_source is not None:
+            rows = fragment_rows(
+                active_manager,
+                camera_id,
+                start_epoch,
+                end_epoch,
+                source,
+                trim_end=trim_end,
+            ) or []
+            selected = next(
+                (
+                    row.get("_encoded_fragment")
+                    for row in rows
+                    if row.get("name") == segment_name
+                ),
+                None,
+            )
+            if selected is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="recording segment not found",
+                )
+            try:
+                materialized = deps.encoded_fragment_source(
+                    active_manager
+                ).materialize(selected)
+            except FragmentUnavailable as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except FragmentSourceError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            if materialized.media_path is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="recording media fragment is unavailable",
+                )
+            return deps.recording_file_response(
+                materialized.media_path,
+                "video/iso.segment",
+            )
         _, media_path = deps.recording_day_fmp4_paths(
             active_manager,
             camera_id,
@@ -1021,14 +1159,23 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         window_start = event_created_epoch - before_seconds
         window_end = event_created_epoch + after_seconds
         selected_source = recording_source(source)
-        rows = deps.recording_day_rows(
+        rows = fragment_rows(
             active_manager,
             camera_id,
             window_start,
             window_end,
             selected_source,
-            fresh=True,
+            trim_end=True,
         )
+        if rows is None:
+            rows = deps.recording_day_rows(
+                active_manager,
+                camera_id,
+                window_start,
+                window_end,
+                selected_source,
+                fresh=True,
+            )
         if not rows:
             raise HTTPException(status_code=404, detail="no recording window found")
 
