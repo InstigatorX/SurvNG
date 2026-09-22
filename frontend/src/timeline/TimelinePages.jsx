@@ -749,7 +749,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const pendingSeekEpochRef = useRef(null);
   const pendingSeekModeRef = useRef(null);
   const seekWatchdogRef = useRef(null);
-  const seekWatchdogGenerationRef = useRef(0);
   const ignorePauseUntilRef = useRef(0);
   const playbackRetryRef = useRef({ attempts: 0, timer: null });
   const gridRefreshCursorRef = useRef(null);
@@ -1284,7 +1283,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   }
 
   function clearSeekWatchdog() {
-    seekWatchdogGenerationRef.current += 1;
     if (seekWatchdogRef.current) {
       window.clearTimeout(seekWatchdogRef.current);
       seekWatchdogRef.current = null;
@@ -1296,49 +1294,26 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (!video || !Number.isFinite(mediaTime)) return;
     const tolerance = recordingSeekToleranceSeconds();
     const requestedSource = video.getAttribute("src");
-    const requestedEpoch = pendingSeekEpochRef.current;
-    const generation = ++seekWatchdogGenerationRef.current;
-    let attempts = 0;
-    const maxAttempts = prefersJpegScrubPreview() ? 20 : 8;
-    const isCurrent = () => (
-      generation === seekWatchdogGenerationRef.current
-      && video === videoRef.current
-      && video.getAttribute("src") === requestedSource
-      && pendingSeekEpochRef.current === requestedEpoch
-    );
-    const checkSeek = () => {
+    const isCurrent = () => video === videoRef.current && video.getAttribute("src") === requestedSource;
+    seekWatchdogRef.current = window.setTimeout(() => {
       seekWatchdogRef.current = null;
       if (!isCurrent() || !Number.isFinite(pendingSeekEpochRef.current)) return;
       const pendingMode = pendingSeekModeRef.current;
       if (pendingMode !== "local" && pendingMode !== "window-ready") return;
-      if (videoReachedSeekTarget(video, mediaTime, tolerance) && !video.seeking) {
-        completePendingRecordingSeek(video);
+      const activeVideo = video;
+      if (!activeVideo) return;
+      if (!videoReachedSeekTarget(activeVideo, mediaTime, tolerance)) {
+        activeVideo.currentTime = mediaTime;
+        seekWatchdogRef.current = window.setTimeout(() => {
+          seekWatchdogRef.current = null;
+          if (isCurrent() && Number.isFinite(pendingSeekEpochRef.current)) {
+            completePendingRecordingSeek(activeVideo);
+          }
+        }, prefersJpegScrubPreview() ? 400 : 150);
         return;
       }
-      attempts += 1;
-      if (attempts >= maxAttempts) {
-        handleRecordingError({
-          category: 1,
-          code: 1001,
-          message: "Recording seek did not settle",
-        });
-        return;
-      }
-      // Native Safari can ignore or supersede currentTime writes while HLS is
-      // extending its seekable ranges. Retry once the prior seek has settled
-      // instead of abandoning the pending seek after a single watchdog tick.
-      if (!video.seeking) {
-        seekVideoToTime(video, mediaTime, { allowFastSeek: false });
-      }
-      seekWatchdogRef.current = window.setTimeout(
-        checkSeek,
-        prefersJpegScrubPreview() ? 400 : 150,
-      );
-    };
-    seekWatchdogRef.current = window.setTimeout(
-      checkSeek,
-      seekWatchdogDelayMs(),
-    );
+      completePendingRecordingSeek(activeVideo);
+    }, seekWatchdogDelayMs());
   }
 
   function completePendingRecordingSeek(video) {

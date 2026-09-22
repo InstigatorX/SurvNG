@@ -295,13 +295,10 @@ for (const secondTick of [false, true]) {
     let src = "day.m3u8?reload=0";
     const video = { currentTime: 0, getAttribute: () => src };
     const context = vm.createContext({
-      Number, videoRef: { current: video }, seekWatchdogRef: {},
-      seekWatchdogGenerationRef: { current: 0 }, clearSeekWatchdog() {},
+      Number, videoRef: { current: video }, seekWatchdogRef: {}, clearSeekWatchdog() {},
       recordingSeekToleranceSeconds: () => .35, seekWatchdogDelayMs: () => 3000,
       pendingSeekEpochRef: { current: 125 }, pendingSeekModeRef: { current: "window-ready" },
       videoReachedSeekTarget: () => false, prefersJpegScrubPreview: () => true,
-      seekVideoToTime: (element, target) => { element.currentTime = target; },
-      handleRecordingError: () => { throw new Error("Stale HLS timer retried playback"); },
       completePendingRecordingSeek: () => { throw new Error("Stale HLS timer completed seek"); },
       window: { setTimeout: (fn) => { timers.push(fn); return timers.length; } },
     });
@@ -315,60 +312,6 @@ for (const secondTick of [false, true]) {
     assert.equal(video.currentTime, timeBefore);
     assert.equal(timers.length, 0);
   }
-}
-
-// Native Safari can ignore currentTime while extending HLS seekable ranges.
-// Keep retrying the same generation until it settles instead of giving up
-// after one reassignment and leaving the Timeline permanently seeking.
-{
-  const timers = [];
-  const errors = [];
-  let writes = 0;
-  let completed = 0;
-  const video = { currentTime: 0, seeking: false, getAttribute: () => "day.m3u8" };
-  const context = vm.createContext({
-    Number, videoRef: { current: video }, seekWatchdogRef: {},
-    seekWatchdogGenerationRef: { current: 0 }, clearSeekWatchdog() {},
-    recordingSeekToleranceSeconds: () => .35, seekWatchdogDelayMs: () => 3000,
-    pendingSeekEpochRef: { current: 125 }, pendingSeekModeRef: { current: "window-ready" },
-    videoReachedSeekTarget: (element, target) => Math.abs(element.currentTime - target) <= .35,
-    prefersJpegScrubPreview: () => true,
-    seekVideoToTime: (element, target) => {
-      writes += 1;
-      if (writes === 3) element.currentTime = target;
-    },
-    handleRecordingError: (error) => errors.push(error),
-    completePendingRecordingSeek: () => { completed += 1; },
-    window: { setTimeout: (fn) => { timers.push(fn); return timers.length; } },
-  });
-  vm.runInContext(watchdog, context);
-  context.scheduleSeekWatchdog(video, 25);
-  while (timers.length && !completed) timers.shift()();
-  assert.equal(writes, 3);
-  assert.equal(completed, 1);
-  assert.deepEqual(errors, []);
-}
-
-{
-  const timers = [];
-  const errors = [];
-  const video = { currentTime: 0, seeking: false, getAttribute: () => "day.m3u8" };
-  const context = vm.createContext({
-    Number, videoRef: { current: video }, seekWatchdogRef: {},
-    seekWatchdogGenerationRef: { current: 0 }, clearSeekWatchdog() {},
-    recordingSeekToleranceSeconds: () => .35, seekWatchdogDelayMs: () => 3000,
-    pendingSeekEpochRef: { current: 125 }, pendingSeekModeRef: { current: "window-ready" },
-    videoReachedSeekTarget: () => false, prefersJpegScrubPreview: () => true,
-    seekVideoToTime() {},
-    handleRecordingError: (error) => errors.push(error),
-    completePendingRecordingSeek: () => { throw new Error("Unsettled seek completed"); },
-    window: { setTimeout: (fn) => { timers.push(fn); return timers.length; } },
-  });
-  vm.runInContext(watchdog, context);
-  context.scheduleSeekWatchdog(video, 25);
-  while (timers.length) timers.shift()();
-  assert.equal(errors.length, 1, "an unsettled seek must reload HLS instead of remaining stuck");
-  assert.equal(errors[0].category, 1);
 }
 
 console.log("HLS default, codec fallback, retained playback intent, and network retry tests passed");

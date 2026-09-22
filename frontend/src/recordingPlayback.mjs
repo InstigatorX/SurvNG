@@ -51,20 +51,12 @@ export function videoReachedSeekTarget(video, mediaTime, tolerance = 0.08) {
 }
 
 export function seekVideoToTime(video, mediaTime, options = {}) {
-  if (!video || !Number.isFinite(mediaTime)) return false;
-  try {
-    if (shouldUseFastSeek(options) && typeof video.fastSeek === "function") {
-      video.fastSeek(mediaTime);
-      return true;
-    }
-    video.currentTime = mediaTime;
-    return true;
-  } catch {
-    // Safari can reject currentTime while a replacement HLS playlist is still
-    // publishing its seekable ranges. The caller's watchdog retries after the
-    // media element advances to a stable metadata state.
-    return false;
+  if (!video || !Number.isFinite(mediaTime)) return;
+  if (shouldUseFastSeek(options) && typeof video.fastSeek === "function") {
+    video.fastSeek(mediaTime);
+    return;
   }
+  video.currentTime = mediaTime;
 }
 
 export function seekWatchdogDelayMs(options = {}) {

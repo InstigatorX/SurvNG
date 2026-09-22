@@ -81,23 +81,20 @@ assert.equal(videoReachedSeekTarget({ currentTime: 4.2 }, 5, 0.35), false);
 
 let fastSeekTime = null;
 let currentTimeValue = 0;
-assert.equal(seekVideoToTime({
+seekVideoToTime({
   fastSeek(value) { fastSeekTime = value; },
   get currentTime() { return currentTimeValue; },
   set currentTime(value) { currentTimeValue = value; },
-}, 12.5, { coarsePointer: false, preferNativeHls: false }), true);
+}, 12.5, { coarsePointer: false, preferNativeHls: false });
 assert.equal(fastSeekTime, 12.5);
 fastSeekTime = null;
 currentTimeValue = 0;
-assert.equal(seekVideoToTime({
+seekVideoToTime({
   fastSeek(value) { fastSeekTime = value; },
   set currentTime(value) { currentTimeValue = value; },
-}, 4.5, { coarsePointer: true }), true);
+}, 4.5, { coarsePointer: true });
 assert.equal(fastSeekTime, null);
 assert.equal(currentTimeValue, 4.5);
-assert.equal(seekVideoToTime({
-  set currentTime(_value) { throw new DOMException("Not ready", "InvalidStateError"); },
-}, 4.5, { preferNativeHls: true }), false);
 
 const mergedAvailability = mergeRecordingAvailability(
   [
