@@ -4492,6 +4492,12 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label className="compact-toggle"><input type="checkbox" checked={config.detector?.enabled || false} onChange={(event) => updateConfig(["detector", "enabled"], event.target.checked)} /><span>Detector enabled</span></label>
             </header>
             <div className="detection-field-grid">
+              <label>Inference execution<select value={config.detector?.inference_mode || "local"} onChange={(event) => updateConfig(["detector", "inference_mode"], event.target.value)}>
+                <option value="local">Local workers</option>
+                <option value="remote">Remote workers only</option>
+                <option value="hybrid">Remote with local incident fallback</option>
+              </select><small>Remote workers connect to this server with a dedicated token. Changing execution mode reloads the camera manager safely.</small></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.remote_incident_fallback ?? true} onChange={(event) => updateConfig(["detector", "remote_incident_fallback"], event.target.checked)} disabled={(config.detector?.inference_mode || "local") !== "hybrid"} /><span>Fallback locally for initial incidents</span></label>
               <label>Backend<select value={detectorBackend} onChange={(event) => updateConfig(["detector", "backend"], event.target.value)}>
                 <option value="openvino">OpenVINO / ONNX</option>
                 <option value="coreml">Core ML (Mac)</option>

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +19,10 @@ from .inference import (
     IsolatedDepthEstimator,
     IsolatedFaceRecognizer,
     IsolatedPersonReidentifier,
+)
+from .inference_runtime.registry import RemoteInferenceRegistry
+from .inference_runtime.remote_backend import (
+    RoutedInferenceWorkerBackend,
 )
 from .object_tracking import (
     AdaptiveTrackingLimiter,
@@ -65,6 +70,7 @@ class InferenceLifecycle:
         database_dir: Path,
         media_storage: MediaStorageRegistry | None = None,
         database_write_lock: threading.RLock | None = None,
+        remote_inference_registry: RemoteInferenceRegistry | None = None,
     ) -> None:
         self.storage_dir = storage_dir
         self.events = events
@@ -75,7 +81,20 @@ class InferenceLifecycle:
         self.database_dir = database_dir
         self.media_storage = media_storage
         self.database_write_lock = database_write_lock or threading.RLock()
-        self.detector = InferenceSupervisor(config)
+        if config.inference_mode == "local":
+            self.detector = InferenceSupervisor(config)
+        else:
+            if remote_inference_registry is None:
+                raise RuntimeError(
+                    "remote inference mode requires a worker registry"
+                )
+            self.detector = InferenceSupervisor(
+                config,
+                worker_factory=partial(
+                    RoutedInferenceWorkerBackend,
+                    registry=remote_inference_registry,
+                ),
+            )
         faces: FaceStore | None = None
         semantic_search: DisabledSemanticSearch | None = None
         appearance_backfill: DeferredAppearanceBackfill | None = None

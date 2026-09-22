@@ -239,6 +239,9 @@ class RemoteInferenceRegistry:
     def has_ready_worker(self, role: WorkerRole) -> bool:
         return self._select_worker(role, reserve=False) is not None
 
+    def config_generation(self) -> str:
+        return detector_config_generation(self._config_provider())
+
     def status(self) -> dict[str, Any]:
         expired = self._prune_expired()
         for worker in expired:
@@ -286,6 +289,12 @@ class RemoteInferenceRegistry:
             self._workers.clear()
         for worker in workers:
             worker.transport.close("remote worker registry stopped")
+
+    def start(self, *, lease_seconds: float | None = None) -> None:
+        with self._lock:
+            if lease_seconds is not None:
+                self._lease_seconds = max(5.0, float(lease_seconds))
+            self._accepting = True
 
     def _select_worker(
         self,

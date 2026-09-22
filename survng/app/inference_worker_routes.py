@@ -30,7 +30,7 @@ class WebSocketRegistryTransport:
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
-        self._outbound: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._outbound: asyncio.Queue[bytes | str | None] = asyncio.Queue()
         self._lock = threading.RLock()
         self._pending: dict[str, Future[bytes]] = {}
         self._closed_reason = ""
@@ -72,7 +72,17 @@ class WebSocketRegistryTransport:
             packet = await self._outbound.get()
             if packet is None:
                 return
-            await websocket.send_bytes(packet)
+            if isinstance(packet, bytes):
+                await websocket.send_bytes(packet)
+            else:
+                await websocket.send_text(packet)
+
+    def send_control(self, message: dict[str, Any]) -> None:
+        encoded = json.dumps(message, separators=(",", ":"))
+        self._loop.call_soon_threadsafe(
+            self._outbound.put_nowait,
+            encoded,
+        )
 
     def close(self, reason: str) -> None:
         with self._lock:
@@ -150,9 +160,16 @@ def create_inference_worker_router(
                         WorkerReady.model_validate(control)
                     )
                 elif control.get("type") == "heartbeat":
-                    deps.registry.heartbeat(
+                    accepted = deps.registry.heartbeat(
                         WorkerHeartbeat.model_validate(control)
                     )
+                    transport.send_control({
+                        "type": "heartbeat_ack",
+                        "accepted": accepted,
+                        "config_generation": (
+                            deps.registry.config_generation()
+                        ),
+                    })
                 else:
                     raise ProtocolError(
                         "worker sent an unknown control message"

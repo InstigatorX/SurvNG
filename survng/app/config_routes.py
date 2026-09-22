@@ -223,6 +223,11 @@ def restore_config_secrets(incoming: AppConfig, current: AppConfig) -> AppConfig
         current.audit_ai.api_key,
         "audit_ai.api_key",
     )
+    restored.inference_workers.worker_token_hash = _restore_secret(
+        restored.inference_workers.worker_token_hash,
+        current.inference_workers.worker_token_hash,
+        "inference_workers.worker_token_hash",
+    )
     current_api_tokens = {token.id: token for token in current.api_auth.tokens}
     for token in restored.api_auth.tokens:
         if token.token_hash != SECRET_PLACEHOLDER:
@@ -285,6 +290,11 @@ def redacted_config_payload(config: AppConfig) -> dict:
     payload = config.model_dump(mode="json")
     payload["mqtt"]["password"] = SECRET_PLACEHOLDER if config.mqtt.password else ""
     payload["audit_ai"]["api_key"] = SECRET_PLACEHOLDER if config.audit_ai.api_key else ""
+    payload["inference_workers"]["worker_token_hash"] = (
+        SECRET_PLACEHOLDER
+        if config.inference_workers.worker_token_hash
+        else ""
+    )
     for token in payload["api_auth"]["tokens"]:
         token["token_hash"] = SECRET_PLACEHOLDER
     if payload["web_auth"].get("session_key"):
@@ -403,6 +413,46 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
             "enabled": effective.api_auth.enabled,
             **result,
         }
+
+    @router.get("/api/config/inference-worker-token")
+    def inference_worker_token_status() -> dict[str, bool]:
+        return {
+            "configured": bool(
+                deps.get_config().inference_workers.worker_token_hash
+            )
+        }
+
+    @router.post("/api/config/inference-worker-token", status_code=201)
+    def create_inference_worker_token() -> dict[str, Any]:
+        with deps.lock:
+            current = deps.get_config()
+            raw_token = f"survng_worker_{secrets.token_urlsafe(32)}"
+            next_config = current.model_copy(deep=True)
+            next_config.inference_workers.worker_token_hash = hash_api_token(
+                raw_token
+            )
+            _effective, result = deps.apply_config(
+                next_config,
+                assign_ids=False,
+            )
+        return {"token": raw_token, "configured": True, **result}
+
+    @router.delete("/api/config/inference-worker-token")
+    def delete_inference_worker_token() -> dict[str, Any]:
+        with deps.lock:
+            current = deps.get_config()
+            if not current.inference_workers.worker_token_hash:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Inference worker token is not configured",
+                )
+            next_config = current.model_copy(deep=True)
+            next_config.inference_workers.worker_token_hash = ""
+            _effective, result = deps.apply_config(
+                next_config,
+                assign_ids=False,
+            )
+        return {"ok": True, "configured": False, **result}
 
     @router.put("/api/incident-notifications")
     def put_global_notifications(state: CameraNotificationRequest) -> dict:

@@ -220,6 +220,15 @@ class InferenceWorkerClient:
                             "pending_requests": 0,
                         }))
                         continue
+                    if isinstance(incoming, str):
+                        control = json.loads(incoming)
+                        if (
+                            control.get("type") == "heartbeat_ack"
+                            and control.get("config_generation")
+                            != config_generation
+                        ):
+                            return
+                        continue
                     if not isinstance(incoming, bytes):
                         continue
                     response = self.handle_packet(
@@ -229,6 +238,12 @@ class InferenceWorkerClient:
                         config_generation=config_generation,
                     )
                     websocket.send(response)
+                    websocket.send(json.dumps({
+                        "type": "heartbeat",
+                        "worker_id": self.worker_id,
+                        "connection_generation": connection_generation,
+                        "pending_requests": 0,
+                    }))
             finally:
                 supervisor.stop()
                 supervisor.stop_resource_tracker()

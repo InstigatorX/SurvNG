@@ -69,6 +69,11 @@ from .intelligence_routes import (
     IntelligenceDependencies,
     create_intelligence_router,
 )
+from .inference_runtime.registry import RemoteInferenceRegistry
+from .inference_worker_routes import (
+    InferenceWorkerRouteDependencies,
+    create_inference_worker_router,
+)
 from .recording_media_runtime import (
     RecordingMediaDependencies,
     RecordingMediaRuntime,
@@ -99,6 +104,7 @@ from .training_routes import TrainingRouteDependencies, create_training_router
 from .proxy import apply_trusted_proxy_headers, request_is_secure, scope_header
 from .security import (
     authenticate_api_token,
+    authenticate_inference_worker,
     authenticate_session,
     session_cookie_value,
     touch_web_session,
@@ -133,13 +139,21 @@ SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 INCIDENT_QUERIES = IncidentQueryService()
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
+INFERENCE_WORKER_REGISTRY = RemoteInferenceRegistry(
+    lambda: config.detector,
+    lease_seconds=config.inference_workers.lease_seconds,
+)
 
 
 def get_manager() -> AppManager:
     current = globals().get("manager")
     if current is not None:
         return current
-    created = AppManager(config, database_write_lock=MAIN_DATABASE_WRITE_LOCK)
+    created = AppManager(
+        config,
+        database_write_lock=MAIN_DATABASE_WRITE_LOCK,
+        remote_inference_registry=INFERENCE_WORKER_REGISTRY,
+    )
     globals()["manager"] = created
     return created
 
@@ -726,6 +740,9 @@ def reload_manager(
         global config, manager
         config = next_value
         manager = next_manager
+        INFERENCE_WORKER_REGISTRY.start(
+            lease_seconds=next_value.inference_workers.lease_seconds,
+        )
 
     def refresh_runtime_caches() -> None:
         global FACE_OBSERVATIONS_SYNCED
@@ -738,7 +755,9 @@ def reload_manager(
         lock=MANAGER_RELOAD_LOCK,
         stopping=APPLICATION_STOPPING,
         manager_factory=lambda app_config: AppManager(
-            app_config, database_write_lock=MAIN_DATABASE_WRITE_LOCK
+            app_config,
+            database_write_lock=MAIN_DATABASE_WRITE_LOCK,
+            remote_inference_registry=INFERENCE_WORKER_REGISTRY,
         ),
         hooks=ManagerReloadHooks(
             active_storage_tasks=_active_storage_tasks,
@@ -816,6 +835,9 @@ def apply_config_update(
             persist=persist,
         )
         config = effective
+        INFERENCE_WORKER_REGISTRY.start(
+            lease_seconds=effective.inference_workers.lease_seconds,
+        )
         if effective.ffmpeg_path != previous_ffmpeg_path:
             _recording_media_runtime.clear_hardware_probe_caches()
         prepare_bootstrap_token(effective)
@@ -879,6 +901,9 @@ async def lifespan(app: FastAPI):
         )
     _record_process_lifecycle("startup_started")
     prepare_bootstrap_token(config)
+    INFERENCE_WORKER_REGISTRY.start(
+        lease_seconds=config.inference_workers.lease_seconds,
+    )
     get_manager().start_all()
     try:
         media_exports = _recording_media_runtime._media_export_manager()
@@ -910,6 +935,7 @@ async def lifespan(app: FastAPI):
     finally:
         _record_process_lifecycle("shutdown_requested")
         APPLICATION_STOPPING.set()
+        INFERENCE_WORKER_REGISTRY.close()
         if local_observability is not None:
             try:
                 await local_observability.stop()
@@ -994,6 +1020,9 @@ def _publish_config_runtime(next_config: AppConfig) -> None:
     global config
     config = next_config
     get_manager().config = next_config
+    INFERENCE_WORKER_REGISTRY.start(
+        lease_seconds=next_config.inference_workers.lease_seconds,
+    )
 
 
 app.include_router(
@@ -1008,6 +1037,17 @@ app.include_router(
             validate_config=validate_manager_configuration,
             lock=MANAGER_RELOAD_LOCK,
             probe_limiter=CONFIG_PROBE_LIMITER,
+        )
+    )
+)
+app.include_router(
+    create_inference_worker_router(
+        InferenceWorkerRouteDependencies(
+            registry=INFERENCE_WORKER_REGISTRY,
+            authenticate=lambda authorization: authenticate_inference_worker(
+                authorization,
+                config.inference_workers.worker_token_hash,
+            ),
         )
     )
 )

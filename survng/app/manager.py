@@ -40,6 +40,7 @@ from .detector import objects_to_json
 from .detection_watch import RouteDetectionWatch
 from .go2rtc import Go2RtcAdapter
 from .inference_lifecycle import InferenceLifecycle
+from .inference_runtime.registry import RemoteInferenceRegistry
 from .inference_runtime.worker_topology import object_worker_recommendation_from_status
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
@@ -260,6 +261,7 @@ class AppManager:
         self,
         config: AppConfig,
         database_write_lock: threading.RLock | None = None,
+        remote_inference_registry: RemoteInferenceRegistry | None = None,
     ) -> None:
         validate_manager_configuration(config)
         self.config = config
@@ -275,6 +277,7 @@ class AppManager:
         self.database_dir = Path(config.database_dir) if config.database_dir else self.storage_dir
         self.database_dir.mkdir(parents=True, exist_ok=True)
         self.database_write_lock = database_write_lock or threading.RLock()
+        self.remote_inference_registry = remote_inference_registry
         self.image_cache = LocalImageCache(self.database_dir / "image-cache")
         self.image_writer = DurableImageWriter(config.image_storage)
         self.media_storage = MediaStorageRegistry(self.storage_dir, config.media_storage)
@@ -344,6 +347,7 @@ class AppManager:
                 database_dir=self.database_dir,
                 media_storage=self.media_storage,
                 database_write_lock=self.database_write_lock,
+                remote_inference_registry=remote_inference_registry,
             )
         except BaseException:
             for label, operation in (
@@ -1757,7 +1761,12 @@ class AppManager:
             **self.detector.status(),
             "lifecycle": self.inference.status(),
             "recorded_decode": recorded_decode,
+            "inference_mode": self.config.detector.inference_mode,
         }
+        if self.remote_inference_registry is not None:
+            status["remote_registry"] = (
+                self.remote_inference_registry.status()
+            )
         status["object_worker_recommendation"] = (
             object_worker_recommendation_from_status(
                 status,

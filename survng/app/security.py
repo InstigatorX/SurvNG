@@ -413,6 +413,9 @@ def is_public_api_path(method: str, path: str) -> bool:
     normalized = method.upper()
     if path == "/api/health":
         return True
+    if path == "/api/inference/workers/connect":
+        # The worker route performs dedicated credential authentication.
+        return True
     if path == "/api/auth/session" and normalized in {"GET", "HEAD", "OPTIONS"}:
         return True
     if path == "/api/auth/login" and normalized == "POST":
@@ -426,6 +429,24 @@ def is_public_api_path(method: str, path: str) -> bool:
 
 def hash_api_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def authenticate_inference_worker(
+    authorization: str,
+    token_hash: str,
+) -> bool:
+    scheme, separator, raw_token = authorization.strip().partition(" ")
+    if (
+        not token_hash
+        or not separator
+        or scheme.lower() != "bearer"
+        or not raw_token.strip()
+    ):
+        return False
+    return hmac.compare_digest(
+        hash_api_token(raw_token.strip()),
+        token_hash,
+    )
 
 
 def authenticate_api_token(

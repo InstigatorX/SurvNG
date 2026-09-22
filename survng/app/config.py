@@ -766,9 +766,22 @@ class ObjectTrackingConfig(BaseModel):
         )
 
 
+class InferenceWorkersConfig(BaseModel):
+    """Authentication and lease policy for remote inference appliances."""
+
+    worker_token_hash: str = Field(
+        default="",
+        max_length=64,
+        pattern=r"^$|^[0-9a-f]{64}$|^__SURVNG_SECRET_SET__$",
+    )
+    lease_seconds: float = Field(default=20.0, ge=5.0, le=120.0)
+
+
 class DetectorConfig(BaseModel):
     enabled: bool = False
     backend: Literal["openvino", "coreml"] = "openvino"
+    inference_mode: Literal["local", "remote", "hybrid"] = "local"
+    remote_incident_fallback: bool = True
     object_worker_count: int = Field(default=2, ge=1, le=4)
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
     recorded_adaptive_sampling: bool = True
@@ -1053,6 +1066,9 @@ class AppConfig(BaseModel):
     media_storage: MediaStorageConfig = Field(default_factory=MediaStorageConfig)
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     web_auth: WebAuthConfig = Field(default_factory=WebAuthConfig)
+    inference_workers: InferenceWorkersConfig = Field(
+        default_factory=InferenceWorkersConfig
+    )
     tls: TlsConfig = Field(default_factory=TlsConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
