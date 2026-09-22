@@ -979,12 +979,16 @@ class AppManager:
         started = time.monotonic()
         self.camera_controls.quiesce()
         self.ema_route_candidates.close_admission()
-        self.media_sessions.cancel_generation(
-            self.media_session_generation,
-            "manager_stopping",
-        )
+        media_sessions = getattr(self, "media_sessions", None)
+        if media_sessions is not None:
+            media_sessions.cancel_generation(
+                getattr(self, "media_session_generation", ""),
+                "manager_stopping",
+            )
         self.mqtt.set_server_lifecycle("stopping", refresh_status=False)
-        attempt("activity event bus", self.activity_events.close)
+        activity_events = getattr(self, "activity_events", None)
+        if activity_events is not None:
+            attempt("activity event bus", activity_events.close)
         LOGGER.info(
             "SurvNG shutdown: cancelling camera admission and releasing ONVIF subscriptions"
         )
@@ -1043,18 +1047,20 @@ class AppManager:
         return self.camera_controls.start_camera(camera_id)
 
     def stop_camera(self, camera_id: str) -> bool:
-        self.media_sessions.cancel_camera(
-            camera_id,
-            "camera_power_off",
-            kinds={
-                MediaSessionKind.GO2RTC_WEBRTC,
-                MediaSessionKind.GO2RTC_MSE,
-                MediaSessionKind.MJPEG,
-                MediaSessionKind.SNAPSHOT,
-                MediaSessionKind.CAPTURE_LIVE,
-                MediaSessionKind.CAPTURE_MAIN,
-            },
-        )
+        media_sessions = getattr(self, "media_sessions", None)
+        if media_sessions is not None:
+            media_sessions.cancel_camera(
+                camera_id,
+                "camera_power_off",
+                kinds={
+                    MediaSessionKind.GO2RTC_WEBRTC,
+                    MediaSessionKind.GO2RTC_MSE,
+                    MediaSessionKind.MJPEG,
+                    MediaSessionKind.SNAPSHOT,
+                    MediaSessionKind.CAPTURE_LIVE,
+                    MediaSessionKind.CAPTURE_MAIN,
+                },
+            )
         return self.camera_controls.stop_camera(camera_id)
 
     def update_camera_zones(

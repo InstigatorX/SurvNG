@@ -648,10 +648,11 @@ class RecordingMediaRuntime:
         self,
         command: list[str],
         origin: str,
-        session: MediaSessionLease,
+        session: MediaSessionLease | None,
     ) -> subprocess.CompletedProcess:
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
-        session.attach_process(process.pid)
+        if session is not None:
+            session.attach_process(process.pid)
         if origin == 'prewarm':
             with self.recording_prewarm_process_lock:
                 self.recording_prewarm_process = process
@@ -660,7 +661,7 @@ class RecordingMediaRuntime:
         try:
             while True:
                 cancelled = (
-                    session.cancelled()
+                    (session is not None and session.cancelled())
                     or (
                         origin == 'prewarm'
                         and self.recording_prewarm_stop.is_set()
@@ -725,21 +726,33 @@ class RecordingMediaRuntime:
                 command.extend(['-tag:v', 'hvc1'])
             command.extend(['-f', 'hls', '-hls_time', '300', '-hls_list_size', '0', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'), str(temp_dir / 'index.m3u8')])
             try:
-                session = self.manager.media_sessions.acquire(
-                    MediaSessionRequest(
-                        (
-                            MediaSessionKind.RECORDING_PREWARM
-                            if origin == 'prewarm'
-                            else MediaSessionKind.RECORDING_REMUX
+                media_sessions = getattr(self.manager, 'media_sessions', None)
+                if media_sessions is None:
+                    result = self._run_recording_remux(command, origin, None)
+                else:
+                    session = media_sessions.acquire(
+                        MediaSessionRequest(
+                            (
+                                MediaSessionKind.RECORDING_PREWARM
+                                if origin == 'prewarm'
+                                else MediaSessionKind.RECORDING_REMUX
+                            ),
+                            resources={MediaResourceClass.REMUX_PROCESS: 1},
+                            owner_generation=getattr(
+                                self.manager,
+                                'media_session_generation',
+                                None,
+                            ),
                         ),
-                        resources={MediaResourceClass.REMUX_PROCESS: 1},
-                        owner_generation=self.manager.media_session_generation,
-                    ),
-                    blocking=origin != 'prewarm',
-                    timeout=3.0 if origin != 'prewarm' else None,
-                )
-                with session:
-                    result = self._run_recording_remux(command, origin, session)
+                        blocking=origin != 'prewarm',
+                        timeout=3.0 if origin != 'prewarm' else None,
+                    )
+                    with session:
+                        result = self._run_recording_remux(
+                            command,
+                            origin,
+                            session,
+                        )
             except MediaSessionAdmissionError as exc:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 if origin == 'prewarm':

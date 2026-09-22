@@ -172,11 +172,12 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         *,
         trim_end: bool,
     ) -> list[dict] | None:
-        if deps.encoded_fragment_source is None:
+        source_factory = getattr(deps, "encoded_fragment_source", None)
+        if source_factory is None:
             return None
         try:
             fragments = list(
-                deps.encoded_fragment_source(active_manager).fragments(
+                source_factory(active_manager).fragments(
                     FragmentWindow(
                         camera_id=camera_id,
                         source=recording_source(source),
@@ -987,7 +988,8 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         trim_end: bool = False,
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
-        if deps.encoded_fragment_source is not None:
+        source_factory = getattr(deps, "encoded_fragment_source", None)
+        if source_factory is not None:
             rows = fragment_rows(
                 active_manager,
                 camera_id,
@@ -1010,9 +1012,9 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                     detail="recording segment not found",
                 )
             try:
-                materialized = deps.encoded_fragment_source(
-                    active_manager
-                ).materialize(selected)
+                materialized = source_factory(active_manager).materialize(
+                    selected
+                )
             except FragmentUnavailable as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except FragmentSourceError as exc:
@@ -1052,7 +1054,8 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         trim_end: bool = False,
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
-        if deps.encoded_fragment_source is not None:
+        source_factory = getattr(deps, "encoded_fragment_source", None)
+        if source_factory is not None:
             rows = fragment_rows(
                 active_manager,
                 camera_id,
@@ -1075,9 +1078,9 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                     detail="recording segment not found",
                 )
             try:
-                materialized = deps.encoded_fragment_source(
-                    active_manager
-                ).materialize(selected)
+                materialized = source_factory(active_manager).materialize(
+                    selected
+                )
             except FragmentUnavailable as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except FragmentSourceError as exc:
