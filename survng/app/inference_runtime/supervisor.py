@@ -11,6 +11,7 @@ import numpy as np
 from ..evidence_work import EvidenceWorkPreempted, check_evidence_cancellation, evidence_wait_timeout, evidence_work_active
 from ..config import DetectorConfig
 from ..perf_samples import RollingLatencySamples
+from .backend import InferenceWorkerBackend, InferenceWorkerFactory
 from .process import load_detector_labels, stop_multiprocessing_resource_tracker
 from .types import (
     INCIDENT_INITIAL_ADMISSION_TIMEOUT_SECONDS,
@@ -28,9 +29,15 @@ from .worker import _InferenceWorker
 
 
 class InferenceSupervisor:
-    def __init__(self, config: DetectorConfig) -> None:
+    def __init__(
+        self,
+        config: DetectorConfig,
+        *,
+        worker_factory: InferenceWorkerFactory = _InferenceWorker,
+    ) -> None:
         self._config_lock = threading.RLock()
         self.config = config
+        self._worker_factory = worker_factory
         self.labels = load_detector_labels(config)
         self.enabled = bool(
             config.enabled
@@ -70,19 +77,19 @@ class InferenceSupervisor:
         # Preserve the long-standing primary-worker handle for compatibility
         # with lifecycle diagnostics and focused tests.
         self._object = self._object_workers[0]
-        self._face = _InferenceWorker(
+        self._face = self._worker_factory(
             config,
             "face",
             self._base_face_status(),
             start_enabled=bool(config.face_recognition_enabled),
         )
-        self._reid = _InferenceWorker(
+        self._reid = self._worker_factory(
             config,
             "reid",
             self._base_reid_status(),
             start_enabled=bool(config.tracking.appearance_reid_enabled),
         )
-        self._depth = _InferenceWorker(
+        self._depth = self._worker_factory(
             config,
             "depth",
             self._base_depth_status(),
@@ -97,16 +104,23 @@ class InferenceSupervisor:
     def _effective_object_worker_count(config: DetectorConfig) -> int:
         return config.effective_object_worker_count()
 
-    def _build_object_workers(self, config: DetectorConfig) -> list[_InferenceWorker]:
+    def _build_object_workers(
+        self,
+        config: DetectorConfig,
+    ) -> list[InferenceWorkerBackend]:
         return [
-            _InferenceWorker(config, "object", self._base_detector_status())
+            self._worker_factory(
+                config,
+                "object",
+                self._base_detector_status(),
+            )
             for _index in range(self._effective_object_worker_count(config))
         ]
 
     def _ordered_object_workers(
         self,
         workload: InferenceWorkload = InferenceWorkload.INCIDENT_INITIAL,
-    ) -> list[_InferenceWorker]:
+    ) -> list[InferenceWorkerBackend]:
         """Order workers by pressure while rotating equal-load workers fairly."""
         with self._config_lock:
             workers = list(self._object_workers)
@@ -425,7 +439,9 @@ class InferenceSupervisor:
                 self.labels = labels
                 self.enabled = enabled
 
-            def role_settings(role: str) -> tuple[_InferenceWorker, dict[str, Any], bool]:
+            def role_settings(
+                role: str,
+            ) -> tuple[InferenceWorkerBackend, dict[str, Any], bool]:
                 if role == "object":
                     return self._object, self._base_detector_status(), True
                 if role == "face":
@@ -520,7 +536,7 @@ class InferenceSupervisor:
         current = list(self._object_workers)
         if len(current) == expected:
             previous_config = current[0].config
-            completed: list[_InferenceWorker] = []
+            completed: list[InferenceWorkerBackend] = []
             try:
                 for worker in current:
                     worker.reconfigure(
@@ -548,7 +564,7 @@ class InferenceSupervisor:
             return
 
         previous_config = current[0].config
-        stopped: list[_InferenceWorker] = []
+        stopped: list[InferenceWorkerBackend] = []
         try:
             for worker in reversed(current):
                 worker.stop()
@@ -570,7 +586,11 @@ class InferenceSupervisor:
                 ) from stop_error
             raise
         replacements = [
-            _InferenceWorker(config, "object", self._base_detector_status())
+            self._worker_factory(
+                config,
+                "object",
+                self._base_detector_status(),
+            )
             for _index in range(expected)
         ]
         try:

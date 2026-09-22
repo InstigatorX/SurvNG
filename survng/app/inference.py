@@ -5,6 +5,10 @@ from .inference_runtime.adapters import (
     IsolatedFaceRecognizer,
     IsolatedPersonReidentifier,
 )
+from .inference_runtime.backend import (
+    InferenceWorkerBackend,
+    InferenceWorkerFactory,
+)
 from .inference_runtime.process import (
     load_detector_labels,
     stop_multiprocessing_resource_tracker,
@@ -32,6 +36,8 @@ __all__ = [
     "InferenceRollbackIncomplete",
     "InferenceSupervisor",
     "InferenceUnavailable",
+    "InferenceWorkerBackend",
+    "InferenceWorkerFactory",
     "InferenceWorkload",
     "IsolatedDepthEstimator",
     "IsolatedFaceRecognizer",
