@@ -893,27 +893,37 @@ class RecordingMediaRuntime:
                 raise HTTPException(status_code=429, detail='recording preview generator is busy', headers={'Retry-After': '1'})
             temporary = cache_dir / f'.{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp.jpg'
             try:
-                try:
-                    session = selected_manager.media_sessions.acquire(
-                        MediaSessionRequest(
-                            MediaSessionKind.RECORDING_PREVIEW,
-                            resources={MediaResourceClass.TRANSCODE_PROCESS: 1},
-                            owner_generation=selected_manager.media_session_generation,
-                        ),
-                        timeout=3.0,
-                    )
-                except MediaSessionAdmissionError as exc:
-                    raise HTTPException(
-                        status_code=429,
-                        detail=str(exc),
-                        headers={'Retry-After': '1'},
-                    ) from exc
+                session = None
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
+                if media_sessions is not None:
+                    try:
+                        session = media_sessions.acquire(
+                            MediaSessionRequest(
+                                MediaSessionKind.RECORDING_PREVIEW,
+                                resources={MediaResourceClass.TRANSCODE_PROCESS: 1},
+                                owner_generation=getattr(
+                                    selected_manager,
+                                    'media_session_generation',
+                                    None,
+                                ),
+                            ),
+                            timeout=3.0,
+                        )
+                    except MediaSessionAdmissionError as exc:
+                        raise HTTPException(
+                            status_code=429,
+                            detail=str(exc),
+                            headers={'Retry-After': '1'},
+                        ) from exc
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 jpeg_quality = 3 if requested_width > 480 else 5
                 command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'info' if exact else 'error', '-ss', f'{preview_offset:.3f}', '-i', str(source_path), '-map', '0:v:0', '-frames:v', '1', '-threads', '1', '-vf', f"showinfo@preview,scale='min({requested_width},iw)':-2" if exact else f"scale='min({requested_width},iw)':-2", '-q:v', str(jpeg_quality), '-y', str(temporary)]
                 try:
-                    with session:
+                    if session is None:
                         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8)
+                    else:
+                        with session:
+                            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8)
                 except subprocess.TimeoutExpired as exc:
                     raise HTTPException(status_code=504, detail='recording preview timed out') from exc
                 except OSError as exc:
@@ -1294,25 +1304,35 @@ class RecordingMediaRuntime:
             if not self.event_clip_build_limiter.acquire(blocking=False):
                 raise HTTPException(status_code=429, detail='too many event clips are already being generated', headers={'Retry-After': '3'})
             try:
-                try:
-                    session = selected_manager.media_sessions.acquire(
-                        MediaSessionRequest(
-                            MediaSessionKind.EVENT_CLIP,
-                            camera_id=str(event.get('camera_id') or '') or None,
-                            source=clip_source,
-                            resources={MediaResourceClass.TRANSCODE_PROCESS: 1},
-                            owner_generation=selected_manager.media_session_generation,
-                        ),
-                        blocking=False,
-                    )
-                except MediaSessionAdmissionError as exc:
-                    raise HTTPException(
-                        status_code=429,
-                        detail=str(exc),
-                        headers={'Retry-After': '3'},
-                    ) from exc
-                with session:
+                session = None
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
+                if media_sessions is not None:
+                    try:
+                        session = media_sessions.acquire(
+                            MediaSessionRequest(
+                                MediaSessionKind.EVENT_CLIP,
+                                camera_id=str(event.get('camera_id') or '') or None,
+                                source=clip_source,
+                                resources={MediaResourceClass.TRANSCODE_PROCESS: 1},
+                                owner_generation=getattr(
+                                    selected_manager,
+                                    'media_session_generation',
+                                    None,
+                                ),
+                            ),
+                            blocking=False,
+                        )
+                    except MediaSessionAdmissionError as exc:
+                        raise HTTPException(
+                            status_code=429,
+                            detail=str(exc),
+                            headers={'Retry-After': '3'},
+                        ) from exc
+                if session is None:
                     self._build_event_clip(event, before=before, after=after, output_path=clip_path, source=clip_source, active_manager=selected_manager)
+                else:
+                    with session:
+                        self._build_event_clip(event, before=before, after=after, output_path=clip_path, source=clip_source, active_manager=selected_manager)
             finally:
                 self.event_clip_build_limiter.release()
         return clip_path
