@@ -5036,6 +5036,53 @@ export function DepthShadowPerformance({ cameraId = "", mode = "", label = "Dept
   </div>;
 }
 
+function spatialAlignmentSummary(alignment = {}) {
+  const mode = String(alignment.mode || "untrusted");
+  const reliable = Boolean(alignment.reliable);
+  const stableSamples = Number(alignment.stable_samples || 0);
+  const failedSamples = Number(alignment.failed_samples || 0);
+  const scaleX = Number(alignment.scale_x ?? 1);
+  const scaleY = Number(alignment.scale_y ?? 1);
+  const offsetX = Number(alignment.offset_x ?? 0);
+  const offsetY = Number(alignment.offset_y ?? 0);
+  const nearIdentity = (
+    Math.abs(scaleX - 1) < 0.02
+    && Math.abs(scaleY - 1) < 0.02
+    && Math.abs(offsetX) < 0.02
+    && Math.abs(offsetY) < 0.02
+  );
+  if (reliable) {
+    if (mode === "identity" || nearIdentity) {
+      return {
+        label: "Trusted",
+        detail: "Live and main share the same field of view",
+        warning: false,
+      };
+    }
+    return {
+      label: "Trusted",
+      detail: `Measured match · scale ${scaleX.toFixed(2)}×${scaleY.toFixed(2)} · offset ${offsetX.toFixed(2)}, ${offsetY.toFixed(2)}`,
+      warning: false,
+    };
+  }
+  if (mode === "untrusted" || failedSamples >= 3) {
+    return {
+      label: "Not trusted",
+      detail: failedSamples
+        ? `Live and main views do not line up (${failedSamples} failed checks)`
+        : "Live boxes are not trusted onto the main recording",
+      warning: true,
+    };
+  }
+  return {
+    label: "Checking",
+    detail: stableSamples
+      ? `${stableSamples}/3 stable matches so far${failedSamples ? ` · ${failedSamples} failed` : ""}`
+      : "Waiting for matching live and main frames",
+    warning: false,
+  };
+}
+
 export function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
@@ -5047,6 +5094,16 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
     && status.onvif_enabled
     && Number(status.onvif_motion_events_received || 0) === 0;
   const missingCameraTrigger = cameraAlertsOnly && !status.onvif_enabled;
+  const fovAlignment = spatialAlignmentSummary(status.spatial_alignment || {});
+  const streamDimensions = status.stream_dimensions || {};
+  const liveSize = streamDimensions.live || streamDimensions.sub;
+  const mainSize = streamDimensions.main;
+  const liveSizeLabel = liveSize?.width && liveSize?.height
+    ? `${liveSize.width}×${liveSize.height}`
+    : null;
+  const mainSizeLabel = mainSize?.width && mainSize?.height
+    ? `${mainSize.width}×${mainSize.height}`
+    : null;
   return (
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
@@ -5055,6 +5112,13 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF notification (any type): {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
       {status.onvif_enabled ? <span>{status.onvif_notifications_received || 0} notifications · {status.onvif_motion_events_received || 0} active motion · {status.onvif_inactive_motion_events || 0} inactive motion · {status.onvif_renewals || 0} subscription renewals</span> : null}
+      <span className={fovAlignment.warning ? "motion-runtime-warning" : undefined}>
+        Live ↔ main FOV: {fovAlignment.label}
+        {liveSizeLabel || mainSizeLabel
+          ? ` · live ${liveSizeLabel || "unknown"} / main ${mainSizeLabel || "unknown"}`
+          : ""}
+      </span>
+      <span>{fovAlignment.detail}</span>
       {status.motion_qualification ? (
         <div className="motion-runtime-status">
           <div className="motion-runtime-summary">
