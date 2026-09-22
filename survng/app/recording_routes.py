@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,13 @@ from .incident_presenter import (
     _recording_grid_incident_payload,
 )
 from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_epoch
+from .encoded_fragments import (
+    EncodedFragmentSource,
+    FragmentSourceError,
+    FragmentUnavailable,
+    FragmentWindow,
+    InvalidFragmentWindow,
+)
 from .media_exports import MediaExportManager
 from .manager_access import ManagerAccessCoordinator, guard_manager_generation
 from .recording_media import (
@@ -80,6 +87,9 @@ class RecordingRouteDependencies:
     ensure_event_clip: Callable[..., Path]
     manager_lock: threading.RLock | None = None
     manager_access: ManagerAccessCoordinator | None = None
+    encoded_fragment_source: (
+        Callable[[Any], EncodedFragmentSource] | None
+    ) = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +162,107 @@ def _recording_playback_window(epoch: float) -> tuple[float, float]:
 
 def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteBundle:
     router = APIRouter()
+
+    def fragment_rows(
+        active_manager: Any,
+        camera_id: str,
+        start_epoch: float,
+        end_epoch: float,
+        source: str,
+        *,
+        trim_end: bool,
+    ) -> list[dict] | None:
+        source_factory = getattr(deps, "encoded_fragment_source", None)
+        if source_factory is None:
+            return None
+        try:
+            fragments = list(
+                source_factory(active_manager).fragments(
+                    FragmentWindow(
+                        camera_id=camera_id,
+                        source=recording_source(source),
+                        start_epoch=start_epoch,
+                        end_epoch=end_epoch,
+                    ),
+                    trim_end=trim_end,
+                )
+            )
+        except InvalidFragmentWindow as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FragmentUnavailable as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FragmentSourceError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return [
+            {
+                "name": fragment.segment_name,
+                "start_epoch": fragment.wall_start_epoch,
+                "end_epoch": fragment.wall_end_epoch,
+                "duration_seconds": fragment.media_duration_seconds,
+                "stream_fingerprint": fragment.stream.fingerprint or "",
+                "_encoded_fragment": fragment,
+            }
+            for fragment in fragments
+        ]
+
+    def materialize_fragment(
+        active_manager: Any,
+        camera_id: str,
+        segment_name: str,
+        start_epoch: float,
+        end_epoch: float,
+        source: str,
+        media_offset: float,
+        trim_end: bool,
+        fragment_id: str,
+    ):
+        if not math.isfinite(media_offset) or media_offset < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid recording media offset",
+            )
+        source_factory = getattr(deps, "encoded_fragment_source", None)
+        if source_factory is None:
+            return None
+        rows = fragment_rows(
+            active_manager,
+            camera_id,
+            start_epoch,
+            end_epoch,
+            source,
+            trim_end=trim_end,
+        ) or []
+        selected = next(
+            (
+                row.get("_encoded_fragment")
+                for row in rows
+                if row.get("name") == segment_name
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(
+                status_code=404,
+                detail="recording segment not found",
+            )
+        if fragment_id and fragment_id != selected.source_identity:
+            raise HTTPException(
+                status_code=409,
+                detail="recording fragment revision changed",
+                headers={"Cache-Control": "no-store"},
+            )
+        # The manifest owns the compact media timeline. Index changes between
+        # manifest and fragment requests must not silently move tfdt/sidx.
+        selected = replace(
+            selected,
+            media_start_seconds=media_offset,
+        )
+        try:
+            return source_factory(active_manager).materialize(selected)
+        except FragmentUnavailable as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FragmentSourceError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.get("/api/cameras/{camera_id}/recordings")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
@@ -848,6 +959,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         start_epoch: float,
         end_epoch: float,
         source: str = "main",
+        start: float | None = None,
     ) -> Response:
         active_manager = _require_recording_camera(deps, camera_id)
         _validate_recording_range(
@@ -857,14 +969,23 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             "invalid recording day range",
         )
         selected_source = recording_source(source)
-        rows = deps.recording_day_rows(
+        rows = fragment_rows(
             active_manager,
             camera_id,
             start_epoch,
             end_epoch,
             selected_source,
-            fresh=True,
+            trim_end=False,
         )
+        if rows is None:
+            rows = deps.recording_day_rows(
+                active_manager,
+                camera_id,
+                start_epoch,
+                end_epoch,
+                selected_source,
+                fresh=True,
+            )
         if not rows:
             raise HTTPException(status_code=404, detail="no recordings found")
         target_duration = max(
@@ -890,7 +1011,15 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         for row, stream_fingerprint in zip(rows, fingerprints):
             row_start = float(row["start_epoch"])
             segment_name = quote(str(row["name"]), safe="")
-            segment_query = f"{query}&media_offset={media_offset:.3f}&v={RECORDING_FMP4_VERSION}"
+            encoded_fragment = row.get("_encoded_fragment")
+            fragment_id = str(
+                getattr(encoded_fragment, "source_identity", "") or ""
+            )
+            segment_query = (
+                f"{query}&media_offset={media_offset:.3f}"
+                f"&fragment_id={quote(fragment_id, safe='')}"
+                f"&v={RECORDING_FMP4_VERSION}"
+            )
             map_lines, previous_fingerprint = hls_map_transition(
                 previous_fingerprint,
                 stream_fingerprint,
@@ -906,6 +1035,19 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                 ]
             )
             media_offset += float(row["duration_seconds"])
+        # Native Safari applies EXT-X-START while building seekable ranges.
+        # Post-metadata currentTime seeks are raced and intermittent on iPhone.
+        if (
+            start is not None
+            and math.isfinite(start)
+            and start > 0
+            and media_offset > 0
+        ):
+            start_offset = min(float(start), max(0.0, media_offset - 0.01))
+            lines.insert(
+                5,
+                f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
+            )
         lines.append("#EXT-X-ENDLIST")
         return Response(
             "\n".join(lines) + "\n",
@@ -925,8 +1067,30 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         source: str = "main",
         media_offset: float = 0.0,
         trim_end: bool = False,
+        fragment_id: str = "",
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
+        materialized = materialize_fragment(
+            active_manager,
+            camera_id,
+            segment_name,
+            start_epoch,
+            end_epoch,
+            source,
+            media_offset,
+            trim_end,
+            fragment_id,
+        )
+        if materialized is not None:
+            if materialized.stream.init_path is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="recording initialization fragment is unavailable",
+                )
+            return deps.recording_file_response(
+                materialized.stream.init_path,
+                "video/mp4",
+            )
         init_path, _ = deps.recording_day_fmp4_paths(
             active_manager,
             camera_id,
@@ -951,8 +1115,30 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         source: str = "main",
         media_offset: float = 0.0,
         trim_end: bool = False,
+        fragment_id: str = "",
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
+        materialized = materialize_fragment(
+            active_manager,
+            camera_id,
+            segment_name,
+            start_epoch,
+            end_epoch,
+            source,
+            media_offset,
+            trim_end,
+            fragment_id,
+        )
+        if materialized is not None:
+            if materialized.media_path is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="recording media fragment is unavailable",
+                )
+            return deps.recording_file_response(
+                materialized.media_path,
+                "video/iso.segment",
+            )
         _, media_path = deps.recording_day_fmp4_paths(
             active_manager,
             camera_id,
@@ -1021,14 +1207,23 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         window_start = event_created_epoch - before_seconds
         window_end = event_created_epoch + after_seconds
         selected_source = recording_source(source)
-        rows = deps.recording_day_rows(
+        rows = fragment_rows(
             active_manager,
             camera_id,
             window_start,
             window_end,
             selected_source,
-            fresh=True,
+            trim_end=True,
         )
+        if rows is None:
+            rows = deps.recording_day_rows(
+                active_manager,
+                camera_id,
+                window_start,
+                window_end,
+                selected_source,
+                fresh=True,
+            )
         if not rows:
             raise HTTPException(status_code=404, detail="no recording window found")
 
@@ -1068,8 +1263,13 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         ):
             row_start = float(row["start_epoch"])
             segment_name = quote(str(row["name"]), safe="")
+            encoded_fragment = row.get("_encoded_fragment")
+            fragment_id = str(
+                getattr(encoded_fragment, "source_identity", "") or ""
+            )
             segment_query = (
                 f"{query}&media_offset={media_offset:.3f}&trim_end=true"
+                f"&fragment_id={quote(fragment_id, safe='')}"
                 f"&v={RECORDING_FMP4_VERSION}"
             )
             encoded_camera = quote(camera_id, safe="")

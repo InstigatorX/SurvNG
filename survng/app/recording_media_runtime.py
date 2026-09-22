@@ -23,9 +23,17 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 from .config import AppConfig, slugify_camera_id
+from .encoded_fragments import IndexedMp4FragmentSource
 from .incident_utils import event_epoch
 from .manager import AppManager
 from .media_exports import MediaExportManager
+from .media_sessions import (
+    MediaResourceClass,
+    MediaSessionAdmissionError,
+    MediaSessionKind,
+    MediaSessionLease,
+    MediaSessionRequest,
+)
 from .recording_media import RECORDING_FMP4_VERSION, concatenated_clip_timing, event_clip_window, playback_segment_duration
 from .recording_routes import recording_source
 from .security import redact_secret_text
@@ -107,6 +115,36 @@ class RecordingMediaRuntime:
             self.recording_cache_status_cached_inventory = (0, 0)
         self.clear_hardware_probe_caches()
 
+    def encoded_fragment_source(
+        self,
+        active_manager: AppManager | None = None,
+    ) -> IndexedMp4FragmentSource:
+        selected_manager = active_manager or self.manager
+        return IndexedMp4FragmentSource(
+            row_loader=lambda camera_id, start_epoch, end_epoch, source: (
+                self._recording_day_rows(
+                    camera_id,
+                    start_epoch,
+                    end_epoch,
+                    source,
+                    fresh=True,
+                    active_manager=selected_manager,
+                )
+            ),
+            path_resolver=lambda value: self._recording_storage_path(
+                value,
+                active_manager=selected_manager,
+            ),
+            remuxer=lambda path, duration, media_offset: (
+                self._recording_fmp4_files(
+                    path,
+                    duration,
+                    media_offset,
+                    active_manager=selected_manager,
+                )
+            ),
+        )
+
     def clear_hardware_probe_caches(self) -> None:
         with self._hardware_probe_lock:
             self._qsv_cache = None
@@ -139,6 +177,7 @@ class RecordingMediaRuntime:
             "max_days": int(self.config.recording_cache_max_days),
             "prewarm": bool(self.config.recording_cache_prewarm),
             "metrics": metrics,
+            "media_sessions": self.manager.media_session_status(),
         }
 
     def _recording_cache_inventory(self) -> tuple[int, int]:
@@ -309,6 +348,8 @@ class RecordingMediaRuntime:
             hardware_backend=self._media_export_hardware_backend,
             hardware_device=self._media_export_hardware_device,
             media_storage=selected_manager.media_storage,
+            media_sessions=selected_manager.media_sessions,
+            owner_generation=selected_manager.media_session_generation,
         )
 
     def rebind_media_exports(
@@ -604,17 +645,30 @@ class RecordingMediaRuntime:
         except ProcessLookupError:
             pass
 
-    def _run_recording_remux(self, command: list[str], origin: str) -> subprocess.CompletedProcess:
-        if origin != 'prewarm':
-            return subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
+    def _run_recording_remux(
+        self,
+        command: list[str],
+        origin: str,
+        session: MediaSessionLease | None,
+    ) -> subprocess.CompletedProcess:
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
-        with self.recording_prewarm_process_lock:
-            self.recording_prewarm_process = process
+        if session is not None:
+            session.attach_process(process.pid)
+        if origin == 'prewarm':
+            with self.recording_prewarm_process_lock:
+                self.recording_prewarm_process = process
         terminate_at: float | None = None
         timeout_at = time.monotonic() + 30.0
         try:
             while True:
-                if not self.recording_prewarm_stop.is_set() and time.monotonic() >= timeout_at:
+                cancelled = (
+                    (session is not None and session.cancelled())
+                    or (
+                        origin == 'prewarm'
+                        and self.recording_prewarm_stop.is_set()
+                    )
+                )
+                if not cancelled and time.monotonic() >= timeout_at:
                     self._signal_recording_prewarm_process(process, signal.SIGTERM)
                     try:
                         _stdout, stderr = process.communicate(timeout=3)
@@ -622,7 +676,7 @@ class RecordingMediaRuntime:
                         self._signal_recording_prewarm_process(process, signal.SIGKILL)
                         _stdout, stderr = process.communicate()
                     raise subprocess.TimeoutExpired(command, 30, stderr=stderr)
-                if self.recording_prewarm_stop.is_set() and process.poll() is None:
+                if cancelled and process.poll() is None:
                     if terminate_at is None:
                         self._signal_recording_prewarm_process(process, signal.SIGTERM)
                         terminate_at = time.monotonic() + 3.0
@@ -630,21 +684,32 @@ class RecordingMediaRuntime:
                         self._signal_recording_prewarm_process(process, signal.SIGKILL)
                 try:
                     _stdout, stderr = process.communicate(timeout=0.25)
-                    if self.recording_prewarm_stop.is_set():
+                    if cancelled:
                         raise RecordingPrewarmCancelled
                     return subprocess.CompletedProcess(command, process.returncode, None, stderr)
                 except subprocess.TimeoutExpired:
                     continue
         finally:
-            with self.recording_prewarm_process_lock:
-                if self.recording_prewarm_process is process:
-                    self.recording_prewarm_process = None
+            if origin == 'prewarm':
+                with self.recording_prewarm_process_lock:
+                    if self.recording_prewarm_process is process:
+                        self.recording_prewarm_process = None
 
-    def _recording_fmp4_files(self, path: Path, duration: float, media_offset: float, origin: str='playback') -> tuple[Path, Path]:
+    def _recording_fmp4_files(
+        self,
+        path: Path,
+        duration: float,
+        media_offset: float,
+        origin: str = 'playback',
+        *,
+        active_manager: AppManager | None = None,
+    ) -> tuple[Path, Path]:
+        selected_manager = active_manager or self.manager
+        selected_config = getattr(selected_manager, 'config', self.config)
         stat = path.stat()
         fingerprint = f'v{RECORDING_FMP4_VERSION}:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}'
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:24]
-        cache_dir = self.manager.storage_dir / 'playback-cache' / 'fmp4' / cache_key
+        cache_dir = selected_manager.storage_dir / 'playback-cache' / 'fmp4' / cache_key
         init_path = cache_dir / 'init.mp4'
         media_path = cache_dir / 'media.m4s'
         if self._recording_cache_files_ready(init_path, media_path, touch=True):
@@ -667,12 +732,50 @@ class RecordingMediaRuntime:
             # own init (for example, after a codec change).
             # Preserve decoder preroll too: automatic negative-timestamp shifting
             # adds per-source A/V edit offsets that native HLS can turn into gaps.
-            command = [self.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
+            command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
             if codec in {'hevc', 'h265'}:
                 command.extend(['-tag:v', 'hvc1'])
             command.extend(['-f', 'hls', '-hls_time', '300', '-hls_list_size', '0', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'), str(temp_dir / 'index.m3u8')])
             try:
-                result = self._run_recording_remux(command, origin)
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
+                if media_sessions is None:
+                    result = self._run_recording_remux(command, origin, None)
+                else:
+                    session = media_sessions.acquire(
+                        MediaSessionRequest(
+                            (
+                                MediaSessionKind.RECORDING_PREWARM
+                                if origin == 'prewarm'
+                                else MediaSessionKind.RECORDING_REMUX
+                            ),
+                            resources={MediaResourceClass.REMUX_PROCESS: 1},
+                            owner_generation=getattr(
+                                selected_manager,
+                                'media_session_generation',
+                                None,
+                            ),
+                        ),
+                        blocking=origin != 'prewarm',
+                        # HLS init/media requests are required dependencies.
+                        # Queue cold playback behind bounded remux work rather
+                        # than turning transient contention into a failed seek.
+                        timeout=None,
+                    )
+                    with session:
+                        result = self._run_recording_remux(
+                            command,
+                            origin,
+                            session,
+                        )
+            except MediaSessionAdmissionError as exc:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                if origin == 'prewarm':
+                    raise RecordingPrewarmCancelled from exc
+                raise HTTPException(
+                    status_code=429,
+                    detail=str(exc),
+                    headers={'Retry-After': '1'},
+                ) from exc
             except RecordingPrewarmCancelled:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 raise
@@ -690,8 +793,8 @@ class RecordingMediaRuntime:
                 self._recording_cache_metric(origin, 'failures')
                 error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                if time.time() - stat.st_mtime >= float(self.config.recording_segment_seconds) * 2:
-                    self.manager.recorder.schedule_revalidation(path, error or 'recording fragment failed')
+                if time.time() - stat.st_mtime >= float(selected_config.recording_segment_seconds) * 2:
+                    selected_manager.recorder.schedule_revalidation(path, error or 'recording fragment failed')
                 with self.recording_day_cache_lock:
                     self.recording_day_cache.clear()
                 raise HTTPException(status_code=500, detail=f'recording fragment failed: {error[-300:]}')
@@ -793,11 +896,37 @@ class RecordingMediaRuntime:
                 raise HTTPException(status_code=429, detail='recording preview generator is busy', headers={'Retry-After': '1'})
             temporary = cache_dir / f'.{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp.jpg'
             try:
+                session = None
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
+                if media_sessions is not None:
+                    try:
+                        session = media_sessions.acquire(
+                            MediaSessionRequest(
+                                MediaSessionKind.RECORDING_PREVIEW,
+                                resources={MediaResourceClass.TRANSCODE_PROCESS: 1},
+                                owner_generation=getattr(
+                                    selected_manager,
+                                    'media_session_generation',
+                                    None,
+                                ),
+                            ),
+                            timeout=3.0,
+                        )
+                    except MediaSessionAdmissionError as exc:
+                        raise HTTPException(
+                            status_code=429,
+                            detail=str(exc),
+                            headers={'Retry-After': '1'},
+                        ) from exc
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 jpeg_quality = 3 if requested_width > 480 else 5
                 command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'info' if exact else 'error', '-ss', f'{preview_offset:.3f}', '-i', str(source_path), '-map', '0:v:0', '-frames:v', '1', '-threads', '1', '-vf', f"showinfo@preview,scale='min({requested_width},iw)':-2" if exact else f"scale='min({requested_width},iw)':-2", '-q:v', str(jpeg_quality), '-y', str(temporary)]
                 try:
-                    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8)
+                    if session is None:
+                        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8)
+                    else:
+                        with session:
+                            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8)
                 except subprocess.TimeoutExpired as exc:
                     raise HTTPException(status_code=504, detail='recording preview timed out') from exc
                 except OSError as exc:
@@ -1046,7 +1175,12 @@ class RecordingMediaRuntime:
         expected_offset = sum((float(row['duration_seconds']) for row in rows[:segment_index]))
         if abs(media_offset - expected_offset) > 0.1:
             media_offset = expected_offset
-        return self._recording_fmp4_files(path, segment_duration, media_offset)
+        return self._recording_fmp4_files(
+            path,
+            segment_duration,
+            media_offset,
+            active_manager=selected_manager,
+        )
 
     def _recording_segment_path(self, camera_id: str, epoch: float, source: str='main', *, active_manager: AppManager | None=None) -> Path:
         """Resolve the indexed source MP4 containing an epoch for native playback."""
@@ -1173,7 +1307,35 @@ class RecordingMediaRuntime:
             if not self.event_clip_build_limiter.acquire(blocking=False):
                 raise HTTPException(status_code=429, detail='too many event clips are already being generated', headers={'Retry-After': '3'})
             try:
-                self._build_event_clip(event, before=before, after=after, output_path=clip_path, source=clip_source, active_manager=selected_manager)
+                session = None
+                media_sessions = getattr(selected_manager, 'media_sessions', None)
+                if media_sessions is not None:
+                    try:
+                        session = media_sessions.acquire(
+                            MediaSessionRequest(
+                                MediaSessionKind.EVENT_CLIP,
+                                camera_id=str(event.get('camera_id') or '') or None,
+                                source=clip_source,
+                                resources={MediaResourceClass.TRANSCODE_PROCESS: 1},
+                                owner_generation=getattr(
+                                    selected_manager,
+                                    'media_session_generation',
+                                    None,
+                                ),
+                            ),
+                            blocking=False,
+                        )
+                    except MediaSessionAdmissionError as exc:
+                        raise HTTPException(
+                            status_code=429,
+                            detail=str(exc),
+                            headers={'Retry-After': '3'},
+                        ) from exc
+                if session is None:
+                    self._build_event_clip(event, before=before, after=after, output_path=clip_path, source=clip_source, active_manager=selected_manager)
+                else:
+                    with session:
+                        self._build_event_clip(event, before=before, after=after, output_path=clip_path, source=clip_source, active_manager=selected_manager)
             finally:
                 self.event_clip_build_limiter.release()
         return clip_path

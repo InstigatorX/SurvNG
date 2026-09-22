@@ -55,6 +55,7 @@ from .frontend_routes import FrontendRouteDependencies, create_frontend_router
 from .help_docs import HelpRouteDependencies, create_help_router
 from .onvif_inspector_routes import create_onvif_inspector_router
 from .manager import AppManager, validate_manager_configuration
+from .media_sessions import MediaSessionManager
 from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
 from .local_observability import LocalObservabilityServer, build_runtime_status
@@ -118,6 +119,7 @@ FACE_OBSERVATIONS_SYNC_THREAD: threading.Thread | None = None
 MANAGER_RELOAD_LOCK = threading.RLock()
 MAIN_DATABASE_WRITE_LOCK = threading.RLock()
 MANAGER_ACCESS = ManagerAccessCoordinator()
+MEDIA_SESSIONS = MediaSessionManager()
 APPLICATION_STOPPING = threading.Event()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
@@ -139,7 +141,11 @@ def get_manager() -> AppManager:
     current = globals().get("manager")
     if current is not None:
         return current
-    created = AppManager(config, database_write_lock=MAIN_DATABASE_WRITE_LOCK)
+    created = AppManager(
+        config,
+        database_write_lock=MAIN_DATABASE_WRITE_LOCK,
+        media_sessions=MEDIA_SESSIONS,
+    )
     globals()["manager"] = created
     return created
 
@@ -738,7 +744,9 @@ def reload_manager(
         lock=MANAGER_RELOAD_LOCK,
         stopping=APPLICATION_STOPPING,
         manager_factory=lambda app_config: AppManager(
-            app_config, database_write_lock=MAIN_DATABASE_WRITE_LOCK
+            app_config,
+            database_write_lock=MAIN_DATABASE_WRITE_LOCK,
+            media_sessions=MEDIA_SESSIONS,
         ),
         hooks=ManagerReloadHooks(
             active_storage_tasks=_active_storage_tasks,
@@ -1452,6 +1460,9 @@ _recording_route_bundle = create_recording_router(
             *args,
             active_manager=active_manager,
             **kwargs,
+        ),
+        encoded_fragment_source=(
+            _recording_media_runtime.encoded_fragment_source
         ),
         manager_lock=MANAGER_RELOAD_LOCK,
         manager_access=MANAGER_ACCESS,

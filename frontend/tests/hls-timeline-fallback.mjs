@@ -11,16 +11,25 @@ for (const error of [{ code: 2 }, { code: 4, category: 1 }, { code: 1001, data: 
   assert.equal(isRecordingCompatibilityError(error), false, JSON.stringify(error));
 }
 const source = readFileSync(new URL("../src/timeline/TimelinePages.jsx", import.meta.url), "utf8");
+const mediaSource = readFileSync(new URL("../src/shared/media.jsx", import.meta.url), "utf8");
+const shakaLoadEffect = mediaSource.slice(
+  mediaSource.indexOf("    if (!runtime?.player || !src)"),
+  mediaSource.indexOf("  const { onPointerDown"),
+);
+assert.match(shakaLoadEffect, /let loadReady = false/);
+assert.match(shakaLoadEffect, /if \(!cancelled && loadReady\)/);
+assert.match(shakaLoadEffect, /loadReady = true/);
 const handler = source.slice(source.indexOf("  function handleRecordingError("), source.indexOf("  function retryRecordingPlayback("));
 function fixture({ playing = true, pending = null, rows = true, transcoded = false, original = false } = {}) {
   const calls = [];
   const context = vm.createContext({
-    Number, Math, console: { warn() {} }, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt,
+    Number, Math, performance, console: { warn() {} }, isRecordingCompatibilityError, describePlaybackError, recordingSegmentAt,
     useTranscodedPlayback: transcoded, useSegmentPlayback: transcoded || original, nativeScope: "gate:main:100:900", activeCameraId: "gate", source: "main",
     originalFallbackRef: { current: original ? "gate:main:100:900" : null },
     transcodeFallbackRef: { current: transcoded ? "gate:main:100:900" : null },
     codecFallbackRef: { current: false }, availableSources: ["main", "live"],
     desiredEpochRef: { current: 105 }, pendingSeekEpochRef: { current: pending }, pendingSeekModeRef: {},
+    ignorePauseUntilRef: { current: 0 },
     autoplayRef: { current: playing }, playbackRetryRef: { current: { attempts: 0, timer: 9 } },
     playbackTimeline: rows ? [{ start_epoch: 100, end_epoch: 110 }] : [], hasPlaybackMedia: true,
     clearSeekWatchdog: () => calls.push(["clearSeek"]),
@@ -62,6 +71,9 @@ for (const error of [{ code: 1001, category: 1 }, { code: 4, category: 1 }]) {
   context.handleRecordingError(error);
   assert.ok(calls.some(([name]) => name === "hlsRetry"));
   assert.ok(!calls.some(([name]) => ["originalScope", "transcodeScope", "source", "mp4Retry"].includes(name)));
+  assert.equal(context.pendingSeekEpochRef.current, 105);
+  assert.equal(context.pendingSeekModeRef.current, "window-ready");
+  assert.equal(context.autoplayRef.current, true);
 }
 // Only an original-file decode failure may start the encoder. Its network
 // failures retry the original-file player, and retained intent is unchanged.

@@ -21,6 +21,12 @@ from typing import Callable
 from .recording_media import concatenated_clip_timing
 from .recorder import Recorder
 from .media_storage import MediaStorageRegistry
+from .media_sessions import (
+    MediaResourceClass,
+    MediaSessionKind,
+    MediaSessionManager,
+    MediaSessionRequest,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -365,6 +371,8 @@ class MediaExportManager:
         retention_hours: int = 24,
         max_storage_bytes: int = 20 * 1024 * 1024 * 1024,
         media_storage: MediaStorageRegistry | None = None,
+        media_sessions: MediaSessionManager | None = None,
+        owner_generation: str | int | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.database_dir = database_dir.resolve()
@@ -390,6 +398,8 @@ class MediaExportManager:
         self._hardware_device = hardware_device or (lambda _backend: "")
         self.retention_hours = max(1, min(int(retention_hours), 720))
         self.max_storage_bytes = max(1024 * 1024, int(max_storage_bytes))
+        self.media_sessions = media_sessions
+        self.owner_generation = owner_generation
         self.store = MediaExportStore(self.database_dir)
         default_expiry = (datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)).isoformat()
         for job in self.store.terminal_without_expiry():
@@ -673,7 +683,27 @@ class MediaExportManager:
                 self._active_job_id = job_id
                 self._active_cancel = cancel
             try:
-                self._execute(job, cancel)
+                if self.media_sessions is None:
+                    self._execute(job, cancel)
+                else:
+                    with self.media_sessions.acquire(
+                        MediaSessionRequest(
+                            MediaSessionKind.MEDIA_EXPORT,
+                            camera_id=str(job.get("camera_id") or "") or None,
+                            source=str(job.get("source") or "") or None,
+                            resources={
+                                MediaResourceClass.EXPORT_WORKER: 1,
+                                MediaResourceClass.TRANSCODE_PROCESS: 1,
+                            },
+                            owner_generation=self.owner_generation,
+                            correlation_id=job_id,
+                        ),
+                        timeout=30.0,
+                    ) as session:
+                        session.cancellation.add_callback(
+                            lambda _reason: cancel.set()
+                        )
+                        self._execute(job, cancel)
             except InterruptedError:
                 self._finish_cancelled(job_id)
             except BaseException as exc:

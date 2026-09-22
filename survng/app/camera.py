@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterator
 import numpy as np
 import cv2
 
+from .activity_events import ActivityEventBus
 from .camera_capture import (
     CaptureBackend,
     CameraCaptureService,
@@ -28,6 +29,7 @@ from .camera_lifecycle import (
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .image_storage import DurableImageWriter
 from .media_storage import MediaStorageRegistry
+from .media_sessions import MediaSessionManager
 from .onvif_events import OnvifEventListener, OnvifStopTicket
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_analysis_service import MotionAnalysisService
@@ -163,6 +165,9 @@ class CameraWorker:
         storage_dir: Path,
         motion_config: MotionQualificationConfig | None = None,
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        activity_events: ActivityEventBus | None = None,
+        media_sessions: MediaSessionManager | None = None,
+        media_session_generation: str | int | None = None,
         *,
         motion_pipeline: MotionPipeline,
         motion_observation_pipeline: MotionPipeline,
@@ -200,6 +205,7 @@ class CameraWorker:
             camera_id=camera.id,
             camera_state=self.runtime_state,
             event_callback=event_callback,
+            activity_events=activity_events,
         )
         # Runtime-state reads are independent from tracking-session operations;
         # neither lock is held while camera lifecycle I/O is blocking.
@@ -403,6 +409,8 @@ class CameraWorker:
             frame_observer=self._capture_frame,
             source_started_observer=self._capture_source_started,
             source_stopped_observer=self._capture_source_stopped,
+            media_sessions=media_sessions,
+            owner_generation=media_session_generation,
         )
         self.tracking_frames = CameraFrameTimeline(
             camera=camera,

@@ -5,9 +5,11 @@ import json
 import os
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .activity_events import ActivityEventBus, ActivityTransition
 from .camera import CameraWorker
 from .camera_capture import (
     CaptureOpenLimiter,
@@ -45,6 +47,10 @@ from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .identity_projection import apply_event_identity
 from .media_storage import MediaStorageRegistry
+from .media_sessions import (
+    MediaSessionKind,
+    MediaSessionManager,
+)
 from .mqtt import MqttService
 from .mqtt_lifecycle import MqttLifecycle
 from .runtime_monitor import (
@@ -260,9 +266,13 @@ class AppManager:
         self,
         config: AppConfig,
         database_write_lock: threading.RLock | None = None,
+        media_sessions: MediaSessionManager | None = None,
     ) -> None:
         validate_manager_configuration(config)
         self.config = config
+        self.media_session_generation = uuid.uuid4().hex
+        self._owns_media_sessions = media_sessions is None
+        self.media_sessions = media_sessions or MediaSessionManager()
         self.detection_watch = RouteDetectionWatch(
             config.detector.tracking.camera_transition_routes
         )
@@ -328,6 +338,7 @@ class AppManager:
             ),
         )
         self.state_events = StateEventBroker()
+        self.activity_events = ActivityEventBus(self._publish_activity_transition)
         try:
             self.incidents = IncidentLifecycle(
                 self._publish_incident_notification, self.database_dir / "incident_notifications.json",
@@ -348,6 +359,7 @@ class AppManager:
         except BaseException:
             for label, operation in (
                 ("recording lifecycle", self.recording.close),
+                ("activity event bus", self.activity_events.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -387,6 +399,7 @@ class AppManager:
             for label, operation in (
                 ("inference lifecycle", self.inference.close),
                 ("recording lifecycle", self.recording.close),
+                ("activity event bus", self.activity_events.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -441,6 +454,7 @@ class AppManager:
                 ("MQTT", self.mqtt.stop),
                 ("inference lifecycle", self.inference.close),
                 ("recording lifecycle", self.recording.close),
+                ("activity event bus", self.activity_events.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -479,6 +493,20 @@ class AppManager:
             state_path=self.database_dir / "runtime_state.json",
             legacy_state_paths=(self.storage_dir / "runtime_state.json",),
         )
+
+    def _publish_activity_transition(
+        self,
+        transition: ActivityTransition,
+    ) -> None:
+        payload = transition.to_payload()
+        self.state_events.publish("activity", payload)
+        mqtt = getattr(self, "mqtt", None)
+        if mqtt is not None:
+            mqtt.publish(
+                f"camera/{transition.camera_id}/activity",
+                payload,
+                retain=True,
+            )
 
     def _publish_identity_update(self, payload: dict) -> None:
         event = dict(payload)
@@ -737,6 +765,9 @@ class AppManager:
                 self.storage_dir,
                 motion_config,
                 self.publish_event,
+                activity_events=self.activity_events,
+                media_sessions=self.media_sessions,
+                media_session_generation=self.media_session_generation,
                 motion_pipeline=qualification_pipeline,
                 motion_observation_pipeline=observation_pipeline,
                 motion_fusion_pipeline=fusion_pipeline,
@@ -948,7 +979,16 @@ class AppManager:
         started = time.monotonic()
         self.camera_controls.quiesce()
         self.ema_route_candidates.close_admission()
+        media_sessions = getattr(self, "media_sessions", None)
+        if media_sessions is not None:
+            media_sessions.cancel_generation(
+                getattr(self, "media_session_generation", ""),
+                "manager_stopping",
+            )
         self.mqtt.set_server_lifecycle("stopping", refresh_status=False)
+        activity_events = getattr(self, "activity_events", None)
+        if activity_events is not None:
+            attempt("activity event bus", activity_events.close)
         LOGGER.info(
             "SurvNG shutdown: cancelling camera admission and releasing ONVIF subscriptions"
         )
@@ -1007,6 +1047,20 @@ class AppManager:
         return self.camera_controls.start_camera(camera_id)
 
     def stop_camera(self, camera_id: str) -> bool:
+        media_sessions = getattr(self, "media_sessions", None)
+        if media_sessions is not None:
+            media_sessions.cancel_camera(
+                camera_id,
+                "camera_power_off",
+                kinds={
+                    MediaSessionKind.GO2RTC_WEBRTC,
+                    MediaSessionKind.GO2RTC_MSE,
+                    MediaSessionKind.MJPEG,
+                    MediaSessionKind.SNAPSHOT,
+                    MediaSessionKind.CAPTURE_LIVE,
+                    MediaSessionKind.CAPTURE_MAIN,
+                },
+            )
         return self.camera_controls.stop_camera(camera_id)
 
     def update_camera_zones(
@@ -1500,6 +1554,11 @@ class AppManager:
             self.mqtt.publish_camera_state(camera_id, bool(status.get("running")))
             self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(status.get("recording_enabled")))
             self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(status.get("detection_enabled")))
+            self.mqtt.publish(
+                f"camera/{camera_id}/activity",
+                self.activity_events.snapshot(camera_id),
+                retain=True,
+            )
 
     def incident_notification_allowed(self, payload: dict) -> bool:
         if not self.config.integration_notifications.enabled:
@@ -1728,6 +1787,9 @@ class AppManager:
         recordings = self.recorder.status(recording_keys)
         timestamp_health = self.recorder.timestamp_health()
         startup_cameras = dict(self.camera_fleet.status().get("cameras") or {})
+        media_cameras = dict(
+            self.media_sessions.snapshot().get("cameras") or {}
+        )
         return [
             {
                 **worker.status(),
@@ -1747,6 +1809,7 @@ class AppManager:
                     for source in ("main", "live")
                     if (camera_id, source) in timestamp_health
                 },
+                "media_sessions": dict(media_cameras.get(camera_id) or {}),
             }
             for camera_id, worker in self.workers.items()
         ]
@@ -1768,3 +1831,6 @@ class AppManager:
 
     def go2rtc_status(self) -> dict:
         return self.go2rtc.status(list(self._unique_cameras()))
+
+    def media_session_status(self, *, include_sessions: bool = False) -> dict:
+        return self.media_sessions.snapshot(include_sessions=include_sessions)

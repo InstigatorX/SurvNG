@@ -11,6 +11,8 @@ from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
+from .activity_events import ActivityEventBus
+from .domain_events import MotionObserved
 from .motion import MotionQualificationResult
 from .motion_analysis_service import MotionAnalysisService
 from .motion_decisions import MotionDecisionOrchestrator
@@ -41,10 +43,12 @@ class CameraMotionState:
         camera_id: str,
         camera_state: CameraRuntimeState,
         event_callback: Callable[[str, dict[str, Any]], None] | None,
+        activity_events: ActivityEventBus | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.camera_state = camera_state
         self._event_callback = event_callback
+        self._activity_events = activity_events
         self._lock = threading.Lock()
         self._ingress_idle = threading.Condition(camera_state.lock)
         self._ingress_by_generation: dict[int, int] = {}
@@ -165,6 +169,22 @@ class CameraMotionState:
             self._last_motion_at = value
 
     def publish_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        if event_type == "motion" and self._activity_events is not None:
+            try:
+                self._activity_events.observe(
+                    MotionObserved(
+                        camera_id=str(payload.get("camera_id") or self.camera_id),
+                        timestamp=str(payload.get("timestamp") or ""),
+                        source=str(payload.get("source") or ""),
+                    ),
+                    self.lifecycle_generation(),
+                )
+            except Exception:
+                self.increment_stat("event_callback_errors")
+                LOGGER.exception(
+                    "activity event projection failed for camera=%s",
+                    self.camera_id,
+                )
         if self._event_callback is None:
             return
         try:
@@ -175,6 +195,21 @@ class CameraMotionState:
                 "camera event callback failed for %s event=%s",
                 self.camera_id,
                 event_type,
+            )
+
+    def start_activity_generation(self) -> None:
+        if self._activity_events is not None:
+            self._activity_events.start_generation(
+                self.camera_id,
+                self.lifecycle_generation(),
+            )
+
+    def stop_activity_generation(self, reason: str) -> None:
+        if self._activity_events is not None:
+            self._activity_events.stop_generation(
+                self.camera_id,
+                self.lifecycle_generation(),
+                reason=reason,
             )
 
     def increment_stat(self, name: str, amount: int = 1) -> None:
@@ -294,6 +329,7 @@ class MotionRuntimeService:
             self.events.episode_controller.start_generation(
                 self.state.lifecycle_generation()
             )
+            self.state.start_activity_generation()
             self._stop_event = stop_event
             try:
                 self.incidents.start(stop_event)
@@ -318,6 +354,7 @@ class MotionRuntimeService:
                     rollback_errors,
                 )
                 self._stop_event = None
+                self.state.stop_activity_generation("start_failed")
                 for rollback_error in rollback_errors:
                     LOGGER.error(
                         "motion runtime start rollback failed for %s: %s",
@@ -388,6 +425,10 @@ class MotionRuntimeService:
                 and ingress_stopped
             )
             if workers_stopped and not failures:
+                self._attempt(
+                    lambda: self.state.stop_activity_generation("camera_stopped"),
+                    failures,
+                )
                 self._attempt(self.analysis.reset, failures)
                 self._attempt(self.evidence.clear, failures)
                 self._attempt(self.qualification.reset_runtime, failures)

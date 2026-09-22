@@ -865,8 +865,16 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const useTranscodedPlayback = transport === "transcode";
   const useSegmentPlayback = transport !== "hls";
   playbackTransportRef.current = { scope: nativeScope, mode: transport };
+  const manifestStartTime = useMemo(() => {
+    if (!playbackTimeline.length) return null;
+    const retainedEpoch = desiredEpochRef.current;
+    const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
+      ? retainedEpoch
+      : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
+    return epochToPlaybackMediaTime(initialEpoch);
+  }, [playbackDetail?.revision, playbackTimeline, dayStart, dayEnd, date, today, timeline]);
   const manifestUrl = !useSegmentPlayback && !isAllCameras && activeCameraId && playbackDetail && playbackTimeline.length
-    ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
+    ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source, manifestStartTime)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
   const nativeSegmentUrl = useSegmentPlayback && !isAllCameras && activeCameraId && loadedPlaybackWindow && nativeSegment
     ? `${recordingSegmentUrl(activeCameraId, nativeSegment.start_epoch, source, useTranscodedPlayback)}&reload=${nativeSegmentRetryToken}`
@@ -939,15 +947,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const frameSearchTrailIds = frameSearchResults
     .map((result) => Number(result?.event?.id))
     .filter((eventId) => Number.isInteger(eventId) && eventId > 0);
-  const manifestStartTime = useMemo(() => {
-    if (!playbackTimeline.length) return null;
-    const retainedEpoch = desiredEpochRef.current;
-    const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
-      ? retainedEpoch
-      : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
-    return epochToPlaybackMediaTime(initialEpoch);
-  }, [manifestUrl, playbackTimeline]);
-
   function switchRecordingTransport() {
     if (playbackTransport?.scope !== nativeScope) {
       setPlaybackTransport({ scope: nativeScope, mode: transport });
@@ -2341,6 +2340,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
     if (playbackRetryRef.current.timer) return;
     if (playbackRetryRef.current.attempts < 4 && hasPlaybackMedia) {
+      const retryTarget = Number.isFinite(pendingSeekEpochRef.current)
+        ? pendingSeekEpochRef.current : desiredEpochRef.current;
+      pendingSeekEpochRef.current = retryTarget;
+      pendingSeekModeRef.current = useSegmentPlayback
+        ? "native-ready" : "window-ready";
+      // Source replacement pauses the existing element. That pause is an
+      // internal retry transition, not a change to the user's play intent.
+      ignorePauseUntilRef.current = performance.now() + 2000;
       playbackRetryRef.current.attempts += 1;
       const attempt = playbackRetryRef.current.attempts;
       const delay = Math.min(5_000, 750 * (2 ** (attempt - 1)));
@@ -2577,7 +2584,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
               onPause={(event) => {
                 if (performance.now() < ignorePauseUntilRef.current) return;
-                if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                if (!event.currentTarget.error && !event.currentTarget.ended
+                  && !Number.isFinite(pendingSeekEpochRef.current)) {
                   cancelClipPreview();
                   autoplayRef.current = false;
                   setHeroPlaying(false);
@@ -2609,7 +2617,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
               onPause={(event) => {
                 if (performance.now() < ignorePauseUntilRef.current) return;
-                if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                if (!event.currentTarget.error && !event.currentTarget.ended
+                  && !Number.isFinite(pendingSeekEpochRef.current)) {
                   cancelClipPreview();
                   autoplayRef.current = false;
                   setHeroPlaying(false);
