@@ -20,6 +20,7 @@ from survng.app.object_tracking import (
     ByteTrackObjectTracker,
     ObjectTrackerRegistry,
     ObjectTrackingSession,
+    SparseIdentityObjectTracker,
     _rescale_detection_boxes,
     ultralytics_deepocsort_dependency_status,
     ultralytics_fasttrack_dependency_status,
@@ -2118,6 +2119,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             limiter=threading.BoundedSemaphore(1),
             tracker_registry=(registry := ObjectTrackerRegistry()),
         )
+        registry.register("survng_sparse_identity", SparseIdentityObjectTracker)
         registry.register("survng_hybrid", ByteTrackObjectTracker)
         session.set_accepting(True)
 
