@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import cv2
 
-from survng.app.camera import CameraWorker
+from survng.app.camera import CameraWorker, _AutoStreamAlignment
 from survng.app.camera_lifecycle import CAPTURE_STOP_TIMEOUT_SECONDS
 from survng.app.camera_capture import (
     CAPTURE_OPEN_CONCURRENCY,
@@ -355,6 +355,54 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(alignment["scale_y"], 1.0)
         self.assertEqual(alignment["offset_x"], 0.0)
         self.assertEqual(alignment["offset_y"], 0.0)
+
+    def test_auto_stream_alignment_needs_main_until_settled(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        alignment = _AutoStreamAlignment(camera)
+        pending = {"mode": "auto", "reliable": False}
+        self.assertTrue(alignment.needs_main_capture(pending))
+        self.assertFalse(alignment.needs_main_capture({**pending, "reliable": True}))
+        self.assertFalse(alignment.needs_main_capture({**pending, "mode": "untrusted"}))
+
+        same_stream = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/shared",
+            live_stream_url="rtsp://camera/shared",
+        )
+        self.assertFalse(_AutoStreamAlignment(same_stream).needs_main_capture(pending))
+
+    def test_live_capture_wakes_main_for_pending_fov_alignment(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker.capture = Mock()
+            worker.capture.request_frame = Mock(return_value=None)
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            frame = CapturedFrame(
+                source="live",
+                image=np.zeros((8, 8, 3), dtype=np.uint8),
+                captured_at_epoch=1.0,
+                captured_at_monotonic=1.0,
+                captured_at_iso="1970-01-01T00:00:01+00:00",
+                width=8,
+                height=8,
+                sequence=1,
+                generation=1,
+            )
+            with patch.object(worker.motion_runtime, "submit_frame"):
+                worker._capture_frame(frame)
+            worker.capture.request_frame.assert_called_with("main")
 
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

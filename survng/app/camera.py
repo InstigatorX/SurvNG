@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -40,6 +41,7 @@ from .motion_runtime import CameraMotionState, MotionRuntimeService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .object_activity import AttributionMode, ObjectActivityAttributor
+from .security import redact_secret_text
 from .tracking_frames import CameraFrameTimeline, TrackingFrameBatch
 from .video_frames import DecodedVideoFrame
 from .motion_pipeline import (
@@ -54,6 +56,7 @@ from .motion_pipeline.object_detection import TimestampedLiveFrame
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
+LOGGER = logging.getLogger(__name__)
 
 
 class _AutoStreamAlignment:
@@ -77,6 +80,18 @@ class _AutoStreamAlignment:
             "last_attempt_seconds_ago": round(max(0.0, time.monotonic() - self._last_attempt), 3)
             if self._last_attempt else None,
         }
+
+    def needs_main_capture(self, alignment: dict[str, Any]) -> bool:
+        """True while auto FOV calibration still needs demand-driven main frames.
+
+        FFmpeg recording is a separate process and does not feed this checker.
+        Main capture is lazy/idleable, so calibration must explicitly wake it.
+        """
+        if not self.enabled:
+            return False
+        if bool(alignment.get("reliable")):
+            return False
+        return str(alignment.get("mode") or "") != "untrusted"
 
     def observe(self, frame: CapturedFrame) -> dict[str, Any] | None:
         if not self.enabled or frame.source not in {"main", "live"}:
@@ -208,6 +223,7 @@ class CameraWorker:
         self._frame_lock = threading.Lock()
         self._stream_alignment = _AutoStreamAlignment(camera)
         self._effective_spatial_alignment = self._motion_spatial_alignment(camera)
+        self._alignment_main_wake_at = 0.0
         effective_capture_backend = capture_backend or FfmpegCaptureBackend(
             CaptureOpenLimiter()
         )
@@ -611,6 +627,8 @@ class CameraWorker:
         return self.motion_qualification.debug_image(layer)
 
     def _capture_frame(self, frame: CapturedFrame) -> None:
+        if frame.source == "live":
+            self._wake_main_for_alignment()
         calibrated = self._stream_alignment.observe(frame)
         if calibrated is not None:
             self._effective_spatial_alignment = calibrated
@@ -637,6 +655,30 @@ class CameraWorker:
                 frame.image,
                 frame.captured_at_epoch,
                 source="main",
+            )
+
+    def _wake_main_for_alignment(self) -> None:
+        """Keep demand-driven main capture warm until FOV calibration settles.
+
+        ``Recording: running`` is FFmpeg and does not publish frames into the
+        capture observer used by ``_AutoStreamAlignment``. Without an explicit
+        ``request_frame("main")`` lease, main stays idle and FOV never leaves
+        Checking.
+        """
+        if not self._stream_alignment.needs_main_capture(self._effective_spatial_alignment):
+            return
+        now = time.monotonic()
+        if now - self._alignment_main_wake_at < 2.0:
+            return
+        self._alignment_main_wake_at = now
+        try:
+            self.capture.request_frame("main")
+        except Exception as error:
+            LOGGER.warning(
+                "FOV alignment could not wake main capture for %s: %s: %s",
+                self.camera.id,
+                type(error).__name__,
+                redact_secret_text(error)[:300],
             )
 
     def _capture_source_started(self, source: str) -> None:

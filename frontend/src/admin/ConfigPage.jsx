@@ -5036,7 +5036,7 @@ export function DepthShadowPerformance({ cameraId = "", mode = "", label = "Dept
   </div>;
 }
 
-function spatialAlignmentSummary(alignment = {}) {
+function spatialAlignmentSummary(alignment = {}, { mainKnown = true, mainRunning = null } = {}) {
   const mode = String(alignment.mode || "untrusted");
   const reliable = Boolean(alignment.reliable);
   const stableSamples = Number(alignment.stable_samples || 0);
@@ -5074,6 +5074,15 @@ function spatialAlignmentSummary(alignment = {}) {
       warning: true,
     };
   }
+  if (!mainKnown) {
+    return {
+      label: "Checking",
+      detail: mainRunning === false
+        ? "Waiting for main capture frames — recording alone does not feed FOV checks"
+        : "Waiting for main capture frames (not the FFmpeg recorder)",
+      warning: false,
+    };
+  }
   return {
     label: "Checking",
     detail: stableSamples
@@ -5094,9 +5103,8 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
     && status.onvif_enabled
     && Number(status.onvif_motion_events_received || 0) === 0;
   const missingCameraTrigger = cameraAlertsOnly && !status.onvif_enabled;
-  const fovAlignment = spatialAlignmentSummary(status.spatial_alignment || {});
   const streamDimensions = status.stream_dimensions || {};
-  const liveSize = streamDimensions.live || streamDimensions.sub;
+  const liveSize = streamDimensions.live;
   const mainSize = streamDimensions.main;
   const liveSizeLabel = liveSize?.width && liveSize?.height
     ? `${liveSize.width}×${liveSize.height}`
@@ -5104,11 +5112,15 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
   const mainSizeLabel = mainSize?.width && mainSize?.height
     ? `${mainSize.width}×${mainSize.height}`
     : null;
+  const fovAlignment = spatialAlignmentSummary(status.spatial_alignment || {}, {
+    mainKnown: Boolean(mainSizeLabel),
+    mainRunning: status.main_running == null ? null : Boolean(status.main_running),
+  });
   return (
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
       <span>Stream worker: {status.running ? "running" : "not running"}</span>
-      <span>Recording: {status.recording ? "running" : "stopped"}</span>
+      <span>Recording: {status.recording ? "running" : "stopped"}{status.main_running ? " · main capture active" : ""}</span>
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF notification (any type): {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
       {status.onvif_enabled ? <span>{status.onvif_notifications_received || 0} notifications · {status.onvif_motion_events_received || 0} active motion · {status.onvif_inactive_motion_events || 0} inactive motion · {status.onvif_renewals || 0} subscription renewals</span> : null}
