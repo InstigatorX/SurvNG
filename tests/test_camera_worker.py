@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import cv2
 
-from survng.app.camera import CameraWorker
+from survng.app.camera import CameraWorker, _AutoStreamAlignment
 from survng.app.camera_lifecycle import CAPTURE_STOP_TIMEOUT_SECONDS
 from survng.app.camera_capture import (
     CAPTURE_OPEN_CONCURRENCY,
@@ -355,6 +355,80 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(alignment["scale_y"], 1.0)
         self.assertEqual(alignment["offset_x"], 0.0)
         self.assertEqual(alignment["offset_y"], 0.0)
+
+    def test_auto_stream_alignment_is_pending_until_settled(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        alignment = _AutoStreamAlignment(camera)
+        pending = {"mode": "auto", "reliable": False}
+        self.assertTrue(alignment.is_pending(pending))
+        self.assertFalse(alignment.is_pending({**pending, "reliable": True}))
+        self.assertFalse(alignment.is_pending({**pending, "mode": "untrusted"}))
+        same = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/shared",
+            live_stream_url="rtsp://camera/shared",
+        )
+        self.assertFalse(_AutoStreamAlignment(same).is_pending(pending))
+
+    def test_startup_spatial_alignment_leases_main_once_then_stops(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker._stop.clear()
+            worker.capture = Mock()
+            worker.capture.request_frame = Mock(return_value=None)
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+
+            def settle(_source: str):
+                worker._effective_spatial_alignment = {
+                    "mode": "affine",
+                    "reliable": True,
+                    "confidence": 0.9,
+                    "scale_x": 1.0,
+                    "scale_y": 1.0,
+                    "offset_x": 0.0,
+                    "offset_y": 0.0,
+                }
+                return None
+
+            worker.capture.request_frame.side_effect = settle
+            with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS", 0.01):
+                worker._run_startup_spatial_alignment(worker.runtime_state.generation)
+            self.assertEqual(worker.capture.request_frame.call_count, 1)
+            self.assertTrue(worker._effective_spatial_alignment["reliable"])
+            self.assertFalse(worker._spatial_alignment_startup_active)
+
+    def test_startup_spatial_alignment_timeout_marks_untrusted(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker._stop.clear()
+            worker.capture = Mock()
+            worker.capture.request_frame = Mock(return_value=None)
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_BUDGET_SECONDS", 0.05):
+                with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS", 0.01):
+                    worker._run_startup_spatial_alignment(worker.runtime_state.generation)
+            self.assertEqual(worker._effective_spatial_alignment["mode"], "untrusted")
+            self.assertFalse(worker._effective_spatial_alignment["reliable"])
+            self.assertFalse(worker._spatial_alignment_startup_active)
+            self.assertGreaterEqual(worker.capture.request_frame.call_count, 1)
 
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

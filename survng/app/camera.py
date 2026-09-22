@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -38,6 +39,7 @@ from .motion_events import MotionEventCoordinator
 from .motion_decisions import MotionDecisionOrchestrator
 from .motion_incidents import MotionIncidentService
 from .motion_ingress import MotionEventIngressService
+from .security import redact_secret_text
 from .motion_runtime import CameraMotionState, MotionRuntimeService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
@@ -56,6 +58,9 @@ from .motion_pipeline.object_detection import TimestampedLiveFrame
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
+SPATIAL_ALIGNMENT_STARTUP_BUDGET_SECONDS = 20.0
+SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS = 0.5
+LOGGER = logging.getLogger(__name__)
 
 
 class _AutoStreamAlignment:
@@ -79,6 +84,14 @@ class _AutoStreamAlignment:
             "last_attempt_seconds_ago": round(max(0.0, time.monotonic() - self._last_attempt), 3)
             if self._last_attempt else None,
         }
+
+    def is_pending(self, alignment: dict[str, Any]) -> bool:
+        """True until auto FOV calibration reaches trusted or untrusted."""
+        if not self.enabled:
+            return False
+        if bool(alignment.get("reliable")):
+            return False
+        return str(alignment.get("mode") or "") != "untrusted"
 
     def observe(self, frame: CapturedFrame) -> dict[str, Any] | None:
         if not self.enabled or frame.source not in {"main", "live"}:
@@ -214,6 +227,8 @@ class CameraWorker:
         self._frame_lock = threading.Lock()
         self._stream_alignment = _AutoStreamAlignment(camera)
         self._effective_spatial_alignment = self._motion_spatial_alignment(camera)
+        self._spatial_alignment_startup_active = False
+        self._spatial_alignment_startup_lock = threading.Lock()
         effective_capture_backend = capture_backend or FfmpegCaptureBackend(
             CaptureOpenLimiter()
         )
@@ -462,9 +477,10 @@ class CameraWorker:
             object_tracking=self.tracking_lifecycle,
             incidents=self.motion_incidents,
             lifecycle=self.lifecycle,
-            spatial_alignment=lambda: self._stream_alignment.status(
-                dict(self._effective_spatial_alignment)
-            ),
+            spatial_alignment=lambda: {
+                **self._stream_alignment.status(dict(self._effective_spatial_alignment)),
+                "startup_calibration": self._spatial_alignment_startup_active,
+            },
         )
 
     @staticmethod
@@ -494,10 +510,79 @@ class CameraWorker:
         }
 
     def start(self) -> None:
+        with self.runtime_state.lock:
+            already_running = self.runtime_state.phase is CameraLifecyclePhase.RUNNING
         self.lifecycle.start()
+        if not already_running:
+            self._spawn_startup_spatial_alignment()
 
     def consider_route_detection_watch(self, watch: Any) -> bool:
         return self.motion_analysis.consider_route_watch(watch)
+
+    def _spawn_startup_spatial_alignment(self) -> None:
+        """One-shot main capture lease after worker start for FOV calibration.
+
+        FFmpeg recording does not feed this path. Lease main only while the
+        startup budget is open, then let demand-driven capture idle again.
+        """
+        if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
+            return
+        with self._spatial_alignment_startup_lock:
+            if self._spatial_alignment_startup_active:
+                return
+            self._spatial_alignment_startup_active = True
+        generation = self.runtime_state.generation
+        thread = threading.Thread(
+            target=self._run_startup_spatial_alignment,
+            args=(generation,),
+            name=f"camera-{self.camera.id}-fov-align",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_startup_spatial_alignment(self, generation: int) -> None:
+        deadline = time.monotonic() + SPATIAL_ALIGNMENT_STARTUP_BUDGET_SECONDS
+        try:
+            while time.monotonic() < deadline:
+                if self._stop.is_set() or self.runtime_state.generation != generation:
+                    return
+                if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
+                    return
+                try:
+                    self.capture.request_frame("main")
+                except Exception as error:
+                    LOGGER.warning(
+                        "startup FOV alignment could not sample main for %s: %s: %s",
+                        self.camera.id,
+                        type(error).__name__,
+                        redact_secret_text(error)[:300],
+                    )
+                    break
+                time.sleep(SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS)
+            if (
+                self._stop.is_set()
+                or self.runtime_state.generation != generation
+                or not self._stream_alignment.is_pending(self._effective_spatial_alignment)
+            ):
+                return
+            failed = {
+                "mode": "untrusted",
+                "reliable": False,
+                "confidence": 0.0,
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+            }
+            self._effective_spatial_alignment = failed
+            self.motion_decision_handler.spatial_alignment = dict(failed)
+            LOGGER.warning(
+                "startup FOV alignment timed out for %s; marking live/main geometry untrusted",
+                self.camera.id,
+            )
+        finally:
+            with self._spatial_alignment_startup_lock:
+                self._spatial_alignment_startup_active = False
 
     def stop(self) -> None:
         self.lifecycle.stop()

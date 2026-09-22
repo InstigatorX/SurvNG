@@ -5036,11 +5036,12 @@ export function DepthShadowPerformance({ cameraId = "", mode = "", label = "Dept
   </div>;
 }
 
-function spatialAlignmentSummary(alignment = {}) {
+function spatialAlignmentSummary(alignment = {}, { mainKnown = true } = {}) {
   const mode = String(alignment.mode || "untrusted");
   const reliable = Boolean(alignment.reliable);
   const stableSamples = Number(alignment.stable_samples || 0);
   const failedSamples = Number(alignment.failed_samples || 0);
+  const startupCalibration = Boolean(alignment.startup_calibration);
   const scaleX = Number(alignment.scale_x ?? 1);
   const scaleY = Number(alignment.scale_y ?? 1);
   const offsetX = Number(alignment.offset_x ?? 0);
@@ -5074,6 +5075,15 @@ function spatialAlignmentSummary(alignment = {}) {
       warning: true,
     };
   }
+  if (startupCalibration) {
+    return {
+      label: "Checking",
+      detail: mainKnown
+        ? "Startup FOV check in progress"
+        : "Startup FOV check — sampling main capture once (not the recorder)",
+      warning: false,
+    };
+  }
   return {
     label: "Checking",
     detail: stableSamples
@@ -5094,9 +5104,8 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
     && status.onvif_enabled
     && Number(status.onvif_motion_events_received || 0) === 0;
   const missingCameraTrigger = cameraAlertsOnly && !status.onvif_enabled;
-  const fovAlignment = spatialAlignmentSummary(status.spatial_alignment || {});
   const streamDimensions = status.stream_dimensions || {};
-  const liveSize = streamDimensions.live || streamDimensions.sub;
+  const liveSize = streamDimensions.live;
   const mainSize = streamDimensions.main;
   const liveSizeLabel = liveSize?.width && liveSize?.height
     ? `${liveSize.width}×${liveSize.height}`
@@ -5104,6 +5113,9 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
   const mainSizeLabel = mainSize?.width && mainSize?.height
     ? `${mainSize.width}×${mainSize.height}`
     : null;
+  const fovAlignment = spatialAlignmentSummary(status.spatial_alignment || {}, {
+    mainKnown: Boolean(mainSizeLabel),
+  });
   return (
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
