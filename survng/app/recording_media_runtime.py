@@ -705,6 +705,7 @@ class RecordingMediaRuntime:
         active_manager: AppManager | None = None,
     ) -> tuple[Path, Path]:
         selected_manager = active_manager or self.manager
+        selected_config = getattr(selected_manager, 'config', self.config)
         stat = path.stat()
         fingerprint = f'v{RECORDING_FMP4_VERSION}:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}'
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:24]
@@ -731,7 +732,7 @@ class RecordingMediaRuntime:
             # own init (for example, after a codec change).
             # Preserve decoder preroll too: automatic negative-timestamp shifting
             # adds per-source A/V edit offsets that native HLS can turn into gaps.
-            command = [selected_manager.config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
+            command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'warning', '-i', str(path), '-t', f'{duration:.3f}', '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-avoid_negative_ts', 'disabled']
             if codec in {'hevc', 'h265'}:
                 command.extend(['-tag:v', 'hvc1'])
             command.extend(['-f', 'hls', '-hls_time', '300', '-hls_list_size', '0', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', str(temp_dir / 'media_%d.m4s'), str(temp_dir / 'index.m3u8')])
@@ -789,7 +790,7 @@ class RecordingMediaRuntime:
                 self._recording_cache_metric(origin, 'failures')
                 error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                if time.time() - stat.st_mtime >= float(selected_manager.config.recording_segment_seconds) * 2:
+                if time.time() - stat.st_mtime >= float(selected_config.recording_segment_seconds) * 2:
                     selected_manager.recorder.schedule_revalidation(path, error or 'recording fragment failed')
                 with self.recording_day_cache_lock:
                     self.recording_day_cache.clear()
