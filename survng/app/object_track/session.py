@@ -60,9 +60,17 @@ def _adaptive_tracking_fps(
     important_transition: bool,
     stable_frames: int,
 ) -> tuple[float, int]:
+    person_tracks = sum(
+        1
+        for item in tracked_objects
+        if str(item.get("label") or "").strip().lower() == "person"
+        and item.get("track_state") == "confirmed"
+    )
+    overlapping_people = person_tracks >= config.ambiguity_min_person_tracks
     uncertain = (
         important_transition
         or not tracked_objects
+        or overlapping_people
         or any(
             item.get("track_state") != "confirmed"
             for item in tracked_objects
@@ -873,7 +881,10 @@ class ObjectTrackingSession:
                 self._annotate_appearances(
                     initial_frame,
                     initial_objects,
-                    lazy=self.config.implementation == "survng_hybrid",
+                    lazy=self.config.implementation in {
+                        "survng_hybrid",
+                        "survng_sparse_identity",
+                    },
                 )
             # Preserve the actual selected recording sample time. Consensus may
             # choose a frame up to one second on either side of the event.
@@ -986,7 +997,10 @@ class ObjectTrackingSession:
                 self._annotate_appearances(
                     frame,
                     objects,
-                    lazy=self.config.implementation == "survng_hybrid",
+                    lazy=self.config.implementation in {
+                        "survng_hybrid",
+                        "survng_sparse_identity",
+                    },
                 )
                 _rescale_detection_boxes(
                     objects,

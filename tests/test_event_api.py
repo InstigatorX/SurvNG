@@ -672,14 +672,16 @@ class EventApiSerializationTest(unittest.TestCase):
         telemetry.sample_times.assert_not_called()
         telemetry.lifecycle_events.assert_not_called()
 
-    def test_object_tracking_catalog_exposes_only_safe_production_backend(self) -> None:
+    def test_object_tracking_catalog_exposes_safe_production_backends(self) -> None:
         catalog = main.object_tracking_catalog()
         implementations = {
             item["id"]: item for item in catalog["implementations"]
         }
 
+        self.assertEqual(catalog["active"], "survng_sparse_identity")
+        self.assertTrue(implementations["survng_sparse_identity"]["available"])
         self.assertTrue(implementations["survng_hybrid"]["available"])
-        self.assertEqual(set(implementations), {"survng_hybrid"})
+        self.assertEqual(set(implementations), {"survng_sparse_identity", "survng_hybrid"})
 
     def test_manual_detection_stays_on_one_manager_generation_during_reload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

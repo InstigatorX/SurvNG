@@ -4612,7 +4612,10 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <summary>Association tuning</summary>
               <div className="detection-field-grid advanced-tracking-grid">
                 <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "enabled"], event.target.checked)} /><span>Enable core tracking</span><small>Runs after recorded confirmation. Use it for cover selection and review overlays, not to catch more incidents. Disable if this hardware cannot sustain the extra detector work.</small></label>
-                <div className="detection-settings-subhead"><strong>SurvNG Hybrid tracking</strong><small>Production tracking uses SurvNG’s timestamp-aware geometry and selective appearance recovery. Hybrid candidate, TrackTrack and BoT-SORT are available only through the incident Compare tool.</small></div>
+                <div className="detection-settings-subhead"><strong>Production tracker</strong><small>Sparse Identity is the promoted production default for identity retention testing. Hybrid remains available. Compare still evaluates both offline.</small></div>
+                <label>Tracker implementation<select value={config.detector?.tracking?.implementation ?? "survng_sparse_identity"} onChange={(event) => updateConfig(["detector", "tracking", "implementation"], event.target.value)}><option value="survng_sparse_identity">Sparse Identity (production)</option><option value="survng_hybrid">Hybrid</option></select><small>Applies on config reload for new tracking sessions.</small></label>
+                <label>Retention profile<select value={config.detector?.tracking?.tracking_profile ?? "default"} onChange={(event) => updateConfig(["detector", "tracking", "tracking_profile"], event.target.value)}><option value="default">Default</option><option value="person_retention">Person retention</option></select><small>Person retention raises lost-track grace floors and enables entity relink. Enable person ReID separately.</small></label>
+                <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.entity_relink_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "entity_relink_enabled"], event.target.checked)} /><span>Entity relink after long gaps</span><small>Assigns a durable entity ID to a new tracklet after long-gap ReID recovery without pretending the trajectory stayed continuous.</small></label>
                 <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Incident-starting objects have already passed the event-frame confirmation above.</small></label>
                 <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
                 <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>
@@ -5033,6 +5036,53 @@ export function DepthShadowPerformance({ cameraId = "", mode = "", label = "Dept
   </div>;
 }
 
+function spatialAlignmentSummary(alignment = {}) {
+  const mode = String(alignment.mode || "untrusted");
+  const reliable = Boolean(alignment.reliable);
+  const stableSamples = Number(alignment.stable_samples || 0);
+  const failedSamples = Number(alignment.failed_samples || 0);
+  const scaleX = Number(alignment.scale_x ?? 1);
+  const scaleY = Number(alignment.scale_y ?? 1);
+  const offsetX = Number(alignment.offset_x ?? 0);
+  const offsetY = Number(alignment.offset_y ?? 0);
+  const nearIdentity = (
+    Math.abs(scaleX - 1) < 0.02
+    && Math.abs(scaleY - 1) < 0.02
+    && Math.abs(offsetX) < 0.02
+    && Math.abs(offsetY) < 0.02
+  );
+  if (reliable) {
+    if (mode === "identity" || nearIdentity) {
+      return {
+        label: "Trusted",
+        detail: "Live and main share the same field of view",
+        warning: false,
+      };
+    }
+    return {
+      label: "Trusted",
+      detail: `Measured match · scale ${scaleX.toFixed(2)}×${scaleY.toFixed(2)} · offset ${offsetX.toFixed(2)}, ${offsetY.toFixed(2)}`,
+      warning: false,
+    };
+  }
+  if (mode === "untrusted" || failedSamples >= 3) {
+    return {
+      label: "Not trusted",
+      detail: failedSamples
+        ? `Live and main views do not line up (${failedSamples} failed checks)`
+        : "Live boxes are not trusted onto the main recording",
+      warning: true,
+    };
+  }
+  return {
+    label: "Checking",
+    detail: stableSamples
+      ? `${stableSamples}/3 stable matches so far${failedSamples ? ` · ${failedSamples} failed` : ""}`
+      : "Waiting for matching live and main frames",
+    warning: false,
+  };
+}
+
 export function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
@@ -5044,6 +5094,16 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
     && status.onvif_enabled
     && Number(status.onvif_motion_events_received || 0) === 0;
   const missingCameraTrigger = cameraAlertsOnly && !status.onvif_enabled;
+  const fovAlignment = spatialAlignmentSummary(status.spatial_alignment || {});
+  const streamDimensions = status.stream_dimensions || {};
+  const liveSize = streamDimensions.live || streamDimensions.sub;
+  const mainSize = streamDimensions.main;
+  const liveSizeLabel = liveSize?.width && liveSize?.height
+    ? `${liveSize.width}×${liveSize.height}`
+    : null;
+  const mainSizeLabel = mainSize?.width && mainSize?.height
+    ? `${mainSize.width}×${mainSize.height}`
+    : null;
   return (
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
@@ -5052,6 +5112,13 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF notification (any type): {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
       {status.onvif_enabled ? <span>{status.onvif_notifications_received || 0} notifications · {status.onvif_motion_events_received || 0} active motion · {status.onvif_inactive_motion_events || 0} inactive motion · {status.onvif_renewals || 0} subscription renewals</span> : null}
+      <span className={fovAlignment.warning ? "motion-runtime-warning" : undefined}>
+        Live ↔ main FOV: {fovAlignment.label}
+        {liveSizeLabel || mainSizeLabel
+          ? ` · live ${liveSizeLabel || "unknown"} / main ${mainSizeLabel || "unknown"}`
+          : ""}
+      </span>
+      <span>{fovAlignment.detail}</span>
       {status.motion_qualification ? (
         <div className="motion-runtime-status">
           <div className="motion-runtime-summary">

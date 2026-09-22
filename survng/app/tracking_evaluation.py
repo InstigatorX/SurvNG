@@ -158,6 +158,18 @@ def validate_labels(
     return by_frame
 
 
+RECOVERY_GAP_SECONDS = (0.5, 1.0, 3.0, 5.0, 10.0)
+
+
+def _observation_epoch(frame: dict[str, Any], replay: dict[str, Any]) -> float:
+    epoch = frame.get("captured_at")
+    if isinstance(epoch, (int, float)) and math.isfinite(epoch):
+        return float(epoch)
+    index = frame["frame_index"]
+    replay_frame = replay["frames"][index]
+    return float(replay_frame["captured_at"])
+
+
 def identity_metrics(observations: list[dict[str, Any]], labels: dict[str, Any], replay: dict[str, Any]) -> dict[str, Any]:
     """Class-aware IoU>=.5 potential matches and global assignment for IDF1.
 
@@ -165,6 +177,7 @@ def identity_metrics(observations: list[dict[str, Any]], labels: dict[str, Any],
     assignment, as in TrackEval's identity metric. Separate per-frame matching
     defines switches (including gaps), fragments (tracked/untracked/tracked
     while GT remains present), and false merges (IDs matched to multiple GTs).
+    Recovery buckets report same-track resume precision after timed gaps.
     These explicit event counts are not the full TrackEval/CLEAR benchmark.
     """
     from .object_track.assignment import maximum_weight_assignment
@@ -172,10 +185,14 @@ def identity_metrics(observations: list[dict[str, Any]], labels: dict[str, Any],
     pair_counts: Counter = Counter()
     potential_counts: Counter = Counter()
     gt_count = pred_count = switches = fragments = 0
-    last_identity = {}
-    ever_matched = set()
-    missed = set()
-    all_tracks = set()
+    last_identity: dict[tuple[str, str], int] = {}
+    last_matched_at: dict[tuple[str, str], float] = {}
+    gap_started_at: dict[tuple[str, str], float] = {}
+    ever_matched: set[tuple[str, str]] = set()
+    missed: set[tuple[str, str]] = set()
+    all_tracks: set[int] = set()
+    recovery_attempts = {gap: 0 for gap in RECOVERY_GAP_SECONDS}
+    recovery_successes = {gap: 0 for gap in RECOVERY_GAP_SECONDS}
     previous_index = -1
     for frame in observations:
         index = frame["frame_index"]
@@ -184,6 +201,7 @@ def identity_metrics(observations: list[dict[str, Any]], labels: dict[str, Any],
         previous_index = index
         if index not in by_frame:
             raise ValueError("label every evaluated frame; an empty objects list means no visible objects")
+        epoch = _observation_epoch(frame, replay)
         gt = by_frame[index]
         pred = frame["objects"]
         if not isinstance(pred, list) or len(pred) > MAX_OBJECTS:
@@ -220,12 +238,26 @@ def identity_metrics(observations: list[dict[str, Any]], labels: dict[str, Any],
             if identity in missed:
                 fragments += 1
                 missed.remove(identity)
+                gap_start = gap_started_at.pop(identity, last_matched_at.get(identity, epoch))
+                gap = max(0.0, epoch - gap_start)
+                for bucket in RECOVERY_GAP_SECONDS:
+                    if gap + 1e-9 >= bucket:
+                        recovery_attempts[bucket] += 1
+                        if last_identity.get(identity) == track:
+                            recovery_successes[bucket] += 1
             last_identity[identity] = track
+            last_matched_at[identity] = epoch
             ever_matched.add(identity)
         present = {(item["label"], item["identity"]) for item in gt}
-        missed.update((present & ever_matched) - matched_gt)
+        newly_missed = (present & ever_matched) - matched_gt
+        for identity in newly_missed - missed:
+            gap_started_at[identity] = epoch
+        missed.update(newly_missed)
         # A GT absence (true occlusion/out-of-frame) is not itself tracker fragmentation.
         missed.intersection_update(present)
+        for identity in list(gap_started_at):
+            if identity not in present:
+                gap_started_at.pop(identity, None)
     identities = sorted({identity for identity, _ in potential_counts})
     tracks = sorted({track for _, track in potential_counts})
     weights = [[potential_counts[(identity, track)] for track in tracks] for identity in identities]
@@ -233,9 +265,78 @@ def identity_metrics(observations: list[dict[str, Any]], labels: dict[str, Any],
     idfp, idfn = pred_count - idtp, gt_count - idtp
     merges = sum(len({identity for identity, candidate in pair_counts if candidate == track}) > 1 for track in tracks)
     denominator = 2 * idtp + idfp + idfn
+    recovery = {
+        f"{gap:g}s": {
+            "attempts": recovery_attempts[gap],
+            "same_track_successes": recovery_successes[gap],
+            "precision": (
+                round(recovery_successes[gap] / recovery_attempts[gap], 6)
+                if recovery_attempts[gap]
+                else None
+            ),
+        }
+        for gap in RECOVERY_GAP_SECONDS
+    }
     return {"definition": "survng_identity_v1_iou_0.5", "idf1": round(2 * idtp / denominator, 6) if denominator else None,
             "idtp": idtp, "idfp": idfp, "idfn": idfn, "id_switches": switches, "fragmentations": fragments,
-            "false_merges": merges, "ground_truth_observations": gt_count, "predicted_observations": pred_count}
+            "false_merges": merges, "ground_truth_observations": gt_count, "predicted_observations": pred_count,
+            "recovery_by_gap": recovery}
+
+
+def promotion_gate(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare identity metrics for Sparse Identity promotion decisions.
+
+    Rejects candidates that raise false merges or worsen fragmentations/ID
+    switches without an IDF1 gain. Missing metrics fail closed.
+    """
+    required = ("idf1", "id_switches", "fragmentations", "false_merges")
+    if any(key not in baseline or key not in candidate for key in required):
+        return {
+            "promote": False,
+            "reason": "missing identity metrics",
+            "baseline": baseline,
+            "candidate": candidate,
+        }
+    baseline_idf1 = baseline["idf1"]
+    candidate_idf1 = candidate["idf1"]
+    if baseline_idf1 is None or candidate_idf1 is None:
+        return {
+            "promote": False,
+            "reason": "undefined IDF1 on empty or invalid scenes",
+            "baseline": baseline,
+            "candidate": candidate,
+        }
+    if candidate["false_merges"] > baseline["false_merges"]:
+        return {
+            "promote": False,
+            "reason": "false merges increased",
+            "baseline": baseline,
+            "candidate": candidate,
+        }
+    improved = (
+        candidate_idf1 > baseline_idf1 + 1e-9
+        or candidate["fragmentations"] < baseline["fragmentations"]
+        or candidate["id_switches"] < baseline["id_switches"]
+    )
+    not_worse = (
+        candidate_idf1 + 1e-9 >= baseline_idf1
+        and candidate["fragmentations"] <= baseline["fragmentations"]
+        and candidate["id_switches"] <= baseline["id_switches"]
+    )
+    promote = improved and not_worse and candidate["false_merges"] <= baseline["false_merges"]
+    return {
+        "promote": promote,
+        "reason": (
+            "candidate improves identity retention without raising false merges"
+            if promote
+            else "candidate does not improve fragmentations/ID switches/IDF1 without regressions"
+        ),
+        "baseline": {key: baseline[key] for key in required},
+        "candidate": {key: candidate[key] for key in required},
+    }
 
 
 def main() -> None:

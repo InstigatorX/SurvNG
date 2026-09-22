@@ -8,6 +8,7 @@ from pathlib import Path
 from ..config import ObjectTrackingConfig
 from .bytetrack import ByteTrackObjectTracker
 from .hybrid import HybridObjectTracker
+from .sparse_identity import SparseIdentityObjectTracker
 from .types import ObjectTrackerBackend, ObjectTrackerBuilder
 
 
@@ -178,6 +179,9 @@ def build_builtin_object_tracker_registry() -> ObjectTrackerRegistry:
     # Keep the evaluated candidate name as an alias for saved comparison data
     # and transition tests; it now points at the promoted production behavior.
     registry.register("survng_hybrid_candidate", HybridObjectTracker)
+    # Offline Sparse Identity is also the promoted production default.
+    # Ultralytics alternatives remain comparison-only via config normalization.
+    registry.register("survng_sparse_identity", SparseIdentityObjectTracker)
     # Compatibility alias for configurations created before the tracker gained
     # SurvNG-specific geometry and appearance association.
     registry.register("bytetrack", ByteTrackObjectTracker)

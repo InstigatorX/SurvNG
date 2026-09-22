@@ -313,13 +313,24 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
     @router.get("/api/object-tracking/catalog")
     def object_tracking_catalog() -> dict:
         return {
-            "active": "survng_hybrid",
-            "implementations": [{
-                "id": "survng_hybrid",
-                "name": "SurvNG Hybrid",
-                "available": True,
-                "description": "Lightweight geometry tracking with SurvNG appearance recovery.",
-            }],
+            "active": "survng_sparse_identity",
+            "implementations": [
+                {
+                    "id": "survng_sparse_identity",
+                    "name": "SurvNG Sparse Identity",
+                    "available": True,
+                    "description": (
+                        "Production identity-retention tracker with cascaded "
+                        "association, quality-gated ReID galleries, and entity relink."
+                    ),
+                },
+                {
+                    "id": "survng_hybrid",
+                    "name": "SurvNG Hybrid",
+                    "available": True,
+                    "description": "Lightweight geometry tracking with SurvNG appearance recovery.",
+                },
+            ],
         }
 
     @router.get("/api/detector/models")

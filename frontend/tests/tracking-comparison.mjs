@@ -17,6 +17,7 @@ assert.deepEqual(trackingComparisonResultsArtifact({ replay: { frames: [1] }, re
   replay_id: "source", engines: { hybrid: { frame_observations: [] } },
 });
 assert.equal(trackingEngineLabel("survng_hybrid"), "Hybrid");
+assert.equal(trackingEngineLabel("survng_sparse_identity"), "Sparse Identity");
 assert.equal(trackingEngineLabel("survng_hybrid_candidate"), "Hybrid candidate (historic)");
 assert.equal(trackingEngineLabel("ultralytics_tracktrack"), "TrackTrack");
 assert.equal(trackingEngineLabel("ultralytics_botsort"), "BoT-SORT");

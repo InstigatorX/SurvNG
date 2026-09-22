@@ -48,6 +48,7 @@ class ObjectTrack:
     reid_recovery_history: list[dict[str, Any]] = field(default_factory=list)
     depth_history: list[tuple[float, float]] = field(default_factory=list)
     seeded: bool = False
+    entity_id: int | None = None
 
     def predicted_box(self, captured_at: float) -> Box:
         elapsed = max(0.0, min(captured_at - self.last_seen, 2.0))
@@ -137,6 +138,7 @@ class ObjectTrack:
             "box_history": [list(sample) for sample in self.box_history],
             "reid_matches": self.reid_matches,
             "reid_recovery_history": [dict(item) for item in self.reid_recovery_history],
+            "entity_id": int(self.entity_id if self.entity_id is not None else self.track_id),
         }
 
 class ByteTrackObjectTracker:
@@ -237,6 +239,8 @@ class ByteTrackObjectTracker:
                 ),
                 seeded=confirm_new,
             )
+            if track.entity_id is None:
+                track.entity_id = track.track_id
             self._tracks[track.track_id] = track
             assignments[index] = track.track_id
             self._next_track_id += 1
@@ -563,6 +567,13 @@ class ByteTrackObjectTracker:
         ]
         for track_id in expired:
             self._completed[track_id] = self._tracks.pop(track_id)
+        stale_completed = [
+            track_id
+            for track_id, track in self._completed.items()
+            if captured_at - track.last_seen > self.config.reid_max_age_seconds
+        ]
+        for track_id in stale_completed:
+            self._completed.pop(track_id, None)
 
     def has_live_tracks(self, captured_at: float) -> bool:
         return any(

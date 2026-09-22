@@ -110,6 +110,7 @@ def test_capture_replay_does_not_repeat_inference_or_mutate_shared_inputs():
             return [detection()]
     registry = ObjectTrackerRegistry()
     registry.register("survng_hybrid", ByteTrackObjectTracker)
+    registry.register("survng_sparse_identity", ByteTrackObjectTracker)
     runner = TrackingComparisonRunner(config=ObjectTrackingConfig(min_confirmations=1), detector=Detector(), tracker_registry=registry)
     result = runner.run(CameraConfig(id="gate", name="Gate", stream_url="rtsp://secret.invalid"),
                         [(100+i*.5, np.zeros((100,120,3), dtype=np.uint8)) for i in range(4)])
@@ -213,6 +214,7 @@ def test_genuine_empty_detection_is_retained_and_scored_as_missing_truth():
     )
     registry = ObjectTrackerRegistry()
     registry.register("survng_hybrid", ByteTrackObjectTracker)
+    registry.register("survng_sparse_identity", ByteTrackObjectTracker)
     runner = TrackingComparisonRunner(config=ObjectTrackingConfig(), detector=detector, tracker_registry=registry)
     result = runner.run(
         CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid"),
@@ -240,3 +242,7 @@ def test_class_mismatch_and_true_absence_have_explicit_metric_effects():
 @pytest.mark.parametrize("implementation", ["survng_hybrid_candidate", "ultralytics_tracktrack", "ultralytics_botsort"])
 def test_evaluation_engines_cannot_be_selected_by_production_config(implementation):
     assert ObjectTrackingConfig(implementation=implementation).implementation == "survng_hybrid"
+
+
+def test_sparse_identity_remains_selectable_for_production():
+    assert ObjectTrackingConfig(implementation="survng_sparse_identity").implementation == "survng_sparse_identity"
