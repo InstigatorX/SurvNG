@@ -1,7 +1,10 @@
 # Remote inference on Proxmox
 
-Status: design accepted for incremental implementation. The repository still
-runs inference locally unless a later implementation milestone says otherwise.
+Status: design accepted for incremental implementation. Milestone 1 is
+implemented: `InferenceSupervisor` constructs execution slots through the
+transport-neutral contracts in `inference_runtime/backend.py`. The repository
+still runs inference locally; remote registration and transport are the next
+milestone.
 
 This document is the implementation handoff for moving SurvNG's model execution
 to self-registering workers in Proxmox LXC guests. It records the intended
