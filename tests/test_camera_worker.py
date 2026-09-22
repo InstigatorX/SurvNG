@@ -15,7 +15,7 @@ import numpy as np
 import cv2
 
 from survng.app.camera import CameraWorker, _AutoStreamAlignment
-from survng.app.camera_lifecycle import CAPTURE_STOP_TIMEOUT_SECONDS
+from survng.app.camera_lifecycle import CAPTURE_STOP_TIMEOUT_SECONDS, CameraLifecyclePhase
 from survng.app.camera_capture import (
     CAPTURE_OPEN_CONCURRENCY,
     CAPTURE_OPEN_TIMEOUT_MS,
@@ -331,6 +331,75 @@ class CameraWorkerTest(unittest.TestCase):
 
             self.assertTrue(worker.runtime_state.detection_enabled)
             self.assertEqual(sync.call_count, 2)
+
+    def test_start_skips_fov_when_detection_disabled(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker.runtime_state.detection_enabled = False
+            worker.lifecycle.start = Mock()
+            worker._spawn_startup_spatial_alignment = Mock()
+            worker.start()
+            worker.lifecycle.start.assert_called_once_with()
+            worker._spawn_startup_spatial_alignment.assert_not_called()
+
+    def test_detection_enable_requests_fov_calibration(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker.runtime_state.detection_enabled = False
+            worker.runtime_state.phase = CameraLifecyclePhase.RUNNING
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            worker._spatial_alignment_recheck_used = True
+            worker.lifecycle.set_detection_enabled = Mock(
+                side_effect=lambda enabled: setattr(
+                    worker.runtime_state, "detection_enabled", bool(enabled)
+                )
+            )
+            worker._spawn_startup_spatial_alignment = Mock()
+            worker.set_detection_enabled(True)
+            worker._spawn_startup_spatial_alignment.assert_called_once_with()
+            self.assertFalse(worker._spatial_alignment_recheck_used)
+
+    def test_detection_enable_resets_untrusted_fov_for_retry(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker.runtime_state.detection_enabled = False
+            worker.runtime_state.phase = CameraLifecyclePhase.RUNNING
+            worker._effective_spatial_alignment = {
+                "mode": "untrusted",
+                "reliable": False,
+                "confidence": 0.0,
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+            }
+            worker.lifecycle.set_detection_enabled = Mock(
+                side_effect=lambda enabled: setattr(
+                    worker.runtime_state, "detection_enabled", bool(enabled)
+                )
+            )
+            worker._spawn_startup_spatial_alignment = Mock()
+            worker.set_detection_enabled(True)
+            self.assertEqual(worker._effective_spatial_alignment["mode"], "auto")
+            worker._spawn_startup_spatial_alignment.assert_called_once_with()
 
     def test_identity_motion_alignment_discards_stale_affine_values(self) -> None:
         camera = CameraConfig(

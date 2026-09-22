@@ -633,12 +633,49 @@ class CameraWorker:
     def start(self) -> None:
         with self.runtime_state.lock:
             already_running = self.runtime_state.phase is CameraLifecyclePhase.RUNNING
+            detection_enabled = self.runtime_state.detection_enabled
         self.lifecycle.start()
-        if not already_running:
+        if not already_running and detection_enabled:
             self._spawn_startup_spatial_alignment()
 
     def consider_route_detection_watch(self, watch: Any) -> bool:
         return self.motion_analysis.consider_route_watch(watch)
+
+    def _request_spatial_alignment_calibration(self, *, reason: str) -> None:
+        """Start (or restart) FOV calibration when geometry is still unresolved."""
+        if not self._stream_alignment.enabled:
+            return
+        if bool(self._effective_spatial_alignment.get("reliable")):
+            return
+        # Detection may turn on after a detection-off boot burned the one-shot
+        # recheck. Allow a fresh attempt for this enablement.
+        self._spatial_alignment_recheck_armed = False
+        self._spatial_alignment_recheck_used = False
+        self._stream_alignment.reset_attempt_state()
+        if str(self._effective_spatial_alignment.get("mode") or "") == "untrusted":
+            pending = {
+                "mode": "auto",
+                "reliable": False,
+                "confidence": 0.0,
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+            }
+            self._effective_spatial_alignment = pending
+            self.motion_decision_handler.spatial_alignment = dict(pending)
+        with self.runtime_state.lock:
+            phase = self.runtime_state.phase
+            detection_enabled = bool(self.runtime_state.detection_enabled)
+        if phase is not CameraLifecyclePhase.RUNNING or not detection_enabled:
+            # Fleet applies detection prefs before start(); start() will spawn.
+            return
+        LOGGER.info(
+            "FOV alignment requested for %s (%s)",
+            self.camera.id,
+            reason,
+        )
+        self._spawn_startup_spatial_alignment()
 
     def _spawn_startup_spatial_alignment(self) -> None:
         """Calibrate FOV at startup (or one healthy recheck) without periodic wake.
@@ -915,7 +952,11 @@ class CameraWorker:
             self.motion_qualification.update_zones(next_zones)
 
     def set_detection_enabled(self, enabled: bool) -> None:
+        with self.runtime_state.lock:
+            previously_enabled = bool(self.runtime_state.detection_enabled)
         self.lifecycle.set_detection_enabled(enabled)
+        if bool(enabled) and not previously_enabled:
+            self._request_spatial_alignment_calibration(reason="detection_enabled")
 
     def create_object_tracking_session(
         self,
