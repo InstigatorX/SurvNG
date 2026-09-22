@@ -2341,6 +2341,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
     if (playbackRetryRef.current.timer) return;
     if (playbackRetryRef.current.attempts < 4 && hasPlaybackMedia) {
+      const retryTarget = Number.isFinite(pendingSeekEpochRef.current)
+        ? pendingSeekEpochRef.current : desiredEpochRef.current;
+      pendingSeekEpochRef.current = retryTarget;
+      pendingSeekModeRef.current = useSegmentPlayback
+        ? "native-ready" : "window-ready";
+      // Source replacement pauses the existing element. That pause is an
+      // internal retry transition, not a change to the user's play intent.
+      ignorePauseUntilRef.current = performance.now() + 2000;
       playbackRetryRef.current.attempts += 1;
       const attempt = playbackRetryRef.current.attempts;
       const delay = Math.min(5_000, 750 * (2 ** (attempt - 1)));
@@ -2577,7 +2585,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
               onPause={(event) => {
                 if (performance.now() < ignorePauseUntilRef.current) return;
-                if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                if (!event.currentTarget.error && !event.currentTarget.ended
+                  && !Number.isFinite(pendingSeekEpochRef.current)) {
                   cancelClipPreview();
                   autoplayRef.current = false;
                   setHeroPlaying(false);
@@ -2609,7 +2618,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
               onPause={(event) => {
                 if (performance.now() < ignorePauseUntilRef.current) return;
-                if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                if (!event.currentTarget.error && !event.currentTarget.ended
+                  && !Number.isFinite(pendingSeekEpochRef.current)) {
                   cancelClipPreview();
                   autoplayRef.current = false;
                   setHeroPlaying(false);
