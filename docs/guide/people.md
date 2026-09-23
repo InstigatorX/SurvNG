@@ -15,9 +15,9 @@ track continuity is not the same as a named person record.
 1. Install the face model package and enable person ReID on the server.
 2. Enable recognition under **Admin → Detection → People Identity**.
 3. Confirm face embedding/landmark/detector paths.
-4. Enable person ReID under **Tracking & ReID** and point it at the person
-   ReID model (`person-reidentification-retail-0286` by default; OSNet-class
-   person models are preferred when available).
+4. Enable person ReID under **Tracking & ReID** and point it at
+   `models/person_reid_model/osnet_x1_0_msmt17.xml` after
+   `scripts/install-person-reid-model.sh`. Intel OMZ `0286` remains a fallback.
 5. Wait for incidents that include people with usable face and/or body evidence.
 
 Distant blobs and heavy motion blur still make faces hard. Body appearance can

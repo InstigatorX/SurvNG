@@ -8,14 +8,46 @@ import numpy as np
 
 from survng.app.config import DetectorConfig
 from survng.app.person_reidentification import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
     OpenVinoAppearanceReidentifier,
     OpenVinoPersonReidentifier,
+    resolve_person_reid_preprocess,
 )
 
 
 class PersonReidentificationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.reidentifier = OpenVinoPersonReidentifier(DetectorConfig())
+
+    def test_osnet_paths_default_to_imagenet_rgb_preprocess(self) -> None:
+        self.assertEqual(resolve_person_reid_preprocess("osnet_x1_0_msmt17.xml"), "imagenet_rgb")
+        self.assertEqual(
+            resolve_person_reid_preprocess("person-reidentification-retail-0286.xml"),
+            "raw_bgr",
+        )
+        self.assertEqual(
+            resolve_person_reid_preprocess("osnet_x1_0_msmt17.xml", "raw_bgr"),
+            "raw_bgr",
+        )
+
+    def test_imagenet_rgb_tensor_matches_torchreid_convention(self) -> None:
+        config = DetectorConfig.model_validate({
+            "tracking": {
+                "reid_enabled": True,
+                "reid_model_path": "osnet_x1_0_msmt17.xml",
+            },
+        })
+        reidentifier = OpenVinoPersonReidentifier(config)
+        reidentifier.input_shape = (2, 2)
+        reidentifier.input_layout = "NCHW"
+        crop = np.full((2, 2, 3), (0, 0, 255), dtype=np.uint8)
+        tensor = reidentifier._image_tensor(crop)
+        expected = ((np.asarray([1.0, 0.0, 0.0], dtype=np.float32) - IMAGENET_MEAN) / IMAGENET_STD)
+        self.assertEqual(reidentifier.preprocess, "imagenet_rgb")
+        self.assertEqual(reidentifier.input_color_order, "RGB")
+        self.assertEqual(tensor.shape, (1, 3, 2, 2))
+        self.assertTrue(np.allclose(tensor[0, :, 0, 0], expected, atol=1e-6))
 
     def test_image_layout_detection_supports_nchw_and_nhwc(self) -> None:
         self.assertEqual(

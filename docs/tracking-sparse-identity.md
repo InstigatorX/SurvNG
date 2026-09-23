@@ -19,9 +19,10 @@ still score both engines on the same saved detections and embeddings.
 ## OpenVINO ReID upgrade (after association gates pass)
 
 1. Keep the association/memory pipeline fixed.
-2. Export an OSNet-class (or stronger) person ReID model to OpenVINO IR.
-3. Point `reid_model_path` at the new IR; recalibrate `reid_match_threshold` on
-   labeled same-camera pairs from the corpus.
+2. Install the torchreid OSNet-x1.0 MSMT17 IR with
+   `scripts/install-person-reid-model.sh`.
+3. Point `reid_model_path` at `models/person_reid_model/osnet_x1_0_msmt17.xml`;
+   recalibrate `reid_match_threshold` on labeled same-camera pairs from the corpus.
 4. Re-run held-out Compare profiles; accept only if false merges do not rise.
 5. Do not swap backbones to chase benchmark mAP without crop-quality gates.
 

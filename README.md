@@ -320,6 +320,7 @@ Install the face models with:
 
 ```bash
 scripts/install-face-model.sh
+scripts/install-person-reid-model.sh
 ```
 
 Enable recognition under **Admin → Detection → People Identity**. Set the face
@@ -327,8 +328,10 @@ embedding model to `models/face_model/face-recognition-resnet100-arcface-onnx.xm
 the landmark model to `models/face_model/landmarks-regression-retail-0009.xml`,
 and the detector model to `models/face_detector/face-detection-retail-0004.xml`.
 Also enable person ReID under Tracking and point it at
-`models/person_reid_model/person-reidentification-retail-0286.xml` (or an
-OSNet-class person ReID model when you prefer stronger clothing/local cues).
+`models/person_reid_model/osnet_x1_0_msmt17.xml`. Intel OMZ
+`person-reidentification-retail-0286` remains a fallback. OSNet uses ImageNet
+RGB preprocessing; do not reuse 0286 body-gallery thresholds against a new
+embedding space.
 
 Dedicated face detection supplies accurate face boxes without creating
 face-only incidents. SurvNG selects clear temporal face samples, aligns five
