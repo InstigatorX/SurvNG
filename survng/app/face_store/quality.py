@@ -35,6 +35,13 @@ class FaceMatch:
     margin: float | None
     reference_ids: tuple[int, ...]
     reference_scores: tuple[float, ...]
+    modality: str = ""
+    face_score: float | None = None
+    body_score: float | None = None
+    fusion_reason: str = ""
+    fusion_decision: str = ""
+    body_reference_ids: tuple[int, ...] = ()
+    body_reference_scores: tuple[float, ...] = ()
 
 
 class FaceTooSmallError(ValueError):

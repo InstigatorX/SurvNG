@@ -40,6 +40,7 @@ class FaceCandidate:
     exposure_score: float
     edge_clearance_ratio: float
     detection_source: str
+    person_track_id: str = ""
 
 
 @dataclass(slots=True)
@@ -118,6 +119,7 @@ def collect_face_candidates(
             if crop_result is None:
                 continue
             crop, crop_box = crop_result
+            person_track_id = _person_track_id(detected)
             retained.append(
                 FaceCandidate(
                     track_id=f"face-{track_index}",
@@ -131,6 +133,7 @@ def collect_face_candidates(
                     exposure_score=_finite_score(detected.get("face_exposure_score")),
                     edge_clearance_ratio=_edge_clearance(box, sample.frame),
                     detection_source=str(detected.get("detection_source") or "object_detector"),
+                    person_track_id=person_track_id,
                 )
             )
     retained.sort(
@@ -142,6 +145,23 @@ def collect_face_candidates(
         )
     )
     return tuple(retained[: max(1, int(max_per_event))])
+
+
+def _person_track_id(detected: dict[str, Any]) -> str:
+    """Prefer the parent person MOT/temporal track for body-identity fusion."""
+    for key in (
+        "parent_person_track_id",
+        "person_track_id",
+        "temporal_track_id",
+        "track_id",
+    ):
+        value = detected.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and not text.startswith("face-"):
+            return text
+    return ""
 
 
 def _candidate_score(

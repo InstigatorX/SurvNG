@@ -13,6 +13,7 @@ import numpy as np
 from ..face_recognition import OpenVinoFaceRecognizer
 from ..inference import InferenceUnavailable
 from ..incident_utils import event_snapshot_path
+from ..person_identity import FusionPolicy, fuse_identity_match
 from .quality import (
     FACE_OUTCOME_EMBEDDED,
     FACE_OUTCOME_FAILED,
@@ -126,7 +127,8 @@ class FaceStoreRecognitionMixin:
                     where canonical = 1 and (person_id is null or review_status = 'auto_identified')
                     order by observed_at desc, id desc limit ?
                 )
-                select o.id, o.event_id, o.candidate_track_id, o.embedding_blob
+                select o.id, o.event_id, o.candidate_track_id, o.embedding_blob,
+                    o.body_embedding_blob, o.body_embedding_model, o.quality_score
                 from face_observations o
                 where (o.person_id is null or (o.review_status = 'auto_identified' and o.candidate_track_id != ''))
                     and o.recognition_pending = 0
@@ -154,22 +156,41 @@ class FaceStoreRecognitionMixin:
                     or norm <= 1e-9
                 ):
                     continue
+                body_embedding = None
+                body_model = str(row["body_embedding_model"] or "")
+                if row["body_embedding_blob"] is not None and body_model:
+                    try:
+                        body_vector = np.frombuffer(row["body_embedding_blob"], dtype=np.float32)
+                        body_norm = float(np.linalg.norm(body_vector))
+                        if (
+                            body_vector.size > 0
+                            and np.all(np.isfinite(body_vector))
+                            and math.isfinite(body_norm)
+                            and body_norm > 1e-9
+                        ):
+                            body_embedding = body_vector / body_norm
+                    except (TypeError, ValueError):
+                        body_embedding = None
                 match = self._match_result(
                     connection,
                     int(row["id"]),
                     embedding / norm,
                     model_fingerprint,
+                    body_embedding=body_embedding,
+                    body_model_fingerprint=body_model,
+                    quality_score=float(row["quality_score"] or 0.0),
                 )
                 connection.execute(
                     """
                     update face_observations
                     set candidate_person_id = ?, candidate_confidence = ?,
-                        match_details_json = ?
+                        match_modality = ?, match_details_json = ?
                     where id = ? and (person_id is null or review_status = 'auto_identified')
                     """,
                     (
                         match.person_id,
                         match.score,
+                        str(match.modality or ""),
                         json.dumps(
                             {
                                 "person_id": match.person_id,
@@ -178,6 +199,13 @@ class FaceStoreRecognitionMixin:
                                 "margin": match.margin,
                                 "reference_ids": list(match.reference_ids),
                                 "reference_scores": list(match.reference_scores),
+                                "body_reference_ids": list(match.body_reference_ids),
+                                "body_reference_scores": list(match.body_reference_scores),
+                                "modality": match.modality,
+                                "face_score": match.face_score,
+                                "body_score": match.body_score,
+                                "fusion_reason": match.fusion_reason,
+                                "fusion_decision": match.fusion_decision,
                             },
                             separators=(",", ":"),
                         ),
@@ -308,6 +336,13 @@ class FaceStoreRecognitionMixin:
             ).fetchone()
         if row is None:
             return False
+        body_embedding, body_model = self._lookup_body_embedding(
+            int(row["event_id"]),
+            str(row["person_track_id"] or ""),
+        )
+        face_embedding: np.ndarray | None = None
+        quality = None
+        face_error: Exception | None = None
         try:
             box = parse_face_box(json.loads(row["box_json"] or "{}"))
             if box is None:
@@ -345,7 +380,45 @@ class FaceStoreRecognitionMixin:
             norm = float(np.linalg.norm(embedding))
             if not math.isfinite(norm) or norm <= 1e-9 or not np.all(np.isfinite(embedding)):
                 raise ValueError("Face embedding was empty or invalid.")
-            embedding = embedding / norm
+            face_embedding = embedding / norm
+        except InferenceUnavailable:
+            raise
+        except Exception as exc:
+            face_error = exc
+            if body_embedding is None:
+                outcome = (
+                    FACE_OUTCOME_TOO_SMALL
+                    if isinstance(exc, FaceTooSmallError)
+                    else FACE_OUTCOME_FAILED
+                )
+                with self._lock, self._connect() as connection:
+                    connection.execute(
+                        """
+                        update face_observations
+                        set recognition_error = ?, recognized_at = ?, recognition_pending = 0,
+                            recognition_outcome = ?
+                        where id = ?
+                        """,
+                        (
+                            str(exc)[:500],
+                            datetime.now(timezone.utc).isoformat(),
+                            outcome,
+                            observation_id,
+                        ),
+                    )
+                    identity_updates = []
+                    track_id = str(row["candidate_track_id"] or "")
+                    if track_id:
+                        identity_updates = self._reconcile_candidate_track(
+                            connection, int(row["event_id"]), track_id,
+                        )
+                self._emit_reconciled_identity_updates(identity_updates)
+                return bool(identity_updates)
+
+        try:
+            quality_score = (
+                float(quality.score) if quality is not None else float(row["quality_score"] or 0.0)
+            )
             now = datetime.now(timezone.utc).isoformat()
             with self._lock, self._connect() as connection:
                 # Inference runs outside the lock; an operator may have reviewed
@@ -358,23 +431,20 @@ class FaceStoreRecognitionMixin:
                 match = self._match_result(
                     connection,
                     observation_id,
-                    embedding,
-                    model_fingerprint,
+                    face_embedding,
+                    model_fingerprint if face_embedding is not None else "",
+                    body_embedding=body_embedding,
+                    body_model_fingerprint=body_model,
+                    quality_score=quality_score,
+                    auto_identify_enabled=bool(
+                        getattr(recognizer.config, "face_auto_identify_enabled", False)
+                    ),
                 )
                 candidate_id = match.person_id
                 candidate_confidence = match.score
                 auto_identified = bool(
-                    getattr(recognizer.config, "face_auto_identify_enabled", False)
+                    match.fusion_decision == "auto"
                     and candidate_id is not None
-                    and candidate_confidence is not None
-                    and candidate_confidence
-                    >= getattr(recognizer.config, "face_auto_identify_threshold", 1.0)
-                    and match.runner_up_score is not None
-                    and match.margin is not None
-                    and match.margin
-                    >= getattr(recognizer.config, "face_auto_identify_margin", 1.0)
-                    and len(match.reference_ids) >= 3
-                    and quality.score >= 0.45
                     and not str(row["candidate_track_id"] or "")
                 )
                 details = json.dumps(
@@ -385,39 +455,69 @@ class FaceStoreRecognitionMixin:
                         "margin": match.margin,
                         "reference_ids": list(match.reference_ids),
                         "reference_scores": list(match.reference_scores),
-                        "quality_score": quality.score,
+                        "body_reference_ids": list(match.body_reference_ids),
+                        "body_reference_scores": list(match.body_reference_scores),
+                        "quality_score": quality_score,
+                        "modality": match.modality,
+                        "face_score": match.face_score,
+                        "body_score": match.body_score,
+                        "fusion_reason": match.fusion_reason,
+                        "fusion_decision": match.fusion_decision,
+                        "face_error": str(face_error)[:200] if face_error else "",
                     },
                     separators=(",", ":"),
                 )
-                quality_payload = json.dumps(
-                    {
-                        "sharpness": quality.sharpness,
-                        "exposure": quality.exposure,
-                        "contrast": quality.contrast,
-                        "size": quality.size,
-                        "edge_detail": quality.edge_detail,
-                    },
-                    separators=(",", ":"),
-                )
+                quality_payload = "{}"
+                if quality is not None:
+                    quality_payload = json.dumps(
+                        {
+                            "sharpness": quality.sharpness,
+                            "exposure": quality.exposure,
+                            "contrast": quality.contrast,
+                            "size": quality.size,
+                            "edge_detail": quality.edge_detail,
+                        },
+                        separators=(",", ":"),
+                    )
+                if face_embedding is not None:
+                    outcome = FACE_OUTCOME_EMBEDDED
+                elif body_embedding is not None and candidate_id is not None:
+                    outcome = FACE_OUTCOME_EMBEDDED
+                elif isinstance(face_error, FaceTooSmallError):
+                    outcome = FACE_OUTCOME_TOO_SMALL
+                else:
+                    outcome = FACE_OUTCOME_FAILED
                 connection.execute(
                     """
                     update face_observations
-                        set embedding_blob = ?, embedding_model = ?,
+                        set embedding_blob = coalesce(?, embedding_blob),
+                        embedding_model = case when ? is not null then ? else embedding_model end,
+                        body_embedding_blob = coalesce(?, body_embedding_blob),
+                        body_embedding_model = case when ? != '' then ? else body_embedding_model end,
+                        match_modality = ?,
                         person_id = case when person_id is null and ? then ? else person_id end,
                         review_status = case when person_id is null and ? then 'auto_identified' else review_status end,
                         match_confidence = case when person_id is null and ? then ? else match_confidence end,
                         auto_identified = case when person_id is null and ? then 1 else auto_identified end,
                         candidate_person_id = case when person_id is null and not ? then ? else null end,
                         candidate_confidence = case when person_id is null and not ? then ? else null end,
-                        quality_score = ?, quality_json = ?, quality_version = ?,
+                        quality_score = coalesce(?, quality_score),
+                        quality_json = case when ? != '{}' then ? else quality_json end,
+                        quality_version = case when ? != '{}' then ? else quality_version end,
                         match_details_json = ?,
-                        recognition_error = '', recognized_at = ?, recognition_pending = 0,
+                        recognition_error = ?,
+                        recognized_at = ?, recognition_pending = 0,
                         recognition_outcome = ?
                     where id = ?
                     """,
                     (
-                        embedding.astype(np.float32).tobytes(),
+                        face_embedding.astype(np.float32).tobytes() if face_embedding is not None else None,
+                        face_embedding,
                         model_fingerprint,
+                        body_embedding.astype(np.float32).tobytes() if body_embedding is not None else None,
+                        body_model,
+                        body_model,
+                        str(match.modality or ""),
                         auto_identified,
                         candidate_id,
                         auto_identified,
@@ -428,12 +528,15 @@ class FaceStoreRecognitionMixin:
                         candidate_id,
                         auto_identified,
                         candidate_confidence,
-                        quality.score,
+                        quality.score if quality is not None else None,
+                        quality_payload,
+                        quality_payload,
                         quality_payload,
                         FACE_QUALITY_VERSION,
                         details,
+                        str(face_error)[:500] if face_error and face_embedding is None else "",
                         now,
-                        FACE_OUTCOME_EMBEDDED,
+                        outcome,
                         observation_id,
                     ),
                 )
@@ -856,24 +959,151 @@ class FaceStoreRecognitionMixin:
         )
         return match.person_id, match.score
 
+    def _fusion_policy(self) -> FusionPolicy:
+        config = getattr(self.recognizer, "config", None)
+        return FusionPolicy(
+            face_suggest_threshold=float(
+                getattr(config, "face_match_threshold", 0.30) or 0.30
+            ),
+            face_auto_threshold=float(
+                getattr(config, "face_auto_identify_threshold", 0.55) or 0.55
+            ),
+            face_auto_margin=float(
+                getattr(config, "face_auto_identify_margin", 0.12) or 0.12
+            ),
+            body_suggest_threshold=float(
+                getattr(config, "people_body_match_threshold", 0.70) or 0.70
+            ),
+            body_reinforce_threshold=float(
+                getattr(config, "people_body_reinforce_threshold", 0.75) or 0.75
+            ),
+            fused_suggest_threshold=float(
+                getattr(config, "people_fused_match_threshold", 0.45) or 0.45
+            ),
+            fused_auto_threshold=float(
+                getattr(config, "people_fused_auto_threshold", 0.62) or 0.62
+            ),
+            fused_auto_margin=float(
+                getattr(config, "people_fused_auto_margin", 0.10) or 0.10
+            ),
+            disagreement_gap=float(
+                getattr(config, "people_modality_disagreement_gap", 0.12) or 0.12
+            ),
+            face_weight=float(getattr(config, "people_face_fusion_weight", 0.65) or 0.65),
+            body_weight=float(getattr(config, "people_body_fusion_weight", 0.35) or 0.35),
+        )
+
+    def _lookup_body_embedding(
+        self,
+        event_id: int,
+        person_track_id: str,
+    ) -> tuple[np.ndarray | None, str]:
+        index = getattr(self, "appearance_index", None)
+        if index is None or not person_track_id:
+            return None, ""
+        try:
+            track_id = int(str(person_track_id).strip())
+        except (TypeError, ValueError):
+            return None, ""
+        lookup = getattr(index, "person_embedding_for_track", None)
+        if not callable(lookup):
+            return None, ""
+        try:
+            record = lookup(int(event_id), track_id)
+        except Exception:
+            LOGGER.exception(
+                "people identity body lookup failed for event %s track %s",
+                event_id,
+                person_track_id,
+            )
+            return None, ""
+        if not isinstance(record, dict):
+            return None, ""
+        embedding = record.get("embedding")
+        fingerprint = str(record.get("model_fingerprint") or "")
+        try:
+            vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            return None, ""
+        if vector.size == 0 or not np.all(np.isfinite(vector)):
+            return None, ""
+        norm = float(np.linalg.norm(vector))
+        if not math.isfinite(norm) or norm <= 1e-9:
+            return None, ""
+        return vector / norm, fingerprint
+
+    def _rank_modality(
+        self,
+        *,
+        observation_id: int,
+        embedding: np.ndarray | None,
+        model_fingerprint: str,
+        gallery_rows: list[dict[str, Any]],
+        rejected_people: set[int],
+        threshold: float,
+    ) -> tuple[int | None, float | None, float | None, tuple[int, ...], tuple[float, ...]]:
+        if (
+            embedding is None
+            or embedding.ndim != 1
+            or embedding.size == 0
+            or not np.all(np.isfinite(embedding))
+            or not model_fingerprint
+        ):
+            return None, None, None, (), ()
+        scores: dict[int, list[tuple[float, int]]] = {}
+        for row in gallery_rows:
+            if int(row["id"]) == observation_id:
+                continue
+            reference = row.get("_embedding")
+            if reference is None:
+                continue
+            score = float(np.dot(embedding, reference))
+            if math.isfinite(score):
+                scores.setdefault(int(row["person_id"]), []).append((score, int(row["id"])))
+        ranked: list[tuple[float, int, list[tuple[float, int]]]] = []
+        for person_id, values in scores.items():
+            if person_id in rejected_people:
+                continue
+            top = sorted(values, reverse=True)[:3]
+            ranked.append((float(sum(item[0] for item in top) / len(top)), person_id, top))
+        if not ranked:
+            return None, None, None, (), ()
+        ranked.sort(reverse=True)
+        score, person_id, top = ranked[0]
+        runner_up = ranked[1][0] if len(ranked) > 1 else None
+        score = max(0.0, min(1.0, score))
+        if score < threshold:
+            return (
+                None,
+                round(score, 4),
+                round(runner_up, 4) if runner_up is not None else None,
+                tuple(item[1] for item in top),
+                tuple(round(item[0], 4) for item in top),
+            )
+        return (
+            person_id,
+            round(score, 4),
+            round(runner_up, 4) if runner_up is not None else None,
+            tuple(item[1] for item in top),
+            tuple(round(item[0], 4) for item in top),
+        )
+
     def _match_result(
         self,
         connection: sqlite3.Connection,
         observation_id: int,
-        embedding: np.ndarray,
+        embedding: np.ndarray | None,
         model_fingerprint: str,
+        *,
+        body_embedding: np.ndarray | None = None,
+        body_model_fingerprint: str = "",
+        quality_score: float = 0.0,
+        auto_identify_enabled: bool = False,
     ) -> FaceMatch:
         recognizer = self.recognizer
         if recognizer is None:
             return FaceMatch(None, None, None, None, (), ())
-        if embedding.ndim != 1 or embedding.size == 0 or not np.all(np.isfinite(embedding)):
-            return FaceMatch(None, None, None, None, (), ())
-        rows = self._reference_gallery(
-            connection,
-            model_fingerprint,
-            max(1, int(recognizer.config.face_max_references)),
-            embedding.shape,
-        )
+        policy = self._fusion_policy()
         rejected_people = {
             int(row["person_id"])
             for row in connection.execute(
@@ -888,45 +1118,103 @@ class FaceStoreRecognitionMixin:
                 (observation_id,),
             ).fetchall()
         }
-        scores: dict[int, list[tuple[float, int]]] = {}
-        for row in rows:
-            if int(row["id"]) == observation_id:
-                continue
-            reference = row["_embedding"]
-            score = float(np.dot(embedding, reference))
-            if math.isfinite(score):
-                scores.setdefault(int(row["person_id"]), []).append((score, int(row["id"])))
-        ranked: list[tuple[float, int, list[tuple[float, int]]]] = []
-        for person_id, values in scores.items():
-            if person_id in rejected_people:
-                continue
-            top = sorted(values, reverse=True)[:3]
-            ranked.append((float(sum(item[0] for item in top) / len(top)), person_id, top))
-        if not ranked:
-            return FaceMatch(None, None, None, None, (), ())
-        ranked.sort(reverse=True)
-        score, person_id, top = ranked[0]
-        runner_up = ranked[1][0] if len(ranked) > 1 else None
-        score = max(0.0, min(1.0, score))
-        margin = score - runner_up if runner_up is not None else score
-        result = FaceMatch(
-            person_id,
-            round(score, 4),
-            round(runner_up, 4) if runner_up is not None else None,
-            round(margin, 4),
-            tuple(item[1] for item in top),
-            tuple(round(item[0], 4) for item in top),
-        )
-        if score < recognizer.config.face_match_threshold:
-            return FaceMatch(
-                None,
-                result.score,
-                result.runner_up_score,
-                result.margin,
-                result.reference_ids,
-                result.reference_scores,
+        face_rows: list[dict[str, Any]] = []
+        if embedding is not None and model_fingerprint:
+            face_rows = self._reference_gallery(
+                connection,
+                model_fingerprint,
+                max(1, int(recognizer.config.face_max_references)),
+                embedding.shape,
             )
-        return result
+        body_rows: list[dict[str, Any]] = []
+        if body_embedding is not None and body_model_fingerprint:
+            body_rows = self._body_reference_gallery(
+                connection,
+                body_model_fingerprint,
+                max(1, int(recognizer.config.face_max_references)),
+                body_embedding.shape,
+            )
+        face_person, face_score, face_runner, face_refs, face_ref_scores = self._rank_modality(
+            observation_id=observation_id,
+            embedding=embedding,
+            model_fingerprint=model_fingerprint,
+            gallery_rows=face_rows,
+            rejected_people=rejected_people,
+            threshold=policy.face_suggest_threshold,
+        )
+        body_person, body_score, body_runner, body_refs, body_ref_scores = self._rank_modality(
+            observation_id=observation_id,
+            embedding=body_embedding,
+            model_fingerprint=body_model_fingerprint,
+            gallery_rows=body_rows,
+            rejected_people=rejected_people,
+            threshold=policy.body_suggest_threshold,
+        )
+        decision = fuse_identity_match(
+            face_person_id=face_person,
+            face_score=face_score,
+            face_runner_up=face_runner,
+            face_reference_ids=face_refs,
+            face_reference_scores=face_ref_scores,
+            body_person_id=body_person,
+            body_score=body_score,
+            body_runner_up=body_runner,
+            body_reference_ids=body_refs,
+            body_reference_scores=body_ref_scores,
+            quality_score=quality_score,
+            auto_identify_enabled=auto_identify_enabled,
+            policy=policy,
+        )
+        match = decision.match
+        return FaceMatch(
+            match.person_id if decision.decision != "none" else None,
+            match.score,
+            match.runner_up_score,
+            match.margin,
+            match.face_reference_ids or match.body_reference_ids,
+            match.face_reference_scores or match.body_reference_scores,
+            modality=match.modality,
+            face_score=match.face_score,
+            body_score=match.body_score,
+            fusion_reason=decision.reason,
+            fusion_decision=decision.decision,
+            body_reference_ids=match.body_reference_ids,
+            body_reference_scores=match.body_reference_scores,
+        )
+
+    def _body_reference_gallery(
+        self,
+        connection: sqlite3.Connection,
+        model_fingerprint: str,
+        limit: int,
+        embedding_shape: tuple[int, ...],
+    ) -> list[dict[str, Any]]:
+        if not model_fingerprint:
+            return []
+        with self._gallery_lock:
+            key = (
+                f"body:{model_fingerprint}",
+                embedding_shape,
+                limit,
+                self._gallery_generation,
+            )
+            if key == getattr(self, "_body_gallery_cache_key", None):
+                return list(getattr(self, "_body_gallery_cache", []))
+            rows = connection.execute(
+                """
+                select id, person_id, camera_id, confidence, quality_score, box_json,
+                    reference_pinned, observed_at, body_embedding_blob as embedding_blob
+                from face_observations
+                where person_id is not null and body_embedding_blob is not null
+                    and body_embedding_model = ? and review_status = 'confirmed'
+                order by observed_at desc, id desc
+                """,
+                (model_fingerprint,),
+            ).fetchall()
+            selected = self._select_reference_gallery(rows, limit, embedding_shape)
+            self._body_gallery_cache_key = key
+            self._body_gallery_cache = selected
+            return selected
 
     def _reference_gallery(
         self,
@@ -1058,3 +1346,5 @@ class FaceStoreRecognitionMixin:
             self._gallery_generation += 1
             self._gallery_cache_key = None
             self._gallery_cache = []
+            self._body_gallery_cache_key = None
+            self._body_gallery_cache = []

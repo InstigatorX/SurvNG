@@ -338,7 +338,8 @@ class FaceStoreQueryMixin:
                     select o.id as observation_id, o.event_id, o.person_id, o.confidence, o.match_confidence,
                         o.candidate_person_id, o.candidate_confidence,
                         o.candidate_track_id, o.consensus_json,
-                        o.review_status, o.auto_identified,
+                        o.review_status, o.auto_identified, o.match_modality,
+                        o.person_track_id, o.match_details_json,
                         m.cluster_id as unknown_cluster_id,
                         p.name as person_name, candidate.name as candidate_person_name
                     from face_observations o
@@ -365,6 +366,21 @@ class FaceStoreQueryMixin:
                         item["consensus"] = json.loads(item.pop("consensus_json") or "{}")
                     except (TypeError, json.JSONDecodeError):
                         item["consensus"] = {}
+                    try:
+                        details = json.loads(item.pop("match_details_json") or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        details = {}
+                    if isinstance(details, dict):
+                        item["modality"] = str(
+                            item.pop("match_modality", None)
+                            or details.get("modality")
+                            or ""
+                        )
+                        item["face_score"] = details.get("face_score")
+                        item["body_score"] = details.get("body_score")
+                        item["fusion_reason"] = details.get("fusion_reason")
+                    else:
+                        item["modality"] = str(item.pop("match_modality", "") or "")
                     observations.append(item)
         return observations
 
@@ -422,6 +438,7 @@ class FaceStoreQueryMixin:
     def _observation_row(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item.pop("embedding_blob", None)
+        item.pop("body_embedding_blob", None)
         try:
             item["box"] = parse_face_box(json.loads(item.pop("box_json"))) or {}
         except (TypeError, json.JSONDecodeError):
@@ -438,4 +455,9 @@ class FaceStoreQueryMixin:
         item["reference_pinned"] = bool(item.get("reference_pinned"))
         item["reference_auto_pinned"] = bool(item.get("reference_auto_pinned"))
         item["auto_identified"] = bool(item.get("auto_identified"))
+        details = item.get("match_details") if isinstance(item.get("match_details"), dict) else {}
+        item["modality"] = str(item.get("match_modality") or details.get("modality") or "")
+        item["face_score"] = details.get("face_score")
+        item["body_score"] = details.get("body_score")
+        item["fusion_reason"] = details.get("fusion_reason")
         return item

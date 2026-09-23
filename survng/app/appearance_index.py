@@ -326,6 +326,53 @@ class AppearanceIndex:
             key=lambda item: (-float(item["similarity"]), str(item["created_at"])),
         )[:bounded_limit]
 
+    def person_embedding_for_track(
+        self,
+        event_id: int,
+        track_id: int,
+    ) -> dict[str, Any] | None:
+        """Return one durable person ReID vector for named-identity fusion.
+
+        Embeddings stay inside this boundary; callers receive a copy intended for
+        private people-identity storage, not for API responses.
+        """
+        if event_id <= 0 or track_id <= 0:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select model_kind, model_fingerprint, embedding_size, embedding_blob,
+                    match_threshold, quality, observation_count, source
+                from appearance_embeddings
+                where event_id = ? and track_id = ? and model_kind = 'person'
+                order by
+                    case source
+                        when 'tracking_multiframe' then 0
+                        when 'deferred_snapshot' then 1
+                        else 2
+                    end,
+                    quality desc,
+                    observation_count desc,
+                    id desc
+                limit 1
+                """,
+                (int(event_id), int(track_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        vector = self._vector(row)
+        if vector is None:
+            return None
+        return {
+            "embedding": np.ascontiguousarray(vector, dtype=np.float32).copy(),
+            "model_fingerprint": str(row["model_fingerprint"] or ""),
+            "embedding_size": int(row["embedding_size"] or 0),
+            "match_threshold": float(row["match_threshold"] or 0.0),
+            "quality": float(row["quality"] or 0.0),
+            "observation_count": int(row["observation_count"] or 0),
+            "source": str(row["source"] or ""),
+        }
+
     def status(self) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
