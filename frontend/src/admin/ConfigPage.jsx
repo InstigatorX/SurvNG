@@ -5083,7 +5083,7 @@ function spatialAlignmentSummary(alignment = {}, { mainKnown = true } = {}) {
       label: "Checking",
       detail: mainKnown
         ? "Startup FOV check in progress"
-        : "Startup FOV check — using latest main recording still (capture only as fallback)",
+        : "Startup FOV check — using latest main recording still",
       warning: false,
     };
   }
