@@ -2530,6 +2530,11 @@ class RecordedMotionObjectDetector:
                             "y2": fy2 + top,
                         },
                         "parent_person_box": person.get("box"),
+                        "parent_person_track_id": (
+                            person.get("temporal_track_id")
+                            if person.get("temporal_track_id") not in (None, "")
+                            else person.get("track_id")
+                        ),
                     }
                 )
         return detected_faces

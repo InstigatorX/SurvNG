@@ -91,6 +91,7 @@ class InferenceLifecycle:
                 database_dir=database_dir,
                 media_storage=media_storage,
                 database_write_lock=self.database_write_lock,
+                appearance_index=appearance_index,
             )
             semantic_search = build_semantic_search(
                 semantic_config,

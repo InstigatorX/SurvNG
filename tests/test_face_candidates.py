@@ -56,7 +56,16 @@ def test_collect_face_candidates_keeps_people_separate_and_bounded() -> None:
     )
 
 
-def test_collect_face_candidates_ignores_non_faces_and_invalid_boxes() -> None:
+def test_collect_face_candidates_keeps_parent_person_track_id() -> None:
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    face = _face(20, quality=0.9)
+    face["parent_person_track_id"] = 42
+    candidates = collect_face_candidates(
+        (FaceCandidateSample(0.0, frame, (face,)),)
+    )
+    assert len(candidates) == 1
+    assert candidates[0].person_track_id == "42"
+
     frame = np.zeros((120, 200, 3), dtype=np.uint8)
     candidates = collect_face_candidates((
         FaceCandidateSample(

@@ -38,7 +38,7 @@ class FaceIdentityReconciliationTest(unittest.TestCase):
         self.matches: dict[int, FaceMatch] = {}
         self.match_patch = patch.object(
             self.store, "_match_result",
-            side_effect=lambda _connection, observation_id, *_args: self.matches[observation_id],
+            side_effect=lambda _connection, observation_id, *_args, **_kwargs: self.matches[observation_id],
         )
         self.match_patch.start()
         self.addCleanup(self.match_patch.stop)

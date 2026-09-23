@@ -14,6 +14,19 @@ from .config import DetectorConfig
 
 
 LOGGER = logging.getLogger(__name__)
+IMAGENET_MEAN = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def resolve_person_reid_preprocess(model_path: str, configured: str = "") -> str:
+    """Choose crop preprocessing. Torchreid OSNet exports expect ImageNet RGB."""
+    value = str(configured or "").strip().lower()
+    if value in {"raw_bgr", "imagenet_rgb"}:
+        return value
+    name = Path(model_path).name.lower()
+    if name.startswith("osnet") or "osnet_" in name:
+        return "imagenet_rgb"
+    return "raw_bgr"
 
 
 class OpenVinoPersonReidentifier:
@@ -44,7 +57,20 @@ class OpenVinoPersonReidentifier:
             if match_threshold is None
             else match_threshold
         )
-        self.input_color_order = input_color_order.upper()
+        configured_preprocess = (
+            str(getattr(tracking, "reid_preprocess", "") or "")
+            if kind == "Person"
+            else ""
+        )
+        self.preprocess = resolve_person_reid_preprocess(
+            self.configured_model_path,
+            configured_preprocess,
+        )
+        self.input_color_order = (
+            "RGB"
+            if self.preprocess == "imagenet_rgb"
+            else input_color_order.upper()
+        )
         self.ready = False
         self.error = ""
         self.loaded_device = ""
@@ -142,6 +168,10 @@ class OpenVinoPersonReidentifier:
         tensor = resized.astype(np.float32)
         if self.input_color_order == "RGB":
             tensor = tensor[:, :, ::-1]
+        if self.preprocess == "imagenet_rgb":
+            tensor /= 255.0
+            tensor -= IMAGENET_MEAN
+            tensor /= IMAGENET_STD
         if self.input_layout == "NCHW":
             tensor = np.transpose(tensor, (2, 0, 1))
         return np.expand_dims(tensor, axis=0)
@@ -184,6 +214,7 @@ class OpenVinoPersonReidentifier:
             "model_fingerprint": self.model_fingerprint,
             "input_shape": list(self.input_shape),
             "input_color_order": self.input_color_order,
+            "preprocess": self.preprocess,
             "embedding_size": self.embedding_size,
             "model_load_ms": self.model_load_ms,
             "match_threshold": self.match_threshold,

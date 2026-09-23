@@ -135,9 +135,12 @@ export function FaceReviewDialog({ observation, people, timeZone, onClose, onUpd
         <button type="button" className="overlay-close" onClick={onClose} aria-label="Close"><X size={22} /></button>
         <img src={appUrl(`/api/faces/observations/${observation.id}/crop.jpg?padding=0.45`)} alt="Selected face" />
         <div className="face-review-form">
-          <div><strong id="face-review-title" ref={headingRef} tabIndex={-1}>{observation.person_name || "Unknown face"}</strong><span>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</span></div>
+          <div><strong id="face-review-title" ref={headingRef} tabIndex={-1}>{observation.person_name || "Unknown person"}</strong><span>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</span></div>
           <div className="face-match-summary">
             <span>Face quality <strong>{observation.quality_score != null ? `${Math.round(Number(observation.quality_score) * 100)}%` : "Not scored"}</strong></span>
+            {observation.modality || observation.match_details?.modality ? <span>Match modality <strong>{observation.modality || observation.match_details.modality}</strong></span> : null}
+            {observation.face_score != null || observation.match_details?.face_score != null ? <span>Face score <strong>{Math.round(Number(observation.face_score ?? observation.match_details.face_score) * 100)}%</strong></span> : null}
+            {observation.body_score != null || observation.match_details?.body_score != null ? <span>Body score <strong>{Math.round(Number(observation.body_score ?? observation.match_details.body_score) * 100)}%</strong></span> : null}
             {Number(observation.consensus?.candidate_count || 0) > 1 ? <span>Selected from <strong>{observation.consensus.candidate_count} incident frames</strong>{Number(observation.consensus?.agreement_count || 0) > 1 ? ` · ${observation.consensus.agreement_count} agreed on identity` : ""}</span> : null}
             {observation.match_details?.reference_ids?.length ? <span>Match supported by <strong>{observation.match_details.reference_ids.length} strongest references</strong></span> : null}
             {observation.match_details?.margin != null ? <span>Lead over next person <strong>{Math.round(Number(observation.match_details.margin) * 100)} points</strong></span> : null}
@@ -580,7 +583,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
               <img src={appUrl(`/api/faces/observations/${observation.id}/crop.jpg`)} alt={observation.person_name || "Unknown face"} loading="lazy" />
               <span className="face-card-hud">
                 <strong>{observation.person_name || (observation.candidate_person_name ? `Suggested: ${observation.candidate_person_name}` : "Unknown")}</strong>
-                <small>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</small>
+                <small>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}{observation.modality ? ` · ${observation.modality}` : ""}</small>
               </span>
               <span className="face-confidence">{Number(observation.consensus?.candidate_count || 0) > 1 ? `Best of ${observation.consensus.candidate_count} · ` : ""}{observation.candidate_confidence != null ? `${Math.round(Number(observation.candidate_confidence) * 100)}% match` : `${Math.round(Number(observation.confidence || 0) * 100)}%`}</span>
             </button>

@@ -338,6 +338,9 @@ class IncidentQueryService:
                             else "cluster"
                         ),
                         "confidence": round(score, 4),
+                        "modality": str(observation.get("modality") or ""),
+                        "face_score": observation.get("face_score"),
+                        "body_score": observation.get("body_score"),
                         "candidate_count": max(
                             1,
                             int((observation.get("consensus") or {}).get("candidate_count") or 1),

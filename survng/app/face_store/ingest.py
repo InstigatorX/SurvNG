@@ -35,6 +35,7 @@ class FaceStoreIngestMixin:
             for candidate in candidates:
                 box = parse_face_box(candidate.get("box"))
                 track_id = str(candidate.get("track_id") or "").strip()
+                person_track_id = str(candidate.get("person_track_id") or "").strip()
                 if box is None or not track_id:
                     continue
                 try:
@@ -64,8 +65,8 @@ class FaceStoreIngestMixin:
                         event_id, object_index, camera_id, snapshot_path, box_json,
                         confidence, observed_at, created_at, candidate_track_id,
                         candidate_rank, candidate_offset_seconds, canonical,
-                        quality_score, quality_json
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        quality_score, quality_json, person_track_id
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id, next_index, camera_id, snapshot_path,
@@ -74,6 +75,7 @@ class FaceStoreIngestMixin:
                         track_id, rank, offset_seconds, int(rank == 1),
                         max(0.0, min(1.0, quality_score)),
                         json.dumps(quality_payload, separators=(",", ":")),
+                        person_track_id,
                     ),
                 )
                 next_index += 1

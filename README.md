@@ -308,19 +308,48 @@ Camera Settings also includes an on-demand **Motion Diagnostics** viewer for the
 
 ONVIF event evidence is stored in the per-camera, thread-safe evidence repository for diagnostics. It is never presented as a visual validator in the guided configuration.
 
-## Face Recognition
+## People Identity (Face + Body Fusion)
 
-SurvNG stores detected face observations separately from object detections. Install the default OpenVINO embedding model with:
+SurvNG recognizes named people by fusing face embeddings with whole-body person
+ReID. Face observations remain the review unit in People, but matching can use
+face, body, or both when the parent person track has a durable appearance
+vector. Tracking ReID and named People identity stay separate policies: track
+continuity is not automatic enrollment.
+
+Install the face models with:
 
 ```bash
 scripts/install-face-model.sh
+scripts/install-person-reid-model.sh
 ```
 
-Then enable face recognition under Admin > General > Object Detection. Set the embedding model to `models/face_model/face-recognition-resnet100-arcface-onnx.xml`, the landmark model to `models/face_model/landmarks-regression-retail-0009.xml`, and the detector model to `models/face_detector/face-detection-retail-0004.xml`. The dedicated detector supplies accurate face boxes without creating face-only incidents. SurvNG selects the clearest face from the recorded temporal samples, aligns five landmarks, and generates a 512-dimensional ArcFace embedding.
+Enable recognition under **Admin → Detection → People Identity**. Set the face
+embedding model to `models/face_model/face-recognition-resnet100-arcface-onnx.xml`,
+the landmark model to `models/face_model/landmarks-regression-retail-0009.xml`,
+and the detector model to `models/face_detector/face-detection-retail-0004.xml`.
+Also enable person ReID under Tracking and point it at
+`models/person_reid_model/osnet_x1_0_msmt17.xml`. Intel OMZ
+`person-reidentification-retail-0286` remains a fallback. OSNet uses ImageNet
+RGB preprocessing; do not reuse 0286 body-gallery thresholds against a new
+embedding space.
 
-Confirmed observations form each person's trusted reference gallery. SurvNG selects a quality-weighted, identity-consistent, camera-diverse subset rather than simply using the newest images. A pinned reference is always retained. New matches remain reviewable suggestions by default; optional automatic identification requires a higher score, a clear lead over the next person, at least three supporting references, and a sufficiently good input image. Automatically identified observations do not become references until a person confirms them, preventing recognition errors from teaching the gallery. Model binaries are intentionally excluded from Git; the installer restores them on a new server.
+Dedicated face detection supplies accurate face boxes without creating
+face-only incidents. SurvNG selects clear temporal face samples, aligns five
+landmarks, and generates a 512-dimensional ArcFace embedding. When the parent
+person track has a body embedding, SurvNG stores that vector on the same
+observation and fuses the two rankings.
 
-The default ArcFace cosine-similarity threshold is `0.40`. Raise it to reduce false matches or lower it cautiously to recognize more difficult views; thresholds from the previous embedding model are not directly comparable.
+Confirmed observations form each person's trusted reference gallery for both
+modalities. New matches remain reviewable suggestions by default. Automatic
+identification requires a strong face match or a fused face+body agreement;
+body-only matches never auto-identify. Automatically identified observations do
+not become references until confirmed. Model binaries are intentionally
+excluded from Git; the installer restores them on a new server.
+
+Default face suggestion threshold is `0.30`. Body suggestion defaults to
+`0.70`. Fused suggestion defaults to `0.45`. Thresholds are not interchangeable
+across embedding model versions.
+
 
 ## MQTT
 

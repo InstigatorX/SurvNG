@@ -52,9 +52,11 @@ class FaceStore(
         database_dir: Path | None = None,
         media_storage: MediaStorageRegistry | None = None,
         database_write_lock: threading.RLock | None = None,
+        appearance_index: Any | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.media_storage = media_storage
+        self.appearance_index = appearance_index
         resolved_database_dir = (database_dir or self.storage_dir).resolve()
         resolved_database_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = resolved_database_dir / "survng.sqlite3"
@@ -70,6 +72,8 @@ class FaceStore(
         self._gallery_generation = 0
         self._gallery_cache_key: tuple[str, tuple[int, ...], int, int] | None = None
         self._gallery_cache: list[dict[str, Any]] = []
+        self._body_gallery_cache_key: tuple[str, tuple[int, ...], int, int] | None = None
+        self._body_gallery_cache: list[dict[str, Any]] = []
         self._directory_revision_instance = uuid.uuid4().hex
         self._identity_event_publisher: Callable[[dict[str, Any]], None] | None = None
         self._recognition_refill_needed = threading.Event()
@@ -220,6 +224,10 @@ class FaceStore(
                 "canonical": "alter table face_observations add column canonical integer not null default 1",
                 "duplicate_of_observation_id": "alter table face_observations add column duplicate_of_observation_id integer",
                 "consensus_json": "alter table face_observations add column consensus_json text not null default '{}'",
+                "person_track_id": "alter table face_observations add column person_track_id text not null default ''",
+                "body_embedding_blob": "alter table face_observations add column body_embedding_blob blob",
+                "body_embedding_model": "alter table face_observations add column body_embedding_model text not null default ''",
+                "match_modality": "alter table face_observations add column match_modality text not null default ''",
             }
             for name, statement in migrations.items():
                 if name not in columns:

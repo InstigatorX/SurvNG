@@ -1155,6 +1155,7 @@ class MotionDecisionHandler:
                 },
                 "confidence": candidate.confidence,
                 "track_id": candidate.track_id,
+                "person_track_id": candidate.person_track_id,
                 "rank": candidate.rank,
                 "offset_seconds": candidate.offset_seconds,
                 "quality_score": candidate.quality_score,

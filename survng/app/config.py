@@ -671,6 +671,7 @@ class ObjectTrackingConfig(BaseModel):
     reid_enabled: bool = False
     reid_model_path: str = Field(default="", max_length=4096)
     reid_device: str = Field(default="AUTO", min_length=1, max_length=64)
+    reid_preprocess: Literal["", "raw_bgr", "imagenet_rgb"] = ""
     reid_match_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     reid_max_age_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     reid_max_embeddings_per_frame: int = Field(default=8, ge=1, le=64)
@@ -798,6 +799,15 @@ class DetectorConfig(BaseModel):
     face_auto_identify_margin: float = Field(default=0.12, ge=0.0, le=1.0)
     face_min_size: int = Field(default=48, ge=16, le=1024)
     face_max_references: int = Field(default=20, ge=1, le=200)
+    # Face + body fusion for named People identity (local-only).
+    people_body_match_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+    people_body_reinforce_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    people_fused_match_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
+    people_fused_auto_threshold: float = Field(default=0.62, ge=0.0, le=1.0)
+    people_fused_auto_margin: float = Field(default=0.10, ge=0.0, le=1.0)
+    people_modality_disagreement_gap: float = Field(default=0.12, ge=0.0, le=1.0)
+    people_face_fusion_weight: float = Field(default=0.65, ge=0.0, le=1.0)
+    people_body_fusion_weight: float = Field(default=0.35, ge=0.0, le=1.0)
     confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     event_candidate_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
     nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)

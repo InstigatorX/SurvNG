@@ -47,6 +47,9 @@ def identity_summaries(faces: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ),
             "confidence": float(face.get("confidence") or 0.0),
             "observation_id": int(face.get("observation_id") or 0),
+            "modality": str(face.get("modality") or ""),
+            "face_score": face.get("face_score"),
+            "body_score": face.get("body_score"),
         }
         previous = identities.get(identity_id)
         status_rank = {"confirmed": 2, "automatic": 1, "unknown": 0}
