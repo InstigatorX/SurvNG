@@ -595,6 +595,14 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertFalse(worker._spatial_alignment_recheck_armed)
             worker._spawn_startup_spatial_alignment.assert_called_once()
             self.assertFalse(worker._spatial_alignment_startup_active)
+            self.assertNotIn(
+                "main",
+                [
+                    call.args[0]
+                    for call in worker.capture.request_frame.call_args_list
+                    if call.args
+                ],
+            )
 
     def test_startup_spatial_alignment_rechecks_once_when_healthy(self) -> None:
         camera = CameraConfig(

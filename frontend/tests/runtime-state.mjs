@@ -30,8 +30,14 @@ assert.deepEqual(unavailable, { cameras: null, appConfig: null, system: null });
 
 const eventsSource = readFileSync(new URL("../src/shared/events.js", import.meta.url), "utf8");
 const pollingSource = readFileSync(new URL("../src/shared/polling.js", import.meta.url), "utf8");
+const runtimeStateSource = readFileSync(new URL("../src/shared/runtimeState.jsx", import.meta.url), "utf8");
 assert.match(eventsSource, /export function useAppEvents\(handler, enabled = true\)/);
 assert.match(eventsSource, /enabled \? subscribeAppEvents/);
 assert.match(pollingSource, /useAppEvents\([\s\S]*?}, enabled\);/);
+assert.match(
+  runtimeStateSource,
+  /type === "camera_state"[\s\S]*setCamerasUpdatedAt\(Date\.now\(\)\)[\s\S]*setCamerasError\(false\)/,
+  "incremental camera_state must refresh health-bar freshness",
+);
 
 console.log("runtime state request contract tests passed");

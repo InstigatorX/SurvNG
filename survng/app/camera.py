@@ -59,7 +59,7 @@ from .motion_pipeline.object_detection import TimestampedLiveFrame
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
-# Wait for live + a stable recording still (or capture fallback) before scoring.
+# Wait for live + a stable recording still before scoring. Do not wake main capture.
 SPATIAL_ALIGNMENT_STARTUP_READY_SECONDS = 45.0
 SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS = 20.0
 SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS = 0.5
@@ -110,8 +110,8 @@ def _decode_recording_still(
 class _AutoStreamAlignment:
     """Bounded live-to-main registration for one camera.
 
-    Prefer a still from the latest closed main recording over waking main
-    capture. Boot-time open races should not burn untrusted strikes.
+    Prefer a still from the latest closed main recording. Never wake main
+    capture for FOV. Boot-time open races should not burn untrusted strikes.
     """
 
     def __init__(self, camera: CameraConfig) -> None:
@@ -702,8 +702,8 @@ class CameraWorker:
     def _spawn_startup_spatial_alignment(self) -> None:
         """Calibrate FOV at startup (or one healthy recheck) without periodic wake.
 
-        Prefer a still from the latest closed main recording segment. Fall back
-        to a one-shot main capture lease only when no stable segment exists yet.
+        Use a still from the latest closed main recording segment. Never open
+        main capture here: that second ffmpeg competes with the recorder.
         """
         if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
             return
@@ -786,7 +786,6 @@ class CameraWorker:
         ready_deadline = time.monotonic() + SPATIAL_ALIGNMENT_STARTUP_READY_SECONDS
         score_deadline: float | None = None
         recording_still: np.ndarray | None = None
-        used_capture_fallback = False
         try:
             while True:
                 now = time.monotonic()
@@ -820,21 +819,6 @@ class CameraWorker:
                         self._apply_spatial_alignment(calibrated)
                         if not self._stream_alignment.is_pending(calibrated):
                             return
-                elif recording_still is None and now >= ready_deadline - (
-                    SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS * 0.25
-                ):
-                    # No closed segment yet — one-shot main capture fallback.
-                    used_capture_fallback = True
-                    try:
-                        self.capture.request_frame("main")
-                    except Exception as error:
-                        LOGGER.warning(
-                            "startup FOV alignment capture fallback failed for %s: %s: %s",
-                            self.camera.id,
-                            type(error).__name__,
-                            redact_secret_text(error)[:300],
-                        )
-                        break
                 if not self._stream_alignment.streams_ready:
                     if now >= ready_deadline:
                         break
@@ -858,8 +842,8 @@ class CameraWorker:
             LOGGER.info(
                 "FOV alignment attempt timed out for %s; leaving Checking%s%s",
                 self.camera.id,
-                " (recording still unavailable; used capture fallback)"
-                if used_capture_fallback and recording_still is None
+                " (recording still unavailable)"
+                if recording_still is None
                 else "",
                 " (will recheck once when live/recording are healthy)"
                 if self._spatial_alignment_recheck_armed
