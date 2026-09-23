@@ -621,6 +621,60 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(worker._spatial_alignment_recheck_used)
             self.assertFalse(worker._spatial_alignment_recheck_armed)
 
+    def test_capture_frames_do_not_overwrite_trusted_recording_fov(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            trusted = {
+                "mode": "affine",
+                "reliable": True,
+                "confidence": 0.9,
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+                "reference_source": "recording",
+                "reference_width": 1920,
+                "reference_height": 1080,
+            }
+            worker._effective_spatial_alignment = trusted
+            blank = np.zeros((8, 8, 3), dtype=np.uint8)
+
+            def frame(source: str, captured_at: float) -> CapturedFrame:
+                return CapturedFrame(
+                    source=source,
+                    image=blank,
+                    captured_at_epoch=captured_at,
+                    captured_at_monotonic=captured_at,
+                    captured_at_iso="2026-01-01T00:00:00+00:00",
+                    width=8,
+                    height=8,
+                    sequence=1,
+                )
+
+            with patch.object(
+                worker._stream_alignment,
+                "observe",
+                return_value={
+                    **trusted,
+                    "reference_source": "capture",
+                    "reference_width": 8,
+                    "reference_height": 8,
+                },
+            ) as observe:
+                worker._capture_frame(frame("live", 100.0))
+                worker._capture_frame(frame("main", 100.1))
+                observe.assert_not_called()
+            self.assertEqual(
+                worker._effective_spatial_alignment["reference_source"],
+                "recording",
+            )
+
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(

@@ -1026,11 +1026,14 @@ class CameraWorker:
         return self.motion_qualification.debug_image(layer)
 
     def _capture_frame(self, frame: CapturedFrame) -> None:
-        calibrated = self._stream_alignment.observe(frame)
-        if calibrated is not None:
-            self._apply_spatial_alignment(calibrated)
-        else:
-            self._maybe_spawn_healthy_spatial_recheck()
+        # FOV is one-shot (startup / detection-on / one recheck). Do not keep
+        # re-scoring when demand-driven main capture later publishes frames.
+        if self._stream_alignment.is_pending(self._effective_spatial_alignment):
+            calibrated = self._stream_alignment.observe(frame)
+            if calibrated is not None:
+                self._apply_spatial_alignment(calibrated)
+            else:
+                self._maybe_spawn_healthy_spatial_recheck()
         if frame.source == "live":
             with self.runtime_state.lock:
                 lifecycle_generation = self.runtime_state.generation
