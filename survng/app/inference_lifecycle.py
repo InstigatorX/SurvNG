@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -65,7 +66,9 @@ class InferenceLifecycle:
         database_dir: Path,
         media_storage: MediaStorageRegistry | None = None,
         database_write_lock: threading.RLock | None = None,
+        tracking_window_provider: Callable[[int, datetime], tuple[float, float]] | None = None,
     ) -> None:
+        self.tracking_window_provider = tracking_window_provider
         self.storage_dir = storage_dir
         self.events = events
         self.appearance_index = appearance_index
@@ -470,6 +473,7 @@ class InferenceLifecycle:
     ) -> ObjectTrackingSessionFactory:
         return ObjectTrackingSessionFactory(
             config=config.tracking,
+            window_provider=self.tracking_window_provider,
             detector=self.detector,
             update_event=self.events.update_object_tracking,
             publisher=self.event_publisher,

@@ -272,7 +272,7 @@ def _incident_list_payload(incident: dict) -> dict:
 
     payload["objects"] = compact_objects(payload.get("objects"))
 
-    def compact_tracking_dimensions(tracking: object) -> dict[str, int] | None:
+    def compact_tracking_dimensions(tracking: object) -> dict[str, Any] | None:
         if not isinstance(tracking, dict):
             return None
         try:
@@ -282,7 +282,8 @@ def _incident_list_payload(incident: dict) -> dict:
             return None
         if width <= 0 or height <= 0:
             return None
-        return {"frame_width": width, "frame_height": height}
+        return {"frame_width": width, "frame_height": height,
+                **{key: tracking[key] for key in ("window_start_epoch", "window_end_epoch") if key in tracking}}
 
     tracking_dimensions = compact_tracking_dimensions(representative_tracking)
     if tracking_dimensions:

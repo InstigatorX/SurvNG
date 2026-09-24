@@ -56,10 +56,10 @@ export function containedFrameTransform(containerSize, sourceSize) {
 }
 
 export function incidentTrackingSource(event, incident = null) {
-  if (event?.object_tracking?.tracks?.length) return event;
+  if (event?.object_tracking?.tracks?.length || event?.object_tracking?.state) return event;
   const incidentEvents = event?.events?.length ? event.events : incident?.events || [];
   const candidates = incidentEvents.filter(
-    (candidate) => candidate?.object_tracking?.tracks?.length,
+    (candidate) => candidate?.object_tracking?.tracks?.length || candidate?.object_tracking?.state,
   );
   if (!candidates.length) return null;
   const target = eventEpoch(event);
@@ -131,7 +131,7 @@ export function storedObjectTracks(event) {
   }).filter((track) => track.x2 > track.x1 && track.y2 > track.y1);
 }
 
-export function trackFrameAt(track, epoch, { holdSeconds = 1, sampleFps = 2 } = {}) {
+export function trackFrameAt(track, epoch, { holdSeconds = 1, sampleFps = 2, observationsOnly = false } = {}) {
   const samples = track?.boxHistory;
   if (!Array.isArray(samples) || !samples.length || !Number.isFinite(epoch)) return null;
   const first = samples[0];
@@ -157,6 +157,7 @@ export function trackFrameAt(track, epoch, { holdSeconds = 1, sampleFps = 2 } = 
     && epoch > previous[0] + expectedInterval * 1.25
     && epoch < next[0] - expectedInterval * 0.25
   );
+  if (observationsOnly && estimated) return null;
   const path = (track.trajectory || []).filter((point) => point[0] <= epoch).map((point) => point.slice(1, 3));
   const center = [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2];
   if (!path.length || path[path.length - 1][0] !== center[0] || path[path.length - 1][1] !== center[1]) path.push(center);
@@ -200,7 +201,35 @@ export function trackingCoverageLabel(tracking) {
   if (["missing_media_while_object_active", "stale_handoff_without_recorded_coverage"].includes(reason)) {
     return "Tracking incomplete — recording coverage unavailable";
   }
+  if (reason === "inference_unavailable") return "Tracking incomplete — waiting for inference capacity";
   if (reason === "processing_budget_exhausted") return "Tracking incomplete — processing time limit reached";
   if (reason === "session_stopped") return "Tracking incomplete — session stopped";
   return "Tracking incomplete";
+}
+
+
+// Explicit recorded windows include their lead-in and tail already.
+export function recordedIncidentWindow(event, before = 5, after = 5) {
+  const events = event?.events?.length ? event.events : [event];
+  const windows = events.flatMap(item => {
+    const start = finiteNumber(item?.object_tracking?.window_start_epoch);
+    const end = finiteNumber(item?.object_tracking?.window_end_epoch);
+    return start !== null && end !== null && end > start ? [{ start, end }] : [];
+  });
+  if (!windows.length) return null;
+  const anchors = [...events, ...(event?.motion_observations || [])].map(eventEpoch).filter(value => value !== null);
+  return {
+    start: Math.min(...windows.map(window => window.start), ...anchors.map(epoch => epoch - before)),
+    end: Math.max(...windows.map(window => window.end), ...anchors.map(epoch => epoch + after)),
+  };
+}
+
+export function trackingCoverageAt(tracking, epoch) {
+  if (!tracking || finiteNumber(tracking.window_start_epoch) === null || !Number.isFinite(epoch)) return null;
+  const from = Date.parse(tracking.analyzed_from || "") / 1000;
+  const through = Date.parse(tracking.analyzed_through || "") / 1000;
+  if (!Number.isFinite(from) || !Number.isFinite(through) || epoch < from || epoch > through) {
+    return tracking.state === "active" ? "Tracking pending for this footage" : "This footage has not been analyzed";
+  }
+  return null;
 }

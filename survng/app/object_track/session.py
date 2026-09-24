@@ -152,6 +152,7 @@ class ObjectTrackingSession:
         snapshot_writer: TrackingSnapshotWriter | None = None,
         cover_promoter: TrackingCoverPromoter | None = None,
         cover_revision_provider: Callable[[int], int | None] | None = None,
+        window_provider: Callable[[int, datetime], tuple[float, float]] | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -178,6 +179,7 @@ class ObjectTrackingSession:
         self.snapshot_writer = snapshot_writer
         self.cover_promoter = cover_promoter
         self.cover_revision_provider = cover_revision_provider
+        self.window_provider = window_provider
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -200,6 +202,9 @@ class ObjectTrackingSession:
         self._frame_width = 0
         self._frame_height = 0
         self._catchup_frames_processed = 0
+        self._recorded_window: tuple[float, float] | None = None
+        self._analyzed_from: float | None = None
+        self._seed_assignments: list[dict[str, Any]] = []
         self._processing_started_at = 0.0
         self._processing_metrics: dict[str, int | float] = {}
         self._coverage_gap_count = 0
@@ -860,11 +865,22 @@ class ObjectTrackingSession:
         tracker: ObjectTrackerBackend | None = None
         frames_processed = 0
         try:
+            self._recorded_window = None
+            self._analyzed_from = None
+            self._seed_assignments = []
+            if self.window_provider is not None and self.catchup_frame_provider is not None and initial_frame is not None:
+                requested_start, requested_end = self.window_provider(event_id, event_at)
+                if not (np.isfinite(requested_start) and np.isfinite(requested_end)
+                        and requested_start <= event_at.timestamp() <= requested_end
+                        and requested_start < requested_end):
+                    raise ValueError("invalid recorded tracking window")
+                self._recorded_window = (requested_start, requested_end)
             with self._lock:
                 # Capacity waiting must not consume the useful tracking window.
                 self._deadline = max(
                     self._deadline,
-                    time.monotonic() + self.config.max_session_seconds,
+                    time.monotonic() + (self.config.recorded_processing_budget_seconds
+                                        if self._recorded_window else self.config.max_session_seconds),
                 )
             self._processing_started_at = time.monotonic()
             self._processing_metrics = {
@@ -923,33 +939,42 @@ class ObjectTrackingSession:
             seed_epoch = event_at.timestamp() + (
                 float(np.median(seed_offsets)) if seed_offsets else 0.0
             )
-            captured_at = seed_epoch
-            media_end = seed_epoch + self.config.max_session_seconds
-            self._last_analyzed_epoch = captured_at
-            for detected in initial_objects:
-                detected["_tracking_first_seen_at"] = seed_epoch
-            tracking_started = time.monotonic()
-            initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
-            self._processing_metrics["tracker_update_ms"] += (time.monotonic() - tracking_started) * 1000
-            primary_track_ids = {
-                int(item["track_id"])
-                for item in initial_tracked
-                if item.get("track_id") is not None
-                and item.get("snapshot_primary_subject") is True
-            }
-            if not primary_track_ids:
-                primary_track_ids = {
-                    int(item["track_id"])
-                    for item in initial_tracked
-                    if item.get("track_id") is not None
-                }
-            if initial_frame is not None:
-                self._consider_cover_candidate(
-                    initial_frame,
-                    captured_at,
-                    initial_tracked,
-                    primary_track_ids,
+            if self._recorded_window:
+                self._recorded_window = (
+                    min(self._recorded_window[0], seed_epoch),
+                    max(self._recorded_window[1], seed_epoch + 1.0 / self.config.sample_fps),
                 )
+            media_end = self._recorded_window[1] if self._recorded_window else seed_epoch + self.config.max_session_seconds
+            # Start empty in the lead-in: future snapshot boxes are never
+            # projected backward. Insert the confirmed snapshot at its own time.
+            captured_at = self._recorded_window[0] - 1.0 / self.config.sample_fps if self._recorded_window else seed_epoch
+            seed_pending = self._recorded_window is not None
+            self._last_analyzed_epoch = None if seed_pending else captured_at
+            initial_tracked = []
+            primary_track_ids: set[int] = set()
+
+            def apply_seed() -> None:
+                nonlocal seed_pending, primary_track_ids
+                for detected in initial_objects:
+                    detected["_tracking_first_seen_at"] = seed_epoch
+                tracking_started = time.monotonic()
+                seeded = tracker.update(initial_objects, seed_epoch, confirm_new=True)
+                self._processing_metrics["tracker_update_ms"] += (time.monotonic() - tracking_started) * 1000
+                self._seed_assignments = [{key: item[key] for key in
+                    ("label", "box", "track_id", "track_state", "track_observations") if key in item}
+                    for item in seeded]
+                primary_track_ids = {int(item["track_id"]) for item in seeded
+                                     if item.get("track_id") is not None and item.get("snapshot_primary_subject") is True}
+                if not primary_track_ids:
+                    primary_track_ids = {int(item["track_id"]) for item in seeded if item.get("track_id") is not None}
+                if initial_frame is not None:
+                    self._consider_cover_candidate(initial_frame, seed_epoch, seeded, primary_track_ids)
+                seed_pending = False
+
+            if not seed_pending:
+                apply_seed()
+                initial_tracked = self._seed_assignments
+                self._analyzed_from = seed_epoch
             self._set_status(enabled=True, active=True, event_id=event_id, last_error="")
             self._persist(
                 event_id,
@@ -1080,6 +1105,8 @@ class ObjectTrackingSession:
                     frame_reference,
                 )
                 self._last_analyzed_epoch = sample_epoch
+                if self._analyzed_from is None:
+                    self._analyzed_from = sample_epoch
                 frames_processed += 1
                 if catchup:
                     self._catchup_frames_processed += 1
@@ -1123,7 +1150,7 @@ class ObjectTrackingSession:
 
             def process_catchup_until(target_epoch: float) -> bool:
                 """Consume a bounded batch, retaining unprocessed samples on deferral."""
-                nonlocal captured_at, last_persisted_at, pending_batch
+                nonlocal captured_at, last_persisted_at, pending_batch, seed_pending
                 nonlocal catchup_deferred, catchup_gap
                 catchup_gap = 0.0
                 if self.catchup_frame_provider is None or initial_frame is None:
@@ -1190,6 +1217,18 @@ class ObjectTrackingSession:
                         # last successful cursor instead of retaining a gap.
                         pending_batch = None
                         break
+                    if seed_pending and sample_epoch >= seed_epoch:
+                        apply_seed()
+                        captured_at = seed_epoch
+                        self._last_analyzed_epoch = seed_epoch
+                        if self._analyzed_from is None:
+                            self._analyzed_from = seed_epoch
+                        advanced = True
+                        if stop.is_set() or time.monotonic() >= self._deadline:
+                            break
+                        if sample_epoch <= seed_epoch + 1e-6:
+                            pending_batch.frames.popleft()
+                            continue
                     if catchup_deferred:
                         self._processing_metrics["recorded_frame_retries"] += 1
                     if not process_frame(
@@ -1204,7 +1243,7 @@ class ObjectTrackingSession:
                     captured_at = sample_epoch
                     pending_batch.frames.popleft()
                     advanced = True
-                    if not tracker.has_live_tracks(captured_at):
+                    if not self._recorded_window and not tracker.has_live_tracks(captured_at):
                         break
                 # A boundary belongs after its readable prefix. A provider may
                 # return more frames than our cap; do not apply its boundary
@@ -1240,7 +1279,7 @@ class ObjectTrackingSession:
             last_frame_token: float | None = None
             pending_live: FrameSample | None = None
             while not stop.is_set():
-                if not tracker.has_live_tracks(captured_at):
+                if not self._recorded_window and not tracker.has_live_tracks(captured_at):
                     self._completion_reason = (
                         "object_exited_recorded_window" if self._catchup_frames_processed
                         else "object_exited_live_window"
@@ -1263,12 +1302,12 @@ class ObjectTrackingSession:
                 # receive cancellation. Skipped samples are not an empty tail.
                 if stop.is_set():
                     break
-                if self._coverage_interruption is not None and tracker.has_live_tracks(captured_at):
+                if self._coverage_interruption is not None and (self._recorded_window or tracker.has_live_tracks(captured_at)):
                     coverage_failed(max(0.0, target_epoch - captured_at))
                     break
                 if time.monotonic() >= self._deadline:
                     if advanced and (
-                        captured_at >= media_end - 1e-6 or not tracker.has_live_tracks(captured_at)
+                        captured_at >= media_end - 1e-6 or (not self._recorded_window and not tracker.has_live_tracks(captured_at))
                     ):
                         continue
                     self._completion_reason = (
@@ -1292,7 +1331,8 @@ class ObjectTrackingSession:
                     stalled_since = None
                     stop.wait(TRACKING_CATCHUP_RETRY_SECONDS)
                     continue
-                sample = pending_live if pending_live is not None else self.frame_provider()
+                sample = (None if self._recorded_window else
+                          pending_live if pending_live is not None else self.frame_provider())
                 if stop.is_set():
                     break
                 if time.monotonic() >= self._deadline:
@@ -1356,7 +1396,8 @@ class ObjectTrackingSession:
                 # for finalization (or deferred inference) at this same cursor.
                 if stalled_since is None:
                     stalled_since = time.monotonic()
-                if time.monotonic() - stalled_since >= TRACKING_CATCHUP_SETTLE_SECONDS:
+                settle_seconds = max(TRACKING_CATCHUP_SETTLE_SECONDS, 15.0) if self._recorded_window else TRACKING_CATCHUP_SETTLE_SECONDS
+                if time.monotonic() - stalled_since >= settle_seconds:
                     coverage_failed(catchup_gap or max(target_epoch - captured_at, 0.0))
                     break
                 stop.wait(TRACKING_CATCHUP_RETRY_SECONDS)
@@ -1423,6 +1464,17 @@ class ObjectTrackingSession:
             if pending_start is not None:
                 self._start_session(*pending_start)
 
+    def _window_snapshot(self) -> dict[str, Any]:
+        if self._recorded_window is None:
+            return {}
+        return {
+            "window_start_epoch": self._recorded_window[0],
+            "window_end_epoch": self._recorded_window[1],
+            "analyzed_from": datetime.fromtimestamp(self._analyzed_from, timezone.utc).isoformat()
+            if self._analyzed_from is not None else None,
+            "snapshot_track_assignments": self._seed_assignments,
+        }
+
     def _processing_snapshot(self) -> dict[str, int | float]:
         return {
             **{key: round(value, 3) if isinstance(value, float) else value
@@ -1472,6 +1524,7 @@ class ObjectTrackingSession:
             "frames_processed": frames_processed,
             "catchup_frames_processed": self._catchup_frames_processed,
             "processing": self._processing_snapshot(),
+            **self._window_snapshot(),
             "coverage_gap_count": self._coverage_gap_count,
             "maximum_coverage_gap_seconds": round(
                 self._maximum_coverage_gap_seconds,
@@ -1487,7 +1540,8 @@ class ObjectTrackingSession:
             # Keep queue/processing time from extending the replay clip.
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "persisted_at": datetime.now(timezone.utc).isoformat(),
-            "analyzed_through": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
+            "analyzed_through": datetime.fromtimestamp(captured_at, timezone.utc).isoformat()
+            if self._last_analyzed_epoch is not None else None,
             "tracks": tracks,
             "reid_diagnostics": {
                 **tracker_diagnostics,
@@ -1633,6 +1687,7 @@ class ObjectTrackingSession:
             "frames_processed": frames_processed,
             "catchup_frames_processed": self._catchup_frames_processed,
             "processing": self._processing_snapshot(),
+            **self._window_snapshot(),
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "error": redact_secret_text(error)[:240],
             "tracks": tracker.summaries(captured_at) if tracker is not None else [],
@@ -1815,6 +1870,7 @@ class ObjectTrackingSessionFactory:
         appearance_indexer: AppearanceIndexWriter | None = None,
         cover_promoter: TrackingCoverPromoter | None = None,
         cover_revision_provider: Callable[[int], int | None] | None = None,
+        window_provider: Callable[[int, datetime], tuple[float, float]] | None = None,
     ) -> None:
         self.config = config
         self.detector = detector
@@ -1826,6 +1882,7 @@ class ObjectTrackingSessionFactory:
         self.appearance_indexer = appearance_indexer
         self.cover_promoter = cover_promoter
         self.cover_revision_provider = cover_revision_provider
+        self.window_provider = window_provider
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
 
@@ -1853,4 +1910,5 @@ class ObjectTrackingSessionFactory:
             snapshot_writer=snapshot_writer,
             cover_promoter=self.cover_promoter,
             cover_revision_provider=self.cover_revision_provider,
+            window_provider=self.window_provider,
         )

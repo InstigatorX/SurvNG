@@ -1695,13 +1695,16 @@ class EventStore(
                 for item in objects
                 if not (isinstance(item, dict) and item.get("status") == "object_tracking")
             ]
-            if tracked_objects and not had_tracking:
+            snapshot_assignments = tracking.get("snapshot_track_assignments")
+            assignment_objects = (snapshot_assignments if isinstance(snapshot_assignments, list)
+                                  else tracked_objects if not had_tracking else None)
+            if assignment_objects:
                 assignments = {
                     (
                         str(item.get("label") or ""),
                         json.dumps(item.get("box"), sort_keys=True, separators=(",", ":")),
                     ): item
-                    for item in tracked_objects
+                    for item in assignment_objects
                     if item.get("track_id") is not None
                 }
                 for item in objects:

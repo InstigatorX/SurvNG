@@ -21,9 +21,10 @@ Missing recording coverage gets a bounded opportunity to become available. A liv
 or recorded frame more than the object lost timeout ahead of the cursor cannot silently age out the existing track. Recorder/capture
 continuity boundaries terminate incomplete coverage after their readable prefix.
 
-The configured `max_session_seconds` bounds the media window from the selected
-initial detection frame. It also remains the independent processing-time safety
-budget after capacity admission. This deadline is cooperative: blocking decoding,
+For legacy sessions without an explicit recorded window, `max_session_seconds`
+bounds the media window from the selected initial detection frame and remains
+the independent processing-time safety budget after capacity admission.
+Production recorded-window sessions use the policy described below. This deadline is cooperative: blocking decoding,
 inference, or persistence can overrun it. Reaching the media horizon or observing object
 expiry completes tracking; stopping, missing media, or exhausting processing time
 reports interruption. Cancellation and budget are checked after provider work,
@@ -78,3 +79,35 @@ and boundary priority at the media horizon. The final revised patch was approved
 for this scope with no remaining blockers. The chronology/coverage suite includes
 18 regressions, with actual timeline integration for the relevant boundary cases.
 The measurements above were refreshed after the batching and tail corrections.
+
+## Full recorded incident window
+
+Production sessions receive an explicit window from the current incident clip
+settings and trigger evidence. The start includes the motion persistence leading
+up to the trigger plus configured pre-roll; motion lookback is capped at 120
+seconds. The end includes `max_session_seconds` after the trigger plus configured
+post-roll. The actual representative-frame timestamp is included if it falls
+outside these bounds. These requested bounds are stored as `window_start_epoch`
+and `window_end_epoch` and used directly for incident playback, without adding
+post-roll a second time. Playback begins at the window start rather than seeking
+to the representative event.
+
+This pass runs in the existing background tracking worker after confirmation;
+it does not delay the initial incident notification. It begins with an empty
+tracker and processes frames chronologically. The confirmed snapshot detections
+join the tracker at their actual timestamp. Their resulting IDs are matched back
+to the original snapshot objects by exact label and box, so an earlier vehicle
+cannot silently take the person's displayed ID. The pass continues through
+empty frames and expired tracks to discover later activity within the window.
+A boundary or unavailable recording remains an incomplete result, not permission
+to jump over missing footage.
+
+Recorded-window sessions use a separate cooperative processing budget,
+`recorded_processing_budget_seconds` (default 60 seconds), while legacy sessions
+without a window retain their existing budget. Recorded batches and inference
+priorities remain bounded and unchanged. The worker is not a durable restart
+queue: a restart or replacement can still interrupt a pass. The requested window,
+`analyzed_from`, and `analyzed_through` distinguish requested footage from actual
+coverage. No analyzed-through timestamp is claimed before the first frame.
+The UI displays progress and marks footage outside the analyzed range, and does
+not hold estimated boxes after their last observation in a full-window replay.

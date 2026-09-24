@@ -649,6 +649,7 @@ class ObjectTrackingConfig(BaseModel):
     max_catchup_frames_per_tick: int = Field(default=8, ge=1, le=120)
     persist_interval_seconds: float = Field(default=1.0, ge=0.0, le=60.0)
     max_session_seconds: float = Field(default=15.0, ge=3.0, le=120.0)
+    recorded_processing_budget_seconds: float = Field(default=60.0, ge=3.0, le=300.0)
     lost_timeout_seconds: float = Field(default=3.0, ge=0.5, le=15.0)
     min_confirmations: int = Field(default=2, ge=1, le=10)
     low_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)

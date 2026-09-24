@@ -155,10 +155,11 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
             }}
             onEnded={onEnded}
           />}
-          {analysisMode === "tracks" && storedTracks.length ? (
+          {analysisMode === "tracks" && trackingEvent?.object_tracking ? (
             <StoredTrackVideoOverlay
               videoRef={videoRef}
               tracks={storedTracks}
+              tracking={trackingEvent?.object_tracking}
               coordinateSize={{
                 width: Number(trackingEvent?.object_tracking?.frame_width),
                 height: Number(trackingEvent?.object_tracking?.frame_height),
@@ -1003,6 +1004,10 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const selectedTrackId = resolveObjectTrackId(selectedSearchObject, findSimilarSourceEvent);
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
+  const trackingWindowSeconds = Number(incidentTracking?.window_end_epoch) - Number(incidentTracking?.window_start_epoch);
+  const analyzedSeconds = incidentTracking?.analyzed_through
+    ? Date.parse(incidentTracking.analyzed_through) / 1000 - Number(incidentTracking.window_start_epoch) : 0;
+
   const faces = faceEvent?.faces || [];
   const zones = incidentZones(inspectedEvent);
   const cameraReports = cameraReportsForIncident(incident);
@@ -1105,7 +1110,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         <h3>Replay analysis</h3>
         <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
           <button type="button" className={analysisMode === "clean" ? "active" : ""} aria-pressed={analysisMode === "clean"} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
-          <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
+          <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!incidentTracking?.state && !objectTracks.length} title={incidentTracking?.state || objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
           <button type="button" className={analysisMode === "ai" ? "active" : ""} aria-pressed={analysisMode === "ai"} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
           <button type="button" className={analysisMode === "depth" ? "active" : ""} aria-pressed={analysisMode === "depth"} onClick={() => onAnalysisModeChange("depth")} disabled={!depthConfigured} title={depthConfigured ? "Run detection with monocular depth while replaying" : "Enable depth estimation in Intelligence settings"}><Layers size={14} /> Depth</button>
         </div>
@@ -1116,7 +1121,11 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
             <button type="button" className={depthLayer === "heatmap" ? "active" : ""} aria-pressed={depthLayer === "heatmap"} onClick={() => onDepthLayerChange?.("heatmap")} title="Show depth heatmap only">Heatmap</button>
           </div>
         ) : null}
-        {analysisMode === "tracks" ? <small>{trackingCoverageLabel(incidentTracking)} · {objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
+        {analysisMode === "tracks" && trackingWindowSeconds > 0 ? <progress
+          className="incident-tracking-progress" aria-label="Tracking analysis coverage"
+          max={trackingWindowSeconds} value={Math.max(0, Math.min(trackingWindowSeconds, analyzedSeconds))}
+        /> : null}
+        {analysisMode === "tracks" ? <small>{trackingCoverageLabel(incidentTracking)}{incidentTracking?.analyzed_through ? ` · analyzed through ${formatTimeOnly(incidentTracking.analyzed_through, timeZone)}` : ""} · {objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
         {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
         {analysisMode === "depth" && analysisStats ? (
           <small className={analysisStats.error || analysisStats.depthError ? "analysis-error" : ""}>

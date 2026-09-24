@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .tracking_window import recorded_tracking_window
 from .activity_events import ActivityEventBus, ActivityTransition
 from .camera import CameraWorker
 from .camera_capture import (
@@ -352,6 +353,12 @@ class AppManager:
                 semantic_index=self.semantic_index,
                 event_publisher=self.publish_event,
                 tracking_burst_guard=self._tracking_burst_available,
+                tracking_window_provider=lambda event_id, event_at: recorded_tracking_window(
+                    self.events.get(event_id) or {}, event_at,
+                    before=self.config.event_clip_before_seconds,
+                    after=self.config.event_clip_after_seconds,
+                    activity_seconds=self.config.detector.tracking.max_session_seconds,
+                ),
                 database_dir=self.database_dir,
                 media_storage=self.media_storage,
                 database_write_lock=self.database_write_lock,
