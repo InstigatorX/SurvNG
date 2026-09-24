@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 import threading
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 from unittest import TestCase
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from survng.app.recording_routes import (
     RecordingRouteDependencies,
@@ -76,6 +77,73 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
+    def test_hls_media_response_prewarms_the_next_fragment(self) -> None:
+        manager = _Manager("current")
+        fragments = tuple(
+            EncodedFragment(
+                sequence=index,
+                segment_name=f"segment-{index}.mp4",
+                wall_start_epoch=100.0 + (index - 1) * 5,
+                wall_end_epoch=105.0 + (index - 1) * 5,
+                media_start_seconds=(index - 1) * 5,
+                media_duration_seconds=5.0,
+                keyframe_aligned=True,
+                stream=StreamDescription(fingerprint="h264"),
+                source_identity=f"revision-{index}",
+                source_path=Path(f"segment-{index}.mp4"),
+            )
+            for index in (1, 2)
+        )
+        materialized = []
+
+        class Source:
+            def fragments(self, *_args, **_kwargs):
+                return iter(fragments)
+
+            def materialize(self, selected):
+                materialized.append(selected)
+                return replace(
+                    selected,
+                    stream=replace(
+                        selected.stream,
+                        init_path=Path("init.mp4"),
+                    ),
+                    media_path=Path(f"{selected.segment_name}.m4s"),
+                )
+
+        source = Source()
+        dependencies = replace(
+            _dependencies(lambda: manager),
+            encoded_fragment_source=lambda _manager: source,
+            recording_file_response=lambda path, media_type: Response(
+                content=str(path),
+                media_type=media_type,
+            ),
+        )
+        response = create_recording_router(dependencies).handlers[
+            "recording_day_hls_segment"
+        ](
+            "gate",
+            "segment-1.mp4",
+            100,
+            110,
+            "main",
+            7.25,
+            False,
+            "revision-1",
+        )
+
+        self.assertEqual(
+            [(item.segment_name, item.media_start_seconds) for item in materialized],
+            [("segment-1.mp4", 7.25)],
+        )
+        self.assertIsNotNone(response.background)
+        asyncio.run(response.background())
+        self.assertEqual(
+            [(item.segment_name, item.media_start_seconds) for item in materialized],
+            [("segment-1.mp4", 7.25), ("segment-2.mp4", 12.25)],
+        )
+
     def test_hls_fragment_urls_pin_identity_and_manifest_media_offset(self) -> None:
         manager = _Manager("current")
         fragment = EncodedFragment(
