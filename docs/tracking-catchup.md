@@ -9,10 +9,16 @@ Each batch bounds both decoding and inference, including the valid one-frame
 batch setting. Providers receive the continuity cursor separately from the next
 sampling timestamp, so recorder/capture boundaries between samples are checked.
 Live fallback checks continuity through its own timestamp with a point read.
-Deferred inference retains and retries the same recorded cursor or pending live
-frame, and missing recording coverage gets a bounded opportunity to become
-available. A live or recorded frame more than the object lost timeout ahead of
-the cursor cannot silently age out the existing track. Recorder/capture
+Deferred inference retains and retries the exact recorded frame and the remaining
+decoded batch, or the pending live frame. Each session retains at most
+`max_catchup_frames_per_tick` recorded samples. Provider iterators are closed
+after bounded materialization, so retries retain images without holding decoder
+resources. Successful processing advances the cursor and releases that sample;
+a missing-media gap discards the pending batch so newly readable coverage can be
+queried again. Recording boundaries remain attached to their readable prefix,
+including when a provider returns more samples than the retained-frame cap.
+Missing recording coverage gets a bounded opportunity to become available. A live
+or recorded frame more than the object lost timeout ahead of the cursor cannot silently age out the existing track. Recorder/capture
 continuity boundaries terminate incomplete coverage after their readable prefix.
 
 The configured `max_session_seconds` bounds the media window from the selected
@@ -27,6 +33,18 @@ horizon permit 1.5 sample intervals of timestamp jitter (capped to half the
 window); this tolerance does not widen interior-gap handling. `analyzed_through` and the compatible `updated_at` field retain the exact
 last analyzed media timestamp. `persisted_at` records wall-clock persistence time.
 Processing latency therefore does not extend the incident replay duration.
+
+Stored tracking `processing` diagnostics include decode-batch calls, buffered
+frame count, recorded-frame retry count, actual inference-deferral count, decode
+time, object-detection request time, tracker-update time (including synchronous
+appearance matching), and elapsed session processing time. Timings are in
+milliseconds.
+Counters are per session and cumulative, not per-frame logs. Elapsed time also
+includes retry waits and other session work; the named timers are not an
+exhaustive breakdown. These snapshots are taken before their persistence call.
+An outstanding deferred sample remains `inference_unavailable` at the processing
+deadline. Sustained higher-priority inference can still exhaust the unchanged
+budget; retaining the batch prevents repeated decoding from adding to that load.
 
 This is resumable catch-up within a running session, not durable recovery after
 a service restart. Replacement incidents still follow the existing per-camera

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import inspect
@@ -100,6 +101,17 @@ def _tracking_persistence_due(
     )
 
 
+@dataclass(slots=True)
+class _PendingCatchupBatch:
+    """Session-owned decoded samples; never retains a provider iterator."""
+
+    frames: deque[tuple[float, np.ndarray] | DecodedVideoFrame]
+    end_epoch: float
+    covered_through: float
+    interruption: str | None
+    empty_prefix: bool
+
+
 @dataclass(frozen=True, slots=True)
 class _TrackingCoverCandidate:
     captured_at: float
@@ -188,6 +200,8 @@ class ObjectTrackingSession:
         self._frame_width = 0
         self._frame_height = 0
         self._catchup_frames_processed = 0
+        self._processing_started_at = 0.0
+        self._processing_metrics: dict[str, int | float] = {}
         self._coverage_gap_count = 0
         self._maximum_coverage_gap_seconds = 0.0
         self._coverage_interruption: str | None = None
@@ -852,6 +866,16 @@ class ObjectTrackingSession:
                     self._deadline,
                     time.monotonic() + self.config.max_session_seconds,
                 )
+            self._processing_started_at = time.monotonic()
+            self._processing_metrics = {
+                "decode_batches": 0,
+                "frames_buffered": 0,
+                "recorded_frame_retries": 0,
+                "inference_deferrals": 0,
+                "decode_ms": 0.0,
+                "detection_ms": 0.0,
+                "tracker_update_ms": 0.0,
+            }
             self._last_analyzed_epoch = None
             self._frame_width = 0
             self._frame_height = 0
@@ -904,7 +928,9 @@ class ObjectTrackingSession:
             self._last_analyzed_epoch = captured_at
             for detected in initial_objects:
                 detected["_tracking_first_seen_at"] = seed_epoch
+            tracking_started = time.monotonic()
             initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
+            self._processing_metrics["tracker_update_ms"] += (time.monotonic() - tracking_started) * 1000
             primary_track_ids = {
                 int(item["track_id"])
                 for item in initial_tracked
@@ -962,12 +988,17 @@ class ObjectTrackingSession:
                 if self._frame_width <= 0 or self._frame_height <= 0:
                     self._frame_width = source_width
                     self._frame_height = source_height
-                objects = _detect_tracking_objects(
-                    self.detector,
-                    frame,
-                    self.config.low_confidence_threshold,
-                )
+                detection_started = time.monotonic()
+                try:
+                    objects = _detect_tracking_objects(
+                        self.detector,
+                        frame,
+                        self.config.low_confidence_threshold,
+                    )
+                finally:
+                    self._processing_metrics["detection_ms"] += (time.monotonic() - detection_started) * 1000
                 if _inference_deferred(objects):
+                    self._processing_metrics["inference_deferrals"] += 1
                     return False
                 failure = detection_failure(objects)
                 if failure:
@@ -1009,7 +1040,9 @@ class ObjectTrackingSession:
                     self._frame_width,
                     self._frame_height,
                 )
+                tracking_started = time.monotonic()
                 tracked = tracker.update(objects, sample_epoch)
+                self._processing_metrics["tracker_update_ms"] += (time.monotonic() - tracking_started) * 1000
                 latest_tracked_objects = tracked
                 summaries = tracker.summaries(sample_epoch)
                 next_track_states = {
@@ -1083,73 +1116,107 @@ class ObjectTrackingSession:
 
             catchup_deferred = False
             catchup_gap = 0.0
+            pending_batch: _PendingCatchupBatch | None = None
             # VFR/live history can be irregular (including dropped samples).
             # Refuse gaps that would expire the object without analyzed evidence.
             continuity_interval = self.config.lost_timeout_seconds
 
             def process_catchup_until(target_epoch: float) -> bool:
-                """Analyze one bounded batch, retaining the last successful cursor."""
-                nonlocal captured_at, last_persisted_at
+                """Consume a bounded batch, retaining unprocessed samples on deferral."""
+                nonlocal captured_at, last_persisted_at, pending_batch
                 nonlocal catchup_deferred, catchup_gap
-                catchup_deferred = False
                 catchup_gap = 0.0
                 if self.catchup_frame_provider is None or initial_frame is None:
                     return False
-                catchup_interval = 1.0 / self.config.sample_fps
-                catchup_start = min(captured_at + catchup_interval, target_epoch)
-                if target_epoch <= captured_at:
-                    return False
-                # Bound decoding, not just inference: CameraFrameTimeline
-                # materializes the requested window before returning it.
-                batch_end = min(
-                    target_epoch,
-                    catchup_start + self.config.max_catchup_frames_per_tick * catchup_interval,
-                )
-                cursor_kwargs = {"after_epoch": captured_at} if self._catchup_accepts_cursor else {}
-                batch = self.catchup_frame_provider(
-                    catchup_start, batch_end, self.config.sample_fps,
-                    min(1280, int(initial_frame.shape[1])),
-                    **cursor_kwargs,
-                )
-                boundary = batch.interruption if isinstance(batch, TrackingFrameBatch) else None
+                if pending_batch is None:
+                    catchup_interval = 1.0 / self.config.sample_fps
+                    catchup_start = min(captured_at + catchup_interval, target_epoch)
+                    if target_epoch <= captured_at:
+                        return False
+                    # Bound both the requested decode window and retained frames.
+                    batch_end = min(
+                        target_epoch,
+                        catchup_start + self.config.max_catchup_frames_per_tick * catchup_interval,
+                    )
+                    cursor_kwargs = {"after_epoch": captured_at} if self._catchup_accepts_cursor else {}
+                    decode_started = time.monotonic()
+                    self._processing_metrics["decode_batches"] += 1
+                    try:
+                        batch = self.catchup_frame_provider(
+                            catchup_start, batch_end, self.config.sample_fps,
+                            min(1280, int(initial_frame.shape[1])),
+                            **cursor_kwargs,
+                        )
+                        samples = iter(batch)
+                        try:
+                            frames: deque[tuple[float, np.ndarray] | DecodedVideoFrame] = deque()
+                            for _ in range(self.config.max_catchup_frames_per_tick):
+                                if stop.is_set() or time.monotonic() >= self._deadline:
+                                    break
+                                try:
+                                    frames.append(next(samples))
+                                except StopIteration:
+                                    break
+                        finally:
+                            # Legacy providers may yield from a running decoder.
+                            # Retain images, never a decoder/iterator across retries.
+                            close = getattr(samples, "close", None)
+                            if callable(close):
+                                close()
+                        typed_batch = isinstance(batch, TrackingFrameBatch)
+                        pending_batch = _PendingCatchupBatch(
+                            frames=frames,
+                            end_epoch=batch_end,
+                            covered_through=batch.covered_through if typed_batch else captured_at,
+                            interruption=batch.interruption if typed_batch else None,
+                            empty_prefix=typed_batch and not batch.frames,
+                        )
+                        self._processing_metrics["frames_buffered"] += len(frames)
+                    finally:
+                        self._processing_metrics["decode_ms"] += (time.monotonic() - decode_started) * 1000
                 advanced = False
                 persisted_before_batch = last_persisted_at
-                samples = iter(batch)
-                try:
-                    for attempt, sample in enumerate(samples):
-                        if attempt >= self.config.max_catchup_frames_per_tick:
-                            break
-                        if stop.is_set() or time.monotonic() >= self._deadline:
-                            break
-                        sample_epoch, frame = sample
-                        if sample_epoch <= captured_at or sample_epoch > batch_end:
-                            continue
-                        if sample_epoch - captured_at > continuity_interval + 1e-6:
-                            catchup_gap = sample_epoch - captured_at
-                            break
-                        if not process_frame(
-                            frame, sample_epoch, catchup=True,
-                            frame_reference=getattr(sample, "reference", None),
-                        ):
-                            # Retry this sample, not a later frame. A deferred
-                            # inference is not negative object evidence.
-                            catchup_deferred = True
-                            break
-                        captured_at = sample_epoch
-                        advanced = True
-                        if not tracker.has_live_tracks(captured_at):
-                            break
-                finally:
-                    close = getattr(samples, "close", None)
-                    if callable(close):
-                        close()
-                # A boundary reported after a readable prefix matters only
-                # once we have consumed that prefix, not on the first tick.
-                if (
-                    boundary and not catchup_deferred and not catchup_gap
-                    and (not batch.frames or captured_at >= batch.covered_through - 1e-6)
-                ):
-                    self._record_coverage_interruption(boundary)
+                while pending_batch.frames:
+                    if stop.is_set() or time.monotonic() >= self._deadline:
+                        break
+                    sample = pending_batch.frames[0]
+                    sample_epoch, frame = sample
+                    if sample_epoch <= captured_at or sample_epoch > pending_batch.end_epoch:
+                        pending_batch.frames.popleft()
+                        continue
+                    if sample_epoch - captured_at > continuity_interval + 1e-6:
+                        catchup_gap = sample_epoch - captured_at
+                        # Missing media may become readable. Requery from the
+                        # last successful cursor instead of retaining a gap.
+                        pending_batch = None
+                        break
+                    if catchup_deferred:
+                        self._processing_metrics["recorded_frame_retries"] += 1
+                    if not process_frame(
+                        frame, sample_epoch, catchup=True,
+                        frame_reference=getattr(sample, "reference", None),
+                    ):
+                        # Keep this exact frame and its remaining decoded batch.
+                        # Neither deferral nor a failed inference advances time.
+                        catchup_deferred = True
+                        break
+                    catchup_deferred = False
+                    captured_at = sample_epoch
+                    pending_batch.frames.popleft()
+                    advanced = True
+                    if not tracker.has_live_tracks(captured_at):
+                        break
+                # A boundary belongs after its readable prefix. A provider may
+                # return more frames than our cap; do not apply its boundary
+                # until subsequent reads have consumed that full prefix.
+                if pending_batch is not None:
+                    if (
+                        pending_batch.interruption and not catchup_deferred and not catchup_gap
+                        and (pending_batch.empty_prefix or captured_at >= pending_batch.covered_through - 1e-6)
+                    ):
+                        self._record_coverage_interruption(pending_batch.interruption)
+                    if not pending_batch.frames:
+                        pending_batch = None
                 if advanced and last_persisted_at == persisted_before_batch:
                     self._persist(event_id, tracker, captured_at, latest_tracked_objects,
                                   frames_processed, "active")
@@ -1331,6 +1398,8 @@ class ObjectTrackingSession:
             )
             LOGGER.exception("object tracking failed for %s event %d", self.camera.id, event_id)
         finally:
+            # Release retained images before admitting a queued replacement.
+            pending_batch = None
             self._finish_worker_and_start_pending(release_limiter=True)
 
     def _finish_worker_and_start_pending(self, *, release_limiter: bool) -> None:
@@ -1353,6 +1422,14 @@ class ObjectTrackingSession:
                     self._pending_start = None
             if pending_start is not None:
                 self._start_session(*pending_start)
+
+    def _processing_snapshot(self) -> dict[str, int | float]:
+        return {
+            **{key: round(value, 3) if isinstance(value, float) else value
+               for key, value in self._processing_metrics.items()},
+            "elapsed_ms": round((time.monotonic() - self._processing_started_at) * 1000, 3)
+            if self._processing_started_at else 0.0,
+        }
 
     def _persist(
         self,
@@ -1394,6 +1471,7 @@ class ObjectTrackingSession:
             "lost_timeout_seconds": self.config.lost_timeout_seconds,
             "frames_processed": frames_processed,
             "catchup_frames_processed": self._catchup_frames_processed,
+            "processing": self._processing_snapshot(),
             "coverage_gap_count": self._coverage_gap_count,
             "maximum_coverage_gap_seconds": round(
                 self._maximum_coverage_gap_seconds,
@@ -1554,6 +1632,7 @@ class ObjectTrackingSession:
             "lost_timeout_seconds": self.config.lost_timeout_seconds,
             "frames_processed": frames_processed,
             "catchup_frames_processed": self._catchup_frames_processed,
+            "processing": self._processing_snapshot(),
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "error": redact_secret_text(error)[:240],
             "tracks": tracker.summaries(captured_at) if tracker is not None else [],

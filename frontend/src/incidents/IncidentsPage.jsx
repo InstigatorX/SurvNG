@@ -93,6 +93,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
   const galleryPageAnchorRef = useRef(null);
   const incidentPagingRef = useRef(null);
   const [incidentRailSize, setIncidentRailSize] = useState({ width: 0, height: 0 });
+  const [showExcludedDetections, setShowExcludedDetections] = useState(false);
   const [desktopAnalysisMode, setDesktopAnalysisMode] = useStoredState("survng.incidentDesktopAnalysis.v1", "clean");
   const [desktopDepthLayer, setDesktopDepthLayer] = useStoredState("survng.incidentDesktopDepthLayer.v1", "both");
   const [desktopAnalysisStats, setDesktopAnalysisStats] = useState(null);
@@ -837,6 +838,7 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
                     thumbnailObjectFocus={thumbnailObjectFocus}
                     thumbnailObjectFocusZoom={thumbnailObjectFocusZoom}
                     desktopWorkspace
+                    showExcluded={showExcludedDetections}
                     analysisMode={desktopAnalysisMode}
                     depthLayer={desktopDepthLayer}
                     replayRequest={desktopReplayRequest}
@@ -882,6 +884,8 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
               appConfig={appConfig}
               timeZone={timeZone}
               imageSize={focusedLoadedImageSize}
+              showExcluded={showExcludedDetections}
+              onShowExcludedChange={setShowExcludedDetections}
               analysisMode={desktopAnalysisMode}
               depthLayer={desktopDepthLayer}
               analysisStats={desktopAnalysisStats}

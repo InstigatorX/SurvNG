@@ -318,3 +318,144 @@ def test_known_boundary_at_horizon_takes_priority_over_deadline_completion():
     assert updates[-1]["state"] == "interrupted"
     assert updates[-1]["coverage_incomplete"]
     assert updates[-1]["completion_reason"] == "capture_generation_changed"
+
+
+def test_deferred_recorded_batch_retains_exact_frames_and_closes_provider():
+    seen, closed, yielded = [], [], []
+
+    def provider(start, end, seed, frame):
+        try:
+            for i in range(1, 7):
+                if start - 1e-6 <= i / 2 <= end + 1e-6:
+                    sample = np.full_like(frame, i)
+                    yielded.append(sample)
+                    yield seed + i / 2, sample
+        finally:
+            closed.append(True)
+
+    def detect(frame, **kwargs):
+        assert closed, "provider resources must close before inference/retry"
+        seen.append(frame)
+        return [{"status": "inference_deferred"}] if len(seen) <= 5 else [detection()]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, requests, _ = run_session(provider, seconds=3, cap=2, detector=detector)
+    assert all(frame is seen[0] for frame in seen[:6])
+    assert [int(frame[0, 0, 0]) for frame in seen] == [1] * 6 + [2, 3, 4, 5, 6]
+    assert len(requests) == len(closed) == 3
+    assert len(yielded) == 6  # Retained frames stay bounded by cap, even for generators.
+    result = updates[-1]
+    assert result["state"] == "complete"
+    assert result["tracks"][0]["observations"] == 7
+    assert result["processing"]["decode_batches"] == 3
+    assert result["processing"]["frames_buffered"] == 6
+    assert result["processing"]["inference_deferrals"] == 5
+    assert result["processing"]["recorded_frame_retries"] == 5
+
+
+def test_persistent_recorded_deferral_preserves_cause_at_deadline():
+    session_ref, calls = [], []
+
+    def remember(session, payload):
+        session_ref[:] = [session]
+
+    def detect(frame, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            return [detection()]
+        if len(calls) == 3:
+            session_ref[0]._deadline = time.monotonic() - 1
+        return [{"status": "inference_deferred"}]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, requests, seed = run_session(frames_at([0.5, 1, 1.5]), detector=detector, on_update=remember)
+    result = updates[-1]
+    assert len(requests) == 1
+    assert result["state"] == "interrupted"
+    assert result["completion_reason"] == "inference_unavailable"
+    assert result["frames_processed"] == 1
+    assert result["processing"]["inference_deferrals"] == 2
+    assert result["processing"]["recorded_frame_retries"] == 1
+    assert datetime.fromisoformat(result["analyzed_through"]).timestamp() == seed + 0.5
+
+
+def test_boundary_survives_deferred_and_truncated_readable_prefix():
+    seen = []
+
+    def provider(start, end, seed, frame):
+        # Simulate a provider returning more than the retained-frame cap.
+        frames = tuple((seed + offset, np.full_like(frame, int(offset * 2)))
+                       for offset in [0.5, 1, 1.5] if offset >= start - 1e-6)
+        return TrackingFrameBatch(frames, seed + 1.5, "recorder_epoch_changed")
+
+    def detect(frame, **kwargs):
+        seen.append(int(frame[0, 0, 0]))
+        if seen[-1] == 2 and seen.count(2) <= 2:
+            return [{"status": "inference_deferred"}]
+        return [detection()]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, requests, seed = run_session(provider, detector=detector, cap=2)
+    assert seen == [1, 2, 2, 2, 3]
+    assert len(requests) == 2
+    result = updates[-1]
+    assert result["frames_processed"] == 3
+    assert result["completion_reason"] == "recorder_epoch_changed"
+    assert datetime.fromisoformat(result["analyzed_through"]).timestamp() == seed + 1.5
+
+
+def test_cancellation_during_recorded_retry_does_not_advance_or_decode_again():
+    session_ref, calls = [], []
+
+    def remember(session, payload):
+        session_ref[:] = [session]
+
+    def detect(frame, **kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            session_ref[0].request_stop()
+        return [{"status": "inference_deferred"}]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, requests, seed = run_session(frames_at([0.5, 1]), detector=detector, on_update=remember)
+    assert len(requests) == 1
+    assert len(calls) == 2
+    assert updates[-1]["frames_processed"] == 0
+    assert updates[-1]["completion_reason"] == "session_stopped"
+    assert datetime.fromisoformat(updates[-1]["analyzed_through"]).timestamp() == seed
+
+
+def test_cancelled_lazy_decode_closes_without_materializing_remaining_frames():
+    for cancellation in ("stop", "deadline"):
+        session_ref, yielded, closed, inferred = [], [], [], []
+
+        def remember(session, payload):
+            session_ref[:] = [session]
+
+        def provider(start, end, seed, frame):
+            try:
+                for offset in [0.5, 1, 1.5, 2]:
+                    yielded.append(offset)
+                    if cancellation == "stop":
+                        session_ref[0].request_stop()
+                    else:
+                        session_ref[0]._deadline = time.monotonic() - 1
+                    yield seed + offset, frame
+            finally:
+                closed.append(True)
+
+        def detect(frame, **kwargs):
+            inferred.append(True)
+            return [detection()]
+
+        detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+        updates, requests, _ = run_session(provider, cap=4, detector=detector, on_update=remember)
+        assert yielded == [0.5]
+        assert closed == [True]
+        assert not inferred
+        assert len(requests) == 1
+        assert updates[-1]["state"] == "interrupted"
+        assert updates[-1]["frames_processed"] == 0
+        assert updates[-1]["completion_reason"] == (
+            "session_stopped" if cancellation == "stop" else "processing_budget_exhausted"
+        )

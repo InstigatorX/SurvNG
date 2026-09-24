@@ -402,3 +402,28 @@
     grid-template-columns: 280px minmax(0, 1fr);
   }
 }
+
+.incident-detection-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.incident-detection-heading button {
+  font-size: 12px;
+  min-height: 36px;
+}
+
+.incident-detection-heading button[aria-pressed="true"] {
+  outline: 2px solid var(--accent);
+}
+
+.incident-exclusion-reason {
+  color: var(--muted);
+}
+
+.incidents-desktop-page .object-box.excluded {
+  border-style: dashed;
+}
