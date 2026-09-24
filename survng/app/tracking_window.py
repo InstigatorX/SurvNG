@@ -1,6 +1,7 @@
 """Recorded tracking windows are independent of representative cover selection."""
 from __future__ import annotations
 
+import json
 import math
 from datetime import datetime
 from typing import Any
@@ -9,8 +10,16 @@ from typing import Any
 def recorded_tracking_window(event: dict[str, Any], event_at: datetime, *, before: float,
                              after: float, activity_seconds: float) -> tuple[float, float]:
     anchor = event_at.timestamp()
-    qualification = next((item.get("motion_qualification", {}) for item in event.get("objects", [])
-                          if item.get("status") == "motion_qualification"), {})
+    objects = event.get("objects")
+    if objects is None:
+        try:
+            objects = json.loads(event.get("objects_json") or "[]")
+        except (TypeError, ValueError):
+            objects = []
+    if not isinstance(objects, list):
+        objects = []
+    qualification = next((item.get("motion_qualification", {}) for item in objects
+                          if isinstance(item, dict) and item.get("status") == "motion_qualification"), {})
     raw_persistence = qualification.get("features", {}).get("persistence_seconds", 0)
     try:
         persistence = float(raw_persistence)

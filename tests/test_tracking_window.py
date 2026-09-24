@@ -38,3 +38,13 @@ def test_snapshot_track_identity_can_be_assigned_after_leadin_progress(tmp_path)
     assignment['track_id'] = 3
     updated = store.update_object_tracking(event['id'], {"state": "active", "tracks": [], "snapshot_track_assignments": [assignment]})
     assert json.loads(updated['objects_json'])[0]['track_id'] == 2
+
+
+def test_persisted_event_json_includes_motion_leadin():
+    import json
+    at = datetime.now(timezone.utc)
+    event = {"objects_json": json.dumps([{"status": "motion_qualification", "motion_qualification": {
+        "features": {"persistence_seconds": 4.5}}}])}
+    start, end = recorded_tracking_window(event, at, before=5, after=7, activity_seconds=15)
+    assert start == at.timestamp() - 9.5
+    assert end == at.timestamp() + 22
