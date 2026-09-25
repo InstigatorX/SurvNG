@@ -412,6 +412,7 @@ class MediaExportManager:
         self._active_job_id = ""
         self._active_cancel: threading.Event | None = None
         self._active_process: subprocess.Popen | None = None
+        self._next_storage_error_log = 0.0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -424,7 +425,7 @@ class MediaExportManager:
         self._thread.start()
         for job_id in self.store.queued_ids():
             self._enqueue(job_id)
-        self.cleanup()
+        self._cleanup_safely()
 
     def is_running(self) -> bool:
         return bool(self._thread is not None and self._thread.is_alive())
@@ -660,6 +661,33 @@ class MediaExportManager:
             )
             raise RuntimeError("export queue is full") from exc
 
+    def _log_storage_failure(self) -> None:
+        now = time.monotonic()
+        if now >= self._next_storage_error_log:
+            self._next_storage_error_log = now + 30.0
+            LOGGER.exception("export storage operation failed; worker will retry")
+
+    def _retry_bookkeeping(self, operation: Callable):
+        # Keep the dequeued job owned by this worker. Retrying only bookkeeping
+        # avoids duplicate transcodes when terminal-state persistence fails.
+        # Attempt once even during shutdown so a healthy store records the
+        # terminal state. The stop event prevents retries after a failed write.
+        while True:
+            try:
+                return operation()
+            except (sqlite3.Error, OSError):
+                self._log_storage_failure()
+                if self._stop.wait(1.0):
+                    break
+        return None
+
+    def _cleanup_safely(self) -> None:
+        try:
+            self.cleanup()
+        except Exception:
+            # Maintenance is retried on the next cycle, independently of jobs.
+            self._log_storage_failure()
+
     def _run(self) -> None:
         next_cleanup = time.monotonic() + 60.0
         while not self._stop.is_set():
@@ -667,16 +695,16 @@ class MediaExportManager:
                 job_id = self._queue.get(timeout=1.0)
             except queue.Empty:
                 if time.monotonic() >= next_cleanup:
-                    self.cleanup()
+                    self._cleanup_safely()
                     next_cleanup = time.monotonic() + 60.0
                 continue
             if job_id is None:
                 return
-            job = self.store.get(job_id)
+            job = self._retry_bookkeeping(lambda: self.store.get(job_id))
             if job is None or job.get("status") not in {"queued", "cancelling"}:
                 continue
             if job.get("cancel_requested"):
-                self._finish_cancelled(job_id)
+                self._retry_bookkeeping(lambda: self._finish_cancelled(job_id))
                 continue
             cancel = threading.Event()
             with self._active_lock:
@@ -705,23 +733,24 @@ class MediaExportManager:
                         )
                         self._execute(job, cancel)
             except InterruptedError:
-                self._finish_cancelled(job_id)
+                self._retry_bookkeeping(lambda: self._finish_cancelled(job_id))
             except BaseException as exc:
                 LOGGER.exception("media export %s failed", job_id)
-                self.store.update(
+                error_message = str(exc)[:500]
+                self._retry_bookkeeping(lambda: self.store.update(
                     job_id,
                     status="failed",
                     phase="Failed",
-                    error=str(exc)[:500],
+                    error=error_message,
                     finished_at=_utc_now(),
                     expires_at=(datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)).isoformat(),
-                )
+                ))
             finally:
                 with self._active_lock:
                     self._active_job_id = ""
                     self._active_cancel = None
                     self._active_process = None
-                self.cleanup()
+                self._cleanup_safely()
                 next_cleanup = time.monotonic() + 60.0
 
     def _execute(self, job: dict[str, object], cancel: threading.Event) -> None:
