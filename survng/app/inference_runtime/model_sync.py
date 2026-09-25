@@ -154,6 +154,8 @@ def worker_config_for_roles(
     worker_config = config.model_copy(deep=True)
     worker_config.inference_mode = "local"
     worker_config.object_worker_count = 1
+    if worker_config.backend != "coreml":
+        worker_config.coreml_model_path = ""
     if "object" not in selected:
         worker_config.enabled = False
     if "face" not in selected:
@@ -265,6 +267,8 @@ class ModelBundleCatalog:
             ):
                 continue
             if not raw_path:
+                continue
+            if spec.config_key == "coreml_model_path" and config.backend != "coreml":
                 continue
             source = Path(raw_path).expanduser()
             try:

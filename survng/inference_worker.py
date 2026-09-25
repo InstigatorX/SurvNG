@@ -228,6 +228,13 @@ class InferenceWorkerClient:
             )
             self.model_cache.receive(websocket, manifest)
             config = self.model_cache.materialize(config, manifest)
+            LOGGER.info(
+                "Installed %d model file%s (%d bytes) under %s",
+                len(manifest.files),
+                "" if len(manifest.files) == 1 else "s",
+                manifest.total_bytes,
+                self.model_cache.bundle_dir / manifest.generation,
+            )
             supervisor = InferenceSupervisor(
                 config,
                 enabled_roles=self.roles,

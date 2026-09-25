@@ -319,6 +319,28 @@ class ModelSynchronizationTests(unittest.TestCase):
                 worker_path.is_relative_to(root / "cache" / "bundles")
             )
 
+    def test_missing_coreml_path_does_not_block_openvino_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "object.onnx"
+            source.write_bytes(b"openvino-model")
+            config = DetectorConfig(
+                enabled=True,
+                backend="openvino",
+                model_path=str(source),
+                coreml_model_path="/missing/detector.mlpackage",
+                object_worker_count=1,
+                tracking={"enabled": False},
+            )
+
+            prepared = ModelBundleCatalog().prepare(config, ["object"])
+
+            self.assertEqual(prepared.config.coreml_model_path, "")
+            self.assertFalse(any(
+                item.path.startswith("object/coreml/")
+                for item in prepared.manifest.files
+            ))
+            self.assertTrue(prepared.manifest.files)
+
     def test_cached_model_digests_are_verified(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = WorkerModelCache(Path(temporary))
