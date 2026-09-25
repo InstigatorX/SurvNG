@@ -1089,7 +1089,8 @@ class AssistantApiTest(unittest.TestCase):
                 "_assistant_execute_tool",
                 return_value=[evidence],
             ),
-            patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
+            patch.object(main._intelligence_route_bundle.service.deps.application_stopping, "is_set", return_value=False),
+            patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs))),
         ):
             response = asyncio.run(main._intelligence_route_bundle.service.assistant_chat(request))
 
@@ -1135,7 +1136,8 @@ class AssistantApiTest(unittest.TestCase):
                 "_assistant_execute_tool",
                 return_value=[evidence],
             ),
-            patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
+            patch.object(main._intelligence_route_bundle.service.deps.application_stopping, "is_set", return_value=False),
+            patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs))),
         ):
             response = asyncio.run(main._intelligence_route_bundle.service.assistant_chat(request))
 
@@ -1160,7 +1162,8 @@ class AssistantApiTest(unittest.TestCase):
             patch.object(main, "config", active_config),
             patch.object(main, "manager", SimpleNamespace(detector=SimpleNamespace(labels=[]))),
             patch.object(AssistantProvider, "plan", side_effect=AuditAiError("provider failed")),
-            patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
+            patch.object(main._intelligence_route_bundle.service.deps.application_stopping, "is_set", return_value=False),
+            patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs))),
         ):
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(main._intelligence_route_bundle.service.assistant_chat(request))

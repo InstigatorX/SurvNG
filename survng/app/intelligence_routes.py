@@ -306,7 +306,14 @@ class IntelligenceService:
         return FileResponse(snapshot_path, media_type=media_type, headers={'Cache-Control': 'private, max-age=300'})
 
     async def motion_audit_ai_analyze(self, audit_id: int) -> dict:
+        # Cancelling the HTTP task cannot stop provider I/O. Its worker must own
+        # admission and manager registration until the blocking work really ends.
+        return await asyncio.to_thread(self._motion_audit_ai_analyze, audit_id)
+
+    def _motion_audit_ai_analyze(self, audit_id: int) -> dict:
         with self.deps.manager_lock:
+            if self.deps.application_stopping.is_set():
+                raise HTTPException(status_code=503, detail='SurvNG is shutting down')
             active_manager = self.deps.get_manager()
             active_config = self.deps.get_config().model_copy(deep=True)
             audit_config = active_config.audit_ai
@@ -319,7 +326,7 @@ class IntelligenceService:
         try:
             snapshot_path = event_snapshot_path(active_manager.storage_dir, audit, active_manager.media_storage)
             analysis_context = self._audit_ai_context(audit, active_config, active_manager)
-            advice = await asyncio.to_thread(AuditAiAdvisor(audit_config).analyze, snapshot_path, analysis_context)
+            advice = AuditAiAdvisor(audit_config).analyze(snapshot_path, analysis_context)
             camera = camera_by_id(active_config, str(audit.get('camera_id') or ''))
             if camera is None:
                 raise AuditAiError('audit camera is unavailable')
@@ -1798,7 +1805,12 @@ class IntelligenceService:
         return {'enabled': bool(ai.assistant_enabled), 'configured': configured, 'provider': ai.provider, 'fast_model': provider.model_for_tier('fast'), 'reasoning_model': provider.model_for_tier('deep'), 'read_only': False, 'media_exports': True}
 
     async def assistant_chat(self, request: AssistantChatRequest) -> dict[str, Any]:
+        return await asyncio.to_thread(self._assistant_chat, request)
+
+    def _assistant_chat(self, request: AssistantChatRequest) -> dict[str, Any]:
         with self.deps.manager_lock:
+            if self.deps.application_stopping.is_set():
+                raise HTTPException(status_code=503, detail='SurvNG is shutting down')
             active_config = self.deps.get_config()
             active_manager = self.deps.get_manager()
             ai = active_config.audit_ai
@@ -1838,7 +1850,7 @@ class IntelligenceService:
             actions = [] if media_export is not None else self._assistant_closed_loop_actions(evidence)
             return {'message': answer.answer, 'citations': answer.citations, 'suggestions': suggestions, 'actions': actions, 'evidence': [item.client_payload() for item in evidence], 'tools': [call.name for call in plan.tool_calls], 'reasoning_tier': plan.reasoning_tier, 'model': provider.model_for_tier(plan.reasoning_tier), 'read_only': False}
         try:
-            return await asyncio.to_thread(run)
+            return run()
         except AuditAiError as exc:
             LOGGER.warning('SurvNG Assistant provider failure: %s', exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
