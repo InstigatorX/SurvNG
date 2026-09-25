@@ -72,6 +72,7 @@ class FaceStore(
         self._gallery_cache: list[dict[str, Any]] = []
         self._directory_revision_instance = uuid.uuid4().hex
         self._identity_event_publisher: Callable[[dict[str, Any]], None] | None = None
+        self._recognition_refill_log_at = 0.0
         self._recognition_refill_needed = threading.Event()
         self._match_refresh_needed = threading.Event()
         self._recognition_stop = threading.Event()
@@ -96,6 +97,7 @@ class FaceStore(
         try:
             self._queue_pending_recognition()
         except Exception:
+            self._recognition_refill_needed.set()
             LOGGER.exception("Could not restore pending face recognition work")
 
     def reconfigure_max_observations(self, max_observations: int) -> int:

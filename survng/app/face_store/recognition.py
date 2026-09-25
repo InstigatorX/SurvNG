@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import time
 from datetime import datetime, timezone
 from queue import Empty, Full
 from typing import Any
@@ -240,6 +241,20 @@ class FaceStoreRecognitionMixin:
             return
         self._try_refresh_unknown_recognition()
 
+    def _refill_recognition(self) -> None:
+        self._recognition_refill_needed.clear()
+        try:
+            self._queue_pending_recognition()
+        except Exception:
+            # SQLite remains authoritative. Preserve the wakeup on transient
+            # storage/model-status failure rather than retiring this consumer.
+            self._recognition_refill_needed.set()
+            now = time.monotonic()
+            if now >= self._recognition_refill_log_at:
+                self._recognition_refill_log_at = now + 30.0
+                LOGGER.exception("Could not refill face recognition; pending work will retry")
+            self._recognition_stop.wait(1.0)
+
     def _recognition_loop(self) -> None:
         references_changed = False
         while True:
@@ -249,8 +264,7 @@ class FaceStoreRecognitionMixin:
                 if self._recognition_stop.is_set():
                     break
                 if self._recognition_refill_needed.is_set():
-                    self._recognition_refill_needed.clear()
-                    self._queue_pending_recognition()
+                    self._refill_recognition()
                 if references_changed or self._match_refresh_needed.is_set():
                     self._match_refresh_needed.clear()
                     if self._try_refresh_unknown_recognition():
@@ -284,8 +298,7 @@ class FaceStoreRecognitionMixin:
             if retry and not self._recognition_stop.wait(1.0):
                 self._queue_recognition(observation_id)
             if self._recognition_refill_needed.is_set() and not self._recognition_stop.is_set():
-                self._recognition_refill_needed.clear()
-                self._queue_pending_recognition()
+                self._refill_recognition()
 
     def _recognize_observation(self, observation_id: int) -> bool:
         recognizer = self.recognizer
