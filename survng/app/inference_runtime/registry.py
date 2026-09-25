@@ -84,6 +84,9 @@ class RemoteInferenceRegistry:
         self,
         registration: WorkerRegistration,
         transport: RegistryTransport,
+        *,
+        config: DetectorConfig | None = None,
+        config_generation: str = "",
     ) -> dict[str, Any]:
         if registration.protocol_version != INFERENCE_PROTOCOL_VERSION:
             raise InferenceUnavailable(
@@ -104,7 +107,11 @@ class RemoteInferenceRegistry:
                 lease_expires_at=now + self._lease_seconds,
                 last_seen_at=now,
             )
-            config = self._config_provider().model_copy(deep=True)
+            active_config = (
+                config.model_copy(deep=True)
+                if config is not None
+                else self._config_provider().model_copy(deep=True)
+            )
         if previous is not None:
             previous.transport.close("worker connection was replaced")
         return {
@@ -113,9 +120,16 @@ class RemoteInferenceRegistry:
             "connection_generation": generation,
             "heartbeat_seconds": max(1.0, self._lease_seconds / 3.0),
             "lease_seconds": self._lease_seconds,
-            "config_generation": self._generation_provider(config),
-            "detector_config": config.model_dump(mode="json"),
+            "config_generation": (
+                config_generation
+                or self._generation_provider(active_config)
+            ),
+            "detector_config": active_config.model_dump(mode="json"),
         }
+
+    def config_snapshot(self) -> DetectorConfig:
+        with self._lock:
+            return self._config_provider().model_copy(deep=True)
 
     def mark_ready(self, ready: WorkerReady) -> bool:
         with self._lock:

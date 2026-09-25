@@ -11,7 +11,6 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from .config import DetectorConfig
 from .inference_runtime.protocol import (
     ProtocolError,
     WorkerHeartbeat,
@@ -137,19 +136,18 @@ def create_inference_worker_router(
                 raw_registration
             )
             worker_id = registration.worker_id
-            welcome = deps.registry.register(registration, transport)
+            config_snapshot = deps.registry.config_snapshot()
             prepared = await asyncio.to_thread(
                 deps.model_catalog.prepare,
-                DetectorConfig.model_validate(welcome["detector_config"]),
+                config_snapshot,
                 registration.roles,
             )
-            if (
-                prepared.config_generation
-                != welcome["config_generation"]
-            ):
-                raise InferenceUnavailable(
-                    "detector configuration changed during worker registration"
-                )
+            welcome = deps.registry.register(
+                registration,
+                transport,
+                config=config_snapshot,
+                config_generation=prepared.config_generation,
+            )
             welcome["detector_config"] = prepared.config.model_dump(
                 mode="json"
             )
@@ -168,7 +166,10 @@ def create_inference_worker_router(
                 source = prepared.sources[model_file.digest]
                 offset = 0
                 with source.open("rb") as handle:
-                    while chunk := handle.read(MODEL_SYNC_CHUNK_BYTES):
+                    while chunk := await asyncio.to_thread(
+                        handle.read,
+                        MODEL_SYNC_CHUNK_BYTES,
+                    ):
                         await websocket.send_bytes(encode_binary_packet(
                             {
                                 "type": "model_chunk",
@@ -210,19 +211,21 @@ def create_inference_worker_router(
                         "worker control message must be an object"
                     )
                 if control.get("type") == "ready":
-                    deps.registry.mark_ready(
-                        WorkerReady.model_validate(control)
+                    await asyncio.to_thread(
+                        deps.registry.mark_ready,
+                        WorkerReady.model_validate(control),
                     )
                 elif control.get("type") == "heartbeat":
                     accepted = deps.registry.heartbeat(
                         WorkerHeartbeat.model_validate(control)
                     )
+                    config_generation = await asyncio.to_thread(
+                        deps.registry.config_generation
+                    )
                     transport.send_control({
                         "type": "heartbeat_ack",
                         "accepted": accepted,
-                        "config_generation": (
-                            deps.registry.config_generation()
-                        ),
+                        "config_generation": config_generation,
                     })
                 else:
                     raise ProtocolError(

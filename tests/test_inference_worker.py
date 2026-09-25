@@ -192,6 +192,10 @@ class ModelSynchronizationTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "object.onnx"
             source.write_bytes(b"first-model")
+            (root / "metadata.yaml").write_text(
+                "task: detect\n",
+                encoding="utf-8",
+            )
             config = DetectorConfig(
                 enabled=True,
                 model_path=str(source),
@@ -207,26 +211,37 @@ class ModelSynchronizationTests(unittest.TestCase):
                 first.config_generation,
                 second.config_generation,
             )
-            self.assertNotEqual(
-                first.manifest.files[0].digest,
-                second.manifest.files[0].digest,
+            binding = second.manifest.bindings["model_path"]
+            first_model = next(
+                item for item in first.manifest.files
+                if item.path == binding
             )
+            second_model = next(
+                item for item in second.manifest.files
+                if item.path == binding
+            )
+            self.assertNotEqual(first_model.digest, second_model.digest)
             self.assertEqual(first.config.object_worker_count, 1)
+            self.assertTrue(any(
+                item.path.endswith("/metadata.yaml")
+                for item in second.manifest.files
+            ))
 
             cache = WorkerModelCache(root / "cache")
-            model_file = second.manifest.files[0]
-            packet = encode_binary_packet(
-                {
-                    "type": "model_chunk",
-                    "digest": model_file.digest,
-                    "offset": 0,
-                    "total_size": model_file.size,
-                },
-                source.read_bytes(),
-            )
             websocket = Mock()
             websocket.recv.side_effect = [
-                packet,
+                *[
+                    encode_binary_packet(
+                        {
+                            "type": "model_chunk",
+                            "digest": model_file.digest,
+                            "offset": 0,
+                            "total_size": model_file.size,
+                        },
+                        second.sources[model_file.digest].read_bytes(),
+                    )
+                    for model_file in second.manifest.files
+                ],
                 json.dumps({
                     "type": "model_sync_complete",
                     "generation": second.manifest.generation,
@@ -241,6 +256,12 @@ class ModelSynchronizationTests(unittest.TestCase):
 
             worker_path = Path(worker_config.model_path)
             self.assertEqual(worker_path.read_bytes(), b"updated-model")
+            self.assertEqual(
+                (worker_path.parent / "metadata.yaml").read_text(
+                    encoding="utf-8"
+                ),
+                "task: detect\n",
+            )
             self.assertTrue(
                 worker_path.is_relative_to(root / "cache" / "bundles")
             )
@@ -394,6 +415,22 @@ class InferenceWorkerRouteTests(unittest.TestCase):
                     "type": "model_sync_complete",
                     "generation": welcome["model_manifest"]["generation"],
                 },
+            )
+            with self.client.websocket_connect(
+                "/api/inference/workers/connect",
+                headers={"Authorization": "Bearer worker-secret"},
+            ) as websocket:
+                websocket.send_text(WorkerRegistration(
+                    worker_id="worker-model",
+                    roles=["object"],
+                    cached_model_digests=[manifest_file["digest"]],
+                ).model_dump_json())
+                cached_welcome = websocket.receive_json()
+                cached_complete = websocket.receive_json()
+
+            self.assertEqual(
+                cached_complete["generation"],
+                cached_welcome["model_manifest"]["generation"],
             )
 
 

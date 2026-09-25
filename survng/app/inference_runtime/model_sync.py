@@ -318,6 +318,21 @@ class ModelBundleCatalog:
                             companion,
                         )
                     )
+                if spec.config_key in {"model_path", "model_xml"}:
+                    for sidecar_name in ("metadata.yaml", "classes.txt"):
+                        sidecar = resolved.parent / sidecar_name
+                        if not sidecar.exists():
+                            continue
+                        if not sidecar.is_file() or sidecar.is_symlink():
+                            raise ModelSyncError(
+                                f"configured object model has an unsafe {sidecar_name}"
+                            )
+                        files.append(
+                            self._file_entry(
+                                destination_root / sidecar.name,
+                                sidecar,
+                            )
+                        )
             else:
                 raise ModelSyncError(
                     f"configured {spec.config_key} is not a regular file or directory"
