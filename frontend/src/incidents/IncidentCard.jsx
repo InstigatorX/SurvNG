@@ -804,7 +804,6 @@ export function VisualSimilarIncidents({
 }
 
 export function RelatedAppearanceIncidents({
-  active = true,
   anchorEventId,
   selectedEventId,
   loadingEventId,
@@ -815,16 +814,20 @@ export function RelatedAppearanceIncidents({
 }) {
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (!active || !Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
+    if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
       setMatches([]);
       setLoading(false);
+      setError(false);
       return undefined;
     }
     const controller = new AbortController();
     let cancelled = false;
     setLoading(true);
+    setError(false);
+    setMatches([]);
     fetch(appUrl(relatedIncidentsPath(anchorEventId)), {
       signal: controller.signal,
     })
@@ -835,6 +838,7 @@ export function RelatedAppearanceIncidents({
       .catch((requestError) => {
         if (!cancelled && requestError?.name !== "AbortError") {
           setMatches([]);
+          setError(true);
         }
       })
       .finally(() => {
@@ -844,9 +848,7 @@ export function RelatedAppearanceIncidents({
       cancelled = true;
       controller.abort();
     };
-  }, [active, anchorEventId]);
-
-  if (!active || (!loading && !matches.length)) return null;
+  }, [anchorEventId]);
 
   return (
     <section className="incident-related">
@@ -855,6 +857,8 @@ export function RelatedAppearanceIncidents({
         {selectedEventId ? <button type="button" onClick={onReturn}>Selected incident</button> : null}
       </div>
       {loading ? <p>Finding related incidents…</p> : null}
+      {!loading && error ? <p>Related incidents are unavailable.</p> : null}
+      {!loading && !error && !matches.length ? <p>No related incidents were found in this time window.</p> : null}
       {matches.length ? <div className="incident-related-grid">
         {matches.map((match) => {
           const eventId = Number(match.event_id);
@@ -1144,6 +1148,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
           </button>
         )) : <p>No recognized faces.</p>}
       </section>
+      <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
       <VisualSimilarIncidents
         active={findSimilarActive}
         anchorEventId={Number.isInteger(findSimilarAnchorId) && findSimilarAnchorId > 0 ? findSimilarAnchorId : null}
@@ -1160,7 +1165,6 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         selectedEventId={selectedRelatedEventId}
         onClear={onFindSimilar ? () => onFindSimilar(null) : (onSelectObject ? () => onSelectObject(null) : null)}
       />
-      <RelatedAppearanceIncidents active={open} anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
       <CrossCameraTracePanel anchorEventId={open ? anchorEventId : null} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} loadingEventId={relatedLoadingEventId} />
       <details className="incident-technical-details">
         <summary>Technical details</summary>
