@@ -196,6 +196,54 @@ class RemoteInferenceRegistryTests(unittest.TestCase):
                 timeout=1.0,
             )
 
+    def test_initial_sync_lease_outlives_normal_heartbeat_lease(self) -> None:
+        transport = _FakeTransport()
+        welcome = self.registry.register(
+            WorkerRegistration(worker_id="worker-sync", roles=["object"]),
+            transport,
+            initial_lease_seconds=30.0,
+        )
+        self.now += 7.0
+
+        status = self.registry.status()
+
+        self.assertEqual(status["connected"], 1)
+        self.assertGreater(
+            status["workers"][0]["lease_remaining_seconds"],
+            20.0,
+        )
+        self.assertTrue(self.registry.mark_ready(WorkerReady(
+            worker_id="worker-sync",
+            connection_generation=welcome["connection_generation"],
+            config_generation=welcome["config_generation"],
+            statuses={"object": {"ready": True}},
+        )))
+
+    def test_unready_role_is_not_routed(self) -> None:
+        transport = _FakeTransport()
+        welcome = self.registry.register(
+            WorkerRegistration(worker_id="worker-unready", roles=["object"]),
+            transport,
+        )
+
+        accepted = self.registry.mark_ready(WorkerReady(
+            worker_id="worker-unready",
+            connection_generation=welcome["connection_generation"],
+            config_generation=welcome["config_generation"],
+            statuses={"object": {"ready": False}},
+        ))
+
+        self.assertTrue(accepted)
+        self.assertEqual(self.registry.status()["ready"], 0)
+        with self.assertRaises(InferenceUnavailable):
+            self.registry.request(
+                "object",
+                "detect",
+                frame=np.zeros((4, 4, 3), dtype=np.uint8),
+                workload=InferenceWorkload.INCIDENT_INITIAL,
+                timeout=1.0,
+            )
+
     def test_stale_config_generation_is_not_routed(self) -> None:
         self._register_ready()
         self.config = self.config.model_copy(

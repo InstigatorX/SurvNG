@@ -240,8 +240,11 @@ class InferenceWorkerClient:
                         control = json.loads(incoming)
                         if (
                             control.get("type") == "heartbeat_ack"
-                            and control.get("config_generation")
-                            != config_generation
+                            and (
+                                control.get("accepted") is False
+                                or control.get("config_generation")
+                                != config_generation
+                            )
                         ):
                             return
                         continue

@@ -87,6 +87,7 @@ class RemoteInferenceRegistry:
         *,
         config: DetectorConfig | None = None,
         config_generation: str = "",
+        initial_lease_seconds: float | None = None,
     ) -> dict[str, Any]:
         if registration.protocol_version != INFERENCE_PROTOCOL_VERSION:
             raise InferenceUnavailable(
@@ -100,11 +101,15 @@ class RemoteInferenceRegistry:
             self._generations[registration.worker_id] = generation
             previous = self._workers.get(registration.worker_id)
             now = self._clock()
+            initial_lease = max(
+                self._lease_seconds,
+                float(initial_lease_seconds or self._lease_seconds),
+            )
             self._workers[registration.worker_id] = _WorkerLease(
                 registration=registration,
                 transport=transport,
                 connection_generation=generation,
-                lease_expires_at=now + self._lease_seconds,
+                lease_expires_at=now + initial_lease,
                 last_seen_at=now,
             )
             active_config = (
@@ -142,9 +147,16 @@ class RemoteInferenceRegistry:
             expected = self._generation_provider(self._config_provider())
             worker.config_generation = ready.config_generation
             worker.statuses = dict(ready.statuses)
-            worker.ready = ready.config_generation == expected
+            accepted = ready.config_generation == expected
+            worker.ready = (
+                accepted
+                and any(
+                    self._role_ready(worker, role)
+                    for role in worker.registration.roles
+                )
+            )
             self._renew(worker)
-            return worker.ready
+            return accepted
 
     def heartbeat(self, heartbeat: WorkerHeartbeat) -> bool:
         with self._lock:
@@ -331,6 +343,7 @@ class RemoteInferenceRegistry:
                 if (
                     worker.ready
                     and role in worker.registration.roles
+                    and self._role_ready(worker, role)
                     and worker.config_generation == expected_generation
                 )
             ]
@@ -402,3 +415,11 @@ class RemoteInferenceRegistry:
         now = self._clock()
         worker.last_seen_at = now
         worker.lease_expires_at = now + self._lease_seconds
+
+    @staticmethod
+    def _role_ready(worker: _WorkerLease, role: WorkerRole) -> bool:
+        status = worker.statuses.get(role)
+        return bool(
+            isinstance(status, dict)
+            and status.get("ready")
+        )

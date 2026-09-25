@@ -182,6 +182,15 @@ class InferenceWorkerClientTests(unittest.TestCase):
         self.assertFalse(worker_config.tracking.reid_enabled)
         self.assertFalse(worker_config.depth.enabled)
         self.assertEqual(worker_config.inference_mode, "local")
+        supervisor = InferenceSupervisor(
+            worker_config,
+            enabled_roles=["object"],
+        )
+        self.addCleanup(supervisor.stop)
+        self.assertTrue(supervisor._object.start_enabled)
+        self.assertFalse(supervisor._face.start_enabled)
+        self.assertFalse(supervisor._reid.start_enabled)
+        self.assertFalse(supervisor._depth.start_enabled)
 
 
 class ModelSynchronizationTests(unittest.TestCase):

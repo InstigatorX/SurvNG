@@ -172,7 +172,7 @@ class ModelBundleCatalog:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._hash_cache: dict[
-            tuple[str, int, int, int], str
+            tuple[str, int, int, int, int], str
         ] = {}
 
     def config_generation(self, config: DetectorConfig) -> str:
@@ -357,6 +357,7 @@ class ModelBundleCatalog:
             int(stat_result.st_ino),
             int(stat_result.st_size),
             int(stat_result.st_mtime_ns),
+            int(stat_result.st_ctime_ns),
         )
         digest = self._hash_cache.get(key)
         if digest is None:
