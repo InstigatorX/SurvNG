@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 import numpy as np
 
 from survng.app.config import DetectorConfig
-from survng.app.inference import InferenceWorkload
+from survng.app.inference import InferenceSupervisor, InferenceWorkload
 from survng.app.inference_runtime.protocol import (
     WorkerRegistration,
     decode_packet,
