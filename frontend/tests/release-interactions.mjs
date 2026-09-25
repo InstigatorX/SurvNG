@@ -107,11 +107,21 @@ try {
     await page.waitForTimeout(400);
     assert.notEqual(await playheadLabel.textContent(), playheadBeforePan);
   }
-  const timelineEvidence = page.locator(".recordings-v2-events button").first();
+  const timelineEvidence = page.locator(".recordings-related-events-full .recordings-v2-events button").first();
   if (await timelineEvidence.count()) {
+    if (await nearbyToggle.getAttribute("aria-expanded") !== "true") {
+      await nearbyToggle.focus();
+      await nearbyToggle.press("Enter");
+    }
+    await timelineEvidence.waitFor({ state: "visible" });
+    const previousEvent = new URL(page.url()).searchParams.get("event");
     await timelineEvidence.click();
-    assert.equal(await timelineEvidence.getAttribute("aria-pressed"), "true");
-    assert.equal(await page.locator(".recordings-related-events").first().isVisible(), true);
+    // Live incident IDs are opaque strings; selection is persisted in the URL.
+    await page.waitForURL((url) => {
+      const selectedEvent = url.searchParams.get("event");
+      return Boolean(selectedEvent) && selectedEvent !== previousEvent;
+    });
+    assert.equal(await page.locator(".recordings-related-events-full").isVisible(), true);
   }
 
   for (const [path, title] of [

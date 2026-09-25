@@ -42,3 +42,11 @@ Absence of a production caller alone was not sufficient to retire tested operati
 - Final owner-only runtime snapshot: all 13 cameras connected, detector ready. No generated assets, test artifacts, credentials or local configuration are included in the commit.
 
 The entire browser test collection was not run: selected isolated fixtures and authenticated live checks covered the affected surfaces. The CSS harness used keyboard activation for the Timeline Nearby control because the existing assistant launcher intercepted a pointer click at the tested viewport. This pre-existing interaction is outside the deleted selector families. No claim is made that every historical CSS candidate or tested compatibility interface is dead.
+
+## Post-commit review
+
+The cleanup was committed as `2eca7be`, then reviewed against its parent. The review rechecked removed backend definitions and the Vite module graph: no unexpected residual callers or orphaned frontend modules were found.
+
+The review found that the revised historical release browser test could select evidence while Nearby was closed. The follow-up opens the panel explicitly, scopes the button to Nearby evidence, and waits for selection to be persisted in the URL. Its exact updated interaction block passed in an authenticated real browser against a real incident, starting with Nearby closed. JavaScript syntax and whitespace checks passed. The complete historical release script was not run. This test/documentation-only follow-up does not change the deployed application.
+
+That focused browser check also confirmed a pre-existing Timeline limitation: live incident IDs can be nonnumeric, while selected-event lookup/highlighting coerces them with `Number`. The selection is recorded in the URL, but the pressed highlight can remain absent. The numeric comparisons were verified in the parent commit; this is retained as a separate functional defect, not attributed to the cleanup. The follow-up diff was reviewed again with no further cleanup-introduced findings.
