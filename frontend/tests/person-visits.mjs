@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { createServer } from "vite";
 import { chromium } from "playwright";
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const server = await createServer({ root, configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [{ name: "visit-fixture", configureServer(vite) {
+const server = await createServer({ root, configFile: false, server: { host: "127.0.0.1", port: 0, fs: { allow: [root, realpathSync(`${root}/node_modules`)] } }, plugins: [{ name: "visit-fixture", configureServer(vite) {
   vite.middlewares.use((req, res, next) => {
     if (req.url === "/visits-fixture") { res.setHeader("Content-Type", "text/html"); res.end('<div id="root"></div><script type="module" src="/tests/fixtures/person-visits.jsx"></script>'); }
     else next();
@@ -42,12 +43,23 @@ try {
   const confirm = suggestions.getByRole("button", { name: "Same person and visit", exact: true });
   await confirm.waitFor();
   pending = false;
+  const panel = page.locator(".faces-review-panel");
+  assert.equal(await panel.evaluate((element) => element.scrollHeight > element.clientHeight), true);
+  const panelBox = await panel.boundingBox();
+  await page.mouse.move(panelBox.x + panelBox.width - 20, panelBox.y + 50);
+  await page.mouse.wheel(0, 600);
+  await page.waitForFunction(() => document.querySelector(".faces-review-panel").scrollTop > 0, null, { timeout: 3000 });
+  await panel.evaluate((element) => element.scrollTop = 0);
   assert.equal(await page.getByRole("checkbox").count(), 0);
   assert.equal(await suggestions.locator(".visit-sightings li").count(), 2);
   assert.equal(await suggestions.getByRole("link", { name: "Review face", exact: true }).first().getAttribute("href"), "/people?face=1");
   assert.ok((await suggestions.boundingBox()).y < (await page.getByRole("heading", { name: "Visit history", exact: true }).boundingBox()).y);
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.mouse.move(350, 400);
+  await page.mouse.wheel(0, 600);
+  await page.waitForFunction(() => window.scrollY > 0, null, { timeout: 3000 });
+  await page.evaluate(() => window.scrollTo(0, 0));
   await page.getByLabel("Person filter").selectOption("7");
   await confirm.waitFor();
   assert.equal(await page.locator(".person-visit").count(), 1);

@@ -14,6 +14,16 @@
   grid-template-rows: 52px 46px minmax(0, 1fr);
 }
 
+.faces-mode-visits .faces-review-panel {
+  display: block;
+}
+
+@media (min-width: 761px) {
+  .faces-mode-visits .faces-review-panel {
+    overflow-y: auto;
+  }
+}
+
 .people-mode-tabs button {
   display: inline-flex;
   align-items: center;
