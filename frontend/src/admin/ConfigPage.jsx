@@ -3799,6 +3799,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const [productUpdateBranch, setProductUpdateBranch] = useState("");
   const [apiTokenDraft, setApiTokenDraft] = useState({ id: "", name: "", scopes: ["read"] });
   const [apiTokenSecret, setApiTokenSecret] = useState("");
+  const [workerTokenSecret, setWorkerTokenSecret] = useState("");
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
   const [apiTokenError, setApiTokenError] = useState("");
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
@@ -4066,6 +4067,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
     setApiTokenBusy(true);
     setApiTokenError("");
     setApiTokenSecret("");
+    setWorkerTokenSecret("");
     onTokenSecretVisibleChange?.(false);
     try {
       const response = await fetch("/api/config/api-tokens", {
@@ -4104,9 +4106,48 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       commitImmediateConfig(["api_auth", "tokens"], (config.api_auth?.tokens || []).filter((token) => token.id !== tokenId));
       if (!payload.enabled) commitImmediateConfig(["api_auth", "enabled"], false);
       setApiTokenSecret("");
-      onTokenSecretVisibleChange?.(false);
+      onTokenSecretVisibleChange?.(Boolean(workerTokenSecret));
     } catch (error) {
       setApiTokenError(error.message || "Could not delete API token");
+    } finally {
+      setApiTokenBusy(false);
+    }
+  }
+
+  async function createWorkerToken() {
+    if (apiTokenBusy) return;
+    setApiTokenBusy(true);
+    setApiTokenError("");
+    setApiTokenSecret("");
+    setWorkerTokenSecret("");
+    onTokenSecretVisibleChange?.(false);
+    try {
+      const response = await fetch("/api/config/inference-worker-token", { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not create inference worker token");
+      commitImmediateConfig(["inference_workers", "worker_token_hash"], "__SURVNG_SECRET_SET__");
+      setWorkerTokenSecret(payload.token || "");
+      onTokenSecretVisibleChange?.(Boolean(payload.token));
+    } catch (error) {
+      setApiTokenError(error.message || "Could not create inference worker token");
+    } finally {
+      setApiTokenBusy(false);
+    }
+  }
+
+  async function deleteWorkerToken() {
+    if (apiTokenBusy || !window.confirm("Delete the inference worker token? Connected workers will be unable to reconnect.")) return;
+    setApiTokenBusy(true);
+    setApiTokenError("");
+    try {
+      const response = await fetch("/api/config/inference-worker-token", { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not delete inference worker token");
+      commitImmediateConfig(["inference_workers", "worker_token_hash"], "");
+      setWorkerTokenSecret("");
+      onTokenSecretVisibleChange?.(Boolean(apiTokenSecret));
+    } catch (error) {
+      setApiTokenError(error.message || "Could not delete inference worker token");
     } finally {
       setApiTokenBusy(false);
     }
@@ -4385,6 +4426,17 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <button type="button" className="primary" onClick={createApiToken} disabled={apiTokenBusy || !apiTokenDraft.id.trim() || !apiTokenDraft.name.trim() || !apiTokenDraft.scopes.length}>{apiTokenBusy ? <RefreshCcw className="spin" size={15} /> : <Plus size={15} />} Create token</button>
             </div>
             {apiTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this token now</strong><code>{apiTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(apiTokenSecret)}><Copy size={14} /> Copy</button><small>It cannot be displayed again after you leave this page.</small></div> : null}
+            <div className="api-auth-toggle">
+              <div className="detection-settings-subhead">
+                <div><strong>Inference worker token</strong><small>Dedicated credential for outbound inference-worker connections. Copy it into <code>SURVNG_INFERENCE_TOKEN</code> on each worker.</small></div>
+                <span className={`retention-state ${config.inference_workers?.worker_token_hash ? "running" : "idle"}`}>{config.inference_workers?.worker_token_hash ? "Configured" : "Not configured"}</span>
+              </div>
+              <div className="preference-action-buttons">
+                <button type="button" className="primary" onClick={createWorkerToken} disabled={apiTokenBusy}>{apiTokenBusy ? <RefreshCcw className="spin" size={15} /> : <KeyRound size={15} />}{config.inference_workers?.worker_token_hash ? "Rotate worker token" : "Create worker token"}</button>
+                {config.inference_workers?.worker_token_hash ? <button type="button" className="danger" onClick={deleteWorkerToken} disabled={apiTokenBusy}><Trash2 size={14} /> Delete</button> : null}
+              </div>
+            </div>
+            {workerTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this worker token now</strong><code>{workerTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(workerTokenSecret)}><Copy size={14} /> Copy</button><small>Paste it into the worker environment. It cannot be displayed again.</small></div> : null}
             {apiTokenError ? <div className="error-banner">{apiTokenError}</div> : null}
           </section>
           <section className="mqtt-access-settings integration-panes" hidden={apiSection !== "mqtt"}>
