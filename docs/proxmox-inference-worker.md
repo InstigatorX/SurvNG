@@ -94,12 +94,14 @@ guest and stores only the OpenVINO compilation cache.
 
 ## 5. Install the same SurvNG revision
 
-`/opt` is not writable by the worker user, so create the checkout directory as root first. It must be empty and owned by `survng-inference`.
+Create the directory as root, then fetch into it. The worker user cannot create `/opt/survng`, and `git clone` cannot use a directory that already contains `.cache`.
 
 ```bash
 sudo install -d -o survng-inference -g survng-inference -m 0750 "$SURVNG_ROOT"
-sudo -u survng-inference git clone --branch "$SURVNG_GIT_REF" --single-branch \
-  "$SURVNG_GIT_URL" "$SURVNG_ROOT"
+sudo -u survng-inference git -C "$SURVNG_ROOT" init
+sudo -u survng-inference git -C "$SURVNG_ROOT" remote add origin "$SURVNG_GIT_URL"
+sudo -u survng-inference git -C "$SURVNG_ROOT" fetch origin "$SURVNG_GIT_REF"
+sudo -u survng-inference git -C "$SURVNG_ROOT" checkout -B "$SURVNG_GIT_REF" FETCH_HEAD
 sudo install -d -o survng-inference -g survng-inference -m 0750 "$SURVNG_ROOT/.cache"
 cd "$SURVNG_ROOT"
 
@@ -108,9 +110,7 @@ sudo -u survng-inference "$SURVNG_ROOT/.venv/bin/pip" install --upgrade pip
 sudo -u survng-inference "$SURVNG_ROOT/.venv/bin/pip" install -r "$SURVNG_ROOT/requirements.txt"
 ```
 
-If `SURVNG_GIT_REF` is a commit rather than a branch, clone without
-`--branch` and then run `sudo -u survng-inference git checkout "$SURVNG_GIT_REF"`.
-Do not build the frontend and do not create a primary `config.json`.
+`checkout -B` attaches the local branch and leaves untracked files such as `.cache` in place. For a commit instead of a branch, replace that command with `sudo -u survng-inference git -C "$SURVNG_ROOT" checkout -f FETCH_HEAD`. Do not build the frontend and do not create a primary `config.json`.
 
 ## 6. Create the worker token on the primary
 
