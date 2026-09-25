@@ -94,6 +94,7 @@ try {
     const engine = process.env.TIMELINE_INTERACTIONS_BROWSER || "chromium";
     const macChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
     browser = engine === "webkit" ? await webkit.launch() : await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (existsSync(macChrome) ? macChrome : undefined), headless: true });
+    await runAvailabilityPlaybackCheck(browser, url);
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
@@ -117,6 +118,58 @@ try {
   for (const response of streams) response.end();
   await server?.close();
   rmSync(temporary, { recursive: true, force: true });
+}
+
+async function runAvailabilityPlaybackCheck(browser, url) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  // Keep the fixture day as "today" without accelerating media or poll timers.
+  await page.clock.setFixedTime(new Date((dayStart + 12 * 3600 + 1800) * 1000));
+  let updateCount = 0;
+  let playlistCount = 0;
+  page.on("request", request => {
+    if (new URL(request.url()).pathname.endsWith("/day.m3u8")) playlistCount += 1;
+  });
+  await page.route("**/recordings/updates?**", route => {
+    updateCount += 1;
+    return route.fulfill({ json: {
+      availability: [{ start_epoch: dayStart + 22 * 3600, end_epoch: dayStart + 22 * 3600 + updateCount * 10 }],
+      incidents: [],
+    } });
+  });
+  await page.goto(url);
+  await page.waitForFunction(() => {
+    const state = window.timelineFixture?.snapshot();
+    return state?.readyState >= 2 && !state.seeking && Number.isFinite(state.playhead);
+  });
+  await page.evaluate(() => {
+    const video = window.timelineFixture.video();
+    window.playbackResourceResets = [];
+    for (const name of ["emptied", "loadstart"]) {
+      video.addEventListener(name, () => window.playbackResourceResets.push(name));
+    }
+    video.muted = true;
+  });
+  await page.locator(".recording-hero-controls").getByRole("button", { name: "Play", exact: true }).click();
+  await page.waitForFunction(() => !window.timelineFixture.snapshot().paused);
+  const initial = await page.evaluate(() => window.timelineFixture.snapshot());
+  const initialPlaylists = playlistCount;
+  for (let index = 0; index < 2; index += 1) {
+    await page.waitForResponse(response => new URL(response.url()).pathname.endsWith("/recordings/updates"));
+    // Wait for the response's React render and any source-change effects.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const state = await page.evaluate(() => ({
+      ...window.timelineFixture.snapshot(), resets: window.playbackResourceResets,
+    }));
+    assert.deepEqual(state.resets, [], "background availability updates must not reset active playback");
+    assert.equal(playlistCount, initialPlaylists, "background updates must retain the loaded playlist");
+    assert.equal(state.src, initial.src);
+    assert.equal(state.videoId, initial.videoId);
+    assert.equal(state.paused, false);
+    assert.ok(state.currentTime > initial.currentTime + 1, "playback must advance across availability updates");
+  }
+  assert.ok(updateCount >= 2, "exercise multiple nonempty recording updates");
+  await page.close();
+  console.log("Today's Timeline playback survives background availability updates");
 }
 
 async function runInteractions(page, url, engine) {

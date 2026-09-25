@@ -860,14 +860,17 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const useTranscodedPlayback = transport === "transcode";
   const useSegmentPlayback = transport !== "hls";
   playbackTransportRef.current = { scope: nativeScope, mode: transport };
+  // Snapshot the start offset only when loading a playback resource. The day
+  // overview changes as new recordings arrive; including it here changes src
+  // during playback and makes native HLS discard its buffer every poll.
   const manifestStartTime = useMemo(() => {
     if (!playbackTimeline.length) return null;
     const retainedEpoch = desiredEpochRef.current;
     const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
       ? retainedEpoch
-      : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
+      : playbackTimeline[0].start_epoch;
     return epochToPlaybackMediaTime(initialEpoch);
-  }, [playbackDetail?.revision, playbackTimeline, dayStart, dayEnd, date, today, timeline]);
+  }, [playbackTimeline, dayStart, dayEnd, manifestRetryToken, transport]);
   const manifestUrl = !useSegmentPlayback && !isAllCameras && activeCameraId && playbackDetail && playbackTimeline.length
     ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source, manifestStartTime)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
