@@ -11,5 +11,10 @@ the same time.
 Commands in those guides are meant to be pasted in order. Set the variables in
 the first block of the guide you chose, then paste each later block as-is.
 
+An optional accelerator guest is separate from either primary installation.
+Follow [docs/proxmox-inference-worker.md](docs/proxmox-inference-worker.md) to
+install only the inference worker. Do not install the primary service in that
+guest.
+
 Related notes: [docs/docker.md](docs/docker.md), [docker/README.md](docker/README.md),
 [docs/storage.md](docs/storage.md), and the [support-bundle guide](README.md#support-bundle).
