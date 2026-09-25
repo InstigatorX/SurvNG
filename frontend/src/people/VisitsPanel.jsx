@@ -2,10 +2,27 @@ import React, { useEffect, useRef, useState } from "react";
 import { appUrl, fetch, recordingsHref } from "../shared/api.js";
 import { formatDateTime } from "../shared/format.js";
 
+function SightingPreview({ item }) {
+  const [preview, setPreview] = useState(item.face_id ? "face" : "snapshot");
+  if (preview === "face") return <img
+    src={appUrl(`/api/faces/observations/${item.face_id}/crop.jpg`)}
+    alt="Face evidence" loading="lazy" onError={() => setPreview("snapshot")}
+  />;
+  return <figure className="visit-snapshot-fallback">
+    {preview === "snapshot" ? <img
+      className="visit-incident-snapshot"
+      src={appUrl(`/api/events/${item.event_id}/thumbnail.jpg?width=520&quality=82&object_focus=false`)}
+      alt={`Incident snapshot at ${item.camera_id}`} loading="lazy"
+      onError={() => setPreview("unavailable")}
+    /> : <span className="visit-snapshot-unavailable">Snapshot unavailable · View recording below</span>}
+    <figcaption>{item.face_id ? "Face crop unavailable" : "No face captured"} · Incident snapshot</figcaption>
+  </figure>;
+}
+
 function SightingEvidence({ item, personName, timeZone }) {
   return <>
     <span>{item.camera_id} · {formatDateTime(item.first_seen, timeZone)}</span>
-    {item.face_id ? <img src={appUrl(`/api/faces/observations/${item.face_id}/crop.jpg`)} alt="Face evidence" /> : null}
+    <SightingPreview key={`${item.event_id}:${item.face_id || "none"}`} item={item} />
     <strong>{({ confirmed: "Confirmed identity", recognized: "Automatically recognized", linked: `Linked to ${personName}'s visit`, unresolved: "Unresolved person", conflict: "Conflicting identity evidence" })[item.identity_status]}</strong>
     <a href={appUrl(`/incidents?event_ids=${item.event_id}`)}>View incident</a>
     <a href={recordingsHref({ cameraId: item.camera_id, epoch: Date.parse(item.first_seen) / 1000 })}>View recording</a>

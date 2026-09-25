@@ -18,9 +18,16 @@ try {
   const page = await browser.newPage();
   let failure = false, pending = true, mutations = [], linked = false, empty = false;
   let noSuggestions = false, blocked = false, mutationFailure = false;
+  let faceImageFailure = false, snapshotFailure = false;
   const a = { id: "track:1:1", event_id: 1, face_id: 1, camera_id: "gate", first_seen: "2026-09-01T12:00:00Z", last_seen: "2026-09-01T12:00:02Z", revision: "a".repeat(64), identity_status: "unresolved" };
   const b = { ...a, id: "track:2:1", event_id: 2, face_id: 2, camera_id: "foyer", revision: "b".repeat(64), identity_status: "confirmed" };
-  await page.route("**/api/faces/observations/*/crop.jpg", (route) => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="gray"/></svg>' }));
+  const testImage = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="gray"/></svg>';
+  await page.route("**/api/faces/observations/*/crop.jpg", (route) => route.fulfill(faceImageFailure
+    ? { status: 404, body: "Face crop unavailable" }
+    : { contentType: "image/svg+xml", body: testImage }));
+  await page.route("**/api/events/*/thumbnail.jpg?*", (route) => route.fulfill(snapshotFailure
+    ? { status: 404, body: "Snapshot unavailable" }
+    : { contentType: "image/svg+xml", body: testImage }));
   await page.route("**/api/people/visits**", async (route) => {
     if (route.request().method() === "PUT") {
       if (mutationFailure) { await route.fulfill({ status: 409, json: { detail: "Sightings changed; refresh and retry" } }); return; }
@@ -99,6 +106,32 @@ try {
   await page.getByLabel("Person filter").selectOption("7");
   await page.getByText("0 of 2 sightings selected", { exact: true }).waitFor();
   await page.getByLabel("Person filter").selectOption("");
+  // Body-only sightings show an incident snapshot in both review and history.
+  a.face_id = null;
+  noSuggestions = false;
+  await page.getByRole("button", { name: "Refresh visits", exact: true }).click();
+  await suggestions.getByText("No face captured · Incident snapshot", { exact: true }).waitFor();
+  const snapshot = suggestions.getByAltText("Incident snapshot at gate", { exact: true });
+  await snapshot.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => {
+    const image = document.querySelector(".visit-suggestions .visit-incident-snapshot");
+    return image?.complete && image.naturalWidth > 0;
+  });
+  assert.match(await snapshot.getAttribute("src"), /\/api\/events\/1\/thumbnail\.jpg\?.*object_focus=false/);
+  assert.equal(await suggestions.getByRole("link", { name: "Review face", exact: true }).count(), 1);
+  assert.equal(await suggestions.getByAltText("Face evidence", { exact: true }).getAttribute("src"), "/api/faces/observations/2/crop.jpg");
+  assert.equal(await page.locator(".person-visit").first().getByText("No face captured · Incident snapshot", { exact: true }).count(), 1);
+  // Missing face files also fall back, with an accurate label.
+  faceImageFailure = true;
+  await page.reload();
+  await suggestions.getByText("Face crop unavailable · Incident snapshot", { exact: true }).waitFor();
+  assert.equal(await suggestions.getByRole("img").count(), 2);
+  // Expired incident media leaves useful text and recording links, not broken images.
+  snapshotFailure = true;
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll(".visit-suggestions .visit-snapshot-unavailable").length === 2);
+  assert.equal(await suggestions.getByRole("img").count(), 0);
+  assert.equal(await suggestions.getByRole("link", { name: "View recording", exact: true }).count(), 2);
   failure = true;
   await page.getByRole("button", { name: "Refresh visits", exact: true }).click();
   await page.getByRole("alert").waitFor();
@@ -107,7 +140,7 @@ try {
   await page.getByText("No person sightings in this window.", { exact: true }).waitFor();
   assert.equal(await page.getByRole("alert").count(), 0);
   assert.deepEqual(errors, []);
-  console.log("Visit pair priority, person filtering, manual review, blocked links, mutation errors, retraction, loading, empty and reconnect checks passed");
+  console.log("Visit snapshot fallbacks, missing media, scrolling, review, filtering, errors and reconnect checks passed");
 } finally {
   await browser?.close();
   await server.close();
