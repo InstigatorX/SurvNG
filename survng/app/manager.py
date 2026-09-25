@@ -824,6 +824,8 @@ class AppManager:
         with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("application manager is closed")
+            if self._stopping:
+                raise RuntimeError("application manager is still stopping")
             if self._started:
                 return
             self._stopping = False
@@ -897,8 +899,11 @@ class AppManager:
                 try:
                     self._shutdown_components()
                 except Exception:
+                    # A later stop must still reach any surviving components.
                     LOGGER.exception("application startup rollback was incomplete")
-                self._closed = True
+                else:
+                    self._closed = True
+                self._started = False
                 raise
 
     def _camera_startup_completed(self) -> None:
@@ -945,7 +950,8 @@ class AppManager:
                 raise
             except BaseException:
                 self._started = False
-                self._closed = True
+                # A failed close is not a completed lifecycle transition.
+                # Preserve the owner so shutdown can be retried.
                 raise
             self._started = False
             self._closed = True

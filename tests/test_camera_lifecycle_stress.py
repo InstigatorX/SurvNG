@@ -247,7 +247,7 @@ def test_repeated_full_camera_generations_leave_no_workers_or_stale_work() -> No
     reader = threading.Thread(target=read_status, name="stress-status-reader")
     reader.start()
     try:
-        for expected_generation in range(1, 51):
+        for expected_generation in range(1, 101):
             lifecycle.start()
             assert owned.analysis.running()
             assert owned.decisions.running()

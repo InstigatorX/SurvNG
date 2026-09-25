@@ -219,6 +219,14 @@ def test_close_attempts_every_owned_and_retired_generation() -> None:
     service.detector.stop.assert_called_once_with()
     retired.assert_called_once_with()
     assert service.status()["closed"]
+    assert service.status()["retired_cleanup_pending"] == 2
+    service.faces.close.side_effect = None
+    retired.side_effect = None
+    service.close()
+    assert service.faces.close.call_count == 2
+    assert retired.call_count == 2
+    service.detector.stop.assert_called_once_with()
+    assert service.status()["retired_cleanup_pending"] == 0
 
 
 def test_close_does_not_chain_secret_bearing_dependency_error() -> None:

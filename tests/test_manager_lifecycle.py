@@ -794,6 +794,19 @@ class ManagerLifecycleTest(unittest.TestCase):
             }),
         )
 
+    def test_failed_startup_cleanup_remains_retryable(self) -> None:
+        manager = manager_with_mocks()
+        manager.inference.start_core.side_effect = RuntimeError("startup failed")
+        with patch.object(manager, "_shutdown_components", side_effect=[RuntimeError("still alive"), None]) as shutdown:
+            with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                manager.start_all()
+            self.assertFalse(manager._closed)
+            with self.assertRaisesRegex(RuntimeError, "stopping"):
+                manager.start_all()
+            manager.stop_all()
+            self.assertEqual(shutdown.call_count, 2)
+            self.assertTrue(manager._closed)
+
     def test_real_empty_manager_starts_and_stops_all_background_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = AppManager(AppConfig(storage_dir=tmpdir))
@@ -1013,7 +1026,11 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.inference.close.assert_called_once_with()
         manager.recorder.stop_all.assert_called_once_with()
         manager.state_events.close.assert_called_once_with()
+        self.assertFalse(manager._closed)
+        manager.inference.close.side_effect = None
+        manager.stop_all()
         self.assertTrue(manager._closed)
+        self.assertEqual(manager.inference.close.call_count, 2)
 
     def test_camera_close_runs_even_when_camera_stop_fails(self) -> None:
         manager = manager_with_mocks()

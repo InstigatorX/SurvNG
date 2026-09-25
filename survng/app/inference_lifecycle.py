@@ -215,20 +215,23 @@ class InferenceLifecycle:
     def close(self) -> None:
         """Close all inference-owned services, attempting every component."""
         with self._lock:
-            if self._closed:
+            if self._closed and not self._retired_cleanup:
                 return
             failures: list[tuple[str, BaseException]] = []
-            for label, operation in (
+            operations = tuple(self._retired_cleanup) if self._closed else (
                 ("face recognition", self.faces.close),
                 ("semantic search", self.semantic_search.close),
                 ("appearance backfill", self.appearance_backfill.close),
                 *tuple(self._retired_cleanup),
                 ("inference", self.detector.stop),
-            ):
+            )
+            self._retired_cleanup = []
+            for label, operation in operations:
                 try:
                     operation()
                 except BaseException as error:
                     failures.append((label, error))
+                    self._retired_cleanup.append((label, operation))
                     LOGGER.error(
                         "%s shutdown failed: %s",
                         label,
@@ -237,8 +240,9 @@ class InferenceLifecycle:
             self._core_started = False
             self._core_ready = False
             self._auxiliary_started = False
+            # Close admission immediately, but retain failed owners for the
+            # next shutdown attempt instead of silently abandoning them.
             self._closed = True
-            self._retired_cleanup = []
             if failures:
                 labels = ", ".join(label for label, _error in failures)
                 first = failures[0][1]
