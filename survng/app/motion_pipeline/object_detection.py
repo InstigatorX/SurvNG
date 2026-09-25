@@ -20,6 +20,7 @@ from ..evidence_work import check_evidence_cancellation, evidence_cancelled
 from ..config import CameraConfig
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
+from ..object_motion import ObjectMotionEstimate, estimate_object_motion
 from ..recording_media import mp4_video_dimensions
 from ..visual_quality import VisualQuality, image_quality
 from ..zones import apply_depth_zone_filters, apply_detection_zones, detection_threshold
@@ -465,9 +466,9 @@ def _candidate_detection(detected: dict[str, Any]) -> bool:
 def _temporal_motion_metrics(
     track: _TemporalDetectionEvidence,
     samples: list[_RecordedDetectionSample],
-) -> tuple[float, float]:
-    """Measure detector-box movement in resolution-independent frame units."""
-    centers: list[tuple[float, float]] = []
+) -> ObjectMotionEstimate:
+    """Measure shared motion evidence in normalized frame units."""
+    centers: list[tuple[float, float, float]] = []
     for sample_index, detected in sorted(track.observations.items()):
         box = _box(detected)
         if box is None or sample_index >= len(samples):
@@ -479,12 +480,12 @@ def _temporal_motion_metrics(
         if width <= 0 or height <= 0:
             continue
         x1, y1, x2, y2 = box
-        centers.append(((x1 + x2) / (2.0 * width), (y1 + y2) / (2.0 * height)))
-    if len(centers) < 2:
-        return 0.0, 0.0
-    displacement = math.dist(centers[0], centers[-1])
-    path = sum(math.dist(previous, current) for previous, current in zip(centers, centers[1:]))
-    return displacement, path
+        centers.append((
+            samples[sample_index].offset,
+            (x1 + x2) / (2.0 * width),
+            (y1 + y2) / (2.0 * height),
+        ))
+    return estimate_object_motion(centers)
 
 
 def _normalized_box_metrics(
@@ -753,9 +754,9 @@ def _temporal_consensus(
         if id(track) in confirmed_ids
         and (
             min(track.observations, default=0) > 0
-            or motion_by_track[id(track)][0]
+            or motion_by_track[id(track)].displacement_ratio
             >= REPRESENTATIVE_DYNAMIC_DISPLACEMENT_RATIO
-            or motion_by_track[id(track)][1] >= REPRESENTATIVE_DYNAMIC_PATH_RATIO
+            or motion_by_track[id(track)].excursion_ratio >= REPRESENTATIVE_DYNAMIC_PATH_RATIO
         )
     }
     if not primary_ids:
@@ -1012,12 +1013,14 @@ def _temporal_consensus(
                 if str(value)
             }
             enriched["temporal_zone_entry"] = bool(later_zones - first_zones)
-        displacement, path = motion_by_track.get(
-            id(track),
-            _temporal_motion_metrics(track, samples),
-        )
-        enriched["temporal_center_displacement_ratio"] = round(displacement, 5)
-        enriched["temporal_center_path_ratio"] = round(path, 5)
+        motion = motion_by_track.get(id(track))
+        if motion is None:
+            motion = _temporal_motion_metrics(track, samples)
+        # Preserve original aggregate diagnostics for historical comparisons.
+        # Admission consumers read the versioned estimate instead.
+        enriched["temporal_center_displacement_ratio"] = round(motion.raw_displacement_ratio, 5)
+        enriched["temporal_center_path_ratio"] = round(motion.raw_path_ratio, 5)
+        enriched["temporal_motion"] = motion.as_dict()
         if confirmed:
             enriched["confidence"] = round(track.aggregate_confidence, 4)
         if not snapshot_visible:

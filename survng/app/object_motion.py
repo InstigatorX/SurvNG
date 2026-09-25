@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 
@@ -15,9 +15,121 @@ MOVEMENT_BOX_SCALE = 0.04
 MINIMUM_PATH_RATIO = 0.01
 PATH_MOVEMENT_SCALE = 2.5
 MOTION_CORRELATION_REASON = "object_not_motion_correlated"
-TRACKING_RESAMPLE_BUCKET = 8
-MINIMUM_TRACKING_OBSERVATIONS = 2 * TRACKING_RESAMPLE_BUCKET
+MINIMUM_TRACKING_OBSERVATIONS = 16
 MINIMUM_TRACKING_MATCH_IOU = 0.5
+ISOLATED_POINT_SEPARATION_FACTOR = 3.0
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectMotionEstimate:
+    """Bounded travel evidence; accumulated path is diagnostic only."""
+
+    displacement_ratio: float = 0.0
+    excursion_ratio: float = 0.0
+    raw_displacement_ratio: float = 0.0
+    raw_path_ratio: float = 0.0
+    filtered_path_ratio: float = 0.0
+    duration_seconds: float = 0.0
+    samples: int = 0
+    isolated_points_rejected: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "version": 2,
+            "method": "supported_observation_excursion",
+            "isolation_floor_ratio": MINIMUM_MOVEMENT_RATIO,
+            "isolation_separation_factor": ISOLATED_POINT_SEPARATION_FACTOR,
+            **asdict(self),
+        }
+
+
+def estimate_object_motion(
+    trajectory: Sequence[Sequence[float]],
+) -> ObjectMotionEstimate:
+    """Measure normalized timestamped centers without accumulating box jitter.
+
+    Retain distinct observations instead of binning away support for brief
+    excursions. Reject only a point far from both temporal neighbors when those
+    neighbors agree spatially and no other observation supports its location.
+    Endpoint rejection also checks the timestamped
+    local trend, so irregularly sampled steady travel is not trimmed away.
+    Decisions use the original points in one pass: rejection cannot cascade.
+    Two-point evidence remains ambiguous between real movement and box error.
+    """
+    by_time: dict[float, list[tuple[float, float]]] = {}
+    for entry in trajectory:
+        if len(entry) < 3:
+            continue
+        try:
+            timestamp, x, y = (float(value) for value in entry[:3])
+        except (TypeError, ValueError):
+            continue
+        if all(math.isfinite(value) for value in (timestamp, x, y)):
+            by_time.setdefault(timestamp, []).append((x, y))
+    if not by_time:
+        return ObjectMotionEstimate()
+
+    def center(points: Sequence[tuple[float, float]]) -> tuple[float, float]:
+        return (
+            statistics.median(p[0] for p in points),
+            statistics.median(p[1] for p in points),
+        )
+
+    times = sorted(by_time)
+    raw = [center(by_time[timestamp]) for timestamp in times]
+    filtered = []
+    for index, point in enumerate(raw):
+        if len(raw) < 3:
+            filtered.append(point)
+            continue
+        if index == 0:
+            first, second = 1, 2
+        elif index == len(raw) - 1:
+            first, second = index - 1, index - 2
+        else:
+            first, second = index - 1, index + 1
+        neighbor_span = math.dist(raw[first], raw[second])
+        tolerance = max(
+            MINIMUM_MOVEMENT_RATIO,
+            ISOLATED_POINT_SEPARATION_FACTOR * neighbor_span,
+        )
+        isolated = min(
+            math.dist(point, raw[first]), math.dist(point, raw[second]),
+        ) > tolerance
+        if isolated and index in (0, len(raw) - 1):
+            # Extrapolate only to test support, never to manufacture a center.
+            # A long gap before an endpoint can explain a large real step.
+            fraction = (times[index] - times[first]) / (times[second] - times[first])
+            expected = tuple(
+                raw[first][axis] + fraction * (raw[second][axis] - raw[first][axis])
+                for axis in (0, 1)
+            )
+            isolated = math.dist(point, expected) > tolerance
+        if isolated:
+            # Repeated excursions can alternate between distant positions.
+            # Support need not be adjacent, but must be a distinct timestamp.
+            isolated = not any(
+                other_index != index
+                and math.dist(point, other) <= MINIMUM_MOVEMENT_RATIO
+                for other_index, other in enumerate(raw)
+            )
+        if not isolated:
+            filtered.append(point)
+    # With three inconsistent observations there may be no supported point.
+    # Retain raw diagnostics, but no affirmative movement evidence.
+    return ObjectMotionEstimate(
+        displacement_ratio=math.dist(filtered[0], filtered[-1]) if len(filtered) >= 2 else 0.0,
+        excursion_ratio=max(
+            (math.dist(first, second) for index, first in enumerate(filtered)
+             for second in filtered[index + 1:]), default=0.0,
+        ),
+        raw_displacement_ratio=math.dist(raw[0], raw[-1]),
+        raw_path_ratio=sum(math.dist(a, b) for a, b in zip(raw, raw[1:])),
+        filtered_path_ratio=sum(math.dist(a, b) for a, b in zip(filtered, filtered[1:])),
+        duration_seconds=times[-1] - times[0],
+        samples=len(times),
+        isolated_points_rejected=len(raw) - len(filtered),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +146,13 @@ class TemporalObjectMotionEvidence:
     newly_appeared: bool
     robust_new_appearance: bool
     zone_entry: bool
+    excursion_ratio: float | None = None
+
+    @property
+    def movement_extent_ratio(self) -> float:
+        # Legacy records have only aggregate path; do not reinterpret their
+        # historical decisions as if the original trajectory had been retained.
+        return self.path_ratio if self.excursion_ratio is None else self.excursion_ratio
 
     @property
     def temporal_evidence_available(self) -> bool:
@@ -47,7 +166,7 @@ class TemporalObjectMotionEvidence:
     def credible_movement(self) -> bool:
         return bool(
             self.displacement_ratio >= self.movement_threshold
-            or self.path_ratio >= self.path_threshold
+            or self.movement_extent_ratio >= self.path_threshold
         )
 
     def stable(
@@ -60,7 +179,7 @@ class TemporalObjectMotionEvidence:
         return bool(
             self.temporal_evidence_available
             and self.displacement_ratio <= maximum_displacement_ratio
-            and self.path_ratio <= maximum_path_ratio
+            and self.movement_extent_ratio <= maximum_path_ratio
             and not self.robust_new_appearance
             and not self.zone_entry
             and (
@@ -101,10 +220,16 @@ def temporal_object_motion_evidence(
         pretrigger = 1
     if posttrigger == 0 and last_offset is not None and last_offset >= 0.0:
         posttrigger = 1
+    estimate = observation.get("temporal_motion")
+    has_estimate = isinstance(estimate, Mapping) and estimate.get("version") in (1, 2)
     return TemporalObjectMotionEvidence(
         normalized_box=normalized_box,
-        displacement_ratio=_finite(observation.get("temporal_center_displacement_ratio")),
+        displacement_ratio=_finite(
+            estimate.get("displacement_ratio") if has_estimate
+            else observation.get("temporal_center_displacement_ratio")
+        ),
         path_ratio=_finite(observation.get("temporal_center_path_ratio")),
+        excursion_ratio=_finite(estimate.get("excursion_ratio")) if has_estimate else None,
         movement_threshold=movement_threshold,
         track_observations=_integer(observation.get("temporal_track_observations")),
         pretrigger_observations=pretrigger,
@@ -123,17 +248,10 @@ def tracking_motion_promotions(
 ) -> dict[int, dict[str, Any]]:
     """Re-check motion-demoted objects against whole-session tracking evidence.
 
-    Refinement decides motion correlation from roughly one second of samples,
-    so a subject that moves slowly can fail the path test and stay out of the
-    incident even though it is real. Tracking follows the same subject for the
-    whole incident, so apply the unchanged path threshold to that longer
-    trajectory. Raw path accumulates detector-box noise, and a median filter
-    does not remove a steady oscillation, so measure travel between resampled
-    bucket means and the widest center separation instead. Either may satisfy
-    the threshold: resampling catches a slow walker, while the separation
-    catches a fast transit that bucket averaging blurs. Both stay below the
-    threshold for jitter. Every other admission gate remains authoritative,
-    so only an object that failed motion correlation alone can be restored.
+    Use the same bounded excursion estimator as initial admission. A longer
+    observation window can establish travel that sparse refinement missed, but
+    accumulating stationary box noise cannot. All other eligibility gates and
+    track identity matching remain authoritative.
     """
     width = _positive_float(tracking.get("frame_width"))
     height = _positive_float(tracking.get("frame_height"))
@@ -182,10 +300,8 @@ def tracking_motion_promotions(
         if matched is None:
             continue
         overlap, summary = matched
-        path, span = _resampled_motion_ratios(
-            summary.get("trajectory"), width, height
-        )
-        if path < threshold and span < threshold:
+        estimate = _tracking_motion_estimate(summary.get("trajectory"), width, height)
+        if estimate.excursion_ratio < threshold:
             continue
         track_id = _integer(summary.get("track_id"))
         claimed.add(track_id)
@@ -203,10 +319,11 @@ def tracking_motion_promotions(
                 "track_id": track_id,
                 "observations": observations,
                 "match_iou": round(overlap, 3),
-                "resampled_path_ratio": round(path, 5),
-                "trajectory_span_ratio": round(span, 5),
+                "resampled_path_ratio": round(estimate.filtered_path_ratio, 5),
+                "trajectory_span_ratio": round(estimate.excursion_ratio, 5),
                 "path_threshold": round(threshold, 5),
-                "resample_bucket": TRACKING_RESAMPLE_BUCKET,
+                "motion_estimate": estimate.as_dict(),
+                "qualification_metric": "supported_excursion",
             },
         }
     return promotions
@@ -277,15 +394,12 @@ def _intersection_over_union(
     return intersection / union if union > 0.0 else 0.0
 
 
-def _resampled_motion_ratios(
-    trajectory: object,
-    width: float,
-    height: float,
-) -> tuple[float, float]:
-    """Return travel between bucket means and the widest center separation."""
+def _tracking_motion_estimate(
+    trajectory: object, width: float, height: float,
+) -> ObjectMotionEstimate:
     if not isinstance(trajectory, Sequence) or isinstance(trajectory, (str, bytes)):
-        return 0.0, 0.0
-    centers: list[tuple[float, float]] = []
+        return ObjectMotionEstimate()
+    normalized = []
     for entry in trajectory:
         if (
             not isinstance(entry, Sequence)
@@ -294,31 +408,12 @@ def _resampled_motion_ratios(
         ):
             continue
         try:
-            point = (float(entry[1]) / width, float(entry[2]) / height)
+            normalized.append((
+                float(entry[0]), float(entry[1]) / width, float(entry[2]) / height,
+            ))
         except (TypeError, ValueError, ZeroDivisionError):
             continue
-        if all(math.isfinite(value) for value in point):
-            centers.append(point)
-    if len(centers) < 2:
-        return 0.0, 0.0
-    means = [
-        (
-            statistics.fmean(point[0] for point in bucket),
-            statistics.fmean(point[1] for point in bucket),
-        )
-        for index in range(0, len(centers), TRACKING_RESAMPLE_BUCKET)
-        if (bucket := centers[index:index + TRACKING_RESAMPLE_BUCKET])
-    ]
-    path = sum(
-        math.dist(previous, current)
-        for previous, current in zip(means, means[1:])
-    )
-    span = max(
-        math.dist(first, second)
-        for index, first in enumerate(centers)
-        for second in centers[index + 1:]
-    )
-    return path, span
+    return estimate_object_motion(normalized)
 
 
 def _movement_threshold(

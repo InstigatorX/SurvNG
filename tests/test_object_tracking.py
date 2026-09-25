@@ -2375,8 +2375,8 @@ class TrackingMotionPromotionTest(unittest.TestCase):
         )
         self.assertGreaterEqual(evidence["match_iou"], 0.5)
 
-    def test_fast_transit_qualifies_on_separation_alone(self) -> None:
-        """Bucket averaging blurs a quick crossing; separation still shows it."""
+    def test_repeated_fast_transit_qualifies_on_supported_excursion(self) -> None:
+        """Repeated crossings retain meaningful extent after temporal filtering."""
         centers = [
             (855.0 if index % 2 else 855.0 + 120.0, 898.0)
             for index in range(38)
@@ -2388,9 +2388,7 @@ class TrackingMotionPromotionTest(unittest.TestCase):
 
         self.assertEqual(list(promotions), [0])
         evidence = promotions[0]["tracking_motion_promotion"]
-        self.assertLess(
-            evidence["resampled_path_ratio"], evidence["path_threshold"]
-        )
+        self.assertEqual(evidence["qualification_metric"], "supported_excursion")
         self.assertGreater(
             evidence["trajectory_span_ratio"], evidence["path_threshold"]
         )

@@ -183,6 +183,35 @@ image regions; object detection identifies semantic objects. For EMA backup and
 other policies that require correlation, a main-stream object must credibly
 explain the motion through aligned overlap or temporal movement.
 
+New temporal evidence uses one shared estimator for initial admission, activity
+attribution, scene-context stability, and tracking promotion. Timestamped centers
+are normalized to frame dimensions and deduplicated by timestamp. Version 2
+retains the original observations and rejects an isolated point only when it is
+far from both neighboring observations relative to their separation, and no
+other distinct observation supports its location. Endpoint rejection checks
+the timestamped local trend so irregularly sampled steady movement remains
+intact. Filtering uses the original observations in one pass; rejected points
+cannot cause cascading rejection. There is no bin-count switch or time-bin
+aggregation to erase short supported excursions.
+
+Sparse evidence cannot reliably distinguish a localization error from a real
+brief transit. A lone unsupported excursion may be rejected, while a repeated
+localization error may look like supported movement.
+
+Admission uses filtered endpoint displacement or maximum filtered excursion
+(including out-and-back travel). Accumulated path length is diagnostic only:
+more observations of bounded jitter cannot turn it into meaningful travel.
+Repeated small loops below the excursion threshold no longer qualify through
+accumulation alone. Existing confidence, zone, and identity gates still apply.
+
+The versioned `temporal_motion` object records raw and filtered measurements,
+duration, sample count, and number of isolated points rejected. Version 1
+estimates from the earlier bin-median filter remain readable. Original
+aggregate fields remain available for comparison. Legacy records without this
+object retain their original aggregate-path interpretation; historical incidents
+are not silently reclassified. Tracking promotion records the same estimator in
+`tracking_motion_promotion.motion_estimate`.
+
 When substream and main-stream crops/FOV differ and no calibration is trusted,
 SurvNG does not pretend their coordinates align. A real object may therefore be
 semantically valid yet fail `object_not_motion_correlated`. That rejection must

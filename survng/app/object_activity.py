@@ -26,6 +26,7 @@ class ObjectActivityRole(StrEnum):
 class ObjectActivityEvidence:
     displacement_ratio: float
     path_ratio: float
+    excursion_ratio: float | None
     movement_threshold: float
     track_observations: int
     pretrigger_observations: int
@@ -45,6 +46,8 @@ class ObjectActivityEvidence:
         return {
             "displacement_ratio": round(self.displacement_ratio, 5),
             "path_ratio": round(self.path_ratio, 5),
+            "excursion_ratio": self.excursion_ratio,
+            "motion_evidence_method": "legacy_path" if self.excursion_ratio is None else "bounded_excursion",
             "movement_threshold": round(self.movement_threshold, 5),
             "track_observations": self.track_observations,
             "pretrigger_observations": self.pretrigger_observations,
@@ -287,7 +290,7 @@ class ObjectActivityAttributor:
             and motion.temporal_evidence_available
             and motion.displacement_ratio
             <= self.stationary_policy.scene_stable_displacement_ratio
-            and motion.path_ratio <= self.stationary_policy.scene_stable_path_ratio
+            and motion.movement_extent_ratio <= self.stationary_policy.scene_stable_path_ratio
             and not motion.zone_entry
         )
         memory_match, memory_sightings, memory_age = self._context_memory_evidence(
@@ -302,7 +305,7 @@ class ObjectActivityAttributor:
                 0.72
                 + min(
                     0.25,
-                    motion.displacement_ratio * 4.0 + motion.path_ratio * 2.0,
+                    motion.displacement_ratio * 4.0 + motion.movement_extent_ratio * 2.0,
                 )
             )
             reasons = ("credible_temporal_movement",)
@@ -353,7 +356,7 @@ class ObjectActivityAttributor:
                     motion.zone_entry
                     or motion.displacement_ratio
                     >= max(0.02, motion.movement_threshold * 2.0)
-                    or motion.path_ratio
+                    or motion.movement_extent_ratio
                     >= max(0.04, motion.movement_threshold * 4.0)
                 ),
             )
@@ -383,6 +386,7 @@ class ObjectActivityAttributor:
             evidence=ObjectActivityEvidence(
                 displacement_ratio=motion.displacement_ratio,
                 path_ratio=motion.path_ratio,
+                excursion_ratio=motion.excursion_ratio,
                 movement_threshold=motion.movement_threshold,
                 track_observations=motion.track_observations,
                 pretrigger_observations=motion.pretrigger_observations,

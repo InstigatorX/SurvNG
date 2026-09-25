@@ -204,6 +204,7 @@ def _incident_event_payload(event: dict) -> dict:
                 "temporal_label_votes",
                 "temporal_center_displacement_ratio",
                 "temporal_center_path_ratio",
+                "temporal_motion",
                 "temporal_first_observation_offset_seconds",
                 "temporal_last_observation_offset_seconds",
                 "temporal_newly_appeared",
