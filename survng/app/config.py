@@ -639,6 +639,11 @@ class DepthConfig(BaseModel):
 
 
 class ObjectTrackingConfig(BaseModel):
+    visit_auto_link_enabled: bool = False
+    visit_match_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    visit_top_two_margin: float = Field(default=0.08, ge=0.0, le=1.0)
+    visit_min_quality: float = Field(default=0.4, ge=0.0, le=1.0)
+    visit_max_seconds: float = Field(default=1200.0, ge=30.0, le=7200.0)
     enabled: bool = True
     implementation: str = Field(default="survng_sparse_identity", min_length=1, max_length=64)
     excluded_labels: list[str] = Field(default_factory=lambda: ["face"], max_length=128)
@@ -786,6 +791,10 @@ class DetectorConfig(BaseModel):
     warmup_enabled: bool = True
     face_max_observations: int = Field(default=1000, ge=100, le=100000)
     face_recognition_enabled: bool = False
+    face_embedding_profile: Literal["legacy_openvino", "adaface", "arcface"] = "legacy_openvino"
+    face_evidence_enabled: bool = True
+    face_evidence_max_extra_frames: int = Field(default=4, ge=0, le=8)
+    face_evidence_timeout_seconds: float = Field(default=4.0, ge=0.5, le=10.0)
     face_embedding_model_path: str = Field(default="", max_length=4096)
     face_landmark_model_path: str = Field(default="", max_length=4096)
     face_detection_model_path: str = Field(default="", max_length=4096)

@@ -59,6 +59,7 @@ jobs:
         run: |
           scripts/run-tests.sh \
             tests/test_face*.py \
+            tests/test_person_visits.py \
             tests/test_identity*.py \
             tests/test_unknown_identity*.py \
             tests/test_timeline_identity.py

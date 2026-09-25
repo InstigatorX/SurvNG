@@ -615,6 +615,7 @@ class InferenceSupervisor:
             "device": self.config.face_recognition_device,
             "model_path": self.config.face_embedding_model_path,
             "landmark_model_path": self.config.face_landmark_model_path,
+            "embedding_profile": self.config.face_embedding_profile,
             "detector": {
                 "enabled": bool(self.config.face_detection_model_path),
                 "ready": False,

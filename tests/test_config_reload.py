@@ -19,6 +19,7 @@ from survng.app.config_application import (
     DETECTOR_SHARED_ENGINE_FIELDS,
     TRACKING_REID_ENGINE_FIELDS,
     TRACKING_SESSION_FIELDS,
+    TRACKING_VISIT_POLICY_FIELDS,
 )
 from survng.app import main
 from survng.app.manager import ManagerShutdownIncompleteError
@@ -173,6 +174,7 @@ class ConfigReloadTest(unittest.TestCase):
         tracking_groups = (
             TRACKING_SESSION_FIELDS,
             TRACKING_REID_ENGINE_FIELDS,
+            TRACKING_VISIT_POLICY_FIELDS,
         )
         depth_groups = (
             DEPTH_ENGINE_FIELDS,
@@ -207,6 +209,36 @@ class ConfigReloadTest(unittest.TestCase):
             DETECTOR_OBJECT_TRACKING_RESET_FIELDS,
             DETECTOR_OBJECT_ENGINE_FIELDS,
         )
+
+    def test_embedding_profile_restarts_only_face_engine(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.face_embedding_profile = "adaface"
+        with patch("survng.app.main.reload_manager") as reload, patch("survng.app.main.save_config"):
+            effective, result = main.apply_config_update(incoming)
+        reload.assert_not_called()
+        active.reconfigure_inference.assert_called_once_with(effective.detector, {"face"}, refresh_tracking=False)
+        self.assertEqual(result["subsystems_restarted"], ["face_inference"])
+
+    def test_visit_policy_does_not_restart_active_tracking_sessions(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.tracking.visit_match_threshold = .95
+        with patch("survng.app.main.reload_manager") as reload, patch("survng.app.main.save_config"):
+            effective, result = main.apply_config_update(incoming)
+        reload.assert_not_called()
+        active.reconfigure_object_tracking.assert_not_called()
+        active.reconfigure_inference.assert_not_called()
+        active.reconfigure_detector_policy.assert_called_once_with(effective)
+        self.assertEqual(result["apply_mode"], "hot")
 
     def test_manager_reload_is_refused_during_shutdown(self) -> None:
         active = Mock()

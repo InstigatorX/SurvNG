@@ -1,11 +1,63 @@
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import patch
 
 import pytest
 
 from tests import test_face_identity_reconciliation as identity_tests
 from tests.test_face_reference_retention import CUTOFF, OLD, gallery, stores
+
+
+@pytest.mark.parametrize("confirm", [False, True], ids=["reject", "confirm"])
+def test_review_does_not_wait_for_entire_background_refresh(confirm):
+    case = identity_tests.FaceIdentityReconciliationTest()
+    case.setUp()
+    try:
+        case.recognizer.config.face_auto_identify_enabled = False
+        ids = [case.candidates([case.alice], event_id=event)[0] for event in range(1, 41)]
+        for observation_id in ids:
+            case.recognize(observation_id)
+        matching = Event()
+        reviewed = Event()
+        matched_after_review = []
+
+        def slow_match(_connection, observation_id, *_args):
+            matching.set()
+            # Represent a large queue without depending on machine-specific
+            # gallery throughput. The entire sweep takes about two seconds.
+            time.sleep(0.05)
+            if reviewed.is_set():
+                matched_after_review.append(observation_id)
+            return case.matches[observation_id]
+
+        def review():
+            result = case.store.assign(ids[0], case.alice if confirm else None)
+            reviewed.set()
+            return result
+
+        with (
+            patch.object(case.store, "_match_result", side_effect=slow_match),
+            patch.object(case.store, "request_match_refresh"),
+            patch.object(case.store, "bootstrap_person_references"),
+            patch.object(case.store, "_queue_recognition"),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            refresh = executor.submit(case.store._refresh_unknown_recognition)
+            assert matching.wait(2)
+            decision = executor.submit(review)
+            assert reviewed.wait(1), "review blocked behind the whole background sweep"
+            assert not refresh.done()
+            assert decision.result()["review_status"] == ("confirmed" if confirm else "rejected")
+            refresh.result(timeout=10)
+        assert matched_after_review
+        assert case.canonical(1)["review_status"] == ("confirmed" if confirm else "rejected")
+        if confirm:
+            assert ids[0] not in matched_after_review
+    finally:
+        case.doCleanups()
 
 
 @pytest.mark.parametrize("bulk", [False, True], ids=["single", "bulk"])

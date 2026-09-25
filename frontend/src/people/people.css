@@ -14,6 +14,16 @@
   grid-template-rows: 52px 46px minmax(0, 1fr);
 }
 
+.faces-mode-visits .faces-review-panel {
+  display: block;
+}
+
+@media (min-width: 761px) {
+  .faces-mode-visits .faces-review-panel {
+    overflow-y: auto;
+  }
+}
+
 .people-mode-tabs button {
   display: inline-flex;
   align-items: center;
@@ -116,3 +126,15 @@
     display: none;
   }
 }
+.person-visits { padding: 1rem; min-width: 0; }
+.visit-controls, .visit-link { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin: 1rem 0; }
+.visit-controls label { display: grid; gap: .4rem; }
+.person-visit { padding: 1rem 0; border-top: 1px solid var(--border, #444); }
+.visit-sightings { display: flex; flex-wrap: wrap; gap: 1rem; padding: 0; list-style: none; }
+.visit-sightings li { display: grid; align-content: start; gap: .5rem; width: min(100%, 260px); }
+.visit-sightings img { width: 100px; height: 100px; object-fit: cover; border-radius: 6px; }
+.visit-link span { flex: 1 1 240px; }
+.visit-suggestions { margin: 1.25rem 0; padding: 1rem; border: 1px solid var(--border, #444); border-radius: 8px; }
+.visit-suggestion + .visit-suggestion { border-top: 1px solid var(--border, #444); padding-top: 1rem; }
+.visit-manual-review { margin: 1rem 0; }
+.visit-manual-review summary { cursor: pointer; }
