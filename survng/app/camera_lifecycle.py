@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -62,6 +64,9 @@ class CameraRuntimeState:
     # This lock protects only small in-memory state transitions. Blocking I/O,
     # joins, and resource cleanup must never execute while it is held.
     lock: threading.Lock = field(default_factory=threading.Lock)
+    detection_generation: int = 0
+    _detection_work_count: int = 0
+    _detection_idle: threading.Condition = field(init=False)
     stop_event: threading.Event = field(default_factory=threading.Event)
     phase: CameraLifecyclePhase = CameraLifecyclePhase.STOPPED
     enabled: bool = False
@@ -75,7 +80,29 @@ class CameraRuntimeState:
     last_failure: str = ""
 
     def __post_init__(self) -> None:
+        self._detection_idle = threading.Condition(self.lock)
         self.stop_event.set()
+
+    @contextmanager
+    def detection_work(self) -> Iterator[bool]:
+        """Lease detection work without serializing capture behind FOV decoding."""
+        with self._detection_idle:
+            admitted = self.detection_enabled
+            if admitted:
+                self._detection_work_count += 1
+        try:
+            yield admitted
+        finally:
+            if admitted:
+                with self._detection_idle:
+                    self._detection_work_count -= 1
+                    self._detection_idle.notify_all()
+
+    def wait_detection_idle(self, timeout: float) -> bool:
+        with self._detection_idle:
+            return self._detection_idle.wait_for(
+                lambda: self._detection_work_count == 0, timeout=max(0.0, timeout),
+            )
 
 
 class CameraLifecycleService:
@@ -103,6 +130,7 @@ class CameraLifecycleService:
         # be held across joins and camera I/O; state.lock may not.
         self._operation_lock = threading.Lock()
         self._pending_shutdown: _PendingCameraShutdown | None = None
+        self._detection_recovery_required = False
 
     def start(self) -> None:
         with self._operation_lock:
@@ -141,7 +169,8 @@ class CameraLifecycleService:
             try:
                 self.tracking.sync_accepting()
                 # Clear previous-run state before any producer can enqueue new work.
-                self.motion_runtime.start(self.state.stop_event)
+                if detection_enabled:
+                    self.motion_runtime.start(threading.Event())
                 if not self.capture.start():
                     raise RuntimeError(
                         f"camera source did not start for {self.camera_id}"
@@ -172,6 +201,7 @@ class CameraLifecycleService:
                 ) from None
             with self.state.lock:
                 self._transition_locked(CameraLifecyclePhase.RUNNING)
+            self._detection_recovery_required = False
 
     def stop(self) -> None:
         with self._operation_lock:
@@ -472,43 +502,86 @@ class CameraLifecycleService:
                 self.state.stop_event.set()
                 self._transition_locked(CameraLifecyclePhase.CLOSED)
 
+    def _stop_detection_runtime(self) -> None:
+        self.motion_runtime.request_stop()
+        if not self.motion_runtime.wait_stopped(
+            analysis_timeout=MOTION_THREAD_STOP_TIMEOUT_SECONDS,
+            decision_timeout=MOTION_THREAD_STOP_TIMEOUT_SECONDS,
+        ):
+            raise RuntimeError(f"motion runtime did not stop for {self.camera_id}")
+        self.tracking_frames.clear(reason="detection_disabled")
+
     def set_detection_enabled(self, enabled: bool) -> None:
         with self._operation_lock:
             desired = bool(enabled)
             with self.state.lock:
                 previous = self.state.detection_enabled
                 phase = self.state.phase
-                if previous is desired:
+                if previous is desired and not self._detection_recovery_required:
                     return
                 self.state.detection_enabled = desired
+                self.state.detection_generation += 1
+            motion_changed = False
             try:
+                if self._detection_recovery_required:
+                    self.onvif.stop()
+                    motion_changed = True
+                    self._stop_detection_runtime()
+                if not desired and not self.state.wait_detection_idle(
+                    MOTION_THREAD_STOP_TIMEOUT_SECONDS
+                ):
+                    raise RuntimeError(f"detection frame work did not stop for {self.camera_id}")
                 self.tracking.sync_accepting()
+                if not desired and self.tracking.running():
+                    raise RuntimeError(f"object tracking did not stop for {self.camera_id}")
                 if phase is CameraLifecyclePhase.RUNNING:
                     if desired:
+                        motion_changed = True
+                        # Motion cancellation must not stop live capture.
+                        self.motion_runtime.start(threading.Event())
                         self.onvif.start()
                     else:
                         self.onvif.stop()
+                        motion_changed = True
+                        self._stop_detection_runtime()
+                self._detection_recovery_required = False
             except BaseException:
+                rollback_failed = False
                 with self.state.lock:
                     self.state.detection_enabled = previous
+                    self.state.detection_generation += 1
                 try:
                     self.tracking.sync_accepting()
                 except BaseException:
+                    rollback_failed = True
                     LOGGER.exception(
                         "object tracking eligibility rollback failed for %s",
                         self.camera_id,
                     )
                 if phase is CameraLifecyclePhase.RUNNING:
+                    if motion_changed:
+                        try:
+                            self._stop_detection_runtime()
+                            if previous:
+                                self.motion_runtime.start(threading.Event())
+                        except BaseException:
+                            rollback_failed = True
+                            LOGGER.exception(
+                                "motion eligibility rollback failed for %s",
+                                self.camera_id,
+                            )
                     try:
                         if previous:
                             self.onvif.start()
                         else:
                             self.onvif.stop()
                     except BaseException:
+                        rollback_failed = True
                         LOGGER.exception(
-                            "ONVIF eligibility rollback failed for %s",
+                            "detection runtime rollback failed for %s",
                             self.camera_id,
                         )
+                self._detection_recovery_required = rollback_failed
                 raise
 
     def runtime_status(self) -> dict[str, Any]:

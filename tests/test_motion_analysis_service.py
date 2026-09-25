@@ -132,6 +132,23 @@ def _service(
     return service
 
 
+def test_detection_disabled_rejects_frames_before_copy_or_preprocessing() -> None:
+    hooks = _hooks()
+    service = _service(hooks)
+    hooks.state.detection_enabled.return_value = False
+    frame = np.zeros((90, 160, 3), dtype=np.uint8)
+    stop = threading.Event()
+    service.submit_frame(frame, 10.0, stop, 100.0)
+    service.remember_frame(frame, 11.0, stop, 101.0)
+    assert service.queue.empty()
+    assert not service.frames
+    assert frame.flags.writeable
+    assert service.telemetry_snapshot()["preprocess_count"] == 0
+    hooks.state.detection_enabled.return_value = True
+    service.remember_frame(frame, 12.0, stop, 102.0)
+    assert service.frames[-1][0] == 102.0
+
+
 def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     service = _service(_hooks())
     stop_event = threading.Event()

@@ -665,39 +665,42 @@ class CameraWorker:
 
     def _request_spatial_alignment_calibration(self, *, reason: str) -> None:
         """Start (or restart) FOV calibration when geometry is still unresolved."""
-        if not self._stream_alignment.enabled:
-            return
-        if bool(self._effective_spatial_alignment.get("reliable")):
-            return
-        # Detection may turn on after a detection-off boot burned the one-shot
-        # recheck. Allow a fresh attempt for this enablement.
-        self._spatial_alignment_recheck_armed = False
-        self._spatial_alignment_recheck_used = False
-        self._stream_alignment.reset_attempt_state()
-        if str(self._effective_spatial_alignment.get("mode") or "") == "untrusted":
-            pending = {
-                "mode": "auto",
-                "reliable": False,
-                "confidence": 0.0,
-                "scale_x": 1.0,
-                "scale_y": 1.0,
-                "offset_x": 0.0,
-                "offset_y": 0.0,
-            }
-            self._effective_spatial_alignment = pending
-            self.motion_decision_handler.spatial_alignment = dict(pending)
-        with self.runtime_state.lock:
-            phase = self.runtime_state.phase
-            detection_enabled = bool(self.runtime_state.detection_enabled)
-        if phase is not CameraLifecyclePhase.RUNNING or not detection_enabled:
-            # Fleet applies detection prefs before start(); start() will spawn.
-            return
-        LOGGER.info(
-            "FOV alignment requested for %s (%s)",
-            self.camera.id,
-            reason,
-        )
-        self._spawn_startup_spatial_alignment()
+        with self.runtime_state.detection_work() as admitted:
+            if not admitted:
+                return
+            if not self._stream_alignment.enabled:
+                return
+            if bool(self._effective_spatial_alignment.get("reliable")):
+                return
+            # Detection may turn on after a detection-off boot burned the one-shot
+            # recheck. Allow a fresh attempt for this enablement.
+            self._spatial_alignment_recheck_armed = False
+            self._spatial_alignment_recheck_used = False
+            self._stream_alignment.reset_attempt_state()
+            if str(self._effective_spatial_alignment.get("mode") or "") == "untrusted":
+                pending = {
+                    "mode": "auto",
+                    "reliable": False,
+                    "confidence": 0.0,
+                    "scale_x": 1.0,
+                    "scale_y": 1.0,
+                    "offset_x": 0.0,
+                    "offset_y": 0.0,
+                }
+                self._effective_spatial_alignment = pending
+                self.motion_decision_handler.spatial_alignment = dict(pending)
+            with self.runtime_state.lock:
+                phase = self.runtime_state.phase
+                detection_enabled = bool(self.runtime_state.detection_enabled)
+            if phase is not CameraLifecyclePhase.RUNNING or not detection_enabled:
+                # Fleet applies detection prefs before start(); start() will spawn.
+                return
+            LOGGER.info(
+                "FOV alignment requested for %s (%s)",
+                self.camera.id,
+                reason,
+            )
+            self._spawn_startup_spatial_alignment()
 
     def _spawn_startup_spatial_alignment(self) -> None:
         """Calibrate FOV at startup (or one healthy recheck) without periodic wake.
@@ -705,20 +708,25 @@ class CameraWorker:
         Use a still from the latest closed main recording segment. Never open
         main capture here: that second ffmpeg competes with the recorder.
         """
-        if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
-            return
-        with self._spatial_alignment_startup_lock:
-            if self._spatial_alignment_startup_active:
+        with self.runtime_state.detection_work() as admitted:
+            if not admitted:
                 return
-            self._spatial_alignment_startup_active = True
-        generation = self.runtime_state.generation
-        thread = threading.Thread(
-            target=self._run_startup_spatial_alignment,
-            args=(generation,),
-            name=f"camera-{self.camera.id}-fov-align",
-            daemon=True,
-        )
-        thread.start()
+            if not self.motion_state.detection_enabled():
+                return
+            if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
+                return
+            with self._spatial_alignment_startup_lock:
+                if self._spatial_alignment_startup_active:
+                    return
+                self._spatial_alignment_startup_active = True
+            generation = self.runtime_state.generation
+            thread = threading.Thread(
+                target=self._run_startup_spatial_alignment,
+                args=(generation, self.runtime_state.detection_generation),
+                name=f"camera-{self.camera.id}-fov-align",
+                daemon=True,
+            )
+            thread.start()
 
     def _apply_spatial_alignment(self, calibrated: dict[str, Any]) -> None:
         self._effective_spatial_alignment = calibrated
@@ -773,6 +781,8 @@ class CameraWorker:
         recorder = getattr(self.motion_object_detector, "recorder", None)
         ffmpeg_path = str(getattr(recorder, "ffmpeg_path", "") or "ffmpeg")
         for path, seek in self._stable_recording_candidates():
+            if not self.motion_state.detection_enabled():
+                return None
             still = _decode_recording_still(
                 path,
                 ffmpeg_path=ffmpeg_path,
@@ -782,43 +792,57 @@ class CameraWorker:
                 return still
         return None
 
-    def _run_startup_spatial_alignment(self, generation: int) -> None:
+    def _run_startup_spatial_alignment(
+        self, generation: int, detection_generation: int | None = None,
+    ) -> None:
+        if detection_generation is None:
+            detection_generation = self.runtime_state.detection_generation
         ready_deadline = time.monotonic() + SPATIAL_ALIGNMENT_STARTUP_READY_SECONDS
         score_deadline: float | None = None
         recording_still: np.ndarray | None = None
         try:
             while True:
                 now = time.monotonic()
-                if self._stop.is_set() or self.runtime_state.generation != generation:
-                    return
-                if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
-                    return
-                live: CapturedFrame | None = None
-                try:
-                    live = self.capture.request_frame("live")
-                except Exception as error:
-                    LOGGER.warning(
-                        "startup FOV alignment could not sample live for %s: %s: %s",
-                        self.camera.id,
-                        type(error).__name__,
-                        redact_secret_text(error)[:300],
-                    )
-                if recording_still is None:
-                    recording_still = self._latest_stable_recording_still()
-                if (
-                    recording_still is not None
-                    and live is not None
-                    and _AutoStreamAlignment._frame_usable(live)
-                ):
-                    calibrated = self._stream_alignment.calibrate_with_main_image(
-                        live,
-                        recording_still,
-                        reference_source="recording",
-                    )
-                    if calibrated is not None:
-                        self._apply_spatial_alignment(calibrated)
-                        if not self._stream_alignment.is_pending(calibrated):
-                            return
+                with self.runtime_state.detection_work() as admitted:
+                    if not admitted:
+                        return
+                    if (
+                        self._stop.is_set()
+                        or self.runtime_state.generation != generation
+                        or self.runtime_state.detection_generation != detection_generation
+                        or not self.motion_state.detection_enabled()
+                    ):
+                        return
+                    if not self._stream_alignment.is_pending(self._effective_spatial_alignment):
+                        return
+                    live: CapturedFrame | None = None
+                    try:
+                        live = self.capture.request_frame("live")
+                    except Exception as error:
+                        LOGGER.warning(
+                            "startup FOV alignment could not sample live for %s: %s: %s",
+                            self.camera.id,
+                            type(error).__name__,
+                            redact_secret_text(error)[:300],
+                        )
+                    if recording_still is None:
+                        recording_still = self._latest_stable_recording_still()
+                    if (
+                        self.motion_state.detection_enabled()
+                        and self.runtime_state.detection_generation == detection_generation
+                        and recording_still is not None
+                        and live is not None
+                        and _AutoStreamAlignment._frame_usable(live)
+                    ):
+                        calibrated = self._stream_alignment.calibrate_with_main_image(
+                            live,
+                            recording_still,
+                            reference_source="recording",
+                        )
+                        if calibrated is not None:
+                            self._apply_spatial_alignment(calibrated)
+                            if not self._stream_alignment.is_pending(calibrated):
+                                return
                 if not self._stream_alignment.streams_ready:
                     if now >= ready_deadline:
                         break
@@ -832,6 +856,8 @@ class CameraWorker:
             if (
                 self._stop.is_set()
                 or self.runtime_state.generation != generation
+                or self.runtime_state.detection_generation != detection_generation
+                or not self.motion_state.detection_enabled()
                 or not self._stream_alignment.is_pending(self._effective_spatial_alignment)
             ):
                 return
@@ -852,7 +878,14 @@ class CameraWorker:
         finally:
             with self._spatial_alignment_startup_lock:
                 self._spatial_alignment_startup_active = False
-            self._maybe_spawn_healthy_spatial_recheck()
+            if (
+                self.runtime_state.detection_generation != detection_generation
+                and self.motion_state.detection_enabled()
+                and self.runtime_state.phase is CameraLifecyclePhase.RUNNING
+            ):
+                self._spawn_startup_spatial_alignment()
+            else:
+                self._maybe_spawn_healthy_spatial_recheck()
 
     def _maybe_spawn_healthy_spatial_recheck(self) -> None:
         """One-shot follow-up after live/recording become healthy — not periodic."""
@@ -1010,37 +1043,43 @@ class CameraWorker:
         return self.motion_qualification.debug_image(layer)
 
     def _capture_frame(self, frame: CapturedFrame) -> None:
-        # FOV is one-shot (startup / detection-on / one recheck). Do not keep
-        # re-scoring when demand-driven main capture later publishes frames.
-        if self._stream_alignment.is_pending(self._effective_spatial_alignment):
-            calibrated = self._stream_alignment.observe(frame)
-            if calibrated is not None:
-                self._apply_spatial_alignment(calibrated)
-            else:
-                self._maybe_spawn_healthy_spatial_recheck()
-        if frame.source == "live":
+        with self.runtime_state.detection_work() as admitted:
+            if not admitted:
+                return
             with self.runtime_state.lock:
-                lifecycle_generation = self.runtime_state.generation
-            self.motion_runtime.submit_frame(
-                frame.image,
-                frame.captured_at_monotonic,
-                frame.captured_at_epoch,
-                capture_sequence=frame.sequence,
-                capture_generation=frame.generation,
-                lifecycle_generation=lifecycle_generation,
-            )
-            # Keep timestamped live history for bridging open main segments.
-            self._remember_tracking_frame(
-                frame.image,
-                frame.captured_at_epoch,
-                source="live",
-            )
-        elif frame.source == "main":
-            self._remember_tracking_frame(
-                frame.image,
-                frame.captured_at_epoch,
-                source="main",
-            )
+                if not self.runtime_state.detection_enabled:
+                    return
+            # FOV is one-shot (startup / detection-on / one recheck). Do not keep
+            # re-scoring when demand-driven main capture later publishes frames.
+            if self._stream_alignment.is_pending(self._effective_spatial_alignment):
+                calibrated = self._stream_alignment.observe(frame)
+                if calibrated is not None:
+                    self._apply_spatial_alignment(calibrated)
+                else:
+                    self._maybe_spawn_healthy_spatial_recheck()
+            if frame.source == "live":
+                with self.runtime_state.lock:
+                    lifecycle_generation = self.runtime_state.generation
+                self.motion_runtime.submit_frame(
+                    frame.image,
+                    frame.captured_at_monotonic,
+                    frame.captured_at_epoch,
+                    capture_sequence=frame.sequence,
+                    capture_generation=frame.generation,
+                    lifecycle_generation=lifecycle_generation,
+                )
+                # Keep timestamped live history for bridging open main segments.
+                self._remember_tracking_frame(
+                    frame.image,
+                    frame.captured_at_epoch,
+                    source="live",
+                )
+            elif frame.source == "main":
+                self._remember_tracking_frame(
+                    frame.image,
+                    frame.captured_at_epoch,
+                    source="main",
+                )
 
     def _capture_source_started(self, source: str) -> None:
         if source in {"main", "live"}:

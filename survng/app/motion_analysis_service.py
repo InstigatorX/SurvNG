@@ -476,6 +476,7 @@ class MotionAnalysisService:
         if (
             stop_event.is_set()
             or not self._accepting_frames
+            or not self.state.detection_enabled()
             or not self.qualification.frame_analysis_required()
         ):
             return False

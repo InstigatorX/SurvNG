@@ -825,6 +825,104 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertEqual([sample[0] for sample in worker.tracking_frames.frames], [100.0, 100.5])
 
+    def test_detection_off_drains_an_admitted_capture_callback(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            entered, release, toggling, disabled = (threading.Event() for _ in range(4))
+            frame = CapturedFrame(
+                source="live", image=np.zeros((90, 160, 3), dtype=np.uint8),
+                captured_at_epoch=100.0, captured_at_monotonic=50.0,
+                captured_at_iso="1970-01-01T00:01:40+00:00",
+                width=160, height=90, sequence=1,
+            )
+
+            def remember(*args, **kwargs):
+                entered.set()
+                release.wait(2.0)
+
+            def disable():
+                toggling.set()
+                worker.lifecycle.set_detection_enabled(False)
+                disabled.set()
+
+            with patch.object(worker.tracking_frames, "remember", side_effect=remember):
+                capture = threading.Thread(target=worker._capture_frame, args=(frame,))
+                toggle = threading.Thread(target=disable)
+                capture.start()
+                try:
+                    self.assertTrue(entered.wait(1.0))
+                    toggle.start()
+                    self.assertTrue(toggling.wait(1.0))
+                    self.assertFalse(disabled.wait(0.05))
+                finally:
+                    release.set()
+                    capture.join(2.0)
+                    if toggle.ident is not None:
+                        toggle.join(2.0)
+                self.assertTrue(disabled.is_set())
+                self.assertFalse(capture.is_alive())
+                self.assertFalse(toggle.is_alive())
+
+    def test_old_alignment_attempt_cannot_resume_after_detection_toggle(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            worker.runtime_state.phase = CameraLifecyclePhase.RUNNING
+            worker.runtime_state.detection_generation = 2
+            with (
+                patch.object(worker.capture, "request_frame") as sample,
+                patch.object(worker, "_latest_stable_recording_still") as decode,
+                patch.object(worker, "_spawn_startup_spatial_alignment") as restart,
+            ):
+                worker._run_startup_spatial_alignment(worker.runtime_state.generation, 0)
+                sample.assert_not_called()
+                decode.assert_not_called()
+                restart.assert_called_once_with()
+
+    def test_detection_toggle_stops_motion_workers_without_stopping_capture(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            frame = CapturedFrame(
+                source="live", image=np.zeros((90, 160, 3), dtype=np.uint8),
+                captured_at_epoch=100.0, captured_at_monotonic=50.0,
+                captured_at_iso="1970-01-01T00:01:40+00:00",
+                width=160, height=90, sequence=1,
+            )
+            with (
+                patch.object(worker.capture, "start", return_value=True) as capture_start,
+                patch.object(worker.onvif, "start"),
+                patch.object(worker.onvif, "stop"),
+            ):
+                worker.lifecycle.start()
+                try:
+                    self.assertTrue(worker.motion_analysis.running())
+                    worker.lifecycle.set_detection_enabled(False)
+                    self.assertEqual(worker.motion_runtime.active_workers(), [])
+                    self.assertFalse(worker._stop.is_set())
+                    with (
+                        patch.object(worker.motion_runtime, "submit_frame") as submit,
+                        patch.object(worker.tracking_frames, "remember") as remember,
+                        patch.object(worker._stream_alignment, "observe") as align,
+                    ):
+                        worker._capture_frame(frame)
+                        submit.assert_not_called()
+                        remember.assert_not_called()
+                        align.assert_not_called()
+                    self.assertFalse(worker.motion_analysis.frames)
+                    worker.lifecycle.set_detection_enabled(True)
+                    self.assertTrue(worker.motion_analysis.running())
+                    worker._capture_frame(frame)
+                    deadline = time.monotonic() + 1.0
+                    while not worker.motion_analysis.frames and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(worker.motion_analysis.frames)
+                    capture_start.assert_called_once_with()
+                finally:
+                    worker.lifecycle.set_detection_enabled(False)
+
     def test_capture_observer_preserves_timestamp_for_motion_and_tracking(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(mode="adaptive", sample_fps=2.0)

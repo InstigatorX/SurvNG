@@ -51,6 +51,34 @@ def _service() -> tuple[CameraLifecycleService, SimpleNamespace]:
     )
 
 
+def test_detection_work_leases_are_concurrent_and_drain_after_failure() -> None:
+    state = CameraRuntimeState()
+    concurrent = threading.Event()
+
+    def another_frame():
+        with state.detection_work() as admitted:
+            if admitted:
+                concurrent.set()
+
+    with pytest.raises(ValueError, match="frame failed"):
+        with state.detection_work() as admitted:
+            assert admitted
+            frame = threading.Thread(target=another_frame)
+            frame.start()
+            try:
+                assert concurrent.wait(1.0)
+            finally:
+                frame.join(1.0)
+            assert not state.wait_detection_idle(0)
+            with state.detection_work() as second:
+                assert second
+            state.detection_enabled = False
+            with state.detection_work() as rejected:
+                assert not rejected
+            raise ValueError("frame failed")
+    assert state.wait_detection_idle(0)
+
+
 def test_start_orders_state_cleanup_before_producers() -> None:
     service, owned = _service()
     assert owned.state.enabled is False
@@ -81,6 +109,8 @@ def test_start_skips_onvif_when_detection_is_disabled() -> None:
     assert owned.state.phase is CameraLifecyclePhase.RUNNING
     assert owned.state.detection_enabled is False
     owned.onvif.start.assert_not_called()
+    owned.motion_runtime.start.assert_not_called()
+    owned.capture.start.assert_called_once_with()
 
 
 def test_start_failure_rolls_back_runtime_state() -> None:
@@ -159,17 +189,28 @@ def test_detection_switch_controls_onvif_while_camera_is_running() -> None:
     service, owned = _service()
     service.start()
     owned.onvif.reset_mock()
+    motion_stop = owned.motion_runtime.start.call_args.args[0]
+    assert motion_stop is not owned.state.stop_event
+    owned.motion_runtime.request_stop.side_effect = motion_stop.set
 
     service.set_detection_enabled(False)
 
     assert owned.state.detection_enabled is False
     owned.onvif.stop.assert_called_once_with()
     owned.onvif.start.assert_not_called()
+    assert motion_stop.is_set()
+    assert not owned.state.stop_event.is_set()
+    owned.motion_runtime.wait_stopped.assert_called_once()
+    owned.tracking_frames.clear.assert_called_once_with(reason="detection_disabled")
 
     service.set_detection_enabled(True)
 
     assert owned.state.detection_enabled is True
     owned.onvif.start.assert_called_once_with()
+    assert owned.motion_runtime.start.call_count == 2
+    assert not owned.motion_runtime.start.call_args.args[0].is_set()
+    owned.capture.start.assert_called_once_with()
+    owned.capture.request_stop.assert_not_called()
 
 
 def test_detection_change_rolls_back_when_onvif_start_fails() -> None:
@@ -184,6 +225,56 @@ def test_detection_change_rolls_back_when_onvif_start_fails() -> None:
     assert owned.state.detection_enabled is False
     assert owned.tracking.sync_accepting.call_count == 4
     owned.onvif.stop.assert_called_once_with()
+    owned.motion_runtime.request_stop.assert_called_once_with()
+    owned.motion_runtime.wait_stopped.assert_called_once()
+    assert not owned.state.stop_event.is_set()
+
+
+def test_detection_disable_timeout_restores_previous_runtime() -> None:
+    service, owned = _service()
+    service.start()
+    owned.motion_runtime.wait_stopped.side_effect = [False, True]
+
+    with pytest.raises(RuntimeError, match="motion runtime did not stop"):
+        service.set_detection_enabled(False)
+
+    assert owned.state.detection_enabled is True
+    assert not owned.state.stop_event.is_set()
+    assert owned.motion_runtime.start.call_count == 2
+    assert owned.motion_runtime.wait_stopped.call_count == 2
+    assert owned.onvif.start.call_count == 2
+    owned.capture.start.assert_called_once_with()
+
+
+def test_detection_disable_does_not_succeed_with_tracking_still_running() -> None:
+    service, owned = _service()
+    service.start()
+    owned.tracking.running.return_value = True
+
+    with pytest.raises(RuntimeError, match="object tracking did not stop"):
+        service.set_detection_enabled(False)
+
+    assert owned.state.detection_enabled is True
+    owned.motion_runtime.request_stop.assert_not_called()
+
+
+def test_motion_rollback_failure_does_not_skip_onvif_restore(caplog) -> None:
+    service, owned = _service()
+    service.start()
+    owned.motion_runtime.wait_stopped.return_value = False
+
+    with pytest.raises(RuntimeError, match="motion runtime did not stop"):
+        service.set_detection_enabled(False)
+
+    assert owned.onvif.start.call_count == 2
+    assert "motion eligibility rollback failed" in caplog.text
+    # A retry matching the restored preference must repair the incomplete runtime.
+    owned.motion_runtime.wait_stopped.return_value = True
+    service.set_detection_enabled(True)
+    assert owned.motion_runtime.start.call_count == 2
+    assert owned.onvif.start.call_count == 3
+    service.set_detection_enabled(True)
+    assert owned.motion_runtime.start.call_count == 2
 
 
 def test_runtime_status_reports_authoritative_state_and_active_workers() -> None:
