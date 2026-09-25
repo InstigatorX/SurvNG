@@ -81,7 +81,6 @@ getent group video >/dev/null && sudo usermod -aG video survng-inference || true
 getent group render >/dev/null && sudo usermod -aG render survng-inference || true
 
 sudo install -d -o survng-inference -g survng-inference -m 0750 \
-  "$SURVNG_ROOT" "$SURVNG_ROOT/.cache" \
   /var/lib/survng-inference /var/lib/survng-inference/models
 sudo install -d -o root -g root -m 0755 /etc/survng-inference
 ```
@@ -95,9 +94,13 @@ guest and stores only the OpenVINO compilation cache.
 
 ## 5. Install the same SurvNG revision
 
+`/opt` is not writable by the worker user, so create the checkout directory as root first. It must be empty and owned by `survng-inference`.
+
 ```bash
+sudo install -d -o survng-inference -g survng-inference -m 0750 "$SURVNG_ROOT"
 sudo -u survng-inference git clone --branch "$SURVNG_GIT_REF" --single-branch \
   "$SURVNG_GIT_URL" "$SURVNG_ROOT"
+sudo install -d -o survng-inference -g survng-inference -m 0750 "$SURVNG_ROOT/.cache"
 cd "$SURVNG_ROOT"
 
 sudo -u survng-inference python3 -m venv "$SURVNG_ROOT/.venv"
