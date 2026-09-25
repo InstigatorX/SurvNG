@@ -267,10 +267,6 @@ class ModelBundleCatalog:
             if not raw_path:
                 continue
             source = Path(raw_path).expanduser()
-            if source.is_symlink():
-                raise ModelSyncError(
-                    f"configured {spec.config_key} cannot be a symlink"
-                )
             try:
                 resolved = source.resolve(strict=True)
             except OSError as error:
@@ -291,9 +287,9 @@ class ModelBundleCatalog:
                         f"configured {spec.config_key} directory is empty"
                     )
                 for candidate in candidates:
-                    if candidate.is_symlink():
+                    if candidate.is_symlink() and not candidate.is_file():
                         raise ModelSyncError(
-                            f"configured {spec.config_key} contains a symlink"
+                            f"configured {spec.config_key} contains a directory symlink"
                         )
                     relative = (
                         directory_root
@@ -308,9 +304,9 @@ class ModelBundleCatalog:
                 files.append(self._file_entry(relative, resolved))
                 if resolved.suffix.casefold() == ".xml":
                     companion = resolved.with_suffix(".bin")
-                    if not companion.is_file() or companion.is_symlink():
+                    if not companion.is_file():
                         raise ModelSyncError(
-                            f"configured {spec.config_key} XML has no safe BIN companion"
+                            f"configured {spec.config_key} XML has no BIN companion"
                         )
                     files.append(
                         self._file_entry(
@@ -323,9 +319,9 @@ class ModelBundleCatalog:
                         sidecar = resolved.parent / sidecar_name
                         if not sidecar.exists():
                             continue
-                        if not sidecar.is_file() or sidecar.is_symlink():
+                        if not sidecar.is_file():
                             raise ModelSyncError(
-                                f"configured object model has an unsafe {sidecar_name}"
+                                f"configured object model has an unreadable {sidecar_name}"
                             )
                         files.append(
                             self._file_entry(

@@ -38,9 +38,17 @@ from survng.app.security import (
 )
 from survng.inference_worker import (
     InferenceWorkerClient,
+    _receive_welcome,
     load_or_create_worker_id,
     worker_websocket_url,
 )
+
+
+def _receive_worker_json(websocket):
+    while True:
+        message = websocket.receive_json()
+        if message.get("type") != "preparing":
+            return message
 
 
 class InferenceWorkerClientTests(unittest.TestCase):
@@ -192,6 +200,30 @@ class InferenceWorkerClientTests(unittest.TestCase):
         self.assertFalse(supervisor._reid.start_enabled)
         self.assertFalse(supervisor._depth.start_enabled)
 
+    def test_welcome_waits_through_model_preparation(self) -> None:
+        websocket = Mock()
+        websocket.recv.side_effect = [
+            json.dumps({"type": "preparing", "stage": "models"}),
+            json.dumps({
+                "type": "welcome",
+                "protocol_version": 2,
+            }),
+        ]
+
+        welcome = _receive_welcome(websocket)
+
+        self.assertEqual(welcome["type"], "welcome")
+
+    def test_welcome_reports_model_sync_error(self) -> None:
+        websocket = Mock()
+        websocket.recv.return_value = json.dumps({
+            "type": "error",
+            "error": "configured model_path does not exist",
+        })
+
+        with self.assertRaisesRegex(RuntimeError, "does not exist"):
+            _receive_welcome(websocket)
+
 
 class ModelSynchronizationTests(unittest.TestCase):
     def test_catalog_tracks_model_content_and_materializes_worker_path(
@@ -231,6 +263,18 @@ class ModelSynchronizationTests(unittest.TestCase):
             )
             self.assertNotEqual(first_model.digest, second_model.digest)
             self.assertEqual(first.config.object_worker_count, 1)
+            linked = root / "linked.onnx"
+            linked.symlink_to(source)
+            linked_config = config.model_copy(
+                update={"model_path": str(linked)},
+                deep=True,
+            )
+            linked_bundle = catalog.prepare(linked_config, ["object"])
+            linked_model = next(
+                item for item in linked_bundle.manifest.files
+                if item.path == binding
+            )
+            self.assertEqual(linked_model.digest, second_model.digest)
             self.assertTrue(any(
                 item.path.endswith("/metadata.yaml")
                 for item in second.manifest.files
@@ -356,7 +400,7 @@ class InferenceWorkerRouteTests(unittest.TestCase):
                 worker_id="worker-a",
                 roles=["object"],
             ).model_dump_json())
-            welcome = websocket.receive_json()
+            welcome = _receive_worker_json(websocket)
             model_sync = websocket.receive_json()
             self.assertEqual(model_sync["type"], "model_sync_complete")
             websocket.send_json({
@@ -409,7 +453,7 @@ class InferenceWorkerRouteTests(unittest.TestCase):
                     worker_id="worker-model",
                     roles=["object"],
                 ).model_dump_json())
-                welcome = websocket.receive_json()
+                welcome = _receive_worker_json(websocket)
                 packet = websocket.receive_bytes()
                 complete = websocket.receive_json()
 
@@ -434,7 +478,7 @@ class InferenceWorkerRouteTests(unittest.TestCase):
                     roles=["object"],
                     cached_model_digests=[manifest_file["digest"]],
                 ).model_dump_json())
-                cached_welcome = websocket.receive_json()
+                cached_welcome = _receive_worker_json(websocket)
                 cached_complete = websocket.receive_json()
 
             self.assertEqual(

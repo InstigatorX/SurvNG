@@ -15,14 +15,16 @@ paste each later block as-is.
 ## 1. Set these values, then paste the rest
 
 Use the same Git revision the primary server is running. A worker and primary
-on different protocol revisions cannot connect.
+on different protocol revisions cannot connect. `v1.2` does not contain
+`survng.inference_worker` until this change is merged, so both machines must
+run the revision that contains it.
 
 ```bash
 SURVNG_UID=1600
 SURVNG_GID=1600
 SURVNG_ROOT=/opt/survng
 SURVNG_GIT_URL=https://github.com/InstigatorX/SurvNG.git
-SURVNG_GIT_REF=v1.2
+SURVNG_GIT_REF=cursor/proxmox-inference-workers-c3fa
 SURVNG_SERVER_URL=https://survng.example.internal/survng
 SURVNG_WORKER_NAME="$(hostname)"
 SURVNG_WORKER_ROLES=object,face,reid,depth

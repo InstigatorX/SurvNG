@@ -16,6 +16,7 @@ import uuid
 import numpy as np
 
 from .app.config import DetectorConfig
+from .app.security import redact_secret_text
 from .app.inference import InferenceSupervisor, InferenceWorkload
 from .app.inference_runtime.protocol import (
     INFERENCE_PROTOCOL_VERSION,
@@ -67,6 +68,34 @@ def worker_websocket_url(server_url: str) -> str:
     if not path.endswith("/api/inference/workers/connect"):
         path = f"{path}/api/inference/workers/connect"
     return urlunsplit((scheme, parsed.netloc, path, "", ""))
+
+
+_WELCOME_TIMEOUT_SECONDS = 300.0
+
+
+def _receive_welcome(websocket: Any) -> dict[str, Any]:
+    """Wait through model hashing without treating a quiet socket as a failure."""
+    deadline = time.monotonic() + _WELCOME_TIMEOUT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "timed out waiting for the primary server welcome"
+            )
+        incoming = websocket.recv(timeout=remaining)
+        if not isinstance(incoming, str):
+            raise RuntimeError("server returned an invalid worker welcome")
+        message = json.loads(incoming)
+        if not isinstance(message, dict):
+            raise RuntimeError("server returned an invalid worker welcome")
+        if message.get("type") == "preparing":
+            deadline = time.monotonic() + _WELCOME_TIMEOUT_SECONDS
+            continue
+        if message.get("type") == "error":
+            raise RuntimeError(
+                str(message.get("error") or "worker registration was rejected")
+            )
+        return message
 
 
 def _role_statuses(
@@ -180,10 +209,7 @@ class InferenceWorkerClient:
             close_timeout=5.0,
         ) as websocket:
             websocket.send(registration.model_dump_json())
-            welcome_raw = websocket.recv(timeout=10.0)
-            if not isinstance(welcome_raw, str):
-                raise RuntimeError("server returned an invalid worker welcome")
-            welcome = json.loads(welcome_raw)
+            welcome = _receive_welcome(websocket)
             if (
                 welcome.get("type") != "welcome"
                 or int(welcome.get("protocol_version") or 0)
@@ -320,8 +346,9 @@ class InferenceWorkerClient:
                 raise
             except Exception as error:
                 LOGGER.warning(
-                    "Inference worker disconnected (%s); retrying in %.1fs",
+                    "Inference worker disconnected (%s: %s); retrying in %.1fs",
                     type(error).__name__,
+                    redact_secret_text(error)[:300],
                     delay,
                 )
                 time.sleep(delay)

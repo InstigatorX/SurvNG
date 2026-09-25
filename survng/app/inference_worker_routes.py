@@ -30,8 +30,40 @@ from .inference_runtime.types import InferenceUnavailable
 
 
 _REGISTRATION_TIMEOUT_SECONDS = 10.0
-_MODEL_SYNC_TIMEOUT_SECONDS = 300.0
+_MODEL_SYNC_TIMEOUT_SECONDS = 3600.0
 _INITIAL_WORKER_LEASE_SECONDS = 600.0
+_PREPARE_KEEPALIVE_SECONDS = 5.0
+
+
+async def _prepare_model_bundle(
+    websocket: WebSocket,
+    catalog: ModelBundleCatalog,
+    config: Any,
+    roles: list[Any],
+) -> PreparedModelBundle:
+    """Hash model files without letting the worker or proxy treat the socket as idle."""
+    stop = asyncio.Event()
+
+    async def keepalive() -> None:
+        while not stop.is_set():
+            await websocket.send_json({
+                "type": "preparing",
+                "stage": "models",
+            })
+            try:
+                await asyncio.wait_for(
+                    stop.wait(),
+                    timeout=_PREPARE_KEEPALIVE_SECONDS,
+                )
+            except TimeoutError:
+                continue
+
+    heartbeat = asyncio.create_task(keepalive())
+    try:
+        return await asyncio.to_thread(catalog.prepare, config, roles)
+    finally:
+        stop.set()
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
 
 async def _send_model_bundle(
@@ -178,11 +210,19 @@ def create_inference_worker_router(
             )
             worker_id = registration.worker_id
             config_snapshot = deps.registry.config_snapshot()
-            prepared = await asyncio.to_thread(
-                deps.model_catalog.prepare,
-                config_snapshot,
-                registration.roles,
-            )
+            try:
+                prepared = await _prepare_model_bundle(
+                    websocket,
+                    deps.model_catalog,
+                    config_snapshot,
+                    list(registration.roles),
+                )
+            except ModelSyncError as error:
+                await websocket.send_json({
+                    "type": "error",
+                    "error": str(error),
+                })
+                raise
             welcome = deps.registry.register(
                 registration,
                 transport,
