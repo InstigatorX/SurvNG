@@ -7,9 +7,69 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+import pytest
 
 from survng.app.config import DetectorConfig
 from survng.app.face_recognition import OpenVinoFaceRecognizer
+
+
+@pytest.mark.parametrize("profile,color,expected", [
+    ("legacy_openvino", "BGR", [0., 127.5, 255.]),
+    ("adaface", "BGR", [-1., 0., 1.]),
+    ("arcface", "RGB", [1., 0., -1.]),
+])
+def test_embedding_profiles_use_explicit_pixel_contract(profile, color, expected):
+    recognizer = OpenVinoFaceRecognizer(DetectorConfig(
+        face_recognition_enabled=False, face_embedding_profile=profile,
+    ))
+    recognizer.input_shape = (112, 112)
+    recognizer.input_color_order = color
+    image = np.full((112, 112, 3), [0., 127.5, 255.], dtype=np.float32)
+    tensor = recognizer._embedding_tensor(image)
+    assert tensor.shape == (1, 3, 112, 112)
+    np.testing.assert_allclose(tensor[0, :, 0, 0], expected)
+
+
+def test_profiles_load_and_produce_distinct_fingerprints(tmp_path):
+    ov = pytest.importorskip("openvino")
+    from openvino import opset13 as ops
+
+    source = ops.parameter([1, 3, 112, 112], np.float32)
+    model = ov.Model([ops.reduce_mean(source, [2, 3], False)], [source])
+    model_path = tmp_path / "embedding.xml"
+    ov.serialize(model, model_path)
+    landmark_input = ops.parameter([1, 3, 48, 48], np.float32)
+    coordinates = OpenVinoFaceRecognizer._ARCFACE_TEMPLATE.reshape(1, 10) / 112
+    landmarks = ov.Model([ops.constant(coordinates)], [landmark_input])
+    landmark_path = tmp_path / "landmarks.xml"
+    ov.serialize(landmarks, landmark_path)
+    fingerprints = []
+    for profile in ("legacy_openvino", "adaface", "arcface"):
+        recognizer = OpenVinoFaceRecognizer(DetectorConfig(
+            face_recognition_enabled=True, face_embedding_profile=profile,
+            face_embedding_model_path=str(model_path),
+            face_landmark_model_path=str(landmark_path),
+            face_recognition_device="CPU", cache_enabled=False,
+        ))
+        assert recognizer.ready, recognizer.error
+        assert recognizer.input_color_order == ("RGB" if profile == "arcface" else "BGR")
+        assert recognizer.status()["embedding_profile"] == profile
+        fingerprints.append(recognizer.model_fingerprint)
+        embedding = recognizer.embed(np.full((112, 112, 3), [0, 128, 255], np.uint8))
+        assert np.isclose(np.linalg.norm(embedding), 1)
+    assert len(set(fingerprints)) == 3
+    assert fingerprints[0] == OpenVinoFaceRecognizer._fingerprint(model_path, landmark_path)
+
+
+@pytest.mark.parametrize("coordinates", [np.zeros(10), np.ones(10) * 2, np.full(10, np.nan)])
+def test_unusable_landmarks_reject_embedding(coordinates):
+    recognizer = OpenVinoFaceRecognizer(DetectorConfig(face_recognition_enabled=False))
+    from unittest.mock import Mock
+    recognizer._landmark_request = Mock()
+    recognizer._landmark_output = "output"
+    recognizer._landmark_request.infer.return_value = {"output": coordinates}
+    with pytest.raises(ValueError, match="landmark"):
+        recognizer._align(np.zeros((112, 112, 3), np.uint8))
 
 
 class FaceRecognitionTest(unittest.TestCase):

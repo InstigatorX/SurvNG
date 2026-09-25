@@ -722,6 +722,10 @@ class FaceStoreRecognitionMixin:
             score = evidence.get(int(row["id"]), {}).get("score")
             return float(score) if isinstance(score, (int, float)) and math.isfinite(score) else 0.0
 
+        def evidence_weight(row: sqlite3.Row) -> float:
+            quality = float(row["quality_score"] or 0.0)
+            return max(0.05, min(1.0, quality)) if math.isfinite(quality) else 0.05
+
         winner_id: int | None = None
         support: list[sqlite3.Row] = []
         if votes:
@@ -734,7 +738,8 @@ class FaceStoreRecognitionMixin:
                 ),
             )
         consensus_score = (
-            sum(confidence(row) for row in support) / len(support)
+            sum(confidence(row) * evidence_weight(row) for row in support)
+            / sum(evidence_weight(row) for row in support)
             if support else None
         )
         protected = [
@@ -759,6 +764,7 @@ class FaceStoreRecognitionMixin:
             "agreement_count": len(support),
             "person_id": winner_id,
             "score": round(consensus_score, 4) if consensus_score is not None else None,
+            "aggregation": "quality_weighted_votes_v1",
         }
         recognizer = self.recognizer
         auto_identify = bool(

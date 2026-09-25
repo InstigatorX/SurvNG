@@ -32,7 +32,10 @@ def epoch(value: object) -> float | None:
 
 
 def iso(value: float) -> str:
-    return datetime.fromtimestamp(value, timezone.utc).isoformat()
+    try:
+        return datetime.fromtimestamp(value, timezone.utc).isoformat()
+    except (ValueError, OverflowError, OSError) as error:
+        raise ValueError("Time range is outside supported calendar dates") from error
 
 
 def route_between(left: dict, right: dict, routes: list) -> str | None:
@@ -147,7 +150,7 @@ def project_visits(sightings: list[dict], decisions: dict, config: Any) -> dict:
         for key in ((left["id"], right["camera_id"]), (right["id"], left["camera_id"])):
             others = sorted(competitors[key], reverse=True)
             margins.append(score - others[1] if len(others) > 1 else 2.0)
-        ambiguous = min(margins) < config.visit_top_two_margin
+        ambiguous = min(margins) <= 0 or min(margins) < config.visit_top_two_margin
         edge["ambiguous"] = ambiguous
         if roots[edge["left"]] == roots[edge["right"]]:
             continue
@@ -214,8 +217,9 @@ class PersonVisitStore:
                 continue
             rows = db.execute("""select * from appearance_embeddings where event_id=? and model_kind='person'
                 and label in ('person','pedestrian') order by id desc limit ?""", (event["id"], self.MAX_SIGHTINGS + 1)).fetchall()
+            truncated = truncated or len(rows) > self.MAX_SIGHTINGS
             faces = db.execute("""select f.id,f.candidate_track_id,f.person_id,f.review_status,f.observed_at,
-                f.candidate_offset_seconds,f.box_json,p.name from face_observations f
+                f.candidate_offset_seconds,f.box_json,f.snapshot_path,f.embedding_model,p.name from face_observations f
                 left join face_people p on p.id=f.person_id where f.event_id=? and f.canonical=1
                 order by f.id limit ?""", (event["id"], self.MAX_SIGHTINGS + 1)).fetchall()
             tracks = {}
@@ -267,6 +271,9 @@ class PersonVisitStore:
                 else:
                     node = {"id": f"face:{face['id']}", "event_id": event["id"], "track_id": None, "camera_id": event["camera_id"], "start": when, "end": when, "vector": None, "model": "", "person_id": None, "person_name": ""}
                 node["face_id"] = face["id"]
+                node["face_evidence_revision"] = hashlib.sha256(json.dumps([
+                    face["box_json"], face["snapshot_path"], face["embedding_model"],
+                ]).encode()).hexdigest()
                 if face["person_id"] and face["name"] and face["review_status"] in ("confirmed", "auto_identified"):
                     node.update(person_id=face["person_id"], person_name=face["name"], anchor_status="confirmed" if face["review_status"] == "confirmed" else "recognized")
                 if not attached:
@@ -312,7 +319,7 @@ class PersonVisitStore:
             raise ValueError("Choose a time range of at most 24 hours")
         with self._connect() as db:
             db.execute("begin immediate")
-            sightings, _ = self._read(db, start, end)
+            sightings, truncated = self._read(db, start, end)
             nodes = {item["id"]: item for item in sightings}
             left, right = nodes.get(left_id), nodes.get(right_id)
             if not left or not right or left["revision"] != left_revision or right["revision"] != right_revision:
@@ -321,7 +328,8 @@ class PersonVisitStore:
             decisions = self._decisions(db, nodes)
             if decision == "accept":
                 decisions[pair] = "accept"
-                projected = project_visits(sightings, decisions, config)
+                effective = config.model_copy(update={"visit_auto_link_enabled": False}) if truncated else config
+                projected = project_visits(sightings, decisions, effective)
                 if not any({left_id, right_id} <= {item["id"] for item in visit["sightings"]} for visit in projected["visits"]):
                     raise ValueError("This link conflicts with identity, time, or a rejected link")
             if decision == "reset":

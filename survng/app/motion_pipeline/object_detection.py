@@ -1579,6 +1579,9 @@ class RecordedMotionObjectDetector:
         budget = self.decode_budget
         if budget is not None:
             maximum_frames = refinement_frame_count(stages)
+            if (getattr(self.detector.config, "face_recognition_enabled", False)
+                    and getattr(self.detector.config, "face_evidence_enabled", True)):
+                maximum_frames += int(getattr(self.detector.config, "face_evidence_max_extra_frames", 4))
             frame_bytes = self._frame_bytes_for_rows(prefetched_rows)
             if frame_bytes:
                 budget.observe_frame_bytes(frame_bytes)
@@ -2032,6 +2035,8 @@ class RecordedMotionObjectDetector:
                                 refinement_pending and representative_needs_refinement
                             ),
                             event_epoch=event_epoch,
+                            face_sampler=sampler,
+                            face_deadline=deadline,
                         )
                 if (
                     adaptive_stage
@@ -2082,6 +2087,8 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=refinement_pending,
                 event_epoch=event_epoch,
+                face_sampler=sampler,
+                face_deadline=deadline,
             )
 
         return self._live_fallback_result(event_epoch, timing, workflow_started, refinement_pending)
@@ -2181,6 +2188,8 @@ class RecordedMotionObjectDetector:
         *,
         refinement_pending: bool,
         event_epoch: float,
+        face_sampler: _EventRecordedSampler | None = None,
+        face_deadline: float | None = None,
     ) -> RecordedDetectionResult:
         frame = selected.frame
         if frame is None:
@@ -2196,6 +2205,8 @@ class RecordedMotionObjectDetector:
                 timing=timing,
             )
             selected.objects = list(objects)
+            if face_sampler is not None:
+                self._refine_face_evidence(samples, face_sampler, event_epoch, face_deadline, timing)
         face_candidates = self._face_candidates(samples)
         self._release_nonselected_frames(samples, selected)
         return self._result(
@@ -2210,6 +2221,116 @@ class RecordedMotionObjectDetector:
             frame_source="recorded_main",
             frame_timestamp_exact=selected.exact_timestamp,
         )
+
+    def _refine_face_evidence(
+        self,
+        samples: list[_RecordedDetectionSample],
+        sampler: _EventRecordedSampler,
+        event_epoch: float,
+        deadline: float | None,
+        timing: dict[str, float],
+    ) -> None:
+        """Spend a bounded part of the existing decode lease on identity evidence.
+
+        Samples remain at recording resolution. Extra detection results are used
+        only for face candidates; they cannot change event qualification/cover.
+        """
+        config = self.detector.config
+        if not getattr(config, "face_recognition_enabled", False) or not getattr(config, "face_evidence_enabled", True):
+            return
+        started = time.monotonic()
+        deadline = min(
+            deadline if deadline is not None else started,
+            started + float(getattr(config, "face_evidence_timeout_seconds", 4)),
+        )
+        max_extra = int(getattr(config, "face_evidence_max_extra_frames", 4))
+        timing["face_evidence_samples"] = 0.0
+        timing["face_evidence_failed"] = 0.0
+
+        def usefulness(sample: _RecordedDetectionSample) -> float:
+            if sample.frame is None:
+                return 0.0
+            areas = []
+            height, width = sample.frame.shape[:2]
+            for item in sample.objects:
+                if item.get("label") not in {"person", "pedestrian"} or item.get("incident_eligible") is False:
+                    continue
+                box = _box(item)
+                if box is not None:
+                    x1, y1, x2, y2 = box
+                    crop = sample.frame[max(0, int(y1)):min(height, int(y2)), max(0, int(x1)):min(width, int(x2))]
+                    if crop.size:
+                        areas.append(crop.shape[0] * crop.shape[1] * _image_quality(crop).score)
+            return max(areas, default=0.0)
+
+        ranked = sorted(((usefulness(sample), sample) for sample in samples), key=lambda item: item[0], reverse=True)
+        anchors = [sample for value, sample in ranked if value > 0][:3]
+        if not anchors:
+            return
+        try:
+            # Existing full-resolution frames are cheaper than another decode.
+            for sample in anchors:
+                if self.stop_requested() or time.monotonic() >= deadline:
+                    break
+                check_evidence_cancellation()
+                if any(item.get("label") == "face" for item in sample.objects):
+                    continue
+                confirmed = [
+                    {**item, "temporal_consensus": True} for item in sample.objects
+                    if item.get("label") in {"person", "pedestrian"}
+                    and item.get("incident_eligible") is not False
+                ]
+                sample.objects = self._enrich_selected_faces(sample.frame, confirmed, timing=timing)
+                timing["face_evidence_samples"] += 1
+            existing = [sample.offset for sample in samples]
+            offsets = []
+            for delta in (-.4, .4, -.8, .8):
+                for anchor in anchors[:2]:
+                    target = round(anchor.offset + delta, 3)
+                    if all(abs(target - other) >= .15 for other in existing + offsets):
+                        offsets.append(target)
+            for target in offsets[:max_extra]:
+                if self.stop_requested() or time.monotonic() >= deadline:
+                    break
+                check_evidence_cancellation()
+                if event_epoch + target + RECORDED_EVENT_SETTLE_SECONDS > time.time():
+                    continue
+                row = sampler.recording_at(event_epoch + target)
+                if row is None or row.get("start_epoch") is None:
+                    timing["face_evidence_recording_unavailable"] = timing.get("face_evidence_recording_unavailable", 0) + 1
+                    continue
+                relative = round(event_epoch + target - float(row["start_epoch"]), 3)
+                decode_started = time.monotonic()
+                frames, processes, fallbacks = sampler.frames_at(
+                    Path(str(row["path"])), [relative], deadline=deadline,
+                )
+                timing["frame_decode_ms"] += (time.monotonic() - decode_started) * 1000
+                timing["recording_batch_processes"] += processes
+                timing["recording_fallback_samples"] += fallbacks
+                timing["recording_samples_requested"] += 1
+                timing["recording_samples_decoded"] += len(frames)
+                decoded = frames.get(relative)
+                # Nudged fallback frames do not establish independent timestamps.
+                if decoded is None or not decoded.exact_timestamp:
+                    timing["face_evidence_inexact_or_missing"] = timing.get("face_evidence_inexact_or_missing", 0) + 1
+                    continue
+                actual = float(row["start_epoch"]) + decoded.actual_offset - event_epoch
+                if any(abs(actual - sample.offset) < .15 for sample in samples):
+                    continue
+                if time.monotonic() >= deadline:
+                    break
+                detected = self._detect_objects(decoded.frame, timing=timing)
+                samples.append(_RecordedDetectionSample(
+                    actual, decoded.frame, detected, str(row["path"]), target, True,
+                ))
+                timing["face_evidence_samples"] += 1
+        except Exception:
+            check_evidence_cancellation()
+            timing["face_evidence_failed"] = 1.0
+            LOGGER.exception("Optional face evidence refinement failed for camera %s", self.camera.id)
+        finally:
+            timing["face_evidence_ms"] = (time.monotonic() - started) * 1000
+            timing["face_evidence_deadline_reached"] = float(time.monotonic() >= deadline)
 
     @staticmethod
     def _release_nonselected_frames(

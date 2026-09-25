@@ -80,9 +80,16 @@ class OpenVinoFaceRecognizer:
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 core.set_property({"CACHE_DIR": str(cache_dir)})
             model = core.read_model(model=model_path)
+            if len(model.inputs) != 1 or len(model.outputs) != 1:
+                raise ValueError("Face embeddings require an exported single-image, single-embedding model.")
             self.input_layout, self.input_shape = self._image_input(model.input(0).shape)
-            if "arcface" in model_path.name.lower():
+            profile = self.config.face_embedding_profile
+            if profile != "legacy_openvino" and self.input_shape != (112, 112):
+                raise ValueError("AdaFace/ArcFace profiles require a 112×112 aligned input.")
+            if profile == "arcface" or (profile == "legacy_openvino" and "arcface" in model_path.name.lower()):
                 self.input_color_order = "RGB"
+            else:
+                self.input_color_order = "BGR"
             landmark_model = core.read_model(model=landmark_path)
             self.landmark_input_layout, self.landmark_input_shape = self._image_input(
                 landmark_model.input(0).shape
@@ -120,9 +127,13 @@ class OpenVinoFaceRecognizer:
             output_shape = [int(value) for value in self._output.shape]
             self.embedding_size = int(np.prod(output_shape[1:] or output_shape))
             self.model_fingerprint = self._fingerprint(model_path, landmark_path)
+            if profile != "legacy_openvino":
+                self.model_fingerprint = hashlib.sha256(
+                    f"{self.model_fingerprint}:{profile}:112:mean127.5:scale127.5:alignment-v1".encode()
+                ).hexdigest()[:24]
             self.model_load_ms = round((time.perf_counter() - started) * 1000, 1)
             self._infer_request.infer(
-                {self._input: self._image_tensor(np.zeros((self.input_shape[1], self.input_shape[0], 3), dtype=np.uint8), self.input_shape, self.input_layout)}
+                {self._input: self._embedding_tensor(np.zeros((self.input_shape[1], self.input_shape[0], 3), dtype=np.uint8))}
             )
             self._landmark_request.infer(
                 {self._landmark_input: self._image_tensor(np.zeros((48, 48, 3), dtype=np.uint8), self.landmark_input_shape, self.landmark_input_layout)}
@@ -190,7 +201,9 @@ class OpenVinoFaceRecognizer:
         values = np.asarray(result, dtype=np.float32).reshape(-1)
         if values.size < 10 or not np.all(np.isfinite(values[:10])):
             raise ValueError("Face landmark output was invalid.")
-        source = values[:10].reshape(5, 2)
+        source = values[:10].reshape(5, 2).copy()
+        if np.any(source < 0) or np.any(source > 1) or np.linalg.norm(source[0] - source[1]) < 0.05:
+            raise ValueError("Face landmarks are outside the crop or have insufficient eye separation.")
         source[:, 0] *= width
         source[:, 1] *= height
         target = self._ARCFACE_TEMPLATE.copy()
@@ -199,6 +212,10 @@ class OpenVinoFaceRecognizer:
         matrix, _ = cv2.estimateAffinePartial2D(source, target, method=cv2.LMEDS)
         if matrix is None or not np.all(np.isfinite(matrix)):
             raise ValueError("Could not align face landmarks.")
+        projected = cv2.transform(source[None, :, :], matrix)[0]
+        residual = float(np.sqrt(np.mean(np.sum((projected - target) ** 2, axis=1))))
+        if residual > max(self.input_shape) * 0.15:
+            raise ValueError("Face landmarks are inconsistent with reliable alignment.")
         return cv2.warpAffine(
             face,
             matrix,
@@ -207,14 +224,20 @@ class OpenVinoFaceRecognizer:
             borderMode=cv2.BORDER_REPLICATE,
         )
 
+    def _embedding_tensor(self, aligned: np.ndarray) -> np.ndarray:
+        if self.input_color_order == "RGB":
+            aligned = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB)
+        tensor = self._image_tensor(aligned, self.input_shape, self.input_layout)
+        if self.config.face_embedding_profile in {"adaface", "arcface"}:
+            tensor = (tensor - 127.5) / 127.5
+        return tensor
+
     def embed(self, face: np.ndarray) -> np.ndarray:
         if self._infer_request is None:
             raise RuntimeError(self.error or "Face recognition is unavailable.")
         with self._lock:
             aligned = self._align(face)
-            if self.input_color_order == "RGB":
-                aligned = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB)
-            tensor = self._image_tensor(aligned, self.input_shape, self.input_layout)
+            tensor = self._embedding_tensor(aligned)
             result = self._infer_request.infer({self._input: tensor})[self._output]
         vector = np.asarray(result, dtype=np.float32).reshape(-1)
         norm = float(np.linalg.norm(vector))
@@ -235,6 +258,7 @@ class OpenVinoFaceRecognizer:
             "model_fingerprint": self.model_fingerprint,
             "input_shape": list(self.input_shape),
             "input_color_order": self.input_color_order,
+            "embedding_profile": self.config.face_embedding_profile,
             "embedding_size": self.embedding_size,
             "model_load_ms": self.model_load_ms,
             "match_threshold": self.config.face_match_threshold,

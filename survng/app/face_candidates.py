@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -14,6 +16,7 @@ MAX_CANDIDATES_PER_EVENT = 12
 MIN_CANDIDATE_OFFSET_GAP_SECONDS = 0.4
 MIN_FACE_ASSOCIATION_IOU = 0.04
 MAX_FACE_ASSOCIATION_DISTANCE_RATIO = 2.0
+MAX_FACE_ASSOCIATION_GAP_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +66,7 @@ def collect_face_candidates(
     decoded and faces that it has already detected.  It performs no inference
     and retains references only until the detection result is handled.
     """
-    ordered_samples = tuple(samples)
+    ordered_samples = tuple(sorted(samples, key=lambda sample: sample.offset_seconds))
     tracks: list[_CandidateTrack] = []
     for sample in ordered_samples:
         available = set(range(len(tracks)))
@@ -77,6 +80,7 @@ def collect_face_candidates(
             matches = [
                 (score, index)
                 for index in available
+                if sample.offset_seconds - tracks[index].observations[-1][0].offset_seconds <= MAX_FACE_ASSOCIATION_GAP_SECONDS
                 if (
                     score := _association_score(tracks[index].latest, detected)
                 ) is not None
@@ -92,7 +96,18 @@ def collect_face_candidates(
 
     retained: list[FaceCandidate] = []
     per_track_limit = max(1, int(max_per_track))
-    for track_index, track in enumerate(tracks, start=1):
+    for track in tracks:
+        # Local enumeration is unsafe across refinement passes: finding a new
+        # earlier person can make yesterday's face-1 refer to a different person.
+        # Anchor to exact source geometry/time instead. A changed anchor starts
+        # a separate group; it must not inherit another group's identity/votes.
+        first_sample, first_face = track.observations[0]
+        anchor = json.dumps({
+            "offset": first_sample.offset_seconds,
+            "box": _box(first_face),
+            "parent": _box({"box": first_face.get("parent_person_box")}),
+        }, sort_keys=True)
+        track_id = "face-v2-" + hashlib.sha256(anchor.encode()).hexdigest()[:20]
         ranked = sorted(
             track.observations,
             key=lambda item: _candidate_score(item[0], item[1]),
@@ -120,7 +135,7 @@ def collect_face_candidates(
             crop, crop_box = crop_result
             retained.append(
                 FaceCandidate(
-                    track_id=f"face-{track_index}",
+                    track_id=track_id,
                     rank=rank,
                     offset_seconds=float(sample.offset_seconds),
                     frame=crop,

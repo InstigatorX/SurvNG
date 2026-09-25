@@ -51,8 +51,9 @@ def test_weak_incompatible_or_conflicting_evidence_never_links(change):
     assert len(result["visits"]) == 2
 
 
-def test_competing_lookalikes_prevent_automatic_link():
-    result = project_visits([node("1", "gate", 0), node("2", "gate", 0), node("3", "foyer", 10)], {}, config(visit_auto_link_enabled=True))
+@pytest.mark.parametrize("margin", [0., .08])
+def test_competing_lookalikes_prevent_automatic_link(margin):
+    result = project_visits([node("1", "gate", 0), node("2", "gate", 0), node("3", "foyer", 10)], {}, config(visit_auto_link_enabled=True, visit_top_two_margin=margin))
     assert len(result["visits"]) == 3
     assert all(item["ambiguous"] for item in result["suggestions"])
 
@@ -177,6 +178,11 @@ def test_truncation_suspends_automatic_links(stores):
     assert len(result["visits"]) == 2
 
 
+def test_unsupported_calendar_range_is_a_validation_error(stores):
+    with pytest.raises(ValueError, match="calendar"):
+        stores[3].list(1e20, 1e20 + 16384, config())
+
+
 def test_confirmed_rejection_survives_identity_rename(stores):
     seed(stores, "gate", 10000)
     seed(stores, "foyer", 10010, person=7)
@@ -186,3 +192,14 @@ def test_confirmed_rejection_survives_identity_rename(stores):
     with stores[1]._connect() as db:
         db.execute("update face_people set name='New name' where id=7")
     assert len(visits.list(9990, 10100, config(visit_auto_link_enabled=True))["visits"]) == 2
+
+
+def test_replaced_face_evidence_invalidates_old_review_revision(stores):
+    seed(stores, "gate", 10000)
+    seed(stores, "foyer", 10010, person=7)
+    visits = stores[3]
+    nodes = [n for v in visits.list(9990, 10100, config())["visits"] for n in v["sightings"]]
+    with stores[1]._connect() as db:
+        db.execute("update face_observations set box_json=? where person_id=7", (json.dumps({"x1": 1, "y1": 1, "x2": 30, "y2": 30}),))
+    with pytest.raises(ValueError, match="Evidence changed"):
+        visits.decide(nodes[0]["id"], nodes[1]["id"], nodes[0]["revision"], nodes[1]["revision"], "accept", 9990, 10100, config())
