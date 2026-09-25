@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from ..evidence_work import EvidenceWorkPreempted, check_evidence_cancellation, evidence_wait_timeout, evidence_work_active
+from ..evidence_work import EvidenceWorkPreempted, check_evidence_cancellation, evidence_wait_timeout, optional_evidence_work_active
 from ..config import DetectorConfig
 from ..perf_samples import RollingLatencySamples
 from .process import load_detector_labels, stop_multiprocessing_resource_tracker
@@ -818,7 +818,7 @@ class InferenceSupervisor:
         confidence_threshold: float | None,
         workload: InferenceWorkload,
     ) -> list[dict[str, Any]]:
-        recovering_cover = evidence_work_active()
+        recovering_cover = optional_evidence_work_active()
         if recovering_cover:
             # Cover recovery shares the sampler, but must yield to security
             # jobs from every camera at each inference admission boundary.

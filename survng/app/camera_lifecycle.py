@@ -29,6 +29,10 @@ MOTION_THREAD_STOP_TIMEOUT_SECONDS = 22.0
 CAPTURE_STOP_TIMEOUT_SECONDS = 8.0
 
 
+class DetectionShutdownIncomplete(RuntimeError):
+    """Detection admission is disabled, but owned workers still need cleanup."""
+
+
 class CameraLifecyclePhase(StrEnum):
     """Observable phases for one camera runtime generation."""
 
@@ -519,14 +523,22 @@ class CameraLifecycleService:
                 phase = self.state.phase
                 if previous is desired and not self._detection_recovery_required:
                     return
-                self.state.detection_enabled = desired
+                # Recovery must drain the old generation before admitting frames.
+                self.state.detection_enabled = desired and not self._detection_recovery_required
                 self.state.detection_generation += 1
             motion_changed = False
             try:
+                if not desired:
+                    # Cancel in-flight refinement before waiting for other workers.
+                    self.motion_runtime.request_stop()
                 if self._detection_recovery_required:
                     self.onvif.stop()
                     motion_changed = True
                     self._stop_detection_runtime()
+                    if desired:
+                        with self.state.lock:
+                            self.state.detection_enabled = True
+                            self.state.detection_generation += 1
                 if not desired and not self.state.wait_detection_idle(
                     MOTION_THREAD_STOP_TIMEOUT_SECONDS
                 ):
@@ -545,7 +557,19 @@ class CameraLifecycleService:
                         motion_changed = True
                         self._stop_detection_runtime()
                 self._detection_recovery_required = False
-            except BaseException:
+            except BaseException as error:
+                if not desired:
+                    self._detection_recovery_required = True
+                    workers = ", ".join(self._residual_workers()) or "unknown"
+                    message = (
+                        f"detection cleanup failed for {self.camera_id}; "
+                        f"detection remains disabled; workers={workers}; "
+                        f"reason={redact_secret_text(error)}"
+                    )
+                    LOGGER.error("%s", message)
+                    if not isinstance(error, Exception):
+                        raise
+                    raise DetectionShutdownIncomplete(message) from None
                 rollback_failed = False
                 with self.state.lock:
                     self.state.detection_enabled = previous
@@ -605,6 +629,7 @@ class CameraLifecycleService:
             "phase": phase.value,
             "enabled": enabled,
             "detection_enabled": detection_enabled,
+            "detection_cleanup_required": self._detection_recovery_required,
             "accepting_motion_events": accepting_motion_events,
             "generation": generation,
             "transition_count": transition_count,

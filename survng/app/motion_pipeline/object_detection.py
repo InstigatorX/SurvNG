@@ -16,7 +16,10 @@ from typing import Any, Callable, Protocol
 import cv2
 import numpy as np
 
-from ..evidence_work import check_evidence_cancellation, evidence_cancelled
+from ..evidence_work import (
+    EvidenceWorkPreempted, check_evidence_cancellation, evidence_cancelled,
+    evidence_wait_timeout, report_evidence_stage, run_evidence_process,
+)
 from ..config import CameraConfig
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
@@ -1573,6 +1576,7 @@ class RecordedMotionObjectDetector:
             timing["temporal_confirmation_wait_ms"] += slept * 1000.0
 
         deadline = time.monotonic() + max(0.0, retry_seconds)
+        report_evidence_stage("recording_lookup")
         prefetched_rows = self._prefetch_recording_rows(
             event_epoch=event_epoch,
             planned_offsets=planned_offsets,
@@ -1589,6 +1593,7 @@ class RecordedMotionObjectDetector:
             if frame_bytes:
                 budget.observe_frame_bytes(frame_bytes)
             budget_wait_started = time.monotonic()
+            report_evidence_stage("decode_memory_wait")
             memory_lease = budget.reserve_workflow(
                 maximum_frames=maximum_frames,
                 frame_bytes=frame_bytes or None,
@@ -2384,6 +2389,7 @@ class RecordedMotionObjectDetector:
         workload: str = "refinement",
     ) -> list[dict[str, Any]]:
         check_evidence_cancellation()
+        report_evidence_stage("inference")
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
         class_thresholds = dict(
@@ -2490,6 +2496,7 @@ class RecordedMotionObjectDetector:
         if not callable(detect_faces):
             return objects
         check_evidence_cancellation()
+        report_evidence_stage("inference")
         enrichment_started = time.monotonic()
         confirmed_objects = [
             item
@@ -2565,6 +2572,7 @@ class RecordedMotionObjectDetector:
         if not callable(estimate_depth):
             return objects
         check_evidence_cancellation()
+        report_evidence_stage("inference")
         enrichment_started = time.monotonic()
         visible_objects = [
             item
@@ -2726,6 +2734,7 @@ class RecordedMotionObjectDetector:
         if budget is None:
             return None
         wait_started = time.monotonic()
+        report_evidence_stage("decode_process_wait")
         lease = budget.acquire_process(
             incident_epoch=(
                 float(incident_epoch)
@@ -2806,13 +2815,7 @@ class RecordedMotionObjectDetector:
                     break
                 result = None
                 try:
-                    result = subprocess.run(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=timeout,
-                        check=False,
-                    )
+                    result = run_evidence_process(command, timeout=timeout)
                 except subprocess.TimeoutExpired:
                     last_error = f"{backend} timed out"
                 finally:
@@ -2941,6 +2944,8 @@ class RecordedMotionObjectDetector:
             stdout_thread: threading.Thread | None = None
             stderr_thread: threading.Thread | None = None
             try:
+                check_evidence_cancellation()
+                report_evidence_stage("frame_decode")
                 process_count += 1
                 process = subprocess.Popen(
                     command,
@@ -2967,7 +2972,22 @@ class RecordedMotionObjectDetector:
                 stderr_thread = threading.Thread(target=read_stderr, daemon=True)
                 stdout_thread.start()
                 stderr_thread.start()
-                process.wait(timeout=timeout)
+                decode_deadline = time.monotonic() + timeout
+                while True:
+                    check_evidence_cancellation()
+                    remaining = decode_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        process.wait(timeout=evidence_wait_timeout(remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            except EvidenceWorkPreempted:
+                if process is not None:
+                    process.kill()
+                    process.wait()
+                raise
             except subprocess.TimeoutExpired:
                 last_error = f"{backend} timed out"
                 if process is not None:

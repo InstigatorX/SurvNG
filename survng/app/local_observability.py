@@ -188,6 +188,7 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "recording": bool(raw.get("recording")),
         "recording_enabled": bool(raw.get("recording_enabled", True)),
         "detection_enabled": bool(raw.get("detection_enabled")),
+        "detection_cleanup_required": bool(lifecycle.get("detection_cleanup_required")),
         "onvif_connected": bool(raw.get("onvif_connected")),
         "lifecycle_generation": _optional_number(lifecycle.get("generation")),
         "motion": _motion_snapshot(raw.get("motion_qualification"), tracking),

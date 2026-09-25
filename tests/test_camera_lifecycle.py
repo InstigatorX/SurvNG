@@ -174,15 +174,16 @@ def test_stop_failure_does_not_chain_unredacted_credentials() -> None:
     assert "supersecret" not in formatted
 
 
-def test_detection_change_rolls_back_when_tracking_sync_fails() -> None:
+def test_detection_disable_keeps_admission_closed_when_tracking_sync_fails() -> None:
     service, owned = _service()
     owned.tracking.sync_accepting.side_effect = [RuntimeError("sync failed"), None]
 
     with pytest.raises(RuntimeError, match="sync failed"):
         service.set_detection_enabled(False)
 
-    assert owned.state.detection_enabled is True
-    assert owned.tracking.sync_accepting.call_count == 2
+    assert owned.state.detection_enabled is False
+    assert owned.tracking.sync_accepting.call_count == 1
+    assert service.runtime_status()["detection_cleanup_required"]
 
 
 def test_detection_switch_controls_onvif_while_camera_is_running() -> None:
@@ -217,6 +218,7 @@ def test_detection_change_rolls_back_when_onvif_start_fails() -> None:
     service, owned = _service()
     service.set_detection_enabled(False)
     service.start()
+    owned.motion_runtime.request_stop.reset_mock()
     owned.onvif.start.side_effect = RuntimeError("subscription failed")
 
     with pytest.raises(RuntimeError, match="subscription failed"):
@@ -230,20 +232,28 @@ def test_detection_change_rolls_back_when_onvif_start_fails() -> None:
     assert not owned.state.stop_event.is_set()
 
 
-def test_detection_disable_timeout_restores_previous_runtime() -> None:
+def test_detection_disable_timeout_keeps_admission_closed_and_can_retry() -> None:
     service, owned = _service()
     service.start()
-    owned.motion_runtime.wait_stopped.side_effect = [False, True]
+    owned.motion_runtime.wait_stopped.side_effect = [False, True, True]
 
     with pytest.raises(RuntimeError, match="motion runtime did not stop"):
         service.set_detection_enabled(False)
 
-    assert owned.state.detection_enabled is True
+    assert owned.state.detection_enabled is False
+    assert service.runtime_status()["detection_cleanup_required"]
+    with owned.state.detection_work() as admitted:
+        assert not admitted
     assert not owned.state.stop_event.is_set()
-    assert owned.motion_runtime.start.call_count == 2
-    assert owned.motion_runtime.wait_stopped.call_count == 2
-    assert owned.onvif.start.call_count == 2
+    assert owned.motion_runtime.start.call_count == 1
+    assert owned.motion_runtime.wait_stopped.call_count == 1
+    assert owned.onvif.start.call_count == 1
     owned.capture.start.assert_called_once_with()
+
+    service.set_detection_enabled(False)
+    assert not service.runtime_status()["detection_cleanup_required"]
+    assert owned.state.detection_enabled is False
+    assert owned.motion_runtime.start.call_count == 1
 
 
 def test_detection_disable_does_not_succeed_with_tracking_still_running() -> None:
@@ -254,25 +264,35 @@ def test_detection_disable_does_not_succeed_with_tracking_still_running() -> Non
     with pytest.raises(RuntimeError, match="object tracking did not stop"):
         service.set_detection_enabled(False)
 
-    assert owned.state.detection_enabled is True
-    owned.motion_runtime.request_stop.assert_not_called()
+    assert owned.state.detection_enabled is False
+    owned.motion_runtime.request_stop.assert_called_once_with()
 
 
-def test_motion_rollback_failure_does_not_skip_onvif_restore(caplog) -> None:
+def test_failed_detection_cleanup_must_finish_before_reenable(caplog) -> None:
     service, owned = _service()
     service.start()
     owned.motion_runtime.wait_stopped.return_value = False
+    owned.motion_runtime.active_workers.return_value = ["motion refinement"]
 
     with pytest.raises(RuntimeError, match="motion runtime did not stop"):
         service.set_detection_enabled(False)
 
-    assert owned.onvif.start.call_count == 2
-    assert "motion eligibility rollback failed" in caplog.text
-    # A retry matching the restored preference must repair the incomplete runtime.
-    owned.motion_runtime.wait_stopped.return_value = True
+    assert owned.onvif.start.call_count == 1
+    assert "detection remains disabled; workers=motion refinement" in caplog.text
+    with pytest.raises(RuntimeError, match="motion runtime did not stop"):
+        service.set_detection_enabled(True)
+    assert owned.state.detection_enabled is False
+    assert owned.motion_runtime.start.call_count == 1
+
+    def finish_cleanup(**kwargs):
+        with owned.state.detection_work() as admitted:
+            assert not admitted
+        return True
+
+    owned.motion_runtime.wait_stopped.side_effect = finish_cleanup
     service.set_detection_enabled(True)
+    assert owned.state.detection_enabled is True
     assert owned.motion_runtime.start.call_count == 2
-    assert owned.onvif.start.call_count == 3
     service.set_detection_enabled(True)
     assert owned.motion_runtime.start.call_count == 2
 

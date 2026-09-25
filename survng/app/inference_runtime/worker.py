@@ -566,11 +566,15 @@ class _InferenceWorker:
                         self._admission_wait_samples[workload].add(wait_ms)
                         break
                     self._admission.wait(evidence_wait_timeout(remaining))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not self._lock.acquire(timeout=remaining):
-                raise InferenceUnavailable(
-                    f"{self.role} {operation} timed out waiting for the inference worker"
-                )
+            while True:
+                check_evidence_cancellation()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InferenceUnavailable(
+                        f"{self.role} {operation} timed out waiting for the inference worker"
+                    )
+                if self._lock.acquire(timeout=evidence_wait_timeout(remaining)):
+                    break
             try:
                 check_evidence_cancellation()
                 remaining = deadline - time.monotonic()

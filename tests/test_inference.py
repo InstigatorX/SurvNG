@@ -421,6 +421,13 @@ class InferenceSupervisorTest(unittest.TestCase):
         )
         self.assertNotIn("/private", metadata["error"])
 
+    def test_cancellable_refinement_retains_security_priority(self) -> None:
+        from survng.app.evidence_work import cancellable_evidence_work
+        with patch.object(self.supervisor, "_enter_device_workload", return_value=False) as enter:
+            with cancellable_evidence_work(lambda: False, optional=False):
+                self.supervisor.detect_refinement(np.zeros((12, 12, 3), dtype=np.uint8))
+        enter.assert_called_once_with(InferenceWorkload.INCIDENT_REFINEMENT, shed_optional=False)
+
     def test_cover_recovery_yields_to_other_camera_security_work(self) -> None:
         from survng.app.evidence_work import EvidenceWorkPreempted, cancellable_evidence_work
         self.assertTrue(self.supervisor._enter_device_workload(InferenceWorkload.INCIDENT_REFINEMENT))

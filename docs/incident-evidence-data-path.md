@@ -297,6 +297,14 @@ to the original stored evidence image.
 
 ## Durable and optional work
 
+Disabling detection cancels active refinement waits and owned frame decoders.
+Cancelled jobs return to the durable queue without consuming a failure attempt;
+normal age limits still apply when detection resumes. If worker cleanup times
+out, detection remains disabled and runtime status reports
+`detection_cleanup_required`. Retrying the control operation completes cleanup
+before detection can restart. Timeout diagnostics identify the remaining worker
+and, for active refinement, its job, processing stage, and elapsed time.
+
 Delayed object discovery is mandatory security work and is stored in the local
 detection-job ledger before optional tracking prewarm. It survives process
 restart and is retried according to its lease/attempt policy. Cover promotion,
