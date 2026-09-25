@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -39,6 +40,16 @@ class FaceBulkReview(BaseModel):
 
 class FaceReferenceUpdate(BaseModel):
     pinned: bool
+
+
+class VisitLinkDecision(BaseModel):
+    left_id: str = Field(min_length=1, max_length=100)
+    right_id: str = Field(min_length=1, max_length=100)
+    left_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    right_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision: str = Field(pattern=r"^(accept|reject|reset)$")
+    start: float = Field(gt=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +140,26 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
                 return operation(deps.get_manager())
         with deps.manager_access.lease(deps.manager_lock, deps.get_manager) as active:
             return operation(active)
+
+    @router.get("/api/people/visits")
+    def person_visits(start: float | None = None, end: float | None = None) -> dict:
+        until = end if end is not None else time.time()
+        since = start if start is not None else until - 86400
+        def read(active):
+            try:
+                return active.person_visits.list(since, until, active.config.detector.tracking)
+            except (ValueError, OverflowError, OSError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return with_manager(read)
+
+    @router.put("/api/people/visits/link")
+    def person_visit_link(payload: VisitLinkDecision) -> dict:
+        def update(active):
+            try:
+                return active.person_visits.decide(**payload.model_dump(), config=active.config.detector.tracking)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return with_manager(update)
 
     @router.get("/api/faces/status")
     def face_status() -> dict[str, Any]:

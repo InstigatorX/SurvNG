@@ -639,6 +639,11 @@ class DepthConfig(BaseModel):
 
 
 class ObjectTrackingConfig(BaseModel):
+    visit_auto_link_enabled: bool = False
+    visit_match_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    visit_top_two_margin: float = Field(default=0.08, ge=0.0, le=1.0)
+    visit_min_quality: float = Field(default=0.4, ge=0.0, le=1.0)
+    visit_max_seconds: float = Field(default=1200.0, ge=30.0, le=7200.0)
     enabled: bool = True
     implementation: str = Field(default="survng_sparse_identity", min_length=1, max_length=64)
     excluded_labels: list[str] = Field(default_factory=lambda: ["face"], max_length=128)

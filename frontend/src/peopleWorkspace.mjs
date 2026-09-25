@@ -8,6 +8,7 @@ export const PEOPLE_REVIEW_FILTERS = Object.freeze({
 });
 
 export const PEOPLE_WORKSPACE_MODES = Object.freeze({
+  visits: "Visits",
   review: "Review queue",
   people: "People profiles",
   clusters: "Unknown clusters",
@@ -50,7 +51,7 @@ export function peopleObservationRequestPlan({
   page = 0,
   pageSize = 48,
 } = {}) {
-  if (mode === "clusters") return { observations: "", count: "" };
+  if (mode === "clusters" || mode === "visits") return { observations: "", count: "" };
   const limit = Math.max(1, Math.floor(Number(pageSize) || 48));
   if (mode === "review") {
     return { observations: `/api/faces/review/queue?limit=${limit}`, count: "" };

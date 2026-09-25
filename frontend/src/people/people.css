@@ -116,3 +116,11 @@
     display: none;
   }
 }
+.person-visits { padding: 1rem; min-width: 0; }
+.visit-controls, .visit-link { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin: 1rem 0; }
+.visit-controls label { display: grid; gap: .4rem; }
+.person-visit { padding: 1rem 0; border-top: 1px solid var(--border, #444); }
+.visit-sightings { display: flex; flex-wrap: wrap; gap: 1rem; padding: 0; list-style: none; }
+.visit-sightings li { display: grid; align-content: start; gap: .5rem; width: min(100%, 260px); }
+.visit-sightings img { width: 100px; height: 100px; object-fit: cover; border-radius: 6px; }
+.visit-link span { flex: 1 1 240px; }

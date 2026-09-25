@@ -27,6 +27,7 @@ from .camera_startup import (
 )
 from .appearance_backfill import DeferredAppearanceBackfill
 from .appearance_index import AppearanceIndex
+from .person_visits import PersonVisitStore
 from .config import (
     AppConfig,
     CameraConfig,
@@ -384,6 +385,7 @@ class AppManager:
         self.face_recognizer = self.inference.face_recognizer
         self.person_reidentifier = self.inference.person_reidentifier
         self.faces = self.inference.faces
+        self.person_visits = PersonVisitStore(self.events.db_path, self.database_write_lock)
         self.motion_pipeline_registry = build_builtin_motion_registry()
         self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
             events=self.events,
