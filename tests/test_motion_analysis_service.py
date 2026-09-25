@@ -132,6 +132,23 @@ def _service(
     return service
 
 
+def test_detection_disabled_rejects_frames_before_copy_or_preprocessing() -> None:
+    hooks = _hooks()
+    service = _service(hooks)
+    hooks.state.detection_enabled.return_value = False
+    frame = np.zeros((90, 160, 3), dtype=np.uint8)
+    stop = threading.Event()
+    service.submit_frame(frame, 10.0, stop, 100.0)
+    service.remember_frame(frame, 11.0, stop, 101.0)
+    assert service.queue.empty()
+    assert not service.frames
+    assert frame.flags.writeable
+    assert service.telemetry_snapshot()["preprocess_count"] == 0
+    hooks.state.detection_enabled.return_value = True
+    service.remember_frame(frame, 12.0, stop, 102.0)
+    assert service.frames[-1][0] == 102.0
+
+
 def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     service = _service(_hooks())
     stop_event = threading.Event()
@@ -1238,10 +1255,8 @@ def test_route_watch_accelerates_below_score_ema_verification() -> None:
         "target_camera_id": "back-left",
         "source_event_id": 44,
     })
-    consume = Mock(return_value=True)
     service.set_security_verification_context(
         route_watch=lambda _camera_id, _captured_at: watch,
-        consume_route_watch=consume,
     )
     accepted = MotionQualificationResult(True, 0.61, 0.48, "qualified", 3, {})
     samples = [(100.0, np.zeros((90, 160, 3), dtype=np.uint8))]
@@ -1253,9 +1268,6 @@ def test_route_watch_accelerates_below_score_ema_verification() -> None:
     assert features["security_verification_reason"] == "route_watch"
     assert features["route_detection_watch"]["source_event_id"] == 44
     assert features["security_verification_bypass_limits"] is True
-    # Trigger admission is not proof of an eligible incident. The watch stays
-    # available until the decision handler durably admits a target event.
-    consume.assert_not_called()
     onvif_observer.assert_not_called()
 
 
@@ -1383,7 +1395,6 @@ def test_confirmed_route_chain_replays_reported_multi_camera_vehicle_trace() -> 
         ))
         service.set_security_verification_context(
             route_watch=watches.match,
-            consume_route_watch=watches.consume,
         )
         services[camera_id] = service
 
@@ -1418,6 +1429,9 @@ def test_confirmed_route_chain_replays_reported_multi_camera_vehicle_trace() -> 
         watch_details = trigger.prequalified.features["route_detection_watch"]
         assert watch_details["origin_camera_id"] == "lower-garage"
         assert watch_details["origin_event_id"] == 44720
+
+    # EMA admission alone must not consume any watch before durable event admission.
+    assert watches.status(1048.0)["consumed"] == 0
 
 
 def test_route_verification_wins_when_ordinary_conditioner_also_qualifies() -> None:
@@ -1472,10 +1486,8 @@ def test_route_watch_gets_distinct_durable_intent_during_existing_episode(
         "target_camera_id": "gate",
         "source_event_id": 44720,
     })
-    consume = Mock(return_value=True)
     service.set_security_verification_context(
         route_watch=lambda _camera_id, _captured_at: watch,
-        consume_route_watch=consume,
     )
     route_result = MotionQualificationResult(
         True,
@@ -1492,7 +1504,6 @@ def test_route_watch_gets_distinct_durable_intent_during_existing_episode(
     assert routed.detection_intent_id == "route:gate:lower-garage:44720"
     assert routed.detection_intent_id != original.detection_intent_id
     assert routed.event_at.timestamp() == 120.0
-    consume.assert_not_called()
 
 
 def test_degraded_onvif_accelerates_below_score_ema_verification() -> None:

@@ -120,6 +120,18 @@ class FaceIdentityReconciliationTest(unittest.TestCase):
             self.assertEqual(json.loads(self.canonical(event_id)["consensus_json"])["agreement_count"], 2)
         self.assertEqual(self.updates, [])
 
+    def test_consensus_weights_quality_without_bypassing_auto_guards(self) -> None:
+        ids = self.candidates([self.alice, self.alice], [.9, .5])
+        self.recognize(ids[0], quality=.9)
+        self.recognize(ids[1], quality=.1)
+        row = self.canonical()
+        self.assertAlmostEqual(row["candidate_confidence"], .86, places=4)
+        self.assertEqual(json.loads(row["consensus_json"])["aggregation"], "quality_weighted_votes_v1")
+        # The weighted score is above the automatic threshold, but poor evidence
+        # still fails the existing per-frame quality/margin/reference gates.
+        self.assertIsNone(row["person_id"])
+        self.assertEqual(self.updates, [])
+
     def test_terminal_majority_notifies_actual_canonical_once_after_commit(self) -> None:
         ids = self.candidates([self.alice, self.alice, self.bob])
         self.assertFalse(self.recognize(ids[0], quality=0.95))

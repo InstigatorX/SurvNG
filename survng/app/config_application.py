@@ -16,12 +16,13 @@ HOT_CONFIG_FIELDS = frozenset({"weather", "base_path", "event_clip_before_second
 # The configured FFmpeg binary also owns live capture and reloads the manager.
 # Acceleration remains recorder/refinement-only and can be applied in place.
 RECORDER_CONFIG_FIELDS = frozenset({"hardware_acceleration", "recording_segment_seconds"})
-DETECTOR_HOT_POLICY_FIELDS = frozenset({"confidence_threshold", "event_candidate_confidence_threshold", "event_confirmation_frames", "event_class_confirmation_frames", "event_class_confidence_thresholds", "event_refinement_stages", "event_route_refinement_stages", "event_refinement_retry_seconds", "event_refinement_settle_seconds", "event_refinement_retry_interval_seconds", "event_representative_refinement_timeout_seconds", "object_activity_attribution", "require_incident_zone", "max_concurrent_refinements", "recorded_adaptive_sampling", "recorded_decode_max_processes", "face_max_observations", "face_detection_threshold", "face_enrich_max_people", "face_match_threshold", "face_unknown_cluster_threshold", "face_auto_identify_enabled", "face_auto_identify_threshold", "face_auto_identify_margin", "face_min_size", "face_max_references", "remote_incident_fallback"})
-TRACKING_SESSION_FIELDS = frozenset({"enabled", "implementation", "excluded_labels", "sample_fps", "adaptive_sampling_enabled", "stable_sample_fps", "adaptive_stable_frames", "max_catchup_frames_per_tick", "persist_interval_seconds", "max_session_seconds", "lost_timeout_seconds", "min_confirmations", "low_confidence_threshold", "match_iou_threshold", "match_center_distance_ratio", "max_active_cameras", "adaptive_burst_enabled", "burst_max_active_cameras", "capacity_wait_seconds", "deferred_reid_enabled", "deferred_reid_delay_seconds", "deferred_reid_min_crop_pixels", "deferred_reid_rate_per_minute", "related_sequence_window_seconds", "camera_transition_routes", "max_tracks_per_session", "reid_max_age_seconds", "reid_max_embeddings_per_frame", "reid_refresh_interval_frames", "reid_match_threshold", "vehicle_reid_match_threshold", "vehicle_reid_labels", "tracking_profile", "reid_spatial_gate_ratio", "reid_top_two_margin", "reid_gallery_size", "reid_provisional_hits", "sparse_buffer_iou_small", "sparse_buffer_iou_large", "entity_relink_enabled", "ambiguity_min_person_tracks"})
+DETECTOR_HOT_POLICY_FIELDS = frozenset({"confidence_threshold", "event_candidate_confidence_threshold", "event_confirmation_frames", "event_class_confirmation_frames", "event_class_confidence_thresholds", "event_refinement_stages", "event_route_refinement_stages", "event_refinement_retry_seconds", "event_refinement_settle_seconds", "event_refinement_retry_interval_seconds", "event_representative_refinement_timeout_seconds", "object_activity_attribution", "require_incident_zone", "max_concurrent_refinements", "recorded_adaptive_sampling", "recorded_decode_max_processes", "face_max_observations", "face_detection_threshold", "face_enrich_max_people", "face_match_threshold", "face_unknown_cluster_threshold", "face_auto_identify_enabled", "face_auto_identify_threshold", "face_auto_identify_margin", "face_min_size", "face_max_references", "face_evidence_enabled", "face_evidence_max_extra_frames", "face_evidence_timeout_seconds", "remote_incident_fallback"})
+TRACKING_SESSION_FIELDS = frozenset({"enabled", "implementation", "excluded_labels", "sample_fps", "adaptive_sampling_enabled", "stable_sample_fps", "adaptive_stable_frames", "max_catchup_frames_per_tick", "persist_interval_seconds", "max_session_seconds", "recorded_processing_budget_seconds", "lost_timeout_seconds", "min_confirmations", "low_confidence_threshold", "match_iou_threshold", "match_center_distance_ratio", "max_active_cameras", "adaptive_burst_enabled", "burst_max_active_cameras", "capacity_wait_seconds", "deferred_reid_enabled", "deferred_reid_delay_seconds", "deferred_reid_min_crop_pixels", "deferred_reid_rate_per_minute", "related_sequence_window_seconds", "camera_transition_routes", "max_tracks_per_session", "reid_max_age_seconds", "reid_max_embeddings_per_frame", "reid_refresh_interval_frames", "reid_match_threshold", "vehicle_reid_match_threshold", "vehicle_reid_labels", "tracking_profile", "reid_spatial_gate_ratio", "reid_top_two_margin", "reid_gallery_size", "reid_provisional_hits", "sparse_buffer_iou_small", "sparse_buffer_iou_large", "entity_relink_enabled", "ambiguity_min_person_tracks"})
+TRACKING_VISIT_POLICY_FIELDS = frozenset({"visit_auto_link_enabled", "visit_match_threshold", "visit_top_two_margin", "visit_min_quality", "visit_max_seconds"})
 CAPTURE_TRACKING_FIELDS = frozenset({"sample_fps"})
 DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({"enabled", "backend", "object_worker_count", "model_path", "model_xml", "model_output_format", "model_input_layout", "coreml_model_path", "labels_path", "device", "nms_threshold", "warmup_enabled", "labels"})
 DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({"enabled", "backend", "model_path", "model_xml", "model_output_format", "model_input_layout", "coreml_model_path", "labels_path", "nms_threshold", "labels"})
-DETECTOR_FACE_ENGINE_FIELDS = frozenset({"face_recognition_enabled", "face_embedding_model_path", "face_landmark_model_path", "face_detection_model_path", "face_recognition_device"})
+DETECTOR_FACE_ENGINE_FIELDS = frozenset({"face_recognition_enabled", "face_embedding_model_path", "face_landmark_model_path", "face_detection_model_path", "face_recognition_device", "face_embedding_profile"})
 DETECTOR_SHARED_ENGINE_FIELDS = frozenset({"cache_enabled", "cache_dir"})
 DETECTOR_MANAGER_FIELDS = frozenset({"inference_mode"})
 DEPTH_ENGINE_FIELDS = frozenset({"enabled", "model_path", "device", "input_size"})
@@ -75,7 +76,7 @@ def manager_owned_config(config: AppConfig) -> dict:
         payload["detector"]["tracking"] = _without_fields(
             tracking,
             (TRACKING_SESSION_FIELDS - CAPTURE_TRACKING_FIELDS)
-            | TRACKING_REID_ENGINE_FIELDS,
+            | TRACKING_REID_ENGINE_FIELDS | TRACKING_VISIT_POLICY_FIELDS,
         )
     depth = payload["detector"].get("depth")
     if isinstance(depth, dict):
@@ -210,6 +211,10 @@ class TargetedConfigApplication:
                 camera.id: camera.object_activity_attribution
                 for camera in incoming.cameras
             }
+            policy_changed = policy_changed or any(
+                getattr(current.detector.tracking, field) != getattr(incoming.detector.tracking, field)
+                for field in TRACKING_VISIT_POLICY_FIELDS
+            )
             tracking_changed = any(getattr(current.detector.tracking, f) != getattr(incoming.detector.tracking, f) for f in TRACKING_SESSION_FIELDS)
             motion_restart_ids, motion_hot_ids = motion_config_changes(current, incoming)
             motion_capacity_changed = (

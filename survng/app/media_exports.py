@@ -21,6 +21,12 @@ from typing import Callable
 from .recording_media import concatenated_clip_timing
 from .recorder import Recorder
 from .media_storage import MediaStorageRegistry
+from .media_sessions import (
+    MediaResourceClass,
+    MediaSessionKind,
+    MediaSessionManager,
+    MediaSessionRequest,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -365,6 +371,8 @@ class MediaExportManager:
         retention_hours: int = 24,
         max_storage_bytes: int = 20 * 1024 * 1024 * 1024,
         media_storage: MediaStorageRegistry | None = None,
+        media_sessions: MediaSessionManager | None = None,
+        owner_generation: str | int | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.database_dir = database_dir.resolve()
@@ -390,6 +398,8 @@ class MediaExportManager:
         self._hardware_device = hardware_device or (lambda _backend: "")
         self.retention_hours = max(1, min(int(retention_hours), 720))
         self.max_storage_bytes = max(1024 * 1024, int(max_storage_bytes))
+        self.media_sessions = media_sessions
+        self.owner_generation = owner_generation
         self.store = MediaExportStore(self.database_dir)
         default_expiry = (datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)).isoformat()
         for job in self.store.terminal_without_expiry():
@@ -402,6 +412,7 @@ class MediaExportManager:
         self._active_job_id = ""
         self._active_cancel: threading.Event | None = None
         self._active_process: subprocess.Popen | None = None
+        self._next_storage_error_log = 0.0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -414,7 +425,7 @@ class MediaExportManager:
         self._thread.start()
         for job_id in self.store.queued_ids():
             self._enqueue(job_id)
-        self.cleanup()
+        self._cleanup_safely()
 
     def is_running(self) -> bool:
         return bool(self._thread is not None and self._thread.is_alive())
@@ -650,6 +661,33 @@ class MediaExportManager:
             )
             raise RuntimeError("export queue is full") from exc
 
+    def _log_storage_failure(self) -> None:
+        now = time.monotonic()
+        if now >= self._next_storage_error_log:
+            self._next_storage_error_log = now + 30.0
+            LOGGER.exception("export storage operation failed; worker will retry")
+
+    def _retry_bookkeeping(self, operation: Callable):
+        # Keep the dequeued job owned by this worker. Retrying only bookkeeping
+        # avoids duplicate transcodes when terminal-state persistence fails.
+        # Attempt once even during shutdown so a healthy store records the
+        # terminal state. The stop event prevents retries after a failed write.
+        while True:
+            try:
+                return operation()
+            except (sqlite3.Error, OSError):
+                self._log_storage_failure()
+                if self._stop.wait(1.0):
+                    break
+        return None
+
+    def _cleanup_safely(self) -> None:
+        try:
+            self.cleanup()
+        except Exception:
+            # Maintenance is retried on the next cycle, independently of jobs.
+            self._log_storage_failure()
+
     def _run(self) -> None:
         next_cleanup = time.monotonic() + 60.0
         while not self._stop.is_set():
@@ -657,41 +695,62 @@ class MediaExportManager:
                 job_id = self._queue.get(timeout=1.0)
             except queue.Empty:
                 if time.monotonic() >= next_cleanup:
-                    self.cleanup()
+                    self._cleanup_safely()
                     next_cleanup = time.monotonic() + 60.0
                 continue
             if job_id is None:
                 return
-            job = self.store.get(job_id)
+            job = self._retry_bookkeeping(lambda: self.store.get(job_id))
             if job is None or job.get("status") not in {"queued", "cancelling"}:
                 continue
             if job.get("cancel_requested"):
-                self._finish_cancelled(job_id)
+                self._retry_bookkeeping(lambda: self._finish_cancelled(job_id))
                 continue
             cancel = threading.Event()
             with self._active_lock:
                 self._active_job_id = job_id
                 self._active_cancel = cancel
             try:
-                self._execute(job, cancel)
+                if self.media_sessions is None:
+                    self._execute(job, cancel)
+                else:
+                    with self.media_sessions.acquire(
+                        MediaSessionRequest(
+                            MediaSessionKind.MEDIA_EXPORT,
+                            camera_id=str(job.get("camera_id") or "") or None,
+                            source=str(job.get("source") or "") or None,
+                            resources={
+                                MediaResourceClass.EXPORT_WORKER: 1,
+                                MediaResourceClass.TRANSCODE_PROCESS: 1,
+                            },
+                            owner_generation=self.owner_generation,
+                            correlation_id=job_id,
+                        ),
+                        timeout=30.0,
+                    ) as session:
+                        session.cancellation.add_callback(
+                            lambda _reason: cancel.set()
+                        )
+                        self._execute(job, cancel)
             except InterruptedError:
-                self._finish_cancelled(job_id)
+                self._retry_bookkeeping(lambda: self._finish_cancelled(job_id))
             except BaseException as exc:
                 LOGGER.exception("media export %s failed", job_id)
-                self.store.update(
+                error_message = str(exc)[:500]
+                self._retry_bookkeeping(lambda: self.store.update(
                     job_id,
                     status="failed",
                     phase="Failed",
-                    error=str(exc)[:500],
+                    error=error_message,
                     finished_at=_utc_now(),
                     expires_at=(datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)).isoformat(),
-                )
+                ))
             finally:
                 with self._active_lock:
                     self._active_job_id = ""
                     self._active_cancel = None
                     self._active_process = None
-                self.cleanup()
+                self._cleanup_safely()
                 next_cleanup = time.monotonic() + 60.0
 
     def _execute(self, job: dict[str, object], cancel: threading.Event) -> None:

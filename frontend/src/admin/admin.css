@@ -79,11 +79,6 @@
   border-radius: 3px;
 }
 
-.camera-command-area button {
-  border-radius: 3px;
-  font-weight: 560;
-}
-
 .calibration-tree .section-head {
   background: var(--panel-soft);
 }
@@ -271,33 +266,6 @@
 .maintenance-panel,
 .log-panel {
   background: var(--panel-solid);
-}
-
-.telemetry-section-tabs {
-  gap: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: var(--panel-solid);
-  padding: 0;
-}
-
-.telemetry-section-tabs button {
-  min-height: 38px;
-  border: 0;
-  border-left: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-  font-size: 10px;
-  font-weight: 540;
-}
-
-.telemetry-section-tabs button:first-child {
-  border-left: 0;
-}
-
-.telemetry-section-tabs button.active {
-  background: color-mix(in srgb, var(--accent) 18%, var(--control));
 }
 
 .telemetry-viewer {
@@ -530,10 +498,6 @@
 
   .telemetry-trend-grid.two-column {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .telemetry-section-tabs button {
-    min-height: 44px;
   }
 
   .log-command-controls select,
@@ -804,8 +768,7 @@ a.button {
   min-width: min(280px, 100%);
 }
 
-.telemetry-panel-head>h2,
-.camera-config-head .camera-command-area {
+.telemetry-panel-head>h2 {
   margin-left: auto;
 }
 

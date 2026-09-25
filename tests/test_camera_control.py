@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from survng.app.camera_control import CameraControlService
+from survng.app.camera_lifecycle import DetectionShutdownIncomplete
 from survng.app.config import AppConfig, CameraConfig
 
 
@@ -159,6 +160,18 @@ class CameraControlServiceTest(unittest.TestCase):
             self.assertTrue(controls.detection_enabled("gate"))
             payload = path.read_text(encoding="utf-8")
             self.assertIn('"gate": true', payload)
+
+    def test_incomplete_detection_shutdown_preserves_off_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runtime_state.json"
+            controls, worker, _recording, _fleet, mqtt = control_service(path)
+            worker.set_detection_enabled.side_effect = DetectionShutdownIncomplete("still draining")
+            with self.assertRaisesRegex(DetectionShutdownIncomplete, "still draining"):
+                controls.set_detection("gate", False)
+            self.assertFalse(controls.detection_enabled("gate"))
+            controls._load_persisted_state()
+            self.assertFalse(controls.detection_enabled("gate"))
+            mqtt.publish_camera_feature_state.assert_called_once_with("gate", "detection", False)
 
     def test_apply_filters_removed_cameras_and_rolls_back_failed_persist(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

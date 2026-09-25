@@ -148,14 +148,14 @@ def motion_correlated_objects(
         temporal = evidence.displacement_ratio >= evidence.movement_threshold
         temporal_path = bool(
             evidence.temporal_evidence_available
-            and evidence.path_ratio >= evidence.path_threshold
+            and evidence.movement_extent_ratio >= evidence.path_threshold
         )
         semantic_tier = str(detected.get("semantic_tier") or "standard")
         standard_semantic = semantic_tier == "standard"
         stable_geometry = bool(
             evidence.track_observations >= 3
             and evidence.displacement_ratio < evidence.movement_threshold
-            and evidence.path_ratio < evidence.path_threshold
+            and evidence.movement_extent_ratio < evidence.path_threshold
         )
         spatial_fallback = bool(
             standard_semantic and spatial and not evidence.temporal_evidence_available
@@ -171,15 +171,13 @@ def motion_correlated_objects(
             and not alignment_reliable
             and not evidence.temporal_evidence_available
         )
-        # A short recorded sequence can begin and end at nearly the same point
-        # while a real object walks through the EMA region.  Permit that only
-        # when spatial evidence also agrees and the travelled path is well
-        # beyond ordinary detector-box jitter.  A stationary object therefore
-        # still cannot explain unrelated motion beside or behind it.
+        # Excursion can establish out-and-back movement with zero net travel.
+        # New evidence uses a bounded excursion, never accumulated box jitter;
+        # legacy records retain their historical aggregate-path interpretation.
         spatial_path = bool(
             spatial
             and evidence.temporal_evidence_available
-            and evidence.path_ratio >= evidence.path_threshold
+            and evidence.movement_extent_ratio >= evidence.path_threshold
         )
         motion_correlated = bool(
             temporal

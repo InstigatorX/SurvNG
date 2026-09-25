@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Protocol
@@ -71,7 +72,9 @@ class InferenceLifecycle:
         media_storage: MediaStorageRegistry | None = None,
         database_write_lock: threading.RLock | None = None,
         remote_inference_registry: RemoteInferenceRegistry | None = None,
+        tracking_window_provider: Callable[[int, datetime], tuple[float, float]] | None = None,
     ) -> None:
+        self.tracking_window_provider = tracking_window_provider
         self.storage_dir = storage_dir
         self.events = events
         self.appearance_index = appearance_index
@@ -231,20 +234,23 @@ class InferenceLifecycle:
     def close(self) -> None:
         """Close all inference-owned services, attempting every component."""
         with self._lock:
-            if self._closed:
+            if self._closed and not self._retired_cleanup:
                 return
             failures: list[tuple[str, BaseException]] = []
-            for label, operation in (
+            operations = tuple(self._retired_cleanup) if self._closed else (
                 ("face recognition", self.faces.close),
                 ("semantic search", self.semantic_search.close),
                 ("appearance backfill", self.appearance_backfill.close),
                 *tuple(self._retired_cleanup),
                 ("inference", self.detector.stop),
-            ):
+            )
+            self._retired_cleanup = []
+            for label, operation in operations:
                 try:
                     operation()
                 except BaseException as error:
                     failures.append((label, error))
+                    self._retired_cleanup.append((label, operation))
                     LOGGER.error(
                         "%s shutdown failed: %s",
                         label,
@@ -253,8 +259,9 @@ class InferenceLifecycle:
             self._core_started = False
             self._core_ready = False
             self._auxiliary_started = False
+            # Close admission immediately, but retain failed owners for the
+            # next shutdown attempt instead of silently abandoning them.
             self._closed = True
-            self._retired_cleanup = []
             if failures:
                 labels = ", ".join(label for label, _error in failures)
                 first = failures[0][1]
@@ -292,7 +299,6 @@ class InferenceLifecycle:
         """Transactionally replace every camera tracking session and backfill."""
         with self._lock:
             self._ensure_open()
-            tracking = config.tracking.model_copy(deep=True)
             next_limiter = self._build_limiter(config)
             next_factory = self._build_tracking_factory(config, next_limiter)
             workers = list(self._workers.values())
@@ -489,6 +495,7 @@ class InferenceLifecycle:
     ) -> ObjectTrackingSessionFactory:
         return ObjectTrackingSessionFactory(
             config=config.tracking,
+            window_provider=self.tracking_window_provider,
             detector=self.detector,
             update_event=self.events.update_object_tracking,
             publisher=self.event_publisher,

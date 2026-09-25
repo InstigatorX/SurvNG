@@ -1544,3 +1544,88 @@ def test_terminal_cleanup_keeps_pending_local_progress(recovery_store):
     service._forget_terminal_refinements()
     assert set(service._refinement_callbacks) == {pending_id}
     assert service._refinement_progress == {pending_id: pending}
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_stop_cancels_decode_capacity_wait_without_publication_or_lost_job(tmp_path, durable):
+    from survng.app.evidence_work import evidence_cancelled, optional_evidence_work_active
+    from survng.app.motion_pipeline.recorded_decode_budget import RecordedDecodeBudget
+
+    store = EventStore(tmp_path) if durable else _MemoryDetectionJobStore()
+    initial = MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False,
+        detected_objects=(), refinement_pending=True,
+    )
+    service, decision, tracking, _prewarm, _reader = _service(initial, refinement_store=store)
+    budget = RecordedDecodeBudget(max_processes=1, memory_budget_bytes=1024, estimated_frame_bytes=1024)
+    occupied = budget.reserve_workflow(maximum_frames=1, incident_epoch=1)
+    assert occupied is not None
+    entered = threading.Event()
+    callback = Mock()
+    stop = threading.Event()
+
+    def refine(*args, **kwargs):
+        assert not optional_evidence_work_active()  # Retain security priority.
+        entered.set()
+        lease = budget.reserve_workflow(
+            maximum_frames=1, incident_epoch=2, deadline=time.monotonic() + 10,
+            cancelled=evidence_cancelled,
+        )
+        if lease is not None:
+            lease.release()
+        assert lease is None
+        return MotionDecisionOutcome(event_id=None, snapshot_path="", object_detected=None)
+
+    decision.refine.side_effect = refine
+    service.start(stop)
+    try:
+        service.process("motion", "person", datetime.now(timezone.utc), {}, refinement_callback=callback)
+        assert entered.wait(2)
+        stop.set()
+        service.request_stop()
+        assert service.wait_stopped(2)
+        callback.assert_not_called()
+        tracking.start.assert_not_called()
+        assert service.status()["refinement_failures"] == 0
+        claimed = store.claim_detection_job("gate", lease_owner="new-runtime")
+        assert claimed is not None
+        assert claimed["attempts"] == 1  # Cancellation did not consume a retry.
+        assert not store.defer_detection_job(claimed["id"], lease_owner="stale-owner")
+        assert store.complete_detection_job(claimed["id"], None, lease_owner="new-runtime")
+    finally:
+        stop.set()
+        service.request_stop()
+        occupied.release()
+        assert service.wait_stopped(2)
+
+
+def test_refinement_timeout_identifies_job_and_stage(caplog):
+    from survng.app.evidence_work import report_evidence_stage
+    initial = MotionDecisionOutcome(
+        event_id=None, snapshot_path="", object_detected=False, refinement_pending=True,
+    )
+    service, decision, _tracking, _prewarm, _reader = _service(initial)
+    entered, release, stop = threading.Event(), threading.Event(), threading.Event()
+
+    def refine(*args, **kwargs):
+        report_evidence_stage("inference")
+        entered.set()
+        assert release.wait(2)
+        return initial
+
+    decision.refine.side_effect = refine
+    service.start(stop)
+    try:
+        service.process("motion", "person", datetime.now(timezone.utc), {})
+        assert entered.wait(1)
+        stop.set()
+        service.request_stop()
+        assert not service.wait_stopped(0)
+        assert "refinement shutdown timeout camera=gate job=" in caplog.text
+        assert "stage=inference elapsed_seconds=" in caplog.text
+        assert "job=unknown" not in caplog.text
+    finally:
+        stop.set()
+        release.set()
+        service.request_stop()
+        assert service.wait_stopped(2)

@@ -41,7 +41,6 @@ import {
   IncidentSourceDot,
   SnapshotImage,
   StoredTrackVideoOverlay,
-  eventObjects,
   formatDepthMeters,
   hasDetectedObjects,
   incidentClipWindow,
@@ -155,10 +154,11 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
             }}
             onEnded={onEnded}
           />}
-          {analysisMode === "tracks" && storedTracks.length ? (
+          {analysisMode === "tracks" && trackingEvent?.object_tracking ? (
             <StoredTrackVideoOverlay
               videoRef={videoRef}
               tracks={storedTracks}
+              tracking={trackingEvent?.object_tracking}
               coordinateSize={{
                 width: Number(trackingEvent?.object_tracking?.frame_width),
                 height: Number(trackingEvent?.object_tracking?.frame_height),
@@ -187,7 +187,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   );
 }
 
-export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, analysisMode = "clean", depthLayer = "both", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, showExcluded = false, analysisMode = "clean", depthLayer = "both", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
@@ -454,7 +454,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
                   onClick={(clickEvent) => { clickEvent.stopPropagation(); selectMosaicEvent(event); }}
                   aria-label={`Focus event at ${formatTimeOnly(event.created_at || incident.created_at, timeZone)}`}
                 >
-                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations showTracking={false} incidentEligibleOnly>
+                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations showTracking={false} incidentEligibleOnly={!showExcluded}>
                     <IncidentSourceDot trigger={eventTrigger} className="incident-mosaic-source" />
                     <div className="incident-mosaic-hud">
                       <time>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</time>
@@ -476,7 +476,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
           <div className={`incident-evidence incident-evidence-${evidenceItems.length}`} role="group" aria-label="Incident evidence frames">
             {evidenceItems.map((item) => (
               <button type="button" className="incident-evidence-tile" key={item.key} onClick={(event) => { event.stopPropagation(); selectEvidenceItem(item); }} aria-label={`Focus ${item.label.toLowerCase()} frame`}>
-                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations={item.kind === "snapshot"} showTracking={false} incidentEligibleOnly={item.kind === "snapshot"}>
+                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail objectFocusMode={thumbnailObjectFocus} objectFocusZoom={thumbnailObjectFocusZoom} objectFocusAspect={null} objectFocusControls={false} showAnnotations={item.kind === "snapshot"} showTracking={false} incidentEligibleOnly={item.kind === "snapshot" && !showExcluded}>
                   <div className="incident-evidence-hud">
                     <strong>{item.label}</strong>
                     <time>{formatTimeOnly(item.event.created_at, timeZone)}</time>
@@ -497,7 +497,7 @@ export function IncidentCard({ incident, timeZone, expanded, selected = false, t
             objectFocusAspect={(!desktopWorkspace || !expanded) ? { width: 16, height: 10 } : null}
             showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
             showTracking={false}
-            incidentEligibleOnly
+            incidentEligibleOnly={!showExcluded}
             thumbnail={!desktopWorkspace || !expanded}
             selectedObjectIndex={desktopWorkspace && expanded ? selectedObjectIndex : null}
             onSelectObject={desktopWorkspace && expanded && onSelectObject ? onSelectObject : null}
@@ -804,7 +804,6 @@ export function VisualSimilarIncidents({
 }
 
 export function RelatedAppearanceIncidents({
-  active = true,
   anchorEventId,
   selectedEventId,
   loadingEventId,
@@ -815,16 +814,20 @@ export function RelatedAppearanceIncidents({
 }) {
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (!active || !Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
+    if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
       setMatches([]);
       setLoading(false);
+      setError(false);
       return undefined;
     }
     const controller = new AbortController();
     let cancelled = false;
     setLoading(true);
+    setError(false);
+    setMatches([]);
     fetch(appUrl(relatedIncidentsPath(anchorEventId)), {
       signal: controller.signal,
     })
@@ -835,6 +838,7 @@ export function RelatedAppearanceIncidents({
       .catch((requestError) => {
         if (!cancelled && requestError?.name !== "AbortError") {
           setMatches([]);
+          setError(true);
         }
       })
       .finally(() => {
@@ -844,9 +848,7 @@ export function RelatedAppearanceIncidents({
       cancelled = true;
       controller.abort();
     };
-  }, [active, anchorEventId]);
-
-  if (!active || (!loading && !matches.length)) return null;
+  }, [anchorEventId]);
 
   return (
     <section className="incident-related">
@@ -855,6 +857,8 @@ export function RelatedAppearanceIncidents({
         {selectedEventId ? <button type="button" onClick={onReturn}>Selected incident</button> : null}
       </div>
       {loading ? <p>Finding related incidents…</p> : null}
+      {!loading && error ? <p>Related incidents are unavailable.</p> : null}
+      {!loading && !error && !matches.length ? <p>No related incidents were found in this time window.</p> : null}
       {matches.length ? <div className="incident-related-grid">
         {matches.map((match) => {
           const eventId = Number(match.event_id);
@@ -965,7 +969,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", depthLayer = "both", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, showExcluded = false, onShowExcludedChange = null, analysisMode = "clean", depthLayer = "both", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -994,7 +998,8 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const inspectedEvent = faceEvent || incident;
   const findSimilarSourceEvent = searchEvent || inspectedEvent;
   const searchableObjects = visualSearchObjects(findSimilarSourceEvent);
-  const objects = searchableObjects.filter((object) => object.incident_eligible !== false);
+  const excludedCount = searchableObjects.filter((object) => object.incident_eligible === false).length;
+  const objects = searchableObjects.filter((object) => showExcluded || object.incident_eligible !== false);
   const findSimilarActive = isValidObjectIndex(findSimilarObjectIndex);
   const selectedSearchObject = findSimilarActive
     ? searchableObjects[Number(findSimilarObjectIndex)]
@@ -1002,6 +1007,10 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const selectedTrackId = resolveObjectTrackId(selectedSearchObject, findSimilarSourceEvent);
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
+  const trackingWindowSeconds = Number(incidentTracking?.window_end_epoch) - Number(incidentTracking?.window_start_epoch);
+  const analyzedSeconds = incidentTracking?.analyzed_through
+    ? Date.parse(incidentTracking.analyzed_through) / 1000 - Number(incidentTracking.window_start_epoch) : 0;
+
   const faces = faceEvent?.faces || [];
   const zones = incidentZones(inspectedEvent);
   const cameraReports = cameraReportsForIncident(incident);
@@ -1031,7 +1040,12 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
       </div>
       <section className="incident-current-summary">
         <h3>Current incident</h3>
-        <h4>Model detections</h4>
+        <div className="incident-detection-heading">
+          <h4>Model detections</h4>
+          {onShowExcludedChange ? <button type="button" aria-pressed={showExcluded} onClick={() => onShowExcludedChange(!showExcluded)}>
+            Show excluded{excludedCount ? ` (${excludedCount})` : ""}
+          </button> : null}
+        </div>
         <div className="incident-summary-objects">
           {objects.length ? objects.map((object) => {
             const objectIndex = searchableObjects.indexOf(object);
@@ -1049,6 +1063,10 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
                   <strong>{object.label}</strong>
                   <span>{Math.round(Number(object.confidence || 0) * 100)}% cover</span>
                 </div>
+                {object.incident_eligible === false ? <small className="incident-exclusion-reason">Excluded · {(object.incident_ineligible_reasons?.length
+                  ? object.incident_ineligible_reasons
+                  : [object.zone_admission_reason || object.activity_admission_reason || "Not eligible for this incident"])
+                  .map((reason) => String(reason).replaceAll("_", " ")).join("; ")}</small> : null}
                 {hasConfirmationSummary ? <small>{qualifyingObservations}/{requiredObservations} qualifying detection{requiredObservations === 1 ? "" : "s"}{Number.isFinite(peakConfidence) ? ` · peak ${Math.round(peakConfidence * 100)}%` : ""}</small> : null}
                 {startFindSimilar ? (
                   <button
@@ -1095,7 +1113,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         <h3>Replay analysis</h3>
         <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
           <button type="button" className={analysisMode === "clean" ? "active" : ""} aria-pressed={analysisMode === "clean"} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
-          <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
+          <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!incidentTracking?.state && !objectTracks.length} title={incidentTracking?.state || objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
           <button type="button" className={analysisMode === "ai" ? "active" : ""} aria-pressed={analysisMode === "ai"} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
           <button type="button" className={analysisMode === "depth" ? "active" : ""} aria-pressed={analysisMode === "depth"} onClick={() => onAnalysisModeChange("depth")} disabled={!depthConfigured} title={depthConfigured ? "Run detection with monocular depth while replaying" : "Enable depth estimation in Intelligence settings"}><Layers size={14} /> Depth</button>
         </div>
@@ -1106,7 +1124,11 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
             <button type="button" className={depthLayer === "heatmap" ? "active" : ""} aria-pressed={depthLayer === "heatmap"} onClick={() => onDepthLayerChange?.("heatmap")} title="Show depth heatmap only">Heatmap</button>
           </div>
         ) : null}
-        {analysisMode === "tracks" ? <small>{trackingCoverageLabel(incidentTracking)} · {objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
+        {analysisMode === "tracks" && trackingWindowSeconds > 0 ? <progress
+          className="incident-tracking-progress" aria-label="Tracking analysis coverage"
+          max={trackingWindowSeconds} value={Math.max(0, Math.min(trackingWindowSeconds, analyzedSeconds))}
+        /> : null}
+        {analysisMode === "tracks" ? <small>{trackingCoverageLabel(incidentTracking)}{incidentTracking?.analyzed_through ? ` · analyzed through ${formatTimeOnly(incidentTracking.analyzed_through, timeZone)}` : ""} · {objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
         {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
         {analysisMode === "depth" && analysisStats ? (
           <small className={analysisStats.error || analysisStats.depthError ? "analysis-error" : ""}>
@@ -1126,6 +1148,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
           </button>
         )) : <p>No recognized faces.</p>}
       </section>
+      <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
       <VisualSimilarIncidents
         active={findSimilarActive}
         anchorEventId={Number.isInteger(findSimilarAnchorId) && findSimilarAnchorId > 0 ? findSimilarAnchorId : null}
@@ -1142,7 +1165,6 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         selectedEventId={selectedRelatedEventId}
         onClear={onFindSimilar ? () => onFindSimilar(null) : (onSelectObject ? () => onSelectObject(null) : null)}
       />
-      <RelatedAppearanceIncidents active={open} anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
       <CrossCameraTracePanel anchorEventId={open ? anchorEventId : null} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} loadingEventId={relatedLoadingEventId} />
       <details className="incident-technical-details">
         <summary>Technical details</summary>

@@ -8,7 +8,7 @@ import numpy as np
 
 from ..config import ObjectTrackingConfig
 from .geometry import _appearance, _box, _confidence, _ensure_detection_appearance, _iou
-from .types import Box, ObjectTrackerBackend
+from .types import Box
 
 
 def _depth_sample(

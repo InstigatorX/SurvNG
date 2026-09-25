@@ -179,10 +179,6 @@ ADVICE_SCHEMA: dict[str, Any] = {
 }
 
 
-def gemini_advice_schema() -> dict[str, Any]:
-    return copy.deepcopy(ADVICE_SCHEMA)
-
-
 SYSTEM_PROMPT = """You are a conservative video-motion calibration advisor for SurvNG.
 Analyze the supplied motion-decision audit frame together with deterministic motion metrics, the
 versioned motion_paradigm summary, and any object-detection result. Motion processing only decides

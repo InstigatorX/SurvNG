@@ -44,7 +44,3 @@ export function insertZonePointWithIndex(points, point, scale = { x: 1, y: 1 }) 
     insertionIndex,
   };
 }
-
-export function insertZonePoint(points, point, scale = { x: 1, y: 1 }) {
-  return insertZonePointWithIndex(points, point, scale).points;
-}

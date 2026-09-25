@@ -2276,14 +2276,6 @@ p {
   font-size: 13px;
 }
 
-.camera-command-area {
-  display: flex;
-  min-width: 0;
-  align-items: flex-end;
-  flex-direction: column;
-  gap: 7px;
-}
-
 .camera-command-bar {
   display: flex;
   align-items: center;
@@ -6596,10 +6588,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     flex-direction: column;
   }
 
-  .camera-command-area {
-    align-items: stretch;
-  }
-
   .camera-command-bar {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -8062,10 +8050,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   flex: 0 0 auto;
 }
 
-.telemetry-section-tabs {
-  margin: 8px 10px 0;
-}
-
 .telemetry-header-continuity {
   min-width: 0;
   max-width: min(720px, 64%);
@@ -9324,10 +9308,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .telemetry-viewer {
     padding: 9px;
-  }
-
-  .telemetry-section-tabs {
-    margin: 9px 9px 0;
   }
 
   .telemetry-diagnostics {
@@ -11752,26 +11732,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   -webkit-overflow-scrolling: touch;
 }
 
-.recordings-v2-selected-event {
-  display: grid;
-  align-content: center;
-  min-width: 0;
-  border-left: 1px solid var(--line);
-}
-
-.recordings-v2-selected-event > header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
 .recordings-v2-trail-nav {
   display: inline-flex;
   align-items: center;
@@ -11807,38 +11767,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   margin: 0;
   color: var(--danger);
   font-size: 12px;
-}
-
-.recordings-v2-selected-event>div {
-  display: grid;
-  min-width: 0;
-}
-
-.recordings-v2-selected-event span,
-.recordings-v2-selected-event small {
-  color: var(--muted);
-}
-
-.recordings-v2-selected-event strong {
-  overflow: hidden;
-  color: var(--ink);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.recordings-v2-selected-event a {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 32px;
-  border: 1px solid rgba(15, 118, 110, .45);
-  border-radius: 6px;
-  background: var(--active);
-  color: var(--active-ink);
-  font-size: 11px;
-  font-weight: 850;
-  text-decoration: none;
 }
 
 .recordings-v2-events button {
@@ -11963,22 +11891,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .recordings-v2-investigation {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .recordings-v2-selected-event {
-    align-items: center;
-    gap: 8px;
-    border-left: 0;
-    padding: 6px 8px;
-  }
-
-  .recordings-v2-selected-event span {
-    display: none;
-  }
-
-  .recordings-v2-selected-event a {
-    min-height: 44px;
-    padding-inline: 12px;
   }
 
   .recordings-v2-filter-label {

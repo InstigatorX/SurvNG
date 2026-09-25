@@ -851,6 +851,18 @@ class EventStoreJobsMixin:
             )
             return cursor.rowcount == 1
 
+    def defer_detection_job(self, job_id: str, *, lease_owner: str) -> bool:
+        """Release cancelled work without spending a failure attempt."""
+        with self._jobs_lock, self._connect_jobs() as conn:
+            cursor = conn.execute(
+                "update detection_jobs set state='queued', attempts=max(0, attempts-1), "
+                "available_at=?, lease_expires_at=null, lease_owner='', "
+                "last_error='detection_stopped', updated_at=? "
+                "where id=? and state='running' and lease_owner=?",
+                (time.time(), datetime.now(timezone.utc).isoformat(), job_id, lease_owner),
+            )
+            return cursor.rowcount == 1
+
     def retry_detection_job(
         self,
         job_id: str,

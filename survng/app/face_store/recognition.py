@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import time
+from contextlib import closing
 from datetime import datetime, timezone
 from queue import Empty, Full
 from typing import Any
@@ -114,7 +116,6 @@ class FaceStoreRecognitionMixin:
         model_fingerprint = str(recognizer_status.get("model_fingerprint") or "")
         if not model_fingerprint:
             return
-        identity_updates: list[dict[str, Any]] = []
         with self._lock, self._connect() as connection:
             # Retention limits canonical observations, each of which may own
             # several candidate crops. Refresh complete tracks so reconciliation
@@ -126,7 +127,7 @@ class FaceStoreRecognitionMixin:
                     where canonical = 1 and (person_id is null or review_status = 'auto_identified')
                     order by observed_at desc, id desc limit ?
                 )
-                select o.id, o.event_id, o.candidate_track_id, o.embedding_blob
+                select o.id, o.event_id, o.candidate_track_id
                 from face_observations o
                 where (o.person_id is null or (o.review_status = 'auto_identified' and o.candidate_track_id != ''))
                     and o.recognition_pending = 0
@@ -141,49 +142,6 @@ class FaceStoreRecognitionMixin:
                 """,
                 (self.max_observations, model_fingerprint),
             ).fetchall()
-            for row in embedded_rows:
-                try:
-                    embedding = np.frombuffer(row["embedding_blob"], dtype=np.float32)
-                except (TypeError, ValueError):
-                    continue
-                norm = float(np.linalg.norm(embedding))
-                if (
-                    embedding.size == 0
-                    or not np.all(np.isfinite(embedding))
-                    or not math.isfinite(norm)
-                    or norm <= 1e-9
-                ):
-                    continue
-                match = self._match_result(
-                    connection,
-                    int(row["id"]),
-                    embedding / norm,
-                    model_fingerprint,
-                )
-                connection.execute(
-                    """
-                    update face_observations
-                    set candidate_person_id = ?, candidate_confidence = ?,
-                        match_details_json = ?
-                    where id = ? and (person_id is null or review_status = 'auto_identified')
-                    """,
-                    (
-                        match.person_id,
-                        match.score,
-                        json.dumps(
-                            {
-                                "person_id": match.person_id,
-                                "score": match.score,
-                                "runner_up_score": match.runner_up_score,
-                                "margin": match.margin,
-                                "reference_ids": list(match.reference_ids),
-                                "reference_scores": list(match.reference_scores),
-                            },
-                            separators=(",", ":"),
-                        ),
-                        int(row["id"]),
-                    ),
-                )
             # Withdraw stale automatic identities even for tracks whose jobs
             # cannot fit in this bounded queue-admission pass.
             stale_tracks = connection.execute(
@@ -214,13 +172,79 @@ class FaceStoreRecognitionMixin:
                 """,
                 (model_fingerprint, self.max_observations),
             ).fetchall()
-            touched_tracks = {
-                (int(row["event_id"]), str(row["candidate_track_id"]))
-                for row in [*embedded_rows, *pending_rows, *stale_tracks] if row["candidate_track_id"]
-            }
-            for event_id, track_id in sorted(touched_tracks):
-                identity_updates.extend(self._reconcile_candidate_track(connection, event_id, track_id))
-        self._emit_reconciled_identity_updates(identity_updates)
+        # Only capture group keys above. Re-read each complete group while
+        # holding the lock so intervening operator decisions and deletions win.
+        groups = dict.fromkeys(
+            (
+                int(row["event_id"]), str(row["candidate_track_id"]),
+                0 if row["candidate_track_id"] else int(row["id"]),
+            )
+            for row in [*embedded_rows, *pending_rows, *stale_tracks]
+        )
+        for event_id, track_id, observation_id in groups:
+            # Give waiting API requests a turn between bounded transactions.
+            # Reacquiring a Python lock in a tight loop does not ensure fairness.
+            if self._recognition_stop.wait(0.001):
+                return
+            identity_updates: list[dict[str, Any]] = []
+            with self._lock, closing(self._connect()) as connection, connection:
+                selector = "event_id = ? and candidate_track_id = ?" if track_id else "id = ?"
+                parameters = (event_id, track_id) if track_id else (observation_id,)
+                rows = connection.execute(
+                    f"""select id, embedding_blob from face_observations
+                    where {selector}
+                        and (person_id is null or (review_status = 'auto_identified' and candidate_track_id != ''))
+                        and recognition_pending = 0 and embedding_model = ?
+                        and embedding_blob is not null
+                    order by observed_at desc, id""",
+                    (*parameters, model_fingerprint),
+                ).fetchall()
+                for row in rows:
+                    try:
+                        embedding = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+                    except (TypeError, ValueError):
+                        continue
+                    norm = float(np.linalg.norm(embedding))
+                    if (
+                        embedding.size == 0
+                        or not np.all(np.isfinite(embedding))
+                        or not math.isfinite(norm)
+                        or norm <= 1e-9
+                    ):
+                        continue
+                    match = self._match_result(
+                        connection,
+                        int(row["id"]),
+                        embedding / norm,
+                        model_fingerprint,
+                    )
+                    connection.execute(
+                        """
+                        update face_observations
+                        set candidate_person_id = ?, candidate_confidence = ?,
+                            match_details_json = ?
+                        where id = ? and (person_id is null or review_status = 'auto_identified')
+                        """,
+                        (
+                            match.person_id,
+                            match.score,
+                            json.dumps(
+                                {
+                                    "person_id": match.person_id,
+                                    "score": match.score,
+                                    "runner_up_score": match.runner_up_score,
+                                    "margin": match.margin,
+                                    "reference_ids": list(match.reference_ids),
+                                    "reference_scores": list(match.reference_scores),
+                                },
+                                separators=(",", ":"),
+                            ),
+                            int(row["id"]),
+                        ),
+                    )
+                if track_id:
+                    identity_updates = self._reconcile_candidate_track(connection, event_id, track_id)
+            self._emit_reconciled_identity_updates(identity_updates)
         for row in pending_rows:
             self._queue_recognition(int(row["id"]))
 
@@ -240,6 +264,20 @@ class FaceStoreRecognitionMixin:
             return
         self._try_refresh_unknown_recognition()
 
+    def _refill_recognition(self) -> None:
+        self._recognition_refill_needed.clear()
+        try:
+            self._queue_pending_recognition()
+        except Exception:
+            # SQLite remains authoritative. Preserve the wakeup on transient
+            # storage/model-status failure rather than retiring this consumer.
+            self._recognition_refill_needed.set()
+            now = time.monotonic()
+            if now >= self._recognition_refill_log_at:
+                self._recognition_refill_log_at = now + 30.0
+                LOGGER.exception("Could not refill face recognition; pending work will retry")
+            self._recognition_stop.wait(1.0)
+
     def _recognition_loop(self) -> None:
         references_changed = False
         while True:
@@ -249,8 +287,7 @@ class FaceStoreRecognitionMixin:
                 if self._recognition_stop.is_set():
                     break
                 if self._recognition_refill_needed.is_set():
-                    self._recognition_refill_needed.clear()
-                    self._queue_pending_recognition()
+                    self._refill_recognition()
                 if references_changed or self._match_refresh_needed.is_set():
                     self._match_refresh_needed.clear()
                     if self._try_refresh_unknown_recognition():
@@ -284,8 +321,7 @@ class FaceStoreRecognitionMixin:
             if retry and not self._recognition_stop.wait(1.0):
                 self._queue_recognition(observation_id)
             if self._recognition_refill_needed.is_set() and not self._recognition_stop.is_set():
-                self._recognition_refill_needed.clear()
-                self._queue_pending_recognition()
+                self._refill_recognition()
 
     def _recognize_observation(self, observation_id: int) -> bool:
         recognizer = self.recognizer
@@ -709,6 +745,10 @@ class FaceStoreRecognitionMixin:
             score = evidence.get(int(row["id"]), {}).get("score")
             return float(score) if isinstance(score, (int, float)) and math.isfinite(score) else 0.0
 
+        def evidence_weight(row: sqlite3.Row) -> float:
+            quality = float(row["quality_score"] or 0.0)
+            return max(0.05, min(1.0, quality)) if math.isfinite(quality) else 0.05
+
         winner_id: int | None = None
         support: list[sqlite3.Row] = []
         if votes:
@@ -721,7 +761,8 @@ class FaceStoreRecognitionMixin:
                 ),
             )
         consensus_score = (
-            sum(confidence(row) for row in support) / len(support)
+            sum(confidence(row) * evidence_weight(row) for row in support)
+            / sum(evidence_weight(row) for row in support)
             if support else None
         )
         protected = [
@@ -746,6 +787,7 @@ class FaceStoreRecognitionMixin:
             "agreement_count": len(support),
             "person_id": winner_id,
             "score": round(consensus_score, 4) if consensus_score is not None else None,
+            "aggregation": "quality_weighted_votes_v1",
         }
         recognizer = self.recognizer
         auto_identify = bool(

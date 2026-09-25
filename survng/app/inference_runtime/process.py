@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 
 from ..config import DetectorConfig
-from ..detector_labels import load_detector_labels
+from ..detector_labels import load_detector_labels as load_detector_labels
 from .types import LOGGER, RESOURCE_TRACKER_STOP_TIMEOUT_SECONDS
 
 

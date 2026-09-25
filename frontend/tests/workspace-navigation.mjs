@@ -6,7 +6,6 @@ import {
   DESKTOP_PRIMARY_WORKSPACES,
   MOBILE_PRIMARY_WORKSPACES,
   resolveWorkspace,
-  systemHealthState,
   timelineHref,
   workspaceDefinition,
   workspaceHref,
@@ -67,23 +66,6 @@ assert.equal(timelineHref({ epoch: Number.NaN }), "/timeline");
 
 assert.deepEqual(DESKTOP_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "exports", "search", "people"]);
 assert.deepEqual(MOBILE_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "search", "more"]);
-
-assert.deepEqual(
-  systemHealthState({ lifecycle: "running", storage: { available: true }, detector: { enabled: true, loaded_backend: "openvino" }, cameras: { enabled: 2, online: 2, recording_expected: 2, recording: 2 } }),
-  { healthy: true, severity: "healthy", label: "Healthy" },
-);
-assert.deepEqual(
-  systemHealthState({ lifecycle: "starting", storage: { available: true }, detector: { enabled: false } }),
-  { healthy: false, severity: "starting", label: "starting" },
-);
-assert.deepEqual(
-  systemHealthState({ lifecycle: "running", storage: { available: true }, detector: { enabled: true, loaded_backend: "openvino" }, cameras: { enabled: 2, online: 1, recording_expected: 2, recording: 1 } }),
-  { healthy: false, severity: "attention", label: "Needs attention" },
-);
-assert.deepEqual(
-  systemHealthState({ lifecycle: "running", storage: { available: false }, detector: { enabled: false }, cameras: { enabled: 0, online: 0, recording_expected: 0, recording: 0 } }),
-  { healthy: false, severity: "attention", label: "Needs attention" },
-);
 
 const stylesSource = [
   readFileSync(new URL("../src/styles.css", import.meta.url), "utf8"),

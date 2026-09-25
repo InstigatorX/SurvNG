@@ -11,7 +11,7 @@ assert.equal(safeMediaUrl("//other.test/image", "/survng", "https://nvr.test"), 
 
 globalThis.window = { __SURVNG_BASE_PATH__: "/survng" };
 globalThis.document = { documentElement: { dataset: {} } };
-const { eventSnapshotUrl, eventThumbnailUrl } = await import("../src/shared/mediaUrls.js");
+const { eventSnapshotUrl, eventThumbnailUrl, recordingDayHlsUrl } = await import("../src/shared/mediaUrls.js");
 const oldCover = { id: 7, snapshot_path: "available", evidence_revision: 1 };
 const newCover = { ...oldCover, evidence_revision: 2 };
 assert.equal(eventSnapshotUrl(oldCover), "/survng/api/events/7/snapshot.jpg?v=1");
@@ -19,5 +19,13 @@ assert.equal(eventSnapshotUrl(newCover), "/survng/api/events/7/snapshot.jpg?v=2"
 assert.notEqual(eventThumbnailUrl(oldCover), eventThumbnailUrl(newCover));
 assert.equal(eventSnapshotUrl({ id: 7, snapshot_path: "available" }), "/survng/api/events/7/snapshot.jpg");
 assert.equal(eventSnapshotUrl({ ...newCover, snapshot_url: "/api/recording/preview?epoch=1" }), "/survng/api/recording/preview?epoch=1");
+assert.equal(
+  recordingDayHlsUrl("gate", 100, 200, "main"),
+  "/survng/api/cameras/gate/recordings/day.m3u8?start_epoch=100.000&end_epoch=200.000&source=main",
+);
+assert.equal(
+  recordingDayHlsUrl("gate", 100, 200, "main", 42.5),
+  "/survng/api/cameras/gate/recordings/day.m3u8?start_epoch=100.000&end_epoch=200.000&source=main&start=42.500",
+);
 
 console.log("media URL tests passed");

@@ -18,7 +18,7 @@ def detection():
 
 
 def run_session(provider, *, fps=2.0, seconds=15.0, detector=None, on_update=None,
-                cap=2, cursor_aware=False, live_provider=None):
+                cap=2, cursor_aware=False, live_provider=None, window=None):
     seed = datetime.fromtimestamp(time.time() - 50.0, timezone.utc).timestamp()
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
     updates, requests = [], []
@@ -47,6 +47,7 @@ def run_session(provider, *, fps=2.0, seconds=15.0, detector=None, on_update=Non
         frame_provider=(lambda: live_provider(seed, frame)) if live_provider else
                        (lambda: (frame, time.time(), time.monotonic())),
         catchup_frame_provider=read, update_event=update, publisher=None,
+        window_provider=(lambda _id, _at: (seed + window[0], seed + window[1])) if window else None,
         limiter=threading.BoundedSemaphore(1),
     )
     session.set_accepting(True)
@@ -318,3 +319,212 @@ def test_known_boundary_at_horizon_takes_priority_over_deadline_completion():
     assert updates[-1]["state"] == "interrupted"
     assert updates[-1]["coverage_incomplete"]
     assert updates[-1]["completion_reason"] == "capture_generation_changed"
+
+
+def test_deferred_recorded_batch_retains_exact_frames_and_closes_provider():
+    seen, closed, yielded = [], [], []
+
+    def provider(start, end, seed, frame):
+        try:
+            for i in range(1, 7):
+                if start - 1e-6 <= i / 2 <= end + 1e-6:
+                    sample = np.full_like(frame, i)
+                    yielded.append(sample)
+                    yield seed + i / 2, sample
+        finally:
+            closed.append(True)
+
+    def detect(frame, **kwargs):
+        assert closed, "provider resources must close before inference/retry"
+        seen.append(frame)
+        return [{"status": "inference_deferred"}] if len(seen) <= 5 else [detection()]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, requests, _ = run_session(provider, seconds=3, cap=2, detector=detector)
+    assert all(frame is seen[0] for frame in seen[:6])
+    assert [int(frame[0, 0, 0]) for frame in seen] == [1] * 6 + [2, 3, 4, 5, 6]
+    assert len(requests) == len(closed) == 3
+    assert len(yielded) == 6  # Retained frames stay bounded by cap, even for generators.
+    result = updates[-1]
+    assert result["state"] == "complete"
+    assert result["tracks"][0]["observations"] == 7
+    assert result["processing"]["decode_batches"] == 3
+    assert result["processing"]["frames_buffered"] == 6
+    assert result["processing"]["inference_deferrals"] == 5
+    assert result["processing"]["recorded_frame_retries"] == 5
+
+
+def test_persistent_recorded_deferral_preserves_cause_at_deadline():
+    session_ref, calls = [], []
+
+    def remember(session, payload):
+        session_ref[:] = [session]
+
+    def detect(frame, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            return [detection()]
+        if len(calls) == 3:
+            session_ref[0]._deadline = time.monotonic() - 1
+        return [{"status": "inference_deferred"}]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, requests, seed = run_session(frames_at([0.5, 1, 1.5]), detector=detector, on_update=remember)
+    result = updates[-1]
+    assert len(requests) == 1
+    assert result["state"] == "interrupted"
+    assert result["completion_reason"] == "inference_unavailable"
+    assert result["frames_processed"] == 1
+    assert result["processing"]["inference_deferrals"] == 2
+    assert result["processing"]["recorded_frame_retries"] == 1
+    assert datetime.fromisoformat(result["analyzed_through"]).timestamp() == seed + 0.5
+
+
+def test_boundary_survives_deferred_and_truncated_readable_prefix():
+    seen = []
+
+    def provider(start, end, seed, frame):
+        # Simulate a provider returning more than the retained-frame cap.
+        frames = tuple((seed + offset, np.full_like(frame, int(offset * 2)))
+                       for offset in [0.5, 1, 1.5] if offset >= start - 1e-6)
+        return TrackingFrameBatch(frames, seed + 1.5, "recorder_epoch_changed")
+
+    def detect(frame, **kwargs):
+        seen.append(int(frame[0, 0, 0]))
+        if seen[-1] == 2 and seen.count(2) <= 2:
+            return [{"status": "inference_deferred"}]
+        return [detection()]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, requests, seed = run_session(provider, detector=detector, cap=2)
+    assert seen == [1, 2, 2, 2, 3]
+    assert len(requests) == 2
+    result = updates[-1]
+    assert result["frames_processed"] == 3
+    assert result["completion_reason"] == "recorder_epoch_changed"
+    assert datetime.fromisoformat(result["analyzed_through"]).timestamp() == seed + 1.5
+
+
+def test_cancellation_during_recorded_retry_does_not_advance_or_decode_again():
+    session_ref, calls = [], []
+
+    def remember(session, payload):
+        session_ref[:] = [session]
+
+    def detect(frame, **kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            session_ref[0].request_stop()
+        return [{"status": "inference_deferred"}]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, requests, seed = run_session(frames_at([0.5, 1]), detector=detector, on_update=remember)
+    assert len(requests) == 1
+    assert len(calls) == 2
+    assert updates[-1]["frames_processed"] == 0
+    assert updates[-1]["completion_reason"] == "session_stopped"
+    assert datetime.fromisoformat(updates[-1]["analyzed_through"]).timestamp() == seed
+
+
+def test_cancelled_lazy_decode_closes_without_materializing_remaining_frames():
+    for cancellation in ("stop", "deadline"):
+        session_ref, yielded, closed, inferred = [], [], [], []
+
+        def remember(session, payload):
+            session_ref[:] = [session]
+
+        def provider(start, end, seed, frame):
+            try:
+                for offset in [0.5, 1, 1.5, 2]:
+                    yielded.append(offset)
+                    if cancellation == "stop":
+                        session_ref[0].request_stop()
+                    else:
+                        session_ref[0]._deadline = time.monotonic() - 1
+                    yield seed + offset, frame
+            finally:
+                closed.append(True)
+
+        def detect(frame, **kwargs):
+            inferred.append(True)
+            return [detection()]
+
+        detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+        updates, requests, _ = run_session(provider, cap=4, detector=detector, on_update=remember)
+        assert yielded == [0.5]
+        assert closed == [True]
+        assert not inferred
+        assert len(requests) == 1
+        assert updates[-1]["state"] == "interrupted"
+        assert updates[-1]["frames_processed"] == 0
+        assert updates[-1]["completion_reason"] == (
+            "session_stopped" if cancellation == "stop" else "processing_budget_exhausted"
+        )
+
+
+def test_recorded_window_starts_empty_and_tracks_forward_through_snapshot_and_tail():
+    calls = []
+
+    def provider(start, end, seed, frame):
+        return [(seed + offset, np.full_like(frame, int((offset + 2) * 2)))
+                for offset in [-2, -1.5, -1, -.5, .5, 1, 1.5, 2]
+                if start - 1e-6 <= offset <= end + 1e-6]
+
+    def detect(frame, **kwargs):
+        value = int(frame[0, 0, 0]); calls.append(value)
+        return [] if value < 2 or value >= 6 else [detection()]
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, _, seed = run_session(provider, detector=detector, window=(-2, 2))
+    assert updates[0]["tracks"] == []
+    assert updates[0]["analyzed_through"] is None
+    result = updates[-1]
+    assert result["state"] == "complete"
+    assert calls == [0, 1, 2, 3, 5, 6, 7, 8]
+    assert datetime.fromisoformat(result["analyzed_from"]).timestamp() == seed - 2
+    assert datetime.fromisoformat(result["analyzed_through"]).timestamp() == seed + 2
+    track = result["tracks"][0]
+    assert len(result["tracks"]) == 1
+    assert datetime.fromisoformat(track["first_seen"]).timestamp() == seed - 1
+    assert result["snapshot_track_assignments"][0]["track_id"] == track["track_id"]
+    assert any(abs(sample[0] - seed) < .001 for sample in track["box_history"])
+
+
+def test_recorded_window_continues_after_tracks_expire_to_discover_later_objects():
+    def provider(start, end, seed, frame):
+        return [(seed + offset, np.full_like(frame, int(offset * 2 + 2)))
+                for offset in [i / 2 for i in range(-2, 17)]
+                if start - 1e-6 <= offset <= end + 1e-6]
+
+    def detect(frame, **kwargs):
+        value = int(frame[0, 0, 0])
+        return [detection()] if value >= 16 else []
+
+    detector = SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7, require_incident_zone=False), detect=detect)
+    updates, _, seed = run_session(provider, detector=detector, window=(-1, 8))
+    assert updates[-1]["state"] == "complete"
+    assert len(updates[-1]["tracks"]) == 2
+    assert datetime.fromisoformat(updates[-1]["analyzed_through"]).timestamp() == seed + 8
+
+
+def test_recorded_window_cancel_before_seed_does_not_invent_snapshot_history():
+    def stop_early(session, payload):
+        if payload["frames_processed"] == 1:
+            session.request_stop()
+    updates, _, seed = run_session(frames_at([-2, -1.5, -1, -.5, .5, 1]),
+                                   window=(-2, 1), on_update=stop_early,
+                                   detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=.7, require_incident_zone=False), detect=lambda *_a, **_k: []))
+    assert updates[-1]["tracks"] == []
+    assert updates[-1]["snapshot_track_assignments"] == []
+    assert updates[-1]["completion_reason"] == "session_stopped"
+    assert datetime.fromisoformat(updates[-1]["analyzed_through"]).timestamp() == seed - 2
+
+
+def test_recorded_window_reports_boundary_even_without_detected_objects():
+    updates, _, _ = run_session(
+        lambda start, end, seed, frame: TrackingFrameBatch((), seed + start, "recorder_epoch_changed"),
+        window=(-2, 2),
+    )
+    assert updates[-1]["state"] == "interrupted"
+    assert updates[-1]["completion_reason"] == "recorder_epoch_changed"
+    assert updates[-1]["analyzed_through"] is None

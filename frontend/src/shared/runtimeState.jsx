@@ -64,6 +64,11 @@ export function RuntimeStateProvider({ children }) {
         next[index] = data;
         return next;
       });
+      // Incremental events are live camera status. If they do not refresh
+      // freshness, the health bar goes "unavailable" after 90s while the
+      // grid keeps updating — and in-flight polls discard their timestamp.
+      setCamerasUpdatedAt(Date.now());
+      setCamerasError(false);
     } else if (type === "system_state" && data) {
       systemEventSequenceRef.current += 1;
       setSystem(data);

@@ -1,6 +1,5 @@
 /** PWA chrome that follows SurvNG light / dark / auto without drawing under the status bar. */
 
-export const BROWSER_APPEARANCE_THEME_KEY = "survng.theme";
 export const BROWSER_APPEARANCE_THEMES = ["auto", "light", "dark"];
 
 export const BROWSER_APPEARANCE_COLORS = Object.freeze({

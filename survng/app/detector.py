@@ -81,23 +81,6 @@ def detection_failure(objects: list[dict[str, Any]]) -> str:
     )
 
 
-def merge_manual_detection_objects(
-    existing_objects_json: str,
-    detected_objects: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    try:
-        existing = json.loads(existing_objects_json or "[]")
-    except (TypeError, ValueError):
-        existing = []
-    preserved = [
-        item
-        for item in existing
-        if isinstance(item, dict)
-        and item.get("status") in {"motion_qualification", "object_tracking"}
-    ] if isinstance(existing, list) else []
-    return [*detected_objects, *preserved]
-
-
 class OpenVinoDetector:
     def __init__(self, config: DetectorConfig) -> None:
         self.config = config

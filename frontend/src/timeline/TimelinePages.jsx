@@ -1,7 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
-  ArrowRight,
   Camera,
   CarFront,
   Check,
@@ -13,7 +11,6 @@ import {
   Clock3,
   Download,
   Film,
-  Grid2X2,
   Images,
   Search,
   Pause,
@@ -29,7 +26,6 @@ import {
   SkipForward,
   Trash2,
   UserRound,
-  Video,
   Volume2,
   VolumeX,
   X,
@@ -837,7 +833,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
   const nextDate = addDaysToDateKey(date, 1);
   const dayEnd = useMemo(() => zonedDateSecondToEpoch(nextDate, 0, timeZone), [nextDate, timeZone]);
-  const daySeconds = Math.max(1, dayEnd - dayStart);
 
   useEffect(() => {
     onAssistantContextChange?.({
@@ -865,8 +860,19 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const useTranscodedPlayback = transport === "transcode";
   const useSegmentPlayback = transport !== "hls";
   playbackTransportRef.current = { scope: nativeScope, mode: transport };
+  // Snapshot the start offset only when loading a playback resource. The day
+  // overview changes as new recordings arrive; including it here changes src
+  // during playback and makes native HLS discard its buffer every poll.
+  const manifestStartTime = useMemo(() => {
+    if (!playbackTimeline.length) return null;
+    const retainedEpoch = desiredEpochRef.current;
+    const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
+      ? retainedEpoch
+      : playbackTimeline[0].start_epoch;
+    return epochToPlaybackMediaTime(initialEpoch);
+  }, [playbackTimeline, dayStart, dayEnd, manifestRetryToken, transport]);
   const manifestUrl = !useSegmentPlayback && !isAllCameras && activeCameraId && playbackDetail && playbackTimeline.length
-    ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
+    ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source, manifestStartTime)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
   const nativeSegmentUrl = useSegmentPlayback && !isAllCameras && activeCameraId && loadedPlaybackWindow && nativeSegment
     ? `${recordingSegmentUrl(activeCameraId, nativeSegment.start_epoch, source, useTranscodedPlayback)}&reload=${nativeSegmentRetryToken}`
@@ -936,17 +942,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       exact: true,
     })
     : "";
-  const frameSearchTrailIds = frameSearchResults
-    .map((result) => Number(result?.event?.id))
-    .filter((eventId) => Number.isInteger(eventId) && eventId > 0);
-  const manifestStartTime = useMemo(() => {
-    if (!playbackTimeline.length) return null;
-    const retainedEpoch = desiredEpochRef.current;
-    const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
-      ? retainedEpoch
-      : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
-    return epochToPlaybackMediaTime(initialEpoch);
-  }, [manifestUrl, playbackTimeline]);
 
   function switchRecordingTransport() {
     if (playbackTransport?.scope !== nativeScope) {
@@ -1121,13 +1116,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (timelinePlayheadInComfortZone(timelineView, playhead)) return;
     setTimelineViewportAnchor(playhead);
   }, [followPlayhead, gridPlaying, isAllCameras, playhead, timelineView]);
-  const selectedEventEnd = selectedEvent ? recordingIncidentEndEpoch(selectedEvent) : null;
-  const selectedEventDuration = selectedEvent && Number.isFinite(selectedEventEnd)
-    ? Math.max(0, selectedEventEnd - selectedEvent.incident_epoch)
-    : 0;
-  const selectedEventConfidence = selectedEvent
-    ? Math.max(0, ...(selectedEvent.objects || []).map((object) => Number(object.confidence) || 0), Number(selectedEvent.confidence) || 0)
-    : 0;
+
   const displayedTimelineEvents = useMemo(() => {
     if (!selectedEvent || viewportEvents.some((event) => Number(event.id) === Number(selectedEvent.id))) return viewportEvents;
     if (
@@ -1882,69 +1871,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     window.history.pushState(null, "", window.location.href);
   }
 
-  async function selectTrailHit(eventId) {
-    const targetId = Number(eventId);
-    if (!Number.isInteger(targetId) || targetId <= 0) return;
-    setTrailNotice("");
-    let hit = trailHitForEvent(trailMeta, targetId);
-    let camera = String(hit?.event?.camera_id || "");
-    let epoch = Number(hit?.event?.incident_epoch);
-    if (!Number.isFinite(epoch) && hit?.event?.created_at) {
-      epoch = new Date(hit.event.created_at).getTime() / 1000;
-    }
-    if (!camera || !Number.isFinite(epoch)) {
-      try {
-        const response = await fetch(`/api/incidents/by-event/${encodeURIComponent(targetId)}`);
-        if (!response.ok) throw new Error("Trail event unavailable");
-        const detail = await response.json();
-        camera = String(detail.camera_id || "");
-        epoch = Number(detail.created_epoch);
-        if (!Number.isFinite(epoch) && detail.created_at) {
-          epoch = new Date(detail.created_at).getTime() / 1000;
-        }
-        const nextHit = {
-          query_mode: hit?.query_mode || "visual",
-          event: {
-            id: targetId,
-            camera_id: camera,
-            created_at: detail.created_at || "",
-            incident_epoch: Number.isFinite(epoch) ? epoch : null,
-            labels: Array.isArray(detail.labels) ? detail.labels : undefined,
-            snapshot_path: detail.snapshot_path || "available",
-          },
-        };
-        hit = nextHit;
-        const nextMeta = writeVisualSearchTrail(window.sessionStorage, {
-          eventIds: trailEventIds,
-          hits: [...(trailMeta?.hits || []).filter((item) => Number(item.event.id) !== targetId), nextHit],
-          queryMode: trailMeta?.queryMode || null,
-        });
-        setTrailMeta(nextMeta);
-      } catch {
-        setTrailNotice("Could not open this Find similar hit.");
-        return;
-      }
-    }
-    if (!camera || !Number.isFinite(epoch)) {
-      setTrailNotice("Could not open this Find similar hit.");
-      return;
-    }
-    if (!cameras.some((item) => item.id === camera)) {
-      setTrailNotice("That hit’s camera is not available.");
-      return;
-    }
-    const nextDate = dateKeyForTimeZone(epoch * 1000, timeZone);
-    checkpointTimelineView();
-    setInvestigationOpen(true);
-    setSelectedEventId(targetId);
-    desiredEpochRef.current = epoch;
-    setPlayhead(epoch);
-    const sameScope = camera === cameraId && nextDate === date;
-    if (camera !== cameraId) setCameraId(camera);
-    if (nextDate !== date) setDate(nextDate);
-    if (sameScope) playAt(epoch, true);
-  }
-
   async function openFindSimilarResult(result) {
     const item = result?.event || {};
     const eventId = Number(item.id);
@@ -2341,6 +2267,14 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     }
     if (playbackRetryRef.current.timer) return;
     if (playbackRetryRef.current.attempts < 4 && hasPlaybackMedia) {
+      const retryTarget = Number.isFinite(pendingSeekEpochRef.current)
+        ? pendingSeekEpochRef.current : desiredEpochRef.current;
+      pendingSeekEpochRef.current = retryTarget;
+      pendingSeekModeRef.current = useSegmentPlayback
+        ? "native-ready" : "window-ready";
+      // Source replacement pauses the existing element. That pause is an
+      // internal retry transition, not a change to the user's play intent.
+      ignorePauseUntilRef.current = performance.now() + 2000;
       playbackRetryRef.current.attempts += 1;
       const attempt = playbackRetryRef.current.attempts;
       const delay = Math.min(5_000, 750 * (2 ** (attempt - 1)));
@@ -2577,7 +2511,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
               onPause={(event) => {
                 if (performance.now() < ignorePauseUntilRef.current) return;
-                if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                if (!event.currentTarget.error && !event.currentTarget.ended
+                  && !Number.isFinite(pendingSeekEpochRef.current)) {
                   cancelClipPreview();
                   autoplayRef.current = false;
                   setHeroPlaying(false);
@@ -2609,7 +2544,8 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
               }}
               onPause={(event) => {
                 if (performance.now() < ignorePauseUntilRef.current) return;
-                if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                if (!event.currentTarget.error && !event.currentTarget.ended
+                  && !Number.isFinite(pendingSeekEpochRef.current)) {
                   cancelClipPreview();
                   autoplayRef.current = false;
                   setHeroPlaying(false);

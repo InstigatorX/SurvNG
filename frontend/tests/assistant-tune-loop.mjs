@@ -4,12 +4,12 @@ import {
   assistantConfirmPostKind,
   buildApplyCameraReviewAction,
   buildEvaluationFollowupAction,
-  buildStartCameraReviewAction,
   isAssistantConfirmPostAllowed,
   summarizeMotionAiReview,
 } from "../src/assistant/assistantTuneLoop.mjs";
 
-const start = buildStartCameraReviewAction("gate", "Gate");
+// Server-authored actions still use this shape; keep the action validation coverage.
+const start = { kind: "confirm_post", path: "/api/motion-ai-reviews", body: { camera_id: "gate" }, label: "Review Gate" };
 assert.equal(start.kind, "confirm_post");
 assert.equal(start.path, "/api/motion-ai-reviews");
 assert.equal(start.body.camera_id, "gate");

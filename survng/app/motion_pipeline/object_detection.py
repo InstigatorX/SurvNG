@@ -16,10 +16,14 @@ from typing import Any, Callable, Protocol
 import cv2
 import numpy as np
 
-from ..evidence_work import check_evidence_cancellation, evidence_cancelled
+from ..evidence_work import (
+    EvidenceWorkPreempted, check_evidence_cancellation, evidence_cancelled,
+    evidence_wait_timeout, report_evidence_stage, run_evidence_process,
+)
 from ..config import CameraConfig
 from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
+from ..object_motion import ObjectMotionEstimate, estimate_object_motion
 from ..recording_media import mp4_video_dimensions
 from ..visual_quality import VisualQuality, image_quality
 from ..zones import apply_depth_zone_filters, apply_detection_zones, detection_threshold
@@ -42,11 +46,6 @@ RECORDED_ROUTE_DENSE_EVENT_FRAME_STAGES = (
     (6.5, 7.0, 7.5),
     (8.0, 8.5),
     (12.0, 12.5),
-)
-RECORDED_EVENT_FRAME_OFFSETS = tuple(
-    offset
-    for stage in RECORDED_EVENT_FRAME_STAGES
-    for offset in stage
 )
 RECORDED_EVENT_SETTLE_SECONDS = 0.75
 RECORDED_EVENT_RETRY_SECONDS = 24.0
@@ -470,9 +469,9 @@ def _candidate_detection(detected: dict[str, Any]) -> bool:
 def _temporal_motion_metrics(
     track: _TemporalDetectionEvidence,
     samples: list[_RecordedDetectionSample],
-) -> tuple[float, float]:
-    """Measure detector-box movement in resolution-independent frame units."""
-    centers: list[tuple[float, float]] = []
+) -> ObjectMotionEstimate:
+    """Measure shared motion evidence in normalized frame units."""
+    centers: list[tuple[float, float, float]] = []
     for sample_index, detected in sorted(track.observations.items()):
         box = _box(detected)
         if box is None or sample_index >= len(samples):
@@ -484,12 +483,12 @@ def _temporal_motion_metrics(
         if width <= 0 or height <= 0:
             continue
         x1, y1, x2, y2 = box
-        centers.append(((x1 + x2) / (2.0 * width), (y1 + y2) / (2.0 * height)))
-    if len(centers) < 2:
-        return 0.0, 0.0
-    displacement = math.dist(centers[0], centers[-1])
-    path = sum(math.dist(previous, current) for previous, current in zip(centers, centers[1:]))
-    return displacement, path
+        centers.append((
+            samples[sample_index].offset,
+            (x1 + x2) / (2.0 * width),
+            (y1 + y2) / (2.0 * height),
+        ))
+    return estimate_object_motion(centers)
 
 
 def _normalized_box_metrics(
@@ -758,9 +757,9 @@ def _temporal_consensus(
         if id(track) in confirmed_ids
         and (
             min(track.observations, default=0) > 0
-            or motion_by_track[id(track)][0]
+            or motion_by_track[id(track)].displacement_ratio
             >= REPRESENTATIVE_DYNAMIC_DISPLACEMENT_RATIO
-            or motion_by_track[id(track)][1] >= REPRESENTATIVE_DYNAMIC_PATH_RATIO
+            or motion_by_track[id(track)].excursion_ratio >= REPRESENTATIVE_DYNAMIC_PATH_RATIO
         )
     }
     if not primary_ids:
@@ -1017,12 +1016,14 @@ def _temporal_consensus(
                 if str(value)
             }
             enriched["temporal_zone_entry"] = bool(later_zones - first_zones)
-        displacement, path = motion_by_track.get(
-            id(track),
-            _temporal_motion_metrics(track, samples),
-        )
-        enriched["temporal_center_displacement_ratio"] = round(displacement, 5)
-        enriched["temporal_center_path_ratio"] = round(path, 5)
+        motion = motion_by_track.get(id(track))
+        if motion is None:
+            motion = _temporal_motion_metrics(track, samples)
+        # Preserve original aggregate diagnostics for historical comparisons.
+        # Admission consumers read the versioned estimate instead.
+        enriched["temporal_center_displacement_ratio"] = round(motion.raw_displacement_ratio, 5)
+        enriched["temporal_center_path_ratio"] = round(motion.raw_path_ratio, 5)
+        enriched["temporal_motion"] = motion.as_dict()
         if confirmed:
             enriched["confidence"] = round(track.aggregate_confidence, 4)
         if not snapshot_visible:
@@ -1575,6 +1576,7 @@ class RecordedMotionObjectDetector:
             timing["temporal_confirmation_wait_ms"] += slept * 1000.0
 
         deadline = time.monotonic() + max(0.0, retry_seconds)
+        report_evidence_stage("recording_lookup")
         prefetched_rows = self._prefetch_recording_rows(
             event_epoch=event_epoch,
             planned_offsets=planned_offsets,
@@ -1584,10 +1586,14 @@ class RecordedMotionObjectDetector:
         budget = self.decode_budget
         if budget is not None:
             maximum_frames = refinement_frame_count(stages)
+            if (getattr(self.detector.config, "face_recognition_enabled", False)
+                    and getattr(self.detector.config, "face_evidence_enabled", True)):
+                maximum_frames += int(getattr(self.detector.config, "face_evidence_max_extra_frames", 4))
             frame_bytes = self._frame_bytes_for_rows(prefetched_rows)
             if frame_bytes:
                 budget.observe_frame_bytes(frame_bytes)
             budget_wait_started = time.monotonic()
+            report_evidence_stage("decode_memory_wait")
             memory_lease = budget.reserve_workflow(
                 maximum_frames=maximum_frames,
                 frame_bytes=frame_bytes or None,
@@ -2037,6 +2043,8 @@ class RecordedMotionObjectDetector:
                                 refinement_pending and representative_needs_refinement
                             ),
                             event_epoch=event_epoch,
+                            face_sampler=sampler,
+                            face_deadline=deadline,
                         )
                 if (
                     adaptive_stage
@@ -2087,6 +2095,8 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=refinement_pending,
                 event_epoch=event_epoch,
+                face_sampler=sampler,
+                face_deadline=deadline,
             )
 
         return self._live_fallback_result(event_epoch, timing, workflow_started, refinement_pending)
@@ -2186,6 +2196,8 @@ class RecordedMotionObjectDetector:
         *,
         refinement_pending: bool,
         event_epoch: float,
+        face_sampler: _EventRecordedSampler | None = None,
+        face_deadline: float | None = None,
     ) -> RecordedDetectionResult:
         frame = selected.frame
         if frame is None:
@@ -2201,6 +2213,8 @@ class RecordedMotionObjectDetector:
                 timing=timing,
             )
             selected.objects = list(objects)
+            if face_sampler is not None:
+                self._refine_face_evidence(samples, face_sampler, event_epoch, face_deadline, timing)
         face_candidates = self._face_candidates(samples)
         self._release_nonselected_frames(samples, selected)
         return self._result(
@@ -2215,6 +2229,116 @@ class RecordedMotionObjectDetector:
             frame_source="recorded_main",
             frame_timestamp_exact=selected.exact_timestamp,
         )
+
+    def _refine_face_evidence(
+        self,
+        samples: list[_RecordedDetectionSample],
+        sampler: _EventRecordedSampler,
+        event_epoch: float,
+        deadline: float | None,
+        timing: dict[str, float],
+    ) -> None:
+        """Spend a bounded part of the existing decode lease on identity evidence.
+
+        Samples remain at recording resolution. Extra detection results are used
+        only for face candidates; they cannot change event qualification/cover.
+        """
+        config = self.detector.config
+        if not getattr(config, "face_recognition_enabled", False) or not getattr(config, "face_evidence_enabled", True):
+            return
+        started = time.monotonic()
+        deadline = min(
+            deadline if deadline is not None else started,
+            started + float(getattr(config, "face_evidence_timeout_seconds", 4)),
+        )
+        max_extra = int(getattr(config, "face_evidence_max_extra_frames", 4))
+        timing["face_evidence_samples"] = 0.0
+        timing["face_evidence_failed"] = 0.0
+
+        def usefulness(sample: _RecordedDetectionSample) -> float:
+            if sample.frame is None:
+                return 0.0
+            areas = []
+            height, width = sample.frame.shape[:2]
+            for item in sample.objects:
+                if item.get("label") not in {"person", "pedestrian"} or item.get("incident_eligible") is False:
+                    continue
+                box = _box(item)
+                if box is not None:
+                    x1, y1, x2, y2 = box
+                    crop = sample.frame[max(0, int(y1)):min(height, int(y2)), max(0, int(x1)):min(width, int(x2))]
+                    if crop.size:
+                        areas.append(crop.shape[0] * crop.shape[1] * _image_quality(crop).score)
+            return max(areas, default=0.0)
+
+        ranked = sorted(((usefulness(sample), sample) for sample in samples), key=lambda item: item[0], reverse=True)
+        anchors = [sample for value, sample in ranked if value > 0][:3]
+        if not anchors:
+            return
+        try:
+            # Existing full-resolution frames are cheaper than another decode.
+            for sample in anchors:
+                if self.stop_requested() or time.monotonic() >= deadline:
+                    break
+                check_evidence_cancellation()
+                if any(item.get("label") == "face" for item in sample.objects):
+                    continue
+                confirmed = [
+                    {**item, "temporal_consensus": True} for item in sample.objects
+                    if item.get("label") in {"person", "pedestrian"}
+                    and item.get("incident_eligible") is not False
+                ]
+                sample.objects = self._enrich_selected_faces(sample.frame, confirmed, timing=timing)
+                timing["face_evidence_samples"] += 1
+            existing = [sample.offset for sample in samples]
+            offsets = []
+            for delta in (-.4, .4, -.8, .8):
+                for anchor in anchors[:2]:
+                    target = round(anchor.offset + delta, 3)
+                    if all(abs(target - other) >= .15 for other in existing + offsets):
+                        offsets.append(target)
+            for target in offsets[:max_extra]:
+                if self.stop_requested() or time.monotonic() >= deadline:
+                    break
+                check_evidence_cancellation()
+                if event_epoch + target + RECORDED_EVENT_SETTLE_SECONDS > time.time():
+                    continue
+                row = sampler.recording_at(event_epoch + target)
+                if row is None or row.get("start_epoch") is None:
+                    timing["face_evidence_recording_unavailable"] = timing.get("face_evidence_recording_unavailable", 0) + 1
+                    continue
+                relative = round(event_epoch + target - float(row["start_epoch"]), 3)
+                decode_started = time.monotonic()
+                frames, processes, fallbacks = sampler.frames_at(
+                    Path(str(row["path"])), [relative], deadline=deadline,
+                )
+                timing["frame_decode_ms"] += (time.monotonic() - decode_started) * 1000
+                timing["recording_batch_processes"] += processes
+                timing["recording_fallback_samples"] += fallbacks
+                timing["recording_samples_requested"] += 1
+                timing["recording_samples_decoded"] += len(frames)
+                decoded = frames.get(relative)
+                # Nudged fallback frames do not establish independent timestamps.
+                if decoded is None or not decoded.exact_timestamp:
+                    timing["face_evidence_inexact_or_missing"] = timing.get("face_evidence_inexact_or_missing", 0) + 1
+                    continue
+                actual = float(row["start_epoch"]) + decoded.actual_offset - event_epoch
+                if any(abs(actual - sample.offset) < .15 for sample in samples):
+                    continue
+                if time.monotonic() >= deadline:
+                    break
+                detected = self._detect_objects(decoded.frame, timing=timing)
+                samples.append(_RecordedDetectionSample(
+                    actual, decoded.frame, detected, str(row["path"]), target, True,
+                ))
+                timing["face_evidence_samples"] += 1
+        except Exception:
+            check_evidence_cancellation()
+            timing["face_evidence_failed"] = 1.0
+            LOGGER.exception("Optional face evidence refinement failed for camera %s", self.camera.id)
+        finally:
+            timing["face_evidence_ms"] = (time.monotonic() - started) * 1000
+            timing["face_evidence_deadline_reached"] = float(time.monotonic() >= deadline)
 
     @staticmethod
     def _release_nonselected_frames(
@@ -2265,6 +2389,7 @@ class RecordedMotionObjectDetector:
         workload: str = "refinement",
     ) -> list[dict[str, Any]]:
         check_evidence_cancellation()
+        report_evidence_stage("inference")
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
         class_thresholds = dict(
@@ -2371,6 +2496,7 @@ class RecordedMotionObjectDetector:
         if not callable(detect_faces):
             return objects
         check_evidence_cancellation()
+        report_evidence_stage("inference")
         enrichment_started = time.monotonic()
         confirmed_objects = [
             item
@@ -2446,6 +2572,7 @@ class RecordedMotionObjectDetector:
         if not callable(estimate_depth):
             return objects
         check_evidence_cancellation()
+        report_evidence_stage("inference")
         enrichment_started = time.monotonic()
         visible_objects = [
             item
@@ -2607,6 +2734,7 @@ class RecordedMotionObjectDetector:
         if budget is None:
             return None
         wait_started = time.monotonic()
+        report_evidence_stage("decode_process_wait")
         lease = budget.acquire_process(
             incident_epoch=(
                 float(incident_epoch)
@@ -2687,13 +2815,7 @@ class RecordedMotionObjectDetector:
                     break
                 result = None
                 try:
-                    result = subprocess.run(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=timeout,
-                        check=False,
-                    )
+                    result = run_evidence_process(command, timeout=timeout)
                 except subprocess.TimeoutExpired:
                     last_error = f"{backend} timed out"
                 finally:
@@ -2822,6 +2944,8 @@ class RecordedMotionObjectDetector:
             stdout_thread: threading.Thread | None = None
             stderr_thread: threading.Thread | None = None
             try:
+                check_evidence_cancellation()
+                report_evidence_stage("frame_decode")
                 process_count += 1
                 process = subprocess.Popen(
                     command,
@@ -2848,7 +2972,22 @@ class RecordedMotionObjectDetector:
                 stderr_thread = threading.Thread(target=read_stderr, daemon=True)
                 stdout_thread.start()
                 stderr_thread.start()
-                process.wait(timeout=timeout)
+                decode_deadline = time.monotonic() + timeout
+                while True:
+                    check_evidence_cancellation()
+                    remaining = decode_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        process.wait(timeout=evidence_wait_timeout(remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            except EvidenceWorkPreempted:
+                if process is not None:
+                    process.kill()
+                    process.wait()
+                raise
             except subprocess.TimeoutExpired:
                 last_error = f"{backend} timed out"
                 if process is not None:

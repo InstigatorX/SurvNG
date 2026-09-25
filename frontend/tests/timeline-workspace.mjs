@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineCompanionGrid, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, timelineViewportPage, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
+import { expectedTimelineCameras, filteredTimelineCameras, invalidateTimelineIdentityCache, mergeTimelineIncidentIdentity, normalizedTimelinePlaybackRate, parseTimelineView, resolveTimelineHeroCameraId, timelineEventMatchesFilter, timelineEvidenceWindow, timelineIdentityDetailEventId, timelineIncidentIncludesEvent, timelineNearbyRadiusSeconds, timelinePanViewport, timelinePlayheadInComfortZone, timelineStageCameras, timelineStagePage, timelineTickIntervalSeconds, timelineViewport, TIMELINE_PLAYBACK_RATES } from "../src/timelineWorkspace.mjs";
 
 assert.deepEqual(TIMELINE_PLAYBACK_RATES, [0.5, 1, 2, 4]);
 assert.equal(normalizedTimelinePlaybackRate("2"), 2);
@@ -33,12 +33,7 @@ const routes = [
 assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "gate").map((camera) => camera.id), ["lower-garage", "upper-garage"]);
 assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "front-door").map((camera) => camera.id), ["gate"]);
 assert.deepEqual(expectedTimelineCameras(routeCameras, routes, "lower-garage").map((camera) => camera.id), []);
-assert.deepEqual(timelineCompanionGrid(0), { columns: 1, rows: 1 });
-assert.deepEqual(timelineCompanionGrid(2), { columns: 1, rows: 2 });
-assert.deepEqual(timelineCompanionGrid(3), { columns: 1, rows: 3 });
-assert.deepEqual(timelineCompanionGrid(4), { columns: 2, rows: 2 });
-assert.deepEqual(timelineCompanionGrid(6), { columns: 2, rows: 3 });
-assert.deepEqual(timelineCompanionGrid(99), { columns: 2, rows: 3 });
+
 assert.deepEqual(timelineStagePage(Array.from({ length: 15 }, (_, index) => ({ id: index })), 2), { cameras: [{ id: 14 }], page: 2, pages: 3 });
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["person"] }, "people"), true);
 assert.equal(timelineEventMatchesFilter({ has_objects: true, labels: ["car"] }, "vehicles"), true);
@@ -106,9 +101,7 @@ assert.deepEqual(timelinePanViewport(0, 24 * 3600, { startEpoch: 11 * 3600, endE
 assert.equal(playhead, 12 * 3600);
 assert.equal(timelinePlayheadInComfortZone({ startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, 12 * 3600), true);
 assert.equal(timelinePlayheadInComfortZone({ startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, 11.1 * 3600), false);
-assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 11 * 3600, endEpoch: 13 * 3600 }, 1), { startEpoch: 12 * 3600, endEpoch: 14 * 3600 });
-assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 0, endEpoch: 2 * 3600 }, -1), { startEpoch: 0, endEpoch: 2 * 3600 });
-assert.deepEqual(timelineViewportPage(0, 24 * 3600, { startEpoch: 22 * 3600, endEpoch: 24 * 3600 }, 1), { startEpoch: 22 * 3600, endEpoch: 24 * 3600 });
+
 assert.equal(resolveTimelineHeroCameraId(routeCameras, "all"), "gate");
 assert.equal(resolveTimelineHeroCameraId(routeCameras, "front-door"), "front-door");
 assert.equal(resolveTimelineHeroCameraId(routeCameras, "missing"), "gate");
@@ -213,7 +206,6 @@ assert.doesNotMatch(recordingsSource, /recordings-timeline-evidence/);
 assert.doesNotMatch(recordingsSource, /recordings-commandbar-export/);
 assert.doesNotMatch(recordingsSource, /View full incident/);
 assert.match(stylesSource, /\.recordings-v2-incidents\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1;/);
-assert.match(stylesSource, /\.recordings-v2-selected-event-image img\s*\{[^}]*object-fit:\s*contain;/);
 assert.match(stylesSource, /--timeline-companion-width:\s*clamp\(148px, 22vw, 280px\)/);
 assert.doesNotMatch(recordingsSource.slice(recordingsSource.indexOf("return ("), recordingsSource.indexOf("<RecordingTimeline")), /recordings-v2-cameras/);
 

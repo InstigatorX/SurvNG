@@ -193,8 +193,8 @@ def test_motion_demand_and_existing_metrics_reach_local_snapshot() -> None:
     assert camera["detection_enabled"] is False
     motion = camera["motion"]
     assert motion["demand"] == {
-        "adaptive_analysis_required": True, "continuous_primary_required": True,
-        "frame_observer_required": False, "frame_analysis_required": True,
+        "adaptive_analysis_required": False, "continuous_primary_required": False,
+        "frame_observer_required": False, "frame_analysis_required": False,
     }
     assert motion["analysis"]["preprocess_total_ms"] == 2.5
     assert motion["continuous_frames"] == 4
@@ -210,7 +210,9 @@ def test_motion_demand_and_existing_metrics_reach_local_snapshot() -> None:
     assert _camera_snapshot(service.snapshot())["motion"]["demand"]["frame_analysis_required"] is False
     service.debug_store.status.return_value = {"enabled": True, "expires_in_seconds": 20.0}
     debug_motion = _camera_snapshot(service.snapshot())["motion"]
-    assert debug_motion["demand"]["frame_analysis_required"] is True
+    assert debug_motion["demand"]["frame_analysis_required"] is False
+    service.runtime_state.detection_enabled = True
+    assert _camera_snapshot(service.snapshot())["motion"]["demand"]["frame_analysis_required"] is True
     assert debug_motion["debug"]["expires_in_seconds"] == 20.0
     service.debug_store.status.return_value = {"enabled": False}
     service.observation_pipeline.handles_observation.return_value = True

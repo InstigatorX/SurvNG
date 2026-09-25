@@ -64,6 +64,7 @@ class DetectionJobStore(Protocol):
     def checkpoint_detection_job(
         self, job_id: str, payload: dict[str, Any], *, lease_owner: str = "",
     ) -> bool: ...
+    def defer_detection_job(self, job_id: str, *, lease_owner: str) -> bool: ...
     def retry_detection_job(
         self, job_id: str, error: str, *, retry_delay_seconds: float = 2.0,
         maximum_attempts: int = 5,
@@ -430,6 +431,16 @@ class _MemoryDetectionJobStore:
             job["payload"] = copy.deepcopy(payload)
             return True
 
+    def defer_detection_job(self, job_id: str, *, lease_owner: str) -> bool:
+        with self._lock:
+            job = self._jobs[job_id]
+            if job["state"] != "running" or job["lease_owner"] != lease_owner:
+                return False
+            job.update(state="queued", attempts=max(0, job["attempts"] - 1),
+                       available_at=time.monotonic(), lease_expires_at=None,
+                       lease_owner="", last_error="detection_stopped")
+            return True
+
     def retry_detection_job(
         self, job_id, error, *, retry_delay_seconds=2.0, maximum_attempts=5,
         lease_owner="",
@@ -524,6 +535,7 @@ class MotionIncidentService:
         self._refinement_completion_handler: RefinementCompletionHandler | None = None
         self._refinement_thread: threading.Thread | None = None
         self._refinement_stop: threading.Event | None = None
+        self._active_refinement: dict[str, Any] | None = None
         self._refinement_accepting = False
         self._refinements_queued = 0
         self._refinements_completed = 0
@@ -651,12 +663,25 @@ class MotionIncidentService:
         except queue.Full:
             pass
 
+    def _set_refinement_stage(self, stage: str) -> None:
+        with self._status_lock:
+            if self._active_refinement is not None:
+                self._active_refinement["stage"] = stage
+
     def wait_stopped(self, timeout: float) -> bool:
         thread = self._refinement_thread
         if thread is None:
             return True
         thread.join(max(0.0, timeout))
         if thread.is_alive():
+            with self._status_lock:
+                active = dict(self._active_refinement or {})
+            started = active.pop("started_monotonic", time.monotonic())
+            LOGGER.error(
+                "refinement shutdown timeout camera=%s job=%s stage=%s elapsed_seconds=%.3f",
+                self.camera_id, active.get("job_id", "unknown"),
+                active.get("stage", "idle"), time.monotonic() - started,
+            )
             return False
         with self._status_lock:
             self._refinement_thread = None
@@ -1093,20 +1118,34 @@ class MotionIncidentService:
             refinement_qualification = dict(job.qualification)
             refinement_qualification["detection_intent_id"] = job_id
             completed = False
+            with self._status_lock:
+                self._active_refinement = {
+                    "job_id": job_id, "stage": "recorded_refinement",
+                    "started_monotonic": time.monotonic(),
+                }
             try:
                 try:
                     if job.refined_outcome is not None:
                         outcome = job.refined_outcome
                     else:
-                        outcome = self.decision_processor.refine(
-                            job.topic,
-                            job.message,
-                            job.event_at,
-                            refinement_qualification,
-                            existing_event_id=job.existing_event_id,
-                            require_eligible_object=job.require_eligible_object,
-                            require_motion_correlation=job.require_motion_correlation,
-                        )
+                        with cancellable_evidence_work(
+                            stop.is_set, optional=False,
+                            stage_reporter=self._set_refinement_stage,
+                        ):
+                            outcome = self.decision_processor.refine(
+                                job.topic,
+                                job.message,
+                                job.event_at,
+                                refinement_qualification,
+                                existing_event_id=job.existing_event_id,
+                                require_eligible_object=job.require_eligible_object,
+                                require_motion_correlation=job.require_motion_correlation,
+                            )
+                except EvidenceWorkPreempted:
+                    self.refinement_store.defer_detection_job(
+                        job_id, lease_owner=self._lease_owner,
+                    )
+                    return
                 except Exception as error:
                     failure = {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1143,6 +1182,11 @@ class MotionIncidentService:
                             self._refinement_callbacks.pop(job_id, None)
                     continue
 
+                with self._status_lock:
+                    self._active_refinement["stage"] = "completion"
+                if stop.is_set():
+                    self.refinement_store.defer_detection_job(job_id, lease_owner=self._lease_owner)
+                    return
                 reused_checkpoint = job.refined_outcome is not None
                 if not reused_checkpoint:
                     self._record_timing(outcome, kind="refine")
@@ -1233,6 +1277,7 @@ class MotionIncidentService:
                     self._refinements_completed += 1
             finally:
                 with self._status_lock:
+                    self._active_refinement = None
                     if completed:
                         self._refinement_callbacks.pop(job_id, None)
                         self._refinement_progress.pop(job_id, None)

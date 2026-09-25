@@ -169,15 +169,6 @@
   .recordings-v2-investigation {
     min-height: 510px;
   }
-
-  .recordings-v2-selected-event {
-    min-height: 156px;
-  }
-
-  .recordings-v2-selected-event>a.recordings-v2-selected-event-image {
-    height: auto;
-    min-height: 128px;
-  }
 }
 
 /* Compact tablet and phone-landscape ownership. At these dimensions the

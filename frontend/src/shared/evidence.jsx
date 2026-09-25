@@ -2,8 +2,6 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { createPortal } from "react-dom";
 import {
   Activity,
-  ArrowLeft,
-  ArrowRight,
   Bike,
   Bot,
   BusFront,
@@ -23,10 +21,9 @@ import {
   Siren,
   Truck,
   UserRound,
-  Video,
   X,
 } from "lucide-react";
-import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
+import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";
 import { liveActivityEventId, liveActivityIncidentHref } from "../liveWorkspace.mjs";
 import { adjacentIncident, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentImageRenderRect, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentTrackingFrameSize, incidentZoomLayout, incidentTriggerLabel, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom } from "../incidentNavigation.mjs";
 import { appUrl, fetch } from "./api.js";
@@ -50,6 +47,8 @@ export function eventEpoch(event) {
 
 export function incidentClipWindow(event, before, after) {
   const anchor = eventEpoch(event);
+  const recorded = recordedIncidentWindow(event, before, after);
+  if (recorded && Number.isFinite(anchor)) return { before: Math.max(0, anchor - recorded.start), after: Math.max(0, recorded.end - anchor) };
   const children = event?.events || [];
   const childEpochs = children.map(eventEpoch).filter(Number.isFinite);
   const explicitStart = Number(event?.start_epoch);
@@ -134,6 +133,7 @@ export function objectBoxes(event, incidentEligibleOnly = false) {
     .filter(({ object, box }) => (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
     .map(({ object, objectIndex, box }) => ({
       objectIndex,
+      excluded: object.incident_eligible === false,
       trackId: Number.isInteger(Number(object.track_id)) ? Number(object.track_id) : null,
       label: object.label,
       confidence: object.confidence,
@@ -388,12 +388,12 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
               const selected = selectedObjectIndex != null && selectedObjectIndex !== ""
                 && Number(selectedObjectIndex) === Number(box.objectIndex);
               const distanceLabel = Number.isFinite(box.depthMeters) ? ` ~${box.depthMeters.toFixed(1)}m` : "";
-              const label = `${box.label}${box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}${distanceLabel}`;
+              const label = `${box.label}${box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}${distanceLabel}${box.excluded ? " · Excluded" : ""}`;
               if (onSelectObject) {
                 return (
                   <button
                     type="button"
-                    className={`object-box selectable${selected ? " selected" : ""}`}
+                    className={`object-box selectable${selected ? " selected" : ""}${box.excluded ? " excluded" : ""}`}
                     key={`${box.label}-${box.objectIndex}-${box.x1}-${box.y1}`}
                     style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
                     onClick={(clickEvent) => {
@@ -414,7 +414,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
               }
               return (
                 <span
-                  className="object-box"
+                  className={`object-box${box.excluded ? " excluded" : ""}`}
                   key={`${box.label}-${index}-${box.x1}-${box.y1}`}
                   style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
                 >
@@ -466,7 +466,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
   );
 }
 
-export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps, lostTimeoutSeconds }) {
+export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps, lostTimeoutSeconds, tracking = null }) {
   const layerRef = useRef(null);
   const [playbackEpoch, setPlaybackEpoch] = useState(null);
   const [layerSize, setLayerSize] = useState(null);
@@ -524,13 +524,13 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
   }, [videoRef, windowStartEpoch, mediaStartTime, mediaKey]);
 
   const visibleTracks = useMemo(() => {
-    if (!Number.isFinite(playbackEpoch)) return [];
+    if (!Number.isFinite(playbackEpoch) || trackingCoverageAt(tracking, playbackEpoch)) return [];
     const holdSeconds = Math.max(0.5, Number(lostTimeoutSeconds) || 3);
     return tracks.flatMap((track) => {
-      const frame = trackFrameAt(track, playbackEpoch, { holdSeconds, sampleFps });
+      const frame = trackFrameAt(track, playbackEpoch, { holdSeconds, sampleFps, observationsOnly: tracking?.window_start_epoch != null });
       return frame ? [{ ...track, ...frame }] : [];
     });
-  }, [lostTimeoutSeconds, playbackEpoch, sampleFps, tracks]);
+  }, [lostTimeoutSeconds, playbackEpoch, sampleFps, tracks, tracking]);
 
   const secondsUntilTracking = useMemo(() => {
     if (!Number.isFinite(playbackEpoch) || visibleTracks.length) return null;
@@ -560,7 +560,8 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
     }));
   }, [coordinateTransform, visibleTracks]);
 
-  if (!coordinateSize?.width || !coordinateSize?.height || !tracks.some((track) => track.boxHistory.length)) return null;
+  const coverageNotice = trackingCoverageAt(tracking, playbackEpoch);
+  if (!coordinateSize?.width || !coordinateSize?.height) return null;
   return (
     <div ref={layerRef} className="object-track-video-layer" aria-hidden="true">
       {layerSize ? <svg viewBox={`0 0 ${layerSize.width} ${layerSize.height}`} preserveAspectRatio="none" aria-hidden="true">
@@ -580,7 +581,8 @@ export function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, wind
           #{track.trackId} {track.label}{track.estimated ? " · estimated" : ""}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
         </span>
       ))}
-      {secondsUntilTracking ? <span className="object-track-video-waiting">Tracking begins in {secondsUntilTracking}s</span> : null}
+      {coverageNotice ? <span className="object-track-video-waiting">{coverageNotice}</span>
+        : secondsUntilTracking ? <span className="object-track-video-waiting">First tracked object in {secondsUntilTracking}s</span> : null}
     </div>
   );
 }
@@ -1729,7 +1731,8 @@ export async function loadIncidentClipInfo(event, isCancelled = () => false, pre
     ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
     : requestedWindowStartEpoch;
   if (isCancelled()) return null;
-  const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
+  // Play from the beginning of the requested incident, not the cover's vicinity.
+  const initialPlaybackOffset = 0;
   return {
     streamUrl,
     downloadUrl: eventClipUrl(eventId, window.before, window.after),

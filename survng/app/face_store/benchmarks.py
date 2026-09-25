@@ -75,7 +75,6 @@ class FaceStoreBenchmarkMixin:
                 "samples": len(samples),
             }
 
-        per_identity: dict[int, dict[str, Any]] = {}
         trials: list[dict[str, Any]] = []
 
         for held_out in samples:

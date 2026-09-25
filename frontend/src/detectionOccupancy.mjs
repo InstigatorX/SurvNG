@@ -5,13 +5,6 @@ export const OCCUPANCY_TONES = Object.freeze({
   idle: "idle",
 });
 
-export const EMA_TRIGGER_SOURCES = Object.freeze([
-  "adaptive",
-  "visual_backup",
-  "adaptive/visual_backup",
-  "ema",
-]);
-
 const TONE_RANK = Object.freeze({
   [OCCUPANCY_TONES.idle]: 0,
   [OCCUPANCY_TONES.good]: 1,
@@ -22,15 +15,6 @@ const TONE_RANK = Object.freeze({
 export function asCount(value) {
   const count = Number(value);
   return Number.isFinite(count) && count > 0 ? Math.round(count) : 0;
-}
-
-export function asPercent(value) {
-  const percent = Number(value);
-  return Number.isFinite(percent) ? percent : null;
-}
-
-export function isEmaTriggerSource(value) {
-  return EMA_TRIGGER_SOURCES.includes(String(value || "").trim().toLowerCase());
 }
 
 export function worstOccupancyTone(tones) {
@@ -640,7 +624,7 @@ export function detectorLaneVerdict({
   const pendingCount = optionalCount(pending) ?? 0;
   const failedCount = optionalCount(failed) ?? 0;
   const crashCount = optionalCount(crashes) ?? 0;
-  const restartCount = optionalCount(restarts) ?? optionalCount(crashCount) ?? 0;
+
   const findings = [];
 
   if (enabled === false) {

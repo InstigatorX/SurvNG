@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from ..durable_payload import durable_json_dumps
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry
@@ -1695,13 +1694,16 @@ class EventStore(
                 for item in objects
                 if not (isinstance(item, dict) and item.get("status") == "object_tracking")
             ]
-            if tracked_objects and not had_tracking:
+            snapshot_assignments = tracking.get("snapshot_track_assignments")
+            assignment_objects = (snapshot_assignments if isinstance(snapshot_assignments, list)
+                                  else tracked_objects if not had_tracking else None)
+            if assignment_objects:
                 assignments = {
                     (
                         str(item.get("label") or ""),
                         json.dumps(item.get("box"), sort_keys=True, separators=(",", ":")),
                     ): item
-                    for item in tracked_objects
+                    for item in assignment_objects
                     if item.get("track_id") is not None
                 }
                 for item in objects:

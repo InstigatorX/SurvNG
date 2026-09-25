@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 import threading
@@ -7,13 +8,17 @@ from types import SimpleNamespace
 from unittest import TestCase
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from survng.app.recording_routes import (
     RecordingRouteDependencies,
     create_recording_router,
 )
 from survng.app.manager_access import ManagerAccessCoordinator
+from survng.app.encoded_fragments import (
+    EncodedFragment,
+    StreamDescription,
+)
 from survng.app.recording_media import RECORDING_FMP4_VERSION
 
 
@@ -72,6 +77,201 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
+    def test_hls_media_response_prewarms_the_next_fragment(self) -> None:
+        manager = _Manager("current")
+        fragments = tuple(
+            EncodedFragment(
+                sequence=index,
+                segment_name=f"segment-{index}.mp4",
+                wall_start_epoch=100.0 + (index - 1) * 5,
+                wall_end_epoch=105.0 + (index - 1) * 5,
+                media_start_seconds=(index - 1) * 5,
+                media_duration_seconds=5.0,
+                keyframe_aligned=True,
+                stream=StreamDescription(fingerprint="h264"),
+                source_identity=f"revision-{index}",
+                source_path=Path(f"segment-{index}.mp4"),
+            )
+            for index in (1, 2)
+        )
+        materialized = []
+
+        class Source:
+            def fragments(self, *_args, **_kwargs):
+                return iter(fragments)
+
+            def materialize(self, selected):
+                materialized.append(selected)
+                return replace(
+                    selected,
+                    stream=replace(
+                        selected.stream,
+                        init_path=Path("init.mp4"),
+                    ),
+                    media_path=Path(f"{selected.segment_name}.m4s"),
+                )
+
+        source = Source()
+        dependencies = replace(
+            _dependencies(lambda: manager),
+            encoded_fragment_source=lambda _manager: source,
+            recording_file_response=lambda path, media_type: Response(
+                content=str(path),
+                media_type=media_type,
+            ),
+        )
+        response = create_recording_router(dependencies).handlers[
+            "recording_day_hls_segment"
+        ](
+            "gate",
+            "segment-1.mp4",
+            100,
+            110,
+            "main",
+            7.25,
+            False,
+            "revision-1",
+        )
+
+        self.assertEqual(
+            [(item.segment_name, item.media_start_seconds) for item in materialized],
+            [("segment-1.mp4", 7.25)],
+        )
+        self.assertIsNotNone(response.background)
+        asyncio.run(response.background())
+        self.assertEqual(
+            [(item.segment_name, item.media_start_seconds) for item in materialized],
+            [("segment-1.mp4", 7.25), ("segment-2.mp4", 12.25)],
+        )
+
+    def test_hls_fragment_urls_pin_identity_and_manifest_media_offset(self) -> None:
+        manager = _Manager("current")
+        fragment = EncodedFragment(
+            sequence=1,
+            segment_name="segment.mp4",
+            wall_start_epoch=100.0,
+            wall_end_epoch=105.0,
+            media_start_seconds=0.0,
+            media_duration_seconds=5.0,
+            keyframe_aligned=True,
+            stream=StreamDescription(fingerprint="h264"),
+            source_identity="revision-123",
+            source_path=Path("segment.mp4"),
+        )
+        materialized = []
+
+        class Source:
+            def fragments(self, *_args, **_kwargs):
+                return iter((fragment,))
+
+            def materialize(self, selected):
+                materialized.append(selected)
+                return replace(
+                    selected,
+                    stream=replace(
+                        selected.stream,
+                        init_path=Path("init.mp4"),
+                    ),
+                    media_path=Path("media.m4s"),
+                )
+
+        source = Source()
+        dependencies = replace(
+            _dependencies(lambda: manager),
+            encoded_fragment_source=lambda _manager: source,
+            recording_day_rows=lambda *_args, **_kwargs: self.fail(
+                "legacy row path should not be used"
+            ),
+            recording_file_response=lambda path, media_type: (
+                path,
+                media_type,
+            ),
+        )
+        handlers = create_recording_router(dependencies).handlers
+
+        playlist = handlers["recording_day_hls_playlist"](
+            "gate",
+            100,
+            110,
+        )
+        urls = [
+            line.split('URI="', 1)[1].split('"', 1)[0]
+            if line.startswith("#EXT-X-MAP:")
+            else line
+            for line in playlist.body.decode().splitlines()
+            if line.startswith("#EXT-X-MAP:")
+            or (line and not line.startswith("#"))
+        ]
+        self.assertEqual(len(urls), 2)
+        for url in urls:
+            self.assertEqual(
+                parse_qs(urlparse(url).query)["fragment_id"],
+                ["revision-123"],
+            )
+
+        response = handlers["recording_day_hls_segment"](
+            "gate",
+            "segment.mp4",
+            100,
+            110,
+            "main",
+            7.25,
+            False,
+            "revision-123",
+        )
+        self.assertEqual(response, (Path("media.m4s"), "video/iso.segment"))
+        self.assertEqual(materialized[-1].media_start_seconds, 7.25)
+
+        with self.assertRaises(HTTPException) as stale:
+            handlers["recording_day_hls_segment"](
+                "gate",
+                "segment.mp4",
+                100,
+                110,
+                "main",
+                7.25,
+                False,
+                "stale-revision",
+            )
+        self.assertEqual(stale.exception.status_code, 409)
+
+    def test_day_playlist_emits_ext_x_start_for_native_safari(self) -> None:
+        manager = _Manager("current")
+        rows = [{
+            "name": "segment.mp4",
+            "start_epoch": 100.0,
+            "end_epoch": 110.0,
+            "duration_seconds": 10.0,
+            "stream_fingerprint": "h264",
+        }]
+        handlers = create_recording_router(
+            replace(
+                _dependencies(lambda: manager),
+                recording_day_rows=lambda *_args, **_kwargs: rows,
+            )
+        ).handlers
+        body = handlers["recording_day_hls_playlist"](
+            "gate",
+            100,
+            110,
+            "main",
+            7.25,
+        ).body.decode()
+        self.assertIn("#EXT-X-START:TIME-OFFSET=7.250,PRECISE=YES", body)
+        # Keep the tag ahead of media so Safari can honor it during load.
+        self.assertLess(
+            body.index("#EXT-X-START:"),
+            body.index("#EXTINF:"),
+        )
+        clipped = handlers["recording_day_hls_playlist"](
+            "gate",
+            100,
+            110,
+            "main",
+            99.0,
+        ).body.decode()
+        self.assertIn("#EXT-X-START:TIME-OFFSET=9.990,PRECISE=YES", clipped)
+
     def test_day_and_event_playlists_version_every_fragment_url(self) -> None:
         manager = _Manager("current")
         manager.events.get = lambda _event_id: {

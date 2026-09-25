@@ -188,6 +188,7 @@ def _camera_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
         "recording": bool(raw.get("recording")),
         "recording_enabled": bool(raw.get("recording_enabled", True)),
         "detection_enabled": bool(raw.get("detection_enabled")),
+        "detection_cleanup_required": bool(lifecycle.get("detection_cleanup_required")),
         "onvif_connected": bool(raw.get("onvif_connected")),
         "lifecycle_generation": _optional_number(lifecycle.get("generation")),
         "motion": _motion_snapshot(raw.get("motion_qualification"), tracking),
@@ -570,7 +571,18 @@ class LocalObservabilityServer:
                     raise ValueError("unsupported command")
                 if int(request.get("version") or 0) != PROTOCOL_VERSION:
                     raise ValueError("unsupported protocol version")
+                loop = asyncio.get_running_loop()
+                probe_started = loop.time()
+                await asyncio.sleep(0.01)
+                probe_lag_ms = max(0.0, (loop.time() - probe_started - 0.01) * 1000)
                 status_payload = await asyncio.to_thread(self.status_provider)
+                status_payload = {
+                    **status_payload,
+                    "event_loop": {
+                        "tasks": len(asyncio.all_tasks(loop)),
+                        "probe_lag_ms": round(probe_lag_ms, 3),
+                    },
+                }
                 response = {"ok": True, "status": status_payload}
         except (ValueError, json.JSONDecodeError, asyncio.TimeoutError) as error:
             response = {"ok": False, "error": str(error)}

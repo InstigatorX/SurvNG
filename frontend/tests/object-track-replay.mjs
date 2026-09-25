@@ -124,3 +124,16 @@ assert.equal(trackingCoverageLabel({ state: "complete", coverage_incomplete: fal
 assert.match(trackingCoverageLabel({ state: "interrupted", completion_reason: "missing_media_while_object_active" }), /recording coverage unavailable/);
 assert.match(trackingCoverageLabel({ state: "interrupted", completion_reason: "processing_budget_exhausted" }), /processing time limit/);
 assert.equal(trackingCoverageLabel({ state: "complete", coverage_incomplete: true }), "Tracking incomplete");
+
+const { recordedIncidentWindow, trackingCoverageAt } = await import("../src/objectTrackReplay.mjs");
+const windowTracking = {
+  window_start_epoch: 100, window_end_epoch: 130,
+  analyzed_from: new Date(100000).toISOString(), analyzed_through: new Date(110000).toISOString(), state: "active",
+};
+assert.deepEqual(recordedIncidentWindow({created_at: new Date(110000).toISOString(), object_tracking: windowTracking}, 5, 5), {start:100, end:130});
+assert.equal(trackingCoverageAt(windowTracking, 105), null);
+assert.equal(trackingCoverageAt(windowTracking, 115), "Tracking pending for this footage");
+assert.equal(trackingCoverageAt({...windowTracking, state: "interrupted"}, 115), "This footage has not been analyzed");
+assert.equal(trackingCoverageAt({}, 115), null); // Legacy stored sessions retain their existing presentation.
+assert.equal(trackFrameAt({boxHistory:[[100,0,0,10,10]], trajectory:[]}, 101, {holdSeconds:5, observationsOnly:true}), null);
+assert.equal(incidentTrackingSource({object_tracking: {state:"active", tracks:[]}})?.object_tracking.state, "active");

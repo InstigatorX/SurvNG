@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { peopleFilterLabel, peopleModeLabel, peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../src/peopleWorkspace.mjs";
+import { peopleObservationRequestPlan, peopleWorkspaceSearch, readPeopleWorkspaceQuery } from "../src/peopleWorkspace.mjs";
 
 assert.deepEqual(readPeopleWorkspaceQuery(""), {
   mode: "review", status: "unknown", cameraId: "", personId: "", page: 0, faceId: "", clusterId: "",
@@ -16,8 +16,7 @@ assert.equal(readPeopleWorkspaceQuery("?mode=invalid").mode, "review");
 assert.equal(peopleWorkspaceSearch({ status: "known", cameraId: "front-door", page: 1, faceId: 92 }), "?status=known&camera=front-door&page=2&face=92");
 assert.equal(peopleWorkspaceSearch(), "");
 assert.equal(peopleWorkspaceSearch({ mode: "clusters", clusterId: 4 }), "?mode=clusters&cluster=4");
-assert.equal(peopleFilterLabel("unusable"), "Unusable");
-assert.equal(peopleModeLabel("people"), "People profiles");
+
 assert.deepEqual(peopleObservationRequestPlan({ mode: "review", pageSize: 24 }), {
   observations: "/api/faces/review/queue?limit=24",
   count: "",

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { VisitsPanel } from "./VisitsPanel.jsx";
 import {
   Activity,
   ChevronLeft,
@@ -253,7 +254,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
 
   async function load({ refreshPeople = false } = {}) {
     const sequence = ++faceLoadSequence.current;
-    if (mode === "clusters") {
+    if (mode === "clusters" || mode === "visits") {
       if (refreshPeople) await loadPeople();
       if (sequence === faceLoadSequence.current) setLoading(false);
       return [];
@@ -526,6 +527,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
       </aside>
 
       <section className="faces-review-panel" ref={faceReviewPanelRef} tabIndex={-1} aria-label={PEOPLE_WORKSPACE_MODES[mode]}>
+        {mode === "visits" ? <VisitsPanel people={people} personId={personId} timeZone={timeZone} /> : <>
         <div className="faces-toolbar">
           {mode === "clusters" ? <div className="cluster-toolbar-copy"><strong>Unknown clusters</strong><small>Group recurring unknown faces before enrolling a person.</small></div> : null}
           {mode === "clusters" ? <button type="button" className="subtle" onClick={rebuildClusters} disabled={clusterBusy}><RefreshCw size={16} className={clusterBusy ? "spinning" : ""} /> {clusterBusy ? "Rebuilding…" : "Rebuild clusters"}</button> : null}
@@ -591,6 +593,7 @@ export function FacesPage({ timeZone, onAssistantContextChange }) {
           <span>Page {Math.min(page + 1, pageCount)} of {pageCount}</span>
           <button type="button" onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))} disabled={page >= pageCount - 1 || loading}>Next <ChevronRight size={16} /></button>
         </div> : null}
+        </>}
       </section>
 
       {selected ? <FaceReviewDialog observation={selected} people={people} timeZone={timeZone} onClose={closeFaceReview} onUpdated={async (message, action = {}) => {

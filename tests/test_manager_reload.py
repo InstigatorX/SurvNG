@@ -102,6 +102,70 @@ class ManagerGenerationLifecycleTest(unittest.TestCase):
         previous.stop_all_with_runtime_preferences.assert_not_called()
         candidate.stop_all.assert_called_once_with()
 
+    def test_failed_candidate_cleanup_prevents_overlapping_recovery(self) -> None:
+        previous = Mock()
+        previous.runtime_preferences.return_value = {}
+        candidate = Mock()
+        candidate.stop_all.side_effect = RuntimeError("worker still alive")
+        recovery = Mock()
+        factory = Mock(side_effect=[candidate, recovery])
+        hooks = self.hooks()
+        hooks.save_config.side_effect = OSError("configuration disk unavailable")
+        lifecycle = self.lifecycle(factory, hooks)
+        effective = AppConfig(base_path="/new")
+        with self.assertRaisesRegex(RuntimeError, "replacement manager.*restart"):
+            lifecycle.reload(AppConfig(), previous, effective, persist=True)
+        self.assertEqual(factory.call_count, 1)
+        recovery.start_all.assert_not_called()
+        hooks.publish_runtime.assert_called_once_with(effective, candidate)
+        self.assertTrue(lifecycle._stopping.is_set())
+
+    def test_failed_recovery_is_closed(self) -> None:
+        previous = Mock()
+        previous.runtime_preferences.return_value = {}
+        candidate = Mock()
+        candidate.start_all.side_effect = RuntimeError("candidate failed")
+        recovery = Mock()
+        recovery.start_all.side_effect = RuntimeError("recovery failed")
+        hooks = self.hooks()
+        lifecycle = self.lifecycle(Mock(side_effect=[candidate, recovery]), hooks)
+        with self.assertRaisesRegex(RuntimeError, "could not be restored"):
+            lifecycle.reload(AppConfig(), previous, AppConfig(), persist=False)
+        recovery.stop_all.assert_called_once_with()
+        self.assertTrue(lifecycle._stopping.is_set())
+
+    def test_previous_shutdown_failure_keeps_previous_owner(self) -> None:
+        previous = Mock()
+        previous.runtime_preferences.return_value = {}
+        previous.stop_all_with_runtime_preferences.side_effect = RuntimeError("inference still alive")
+        candidate = Mock()
+        factory = Mock(return_value=candidate)
+        hooks = self.hooks()
+        lifecycle = self.lifecycle(factory, hooks)
+        original = AppConfig()
+        with self.assertRaisesRegex(RuntimeError, "previous manager shutdown"):
+            lifecycle.reload(original, previous, AppConfig(), persist=False)
+        candidate.start_all.assert_not_called()
+        hooks.publish_runtime.assert_called_once_with(original, previous)
+        self.assertEqual(factory.call_count, 1)
+        self.assertTrue(lifecycle._stopping.is_set())
+
+    def test_failed_recovery_cleanup_preserves_owner_for_final_shutdown(self) -> None:
+        previous = Mock()
+        previous.runtime_preferences.return_value = {}
+        candidate = Mock()
+        candidate.start_all.side_effect = RuntimeError("candidate failed")
+        recovery = Mock()
+        recovery.start_all.side_effect = RuntimeError("recovery failed")
+        recovery.stop_all.side_effect = RuntimeError("recovery workers still alive")
+        hooks = self.hooks()
+        lifecycle = self.lifecycle(Mock(side_effect=[candidate, recovery]), hooks)
+        original = AppConfig()
+        with self.assertRaisesRegex(RuntimeError, "could not be restored"):
+            lifecycle.reload(original, previous, AppConfig(), persist=False)
+        hooks.publish_runtime.assert_called_once_with(original, recovery)
+        self.assertTrue(lifecycle._stopping.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -261,6 +261,8 @@ def test_owner_only_socket_serves_status_and_is_removed(tmp_path: Path) -> None:
             assert stat.S_IMODE(socket_path.stat().st_mode) == 0o600
             payload = await asyncio.to_thread(request_runtime_status, socket_path)
             assert payload["tracking"]["capacity"]["active"] == 2
+            assert payload["event_loop"]["tasks"] >= 2
+            assert payload["event_loop"]["probe_lag_ms"] >= 0
         finally:
             await server.stop()
         assert not socket_path.exists()
@@ -317,7 +319,9 @@ def test_ffmpeg_and_observer_share_private_runtime_across_restarts(tmp_path: Pat
                     named_ffmpeg_executable("sh", "survng-test", runtime_dir=parent)
                 assert stat.S_IMODE(parent.stat().st_mode) == 0o700
                 assert stat.S_IMODE(server.socket_path.stat().st_mode) == 0o600
-                assert await asyncio.to_thread(request_runtime_status, server.socket_path) == {"ready": True}
+                payload = await asyncio.to_thread(request_runtime_status, server.socket_path)
+                assert payload["ready"] is True
+                assert payload["event_loop"]["tasks"] >= 2
             finally:
                 await server.stop()
             assert not server.socket_path.exists()

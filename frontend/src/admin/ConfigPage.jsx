@@ -28,7 +28,6 @@ import {
   LayoutDashboard,
   Monitor,
   Moon,
-  Pause,
   PanelLeftOpen,
   Plus,
   Power,
@@ -195,10 +194,6 @@ export function MotionDecisionEditor({
   const statusLabel = onRestoreDefaults
     ? configurationInherited ? "Inherited" : "Custom"
     : fullyInherited ? "Inherited" : custom ? "Advanced" : legacyMode ? "Legacy" : parsed.usesDefaults ? "Recommended default" : "Customized";
-
-  function updateSettings(patch) {
-    onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
-  }
 
   function selectBehavior(value) {
     if (value === "inherit") {
@@ -1135,7 +1130,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const apiTokenSecretVisibleRef = useRef(apiTokenSecretVisible);
   const acceptedAdminLocationRef = useRef(`${window.location.pathname}${window.location.search}${window.location.hash}`);
   const baselineConfigRef = useRef(null);
-  const [baselineRevision, setBaselineRevision] = useState(0);
+  const [, setBaselineRevision] = useState(0);
   const auditPageSize = 24;
 
   function adminLocationOptions(section = settingsTab) {
@@ -1665,10 +1660,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const cameraDirtyState = cameraConfigDirtyState(config?.cameras || [], baselineConfig?.cameras || []);
   const perCameraDirty = perCameraDirtyState(config?.cameras || [], baselineConfig?.cameras || []);
   const dirtyCamerasCount = dirtyCameraCount(perCameraDirty);
-  const runtimeStatusById = useMemo(
-    () => new Map(runtimeStatus.map((item) => [item.id, item])),
-    [runtimeStatus],
-  );
+
   const cameraSettingsDirty = Boolean(config && baselineConfig) && cameraDirtyState.settings;
   const zonesDirty = Boolean(config && baselineConfig) && cameraDirtyState.zones;
   const cameraOrderDirty = Boolean(config && baselineConfig) && !configValuesEqual(
@@ -3844,36 +3836,13 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const openvinoDevices = accelerator?.openvino_devices || [];
   const hasOpenvinoGpu = openvinoDevices.includes("GPU");
   const detectorBackend = config.detector?.backend || "openvino";
-  const coremlLabel = accelerator?.is_macos
-    ? accelerator?.coreml_available
-      ? "Core ML available"
-      : "Core ML not installed"
-    : "Core ML is macOS only";
-  const gpuLabel = accelerator?.is_apple_silicon
-    ? "Mac GPU detected, OpenVINO GPU not available on Apple GPU"
-    : accelerator?.has_nvidia
-      ? "NVIDIA GPU detected"
-      : hasOpenvinoGpu
-        ? "OpenVINO GPU device available"
-        : "No OpenVINO GPU device reported";
+
   const deviceOptions = [
     ["CPU", "CPU"],
     ["GPU", hasOpenvinoGpu ? "GPU" : "GPU (if OpenVINO plugin is available)"],
     ["AUTO", "AUTO"],
   ];
-  const ffmpegAcceleration = accelerator?.ffmpeg_hardware_acceleration || {};
-  const vaapi = ffmpegAcceleration.vaapi || {};
-  const qsv = ffmpegAcceleration.qsv || {};
-  const vaapiLabel = vaapi.available
-    ? `VAAPI available (${(vaapi.encoders || []).join(", ") || "encoders detected"})`
-    : vaapi.listed
-      ? "VAAPI listed by FFmpeg but runtime init failed"
-      : "VAAPI not available to FFmpeg";
-  const qsvLabel = qsv.available
-    ? `Intel QSV available (${(qsv.encoders || []).join(", ") || "encoders detected"})`
-    : qsv.listed
-      ? "Intel QSV listed by FFmpeg but runtime init failed"
-      : "Intel QSV not available to FFmpeg";
+
   const activeModel = findDetectorModel(detectorModels, activeModelPath);
   const eventClassConfirmations = config.detector?.event_class_confirmation_frames || {};
   const eventClassConfidences = config.detector?.event_class_confidence_thresholds || {};
@@ -4771,6 +4740,11 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             <div className="detection-feature-body detection-field-grid">
               <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Recognition enabled</span></label>
               <label>Embedding Model<input value={config.detector?.face_embedding_model_path || ""} onChange={(event) => updateConfig(["detector", "face_embedding_model_path"], event.target.value)} placeholder="face_model/model.xml" /></label>
+              <label>Model input profile<select value={config.detector?.face_embedding_profile || "legacy_openvino"} onChange={(event) => updateConfig(["detector", "face_embedding_profile"], event.target.value)}><option value="legacy_openvino">Existing OpenVINO package</option><option value="adaface">AdaFace · BGR, normalized 112×112</option><option value="arcface">ArcFace · RGB, normalized 112×112</option></select><small>Match the exported model's input contract. A profile change requires new embeddings and calibration.</small></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_evidence_enabled ?? true} onChange={(event) => updateConfig(["detector", "face_evidence_enabled"], event.target.checked)} /><span>Find better face evidence in recordings</span></label>
+              <label>Additional face frames<input type="number" min="0" max="8" value={config.detector?.face_evidence_max_extra_frames ?? 4} onChange={(event) => updateConfig(["detector", "face_evidence_max_extra_frames"], Number(event.target.value))} /></label>
+              <label>Face evidence budget (seconds)<input type="number" min="0.5" max="10" step="0.5" value={config.detector?.face_evidence_timeout_seconds ?? 4} onChange={(event) => updateConfig(["detector", "face_evidence_timeout_seconds"], Number(event.target.value))} /></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.visit_auto_link_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "visit_auto_link_enabled"], event.target.checked)} /><span>Automatically link calibrated visit matches</span></label>
               <label>Landmark Model<input value={config.detector?.face_landmark_model_path || ""} onChange={(event) => updateConfig(["detector", "face_landmark_model_path"], event.target.value)} placeholder="face_model/landmarks.xml" /></label>
               <label>Face Detector Model<input value={config.detector?.face_detection_model_path || ""} onChange={(event) => updateConfig(["detector", "face_detection_model_path"], event.target.value)} placeholder="face_detector/model.xml" /></label>
               <label>Recognition Device<select value={config.detector?.face_recognition_device || "AUTO"} onChange={(event) => updateConfig(["detector", "face_recognition_device"], event.target.value)}>
@@ -5042,6 +5016,66 @@ export function DepthShadowPerformance({ cameraId = "", mode = "", label = "Dept
   </div>;
 }
 
+function spatialAlignmentSummary(alignment = {}, { mainKnown = true } = {}) {
+  const mode = String(alignment.mode || "untrusted");
+  const reliable = Boolean(alignment.reliable);
+  const stableSamples = Number(alignment.stable_samples || 0);
+  const failedSamples = Number(alignment.failed_samples || 0);
+  const startupCalibration = Boolean(alignment.startup_calibration);
+  const referenceSource = String(alignment.reference_source || "");
+  const scaleX = Number(alignment.scale_x ?? 1);
+  const scaleY = Number(alignment.scale_y ?? 1);
+  const offsetX = Number(alignment.offset_x ?? 0);
+  const offsetY = Number(alignment.offset_y ?? 0);
+  const nearIdentity = (
+    Math.abs(scaleX - 1) < 0.02
+    && Math.abs(scaleY - 1) < 0.02
+    && Math.abs(offsetX) < 0.02
+    && Math.abs(offsetY) < 0.02
+  );
+  if (reliable) {
+    if (mode === "identity" || nearIdentity) {
+      return {
+        label: "Trusted",
+        detail: referenceSource === "recording"
+          ? "Live matches the latest main recording field of view"
+          : "Live and main share the same field of view",
+        warning: false,
+      };
+    }
+    return {
+      label: "Trusted",
+      detail: `Measured match · scale ${scaleX.toFixed(2)}×${scaleY.toFixed(2)} · offset ${offsetX.toFixed(2)}, ${offsetY.toFixed(2)}`,
+      warning: false,
+    };
+  }
+  if (mode === "untrusted" || failedSamples >= 3) {
+    return {
+      label: "Not trusted",
+      detail: failedSamples
+        ? `Live and main views do not line up (${failedSamples} failed checks)`
+        : "Live boxes are not trusted onto the main recording",
+      warning: true,
+    };
+  }
+  if (startupCalibration) {
+    return {
+      label: "Checking",
+      detail: mainKnown
+        ? "Startup FOV check in progress"
+        : "Startup FOV check — using latest main recording still",
+      warning: false,
+    };
+  }
+  return {
+    label: "Checking",
+    detail: stableSamples
+      ? `${stableSamples}/3 stable matches so far${failedSamples ? ` · ${failedSamples} failed` : ""}`
+      : "Waiting for matching live and main frames",
+    warning: false,
+  };
+}
+
 export function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
@@ -5053,6 +5087,30 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
     && status.onvif_enabled
     && Number(status.onvif_motion_events_received || 0) === 0;
   const missingCameraTrigger = cameraAlertsOnly && !status.onvif_enabled;
+  const streamDimensions = status.stream_dimensions || {};
+  const alignment = status.spatial_alignment || {};
+  const liveSize = streamDimensions.live;
+  const mainSize = streamDimensions.main;
+  const liveSizeLabel = liveSize?.width && liveSize?.height
+    ? `${liveSize.width}×${liveSize.height}`
+    : null;
+  const mainSizeLabel = mainSize?.width && mainSize?.height
+    ? `${mainSize.width}×${mainSize.height}`
+    : null;
+  const referenceWidth = Number(alignment.reference_width || 0);
+  const referenceHeight = Number(alignment.reference_height || 0);
+  const referenceSizeLabel = referenceWidth > 0 && referenceHeight > 0
+    ? `${referenceWidth}×${referenceHeight}`
+    : null;
+  const referenceSource = String(alignment.reference_source || "");
+  const mainSideLabel = mainSizeLabel
+    || (referenceSource === "recording" && referenceSizeLabel
+      ? `recording ${referenceSizeLabel}`
+      : null)
+    || (referenceSource === "recording" ? "recording" : null);
+  const fovAlignment = spatialAlignmentSummary(alignment, {
+    mainKnown: Boolean(mainSizeLabel || mainSideLabel),
+  });
   return (
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
@@ -5061,6 +5119,13 @@ export function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF notification (any type): {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
       {status.onvif_enabled ? <span>{status.onvif_notifications_received || 0} notifications · {status.onvif_motion_events_received || 0} active motion · {status.onvif_inactive_motion_events || 0} inactive motion · {status.onvif_renewals || 0} subscription renewals</span> : null}
+      <span className={fovAlignment.warning ? "motion-runtime-warning" : undefined}>
+        Live ↔ main FOV: {fovAlignment.label}
+        {liveSizeLabel || mainSideLabel
+          ? ` · live ${liveSizeLabel || "unknown"} / ${mainSideLabel ? (mainSizeLabel ? `main ${mainSizeLabel}` : mainSideLabel) : "main unknown"}`
+          : ""}
+      </span>
+      <span>{fovAlignment.detail}</span>
       {status.motion_qualification ? (
         <div className="motion-runtime-status">
           <div className="motion-runtime-summary">

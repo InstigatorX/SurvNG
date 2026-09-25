@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -103,24 +102,6 @@ def test_delayed_refinement_cannot_overwrite_concurrent_cover(tmp_path):
         )
     assert store.get(event["id"])["snapshot_path"] == "newer.webp"
     publish.assert_not_called()
-
-
-class FakeProvider:
-    def __init__(self, camera_id, source, budget, **kwargs):
-        self.running = False
-        self.max_bytes = kwargs["max_bytes"]
-        self.starts = self.stops = 0
-
-    def start(self):
-        self.running = True
-        self.starts += 1
-
-    def stop(self):
-        self.running = False
-        self.stops += 1
-
-    def refresh_status(self):
-        pass
 
 
 def test_duplicate_cover_refresh_does_not_publish_another_notification():

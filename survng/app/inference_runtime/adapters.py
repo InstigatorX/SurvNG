@@ -6,7 +6,6 @@ import numpy as np
 
 from ..config import DetectorConfig
 from .supervisor import InferenceSupervisor
-from .types import InferenceUnavailable
 
 
 class IsolatedFaceRecognizer:

@@ -20,26 +20,6 @@ export function serializeTrailEventIds(values) {
   return ids.length ? ids.join(",") : "";
 }
 
-export function parseTrailEventIds(raw) {
-  if (Array.isArray(raw)) return normalizeTrailEventIds(raw);
-  return normalizeTrailEventIds(String(raw || "").split(","));
-}
-
-export function trailPosition(eventIds, eventId) {
-  const ids = normalizeTrailEventIds(eventIds);
-  const current = Number(eventId);
-  if (!ids.length || !Number.isInteger(current) || current <= 0) {
-    return { index: -1, count: ids.length, previousId: null, nextId: null };
-  }
-  const index = ids.indexOf(current);
-  return {
-    index,
-    count: ids.length,
-    previousId: index > 0 ? ids[index - 1] : null,
-    nextId: index >= 0 && index < ids.length - 1 ? ids[index + 1] : null,
-  };
-}
-
 export function normalizeTrailHit(value) {
   const event = value?.event || {};
   const eventId = Number(event.id || value?.event_id);

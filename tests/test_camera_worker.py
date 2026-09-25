@@ -12,10 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
-import cv2
 
-from survng.app.camera import CameraWorker
-from survng.app.camera_lifecycle import CAPTURE_STOP_TIMEOUT_SECONDS
+from survng.app.camera import CameraWorker, _AutoStreamAlignment
+from survng.app.camera_lifecycle import CAPTURE_STOP_TIMEOUT_SECONDS, CameraLifecyclePhase
 from survng.app.camera_capture import (
     CAPTURE_OPEN_CONCURRENCY,
     CAPTURE_OPEN_TIMEOUT_MS,
@@ -88,6 +87,9 @@ class DummyRecorder:
 
     def recording_at(self, camera_id: str, epoch: float):
         return None
+
+    def recording_rows(self, camera_id, limit=1000, source="main"):
+        return []
 
     def recording_rows_between(self, camera_id, start_epoch, end_epoch, source="main", *, discover_missing=True):
         return []
@@ -329,6 +331,75 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(worker.runtime_state.detection_enabled)
             self.assertEqual(sync.call_count, 2)
 
+    def test_start_skips_fov_when_detection_disabled(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker.runtime_state.detection_enabled = False
+            worker.lifecycle.start = Mock()
+            worker._spawn_startup_spatial_alignment = Mock()
+            worker.start()
+            worker.lifecycle.start.assert_called_once_with()
+            worker._spawn_startup_spatial_alignment.assert_not_called()
+
+    def test_detection_enable_requests_fov_calibration(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker.runtime_state.detection_enabled = False
+            worker.runtime_state.phase = CameraLifecyclePhase.RUNNING
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            worker._spatial_alignment_recheck_used = True
+            worker.lifecycle.set_detection_enabled = Mock(
+                side_effect=lambda enabled: setattr(
+                    worker.runtime_state, "detection_enabled", bool(enabled)
+                )
+            )
+            worker._spawn_startup_spatial_alignment = Mock()
+            worker.set_detection_enabled(True)
+            worker._spawn_startup_spatial_alignment.assert_called_once_with()
+            self.assertFalse(worker._spatial_alignment_recheck_used)
+
+    def test_detection_enable_resets_untrusted_fov_for_retry(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker.runtime_state.detection_enabled = False
+            worker.runtime_state.phase = CameraLifecyclePhase.RUNNING
+            worker._effective_spatial_alignment = {
+                "mode": "untrusted",
+                "reliable": False,
+                "confidence": 0.0,
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+            }
+            worker.lifecycle.set_detection_enabled = Mock(
+                side_effect=lambda enabled: setattr(
+                    worker.runtime_state, "detection_enabled", bool(enabled)
+                )
+            )
+            worker._spawn_startup_spatial_alignment = Mock()
+            worker.set_detection_enabled(True)
+            self.assertEqual(worker._effective_spatial_alignment["mode"], "auto")
+            worker._spawn_startup_spatial_alignment.assert_called_once_with()
+
     def test_identity_motion_alignment_discards_stale_affine_values(self) -> None:
         camera = CameraConfig(
             id="gate",
@@ -355,6 +426,261 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(alignment["scale_y"], 1.0)
         self.assertEqual(alignment["offset_x"], 0.0)
         self.assertEqual(alignment["offset_y"], 0.0)
+
+    def test_auto_stream_alignment_is_pending_until_settled(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        alignment = _AutoStreamAlignment(camera)
+        pending = {"mode": "auto", "reliable": False}
+        self.assertTrue(alignment.is_pending(pending))
+        self.assertFalse(alignment.is_pending({**pending, "reliable": True}))
+        self.assertFalse(alignment.is_pending({**pending, "mode": "untrusted"}))
+        same = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/shared",
+            live_stream_url="rtsp://camera/shared",
+        )
+        self.assertFalse(_AutoStreamAlignment(same).is_pending(pending))
+
+    def test_auto_stream_alignment_ignores_empty_boot_frames(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        alignment = _AutoStreamAlignment(camera)
+        empty = np.zeros((0, 0, 3), dtype=np.uint8)
+
+        def frame(source: str, image: np.ndarray, width: int, height: int) -> CapturedFrame:
+            return CapturedFrame(
+                source=source,
+                image=image,
+                captured_at_epoch=100.0,
+                captured_at_monotonic=100.0,
+                captured_at_iso="2026-01-01T00:00:00+00:00",
+                width=width,
+                height=height,
+                sequence=1,
+            )
+
+        with patch.object(_AutoStreamAlignment, "_estimate", return_value=None) as estimate:
+            self.assertIsNone(alignment.observe(frame("live", empty, 0, 0)))
+            self.assertIsNone(alignment.observe(frame("main", empty, 0, 0)))
+            estimate.assert_not_called()
+        self.assertFalse(alignment.streams_ready)
+        self.assertEqual(alignment._failures, 0)
+
+    def test_auto_stream_alignment_calibrates_from_recording_still(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        alignment = _AutoStreamAlignment(camera)
+        blank = np.zeros((8, 8, 3), dtype=np.uint8)
+        live = CapturedFrame(
+            source="live",
+            image=blank,
+            captured_at_epoch=100.0,
+            captured_at_monotonic=100.0,
+            captured_at_iso="2026-01-01T00:00:00+00:00",
+            width=8,
+            height=8,
+            sequence=1,
+        )
+        clock = {"now": 3.0}
+        with patch.object(_AutoStreamAlignment, "_estimate", return_value=(1.0, 1.0, 0.0, 0.0)):
+            with patch("survng.app.camera.time.monotonic", side_effect=lambda: clock["now"]):
+                self.assertIsNone(alignment.calibrate_with_main_image(live, blank))
+                self.assertEqual(len(alignment._samples), 1)
+                clock["now"] = 7.0
+                self.assertIsNone(alignment.calibrate_with_main_image(live, blank))
+                self.assertEqual(len(alignment._samples), 2)
+                clock["now"] = 11.0
+                trusted = alignment.calibrate_with_main_image(live, blank)
+        self.assertIsNotNone(trusted)
+        assert trusted is not None
+        self.assertTrue(trusted["reliable"])
+        self.assertEqual(alignment.status(trusted)["reference_source"], "recording")
+        self.assertEqual(trusted.get("reference_width"), 8)
+        self.assertEqual(trusted.get("reference_height"), 8)
+
+    def test_startup_spatial_alignment_uses_recording_still(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker._stop.clear()
+            blank = np.zeros((8, 8, 3), dtype=np.uint8)
+            live = CapturedFrame(
+                source="live",
+                image=blank,
+                captured_at_epoch=100.0,
+                captured_at_monotonic=100.0,
+                captured_at_iso="2026-01-01T00:00:00+00:00",
+                width=8,
+                height=8,
+                sequence=1,
+            )
+            worker.capture = Mock()
+            worker.capture.request_frame = Mock(return_value=live)
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            worker._latest_stable_recording_still = Mock(return_value=blank)  # type: ignore[method-assign]
+
+            samples = {"n": 0}
+
+            def calibrate(live_frame, main_image, *, reference_source="recording"):
+                samples["n"] += 1
+                if samples["n"] < 3:
+                    return None
+                return {
+                    "mode": "affine",
+                    "reliable": True,
+                    "confidence": 0.9,
+                    "scale_x": 1.0,
+                    "scale_y": 1.0,
+                    "offset_x": 0.0,
+                    "offset_y": 0.0,
+                }
+
+            worker._stream_alignment.calibrate_with_main_image = calibrate  # type: ignore[method-assign]
+            worker._stream_alignment._streams_ready = True
+            with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS", 0.01):
+                worker._run_startup_spatial_alignment(worker.runtime_state.generation)
+            self.assertTrue(worker._effective_spatial_alignment["reliable"])
+            worker.capture.request_frame.assert_called_with("live")
+            self.assertNotIn(
+                (("main",), {}),
+                [
+                    (call.args, call.kwargs)
+                    for call in worker.capture.request_frame.call_args_list
+                ],
+            )
+            self.assertFalse(worker._spatial_alignment_startup_active)
+
+    def test_startup_spatial_alignment_timeout_stays_checking(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker._stop.clear()
+            worker.capture = Mock()
+            worker.capture.request_frame = Mock(return_value=None)
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            worker._stream_alignment._streams_ready = True
+            worker._latest_stable_recording_still = Mock(return_value=None)  # type: ignore[method-assign]
+            worker._spawn_startup_spatial_alignment = Mock()
+            with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_SCORE_SECONDS", 0.05):
+                with patch("survng.app.camera.SPATIAL_ALIGNMENT_STARTUP_POLL_SECONDS", 0.01):
+                    worker._run_startup_spatial_alignment(worker.runtime_state.generation)
+            self.assertEqual(worker._effective_spatial_alignment["mode"], "auto")
+            self.assertFalse(worker._effective_spatial_alignment["reliable"])
+            self.assertTrue(worker._spatial_alignment_recheck_used)
+            self.assertFalse(worker._spatial_alignment_recheck_armed)
+            worker._spawn_startup_spatial_alignment.assert_called_once()
+            self.assertFalse(worker._spatial_alignment_startup_active)
+            self.assertNotIn(
+                "main",
+                [
+                    call.args[0]
+                    for call in worker.capture.request_frame.call_args_list
+                    if call.args
+                ],
+            )
+
+    def test_startup_spatial_alignment_rechecks_once_when_healthy(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            worker._stop.clear()
+            worker._effective_spatial_alignment = {"mode": "auto", "reliable": False}
+            worker._spatial_alignment_recheck_armed = True
+            worker._stream_alignment._streams_ready = True
+            spawned: list[bool] = []
+
+            def spawn() -> None:
+                spawned.append(True)
+
+            worker._spawn_startup_spatial_alignment = spawn  # type: ignore[method-assign]
+            worker._maybe_spawn_healthy_spatial_recheck()
+            worker._maybe_spawn_healthy_spatial_recheck()
+            self.assertEqual(spawned, [True])
+            self.assertTrue(worker._spatial_alignment_recheck_used)
+            self.assertFalse(worker._spatial_alignment_recheck_armed)
+
+    def test_capture_frames_do_not_overwrite_trusted_recording_fov(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = make_worker(camera, Path(temp_dir))
+            trusted = {
+                "mode": "affine",
+                "reliable": True,
+                "confidence": 0.9,
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+                "reference_source": "recording",
+                "reference_width": 1920,
+                "reference_height": 1080,
+            }
+            worker._effective_spatial_alignment = trusted
+            blank = np.zeros((8, 8, 3), dtype=np.uint8)
+
+            def frame(source: str, captured_at: float) -> CapturedFrame:
+                return CapturedFrame(
+                    source=source,
+                    image=blank,
+                    captured_at_epoch=captured_at,
+                    captured_at_monotonic=captured_at,
+                    captured_at_iso="2026-01-01T00:00:00+00:00",
+                    width=8,
+                    height=8,
+                    sequence=1,
+                )
+
+            with patch.object(
+                worker._stream_alignment,
+                "observe",
+                return_value={
+                    **trusted,
+                    "reference_source": "capture",
+                    "reference_width": 8,
+                    "reference_height": 8,
+                },
+            ) as observe:
+                worker._capture_frame(frame("live", 100.0))
+                worker._capture_frame(frame("main", 100.1))
+                observe.assert_not_called()
+            self.assertEqual(
+                worker._effective_spatial_alignment["reference_source"],
+                "recording",
+            )
 
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -497,6 +823,104 @@ class CameraWorkerTest(unittest.TestCase):
             worker._remember_tracking_frame(frame, 100.5)
 
         self.assertEqual([sample[0] for sample in worker.tracking_frames.frames], [100.0, 100.5])
+
+    def test_detection_off_drains_an_admitted_capture_callback(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            entered, release, toggling, disabled = (threading.Event() for _ in range(4))
+            frame = CapturedFrame(
+                source="live", image=np.zeros((90, 160, 3), dtype=np.uint8),
+                captured_at_epoch=100.0, captured_at_monotonic=50.0,
+                captured_at_iso="1970-01-01T00:01:40+00:00",
+                width=160, height=90, sequence=1,
+            )
+
+            def remember(*args, **kwargs):
+                entered.set()
+                release.wait(2.0)
+
+            def disable():
+                toggling.set()
+                worker.lifecycle.set_detection_enabled(False)
+                disabled.set()
+
+            with patch.object(worker.tracking_frames, "remember", side_effect=remember):
+                capture = threading.Thread(target=worker._capture_frame, args=(frame,))
+                toggle = threading.Thread(target=disable)
+                capture.start()
+                try:
+                    self.assertTrue(entered.wait(1.0))
+                    toggle.start()
+                    self.assertTrue(toggling.wait(1.0))
+                    self.assertFalse(disabled.wait(0.05))
+                finally:
+                    release.set()
+                    capture.join(2.0)
+                    if toggle.ident is not None:
+                        toggle.join(2.0)
+                self.assertTrue(disabled.is_set())
+                self.assertFalse(capture.is_alive())
+                self.assertFalse(toggle.is_alive())
+
+    def test_old_alignment_attempt_cannot_resume_after_detection_toggle(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            worker.runtime_state.phase = CameraLifecyclePhase.RUNNING
+            worker.runtime_state.detection_generation = 2
+            with (
+                patch.object(worker.capture, "request_frame") as sample,
+                patch.object(worker, "_latest_stable_recording_still") as decode,
+                patch.object(worker, "_spawn_startup_spatial_alignment") as restart,
+            ):
+                worker._run_startup_spatial_alignment(worker.runtime_state.generation, 0)
+                sample.assert_not_called()
+                decode.assert_not_called()
+                restart.assert_called_once_with()
+
+    def test_detection_toggle_stops_motion_workers_without_stopping_capture(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            frame = CapturedFrame(
+                source="live", image=np.zeros((90, 160, 3), dtype=np.uint8),
+                captured_at_epoch=100.0, captured_at_monotonic=50.0,
+                captured_at_iso="1970-01-01T00:01:40+00:00",
+                width=160, height=90, sequence=1,
+            )
+            with (
+                patch.object(worker.capture, "start", return_value=True) as capture_start,
+                patch.object(worker.onvif, "start"),
+                patch.object(worker.onvif, "stop"),
+            ):
+                worker.lifecycle.start()
+                try:
+                    self.assertTrue(worker.motion_analysis.running())
+                    worker.lifecycle.set_detection_enabled(False)
+                    self.assertEqual(worker.motion_runtime.active_workers(), [])
+                    self.assertFalse(worker._stop.is_set())
+                    with (
+                        patch.object(worker.motion_runtime, "submit_frame") as submit,
+                        patch.object(worker.tracking_frames, "remember") as remember,
+                        patch.object(worker._stream_alignment, "observe") as align,
+                    ):
+                        worker._capture_frame(frame)
+                        submit.assert_not_called()
+                        remember.assert_not_called()
+                        align.assert_not_called()
+                    self.assertFalse(worker.motion_analysis.frames)
+                    worker.lifecycle.set_detection_enabled(True)
+                    self.assertTrue(worker.motion_analysis.running())
+                    worker._capture_frame(frame)
+                    deadline = time.monotonic() + 1.0
+                    while not worker.motion_analysis.frames and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(worker.motion_analysis.frames)
+                    capture_start.assert_called_once_with()
+                finally:
+                    worker.lifecycle.set_detection_enabled(False)
 
     def test_capture_observer_preserves_timestamp_for_motion_and_tracking(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

@@ -1,8 +1,4 @@
 import React, { useEffect, useState } from "react";
-import {
-  Camera,
-  Copy,
-} from "lucide-react";
 import { liveFramingStyle, normalizedLiveFraming } from "../liveFraming.mjs";
 import { appUrl } from "../shared/api.js";
 import { clearMaskedUrlPassword, clearMaskedSecret, secretInputValue, secretInputHint } from "../shared/secrets.js";

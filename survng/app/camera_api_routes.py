@@ -18,6 +18,12 @@ from .go2rtc import Go2RtcError
 from .incident_utils import event_snapshot_path, snapshot_media_type
 from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator
+from .media_sessions import (
+    MediaResourceClass,
+    MediaSessionAdmissionError,
+    MediaSessionKind,
+    MediaSessionRequest,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -204,28 +210,59 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
         fps: float = 4.0,
     ) -> StreamingResponse:
         with deps.manager_lock:
-            worker = deps.get_manager().workers.get(camera_id)
+            active_manager = deps.get_manager()
+            worker = active_manager.workers.get(camera_id)
             if worker is None:
                 raise HTTPException(status_code=404, detail="camera not found")
             if not worker.status().get("running"):
                 raise HTTPException(status_code=503, detail="camera is powered off")
+        try:
+            session = active_manager.media_sessions.acquire(
+                MediaSessionRequest(
+                    MediaSessionKind.MJPEG,
+                    camera_id=camera_id,
+                    source=source,
+                    resources={MediaResourceClass.JPEG_ENCODER: 1},
+                    owner_generation=active_manager.media_session_generation,
+                ),
+                blocking=False,
+            )
+        except MediaSessionAdmissionError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
         frame_interval = 1.0 / max(0.5, min(4.0, fps))
 
         async def frames():
-            while not await request.is_disconnected():
-                with deps.manager_lock:
-                    if deps.get_manager().workers.get(camera_id) is not worker:
-                        return
-                image = await asyncio.to_thread(worker.snapshot, source)
-                if image is not None:
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n"
-                        b"Cache-Control: no-cache\r\n\r\n"
-                        + image
-                        + b"\r\n"
+            try:
+                while (
+                    not session.cancelled()
+                    and not await request.is_disconnected()
+                ):
+                    with deps.manager_lock:
+                        if deps.get_manager().workers.get(camera_id) is not worker:
+                            return
+                    image = await asyncio.to_thread(worker.snapshot, source)
+                    if image is not None:
+                        frame = (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n"
+                            b"Cache-Control: no-cache\r\n\r\n"
+                            + image
+                            + b"\r\n"
+                        )
+                        session.add_usage(
+                            bytes_out=len(frame),
+                            frames=1,
+                        )
+                        yield frame
+                    await asyncio.sleep(
+                        frame_interval if image is not None else 0.1
                     )
-                await asyncio.sleep(frame_interval if image is not None else 0.1)
+            finally:
+                session.close()
 
         return StreamingResponse(
             frames(),
@@ -255,7 +292,28 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
             return
         accepted = False
         tasks: list[asyncio.Task] = []
+        session = None
         try:
+            kind = (
+                MediaSessionKind.GO2RTC_WEBRTC
+                if transport == "WebRTC signaling"
+                else MediaSessionKind.GO2RTC_MSE
+            )
+            session = active_manager.media_sessions.acquire(
+                MediaSessionRequest(
+                    kind,
+                    camera_id=camera_id,
+                    source=websocket.query_params.get("source", "live"),
+                    resources={MediaResourceClass.RELAY: 1},
+                    owner_generation=active_manager.media_session_generation,
+                ),
+                blocking=False,
+            )
+            loop = asyncio.get_running_loop()
+            cancellation = asyncio.Event()
+            session.cancellation.add_callback(
+                lambda _reason: loop.call_soon_threadsafe(cancellation.set)
+            )
             async with websockets.connect(
                 upstream_url,
                 open_timeout=5,
@@ -289,6 +347,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 tasks = [
                     asyncio.create_task(browser_to_go2rtc()),
                     asyncio.create_task(go2rtc_to_browser()),
+                    asyncio.create_task(cancellation.wait()),
                 ]
                 done, pending = await asyncio.wait(
                     tasks, return_when=asyncio.FIRST_COMPLETED
@@ -296,6 +355,8 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*done, *pending, return_exceptions=True)
+        except MediaSessionAdmissionError:
+            pass
         except (WebSocketDisconnect, websockets.ConnectionClosed):
             pass
         except Exception as exc:
@@ -306,6 +367,8 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                     task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            if session is not None:
+                session.close()
             try:
                 await websocket.close(code=1000 if accepted else 1013)
             except (RuntimeError, WebSocketDisconnect):

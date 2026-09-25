@@ -49,7 +49,6 @@ export const ShakaVideo = forwardRef(function ShakaVideo({
     let disposed = false;
     let nextPlayer = null;
     let shaka = null;
-    let handleError = null;
     loadShaka().then((loadedShaka) => {
       if (disposed) return;
       shaka = loadedShaka;
@@ -59,8 +58,6 @@ export const ShakaVideo = forwardRef(function ShakaVideo({
         return;
       }
       nextPlayer = new shaka.Player();
-      handleError = (event) => callbacksRef.current.onError?.(event.detail || event);
-      nextPlayer.addEventListener("error", handleError);
       nextPlayer.configure({
         streaming: {
           preferNativeHls: PREFER_NATIVE_HLS,
@@ -74,7 +71,6 @@ export const ShakaVideo = forwardRef(function ShakaVideo({
     }).catch((error) => callbacksRef.current.onError?.(error));
     return () => {
       disposed = true;
-      if (nextPlayer && handleError) nextPlayer.removeEventListener("error", handleError);
       nextPlayer?.destroy();
     };
   }, [bufferingGoal]);
@@ -82,8 +78,19 @@ export const ShakaVideo = forwardRef(function ShakaVideo({
   useEffect(() => {
     if (!runtime?.player || !src) return undefined;
     let cancelled = false;
+    let loadReady = false;
+    const handleError = (event) => {
+      // A superseded load can report its terminal error after the next load
+      // starts. New-load failures are reported by load().catch below; only
+      // forward asynchronous playback errors once this exact load is ready.
+      if (!cancelled && loadReady) {
+        callbacksRef.current.onError?.(event.detail || event);
+      }
+    };
+    runtime.player.addEventListener("error", handleError);
     runtime.player.load(src, Number.isFinite(startTime) ? startTime : null, mimeType).then(() => {
       if (cancelled) return;
+      loadReady = true;
       callbacksRef.current.onReady?.(runtime.player, videoRef.current);
       if (autoPlay) videoRef.current?.play().catch(() => { });
     }).catch((error) => {
@@ -93,6 +100,7 @@ export const ShakaVideo = forwardRef(function ShakaVideo({
     });
     return () => {
       cancelled = true;
+      runtime.player.removeEventListener("error", handleError);
     };
   }, [runtime, src, mimeType, startTime]);
 

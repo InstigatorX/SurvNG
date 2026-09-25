@@ -205,7 +205,6 @@ class MotionAnalysisService:
         ) = None
         self._onvif_effectiveness_provider: Callable[[], dict[str, Any]] | None = None
         self._route_watch_provider: Callable[[str, float], Any | None] | None = None
-        self._route_watch_consumer: Callable[[str, int], bool] | None = None
         self._ema_candidate_sink: (
             Callable[[str, float, dict[str, Any]], object] | None
         ) = None
@@ -306,7 +305,6 @@ class MotionAnalysisService:
         *,
         onvif_effectiveness: Callable[[], dict[str, Any]] | None = None,
         route_watch: Callable[[str, float], Any | None] | None = None,
-        consume_route_watch: Callable[[str, int], bool] | None = None,
         record_ema_candidate: (
             Callable[[str, float, dict[str, Any]], object] | None
         ) = None,
@@ -317,7 +315,6 @@ class MotionAnalysisService:
         """Attach advisory signals that may accelerate persistent EMA checks."""
         self._onvif_effectiveness_provider = onvif_effectiveness
         self._route_watch_provider = route_watch
-        self._route_watch_consumer = consume_route_watch
         self._ema_candidate_sink = record_ema_candidate
         self._ema_candidate_source = load_ema_candidates
 
@@ -476,6 +473,7 @@ class MotionAnalysisService:
         if (
             stop_event.is_set()
             or not self._accepting_frames
+            or not self.state.detection_enabled()
             or not self.qualification.frame_analysis_required()
         ):
             return False
@@ -855,11 +853,6 @@ class MotionAnalysisService:
     def visual_backup_scene_ready(self) -> bool:
         with self._visual_lock:
             return self.ema_v2.scene_ready
-
-    @property
-    def visual_backup_stable_samples(self) -> int:
-        with self._visual_lock:
-            return self.ema_v2.observation_count
 
     def run(self, stop_event: threading.Event) -> None:
         try:

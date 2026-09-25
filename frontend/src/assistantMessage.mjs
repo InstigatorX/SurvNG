@@ -1,5 +1,3 @@
-const CITATION_PATTERN = /\[(E[A-Za-z0-9_-]+)\]/g;
-
 /** Remove grounding markers like [E-system] from reader-facing answer text. */
 export function stripAssistantCitationMarkers(text) {
   return String(text || "")
@@ -7,29 +5,6 @@ export function stripAssistantCitationMarkers(text) {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
-}
-
-/** Split assistant prose into plain text and citation tokens for interactive rendering. */
-export function splitAssistantCitations(text) {
-  const source = String(text || "");
-  if (!source) return [];
-  const parts = [];
-  let lastIndex = 0;
-  for (const match of source.matchAll(CITATION_PATTERN)) {
-    const index = match.index ?? 0;
-    if (index > lastIndex) parts.push({ type: "text", value: source.slice(lastIndex, index) });
-    parts.push({ type: "citation", value: match[0], evidenceId: match[1] });
-    lastIndex = index + match[0].length;
-  }
-  if (lastIndex < source.length) parts.push({ type: "text", value: source.slice(lastIndex) });
-  return parts.length ? parts : [{ type: "text", value: source }];
-}
-
-export function assistantEvidenceLabel(evidence) {
-  if (!evidence) return "Evidence";
-  const title = String(evidence.title || "").trim();
-  if (title) return title;
-  return String(evidence.id || "Evidence");
 }
 
 /** Context-aware status lines while waiting for a full chat response. */

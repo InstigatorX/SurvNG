@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .camera_fleet import CameraFleetLifecycle
+from .camera_lifecycle import DetectionShutdownIncomplete
 from .config import AppConfig, CameraConfig
 from .mqtt_lifecycle import MqttLifecycle
 from .recording_lifecycle import RecordingLifecycle
@@ -232,6 +233,11 @@ class CameraControlService:
             self._update_preference_locked("detection_enabled", camera_id, enabled)
             try:
                 self._workers[camera_id].set_detection_enabled(enabled)
+            except DetectionShutdownIncomplete:
+                # The off preference is authoritative even when draining fails.
+                self._mqtt.publish_camera_feature_state(camera_id, "detection", False)
+                self._runtime_monitor.publish_camera_status(camera_id)
+                raise
             except BaseException:
                 self._restore_preference_locked(
                     "detection_enabled",

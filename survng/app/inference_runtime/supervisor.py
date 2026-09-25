@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from ..evidence_work import EvidenceWorkPreempted, check_evidence_cancellation, evidence_wait_timeout, evidence_work_active
+from ..evidence_work import EvidenceWorkPreempted, check_evidence_cancellation, evidence_wait_timeout, optional_evidence_work_active
 from ..config import DetectorConfig
 from ..perf_samples import RollingLatencySamples
 from .backend import InferenceWorkerBackend, InferenceWorkerFactory
@@ -635,6 +635,7 @@ class InferenceSupervisor:
             "device": self.config.face_recognition_device,
             "model_path": self.config.face_embedding_model_path,
             "landmark_model_path": self.config.face_landmark_model_path,
+            "embedding_profile": self.config.face_embedding_profile,
             "detector": {
                 "enabled": bool(self.config.face_detection_model_path),
                 "ready": False,
@@ -837,7 +838,7 @@ class InferenceSupervisor:
         confidence_threshold: float | None,
         workload: InferenceWorkload,
     ) -> list[dict[str, Any]]:
-        recovering_cover = evidence_work_active()
+        recovering_cover = optional_evidence_work_active()
         if recovering_cover:
             # Cover recovery shares the sampler, but must yield to security
             # jobs from every camera at each inference admission boundary.

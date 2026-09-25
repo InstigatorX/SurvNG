@@ -422,6 +422,9 @@ class FaceStoreQueryMixin:
     def _observation_row(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item.pop("embedding_blob", None)
+        # Retired body embeddings can still exist in upgraded SQLite schemas.
+        # Keep these private bytes out of observation/API projections too.
+        item.pop("body_embedding_blob", None)
         try:
             item["box"] = parse_face_box(json.loads(item.pop("box_json"))) or {}
         except (TypeError, json.JSONDecodeError):

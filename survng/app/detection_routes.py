@@ -393,7 +393,6 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
             limiter.release()
 
     @router.post("/api/detector/frame")
-    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     async def detect_debug_frame(
         request: Request,
         confidence: float = 0.35,
@@ -422,8 +421,18 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
             payload.extend(chunk)
         if not payload:
             raise HTTPException(status_code=422, detail="invalid debug frame")
+        # Uploading does not use a manager. Decode and inference share a worker-
+        # owned lease that outlives HTTP cancellation and never blocks the loop.
+        return await asyncio.to_thread(
+            analyze_debug_frame, bytes(payload), confidence, depth, heatmap,
+        )
+
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
+    def analyze_debug_frame(
+        payload: bytes, confidence: float, depth: bool, heatmap: bool,
+    ) -> dict[str, Any]:
         frame = cv2.imdecode(
-            np.frombuffer(bytes(payload), dtype=np.uint8), cv2.IMREAD_COLOR
+            np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR
         )
         if frame is None:
             raise HTTPException(status_code=422, detail="failed to decode debug frame")
@@ -433,9 +442,7 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
         active_manager = deps.get_manager()
         active_detector = active_manager.detector
         started = time.perf_counter()
-        objects = await asyncio.to_thread(
-            active_detector.detect, frame, confidence_threshold=safe_confidence
-        )
+        objects = active_detector.detect(frame, confidence_threshold=safe_confidence)
         detector_error = detection_failure(objects)
         if detector_error:
             raise HTTPException(status_code=503, detail=detector_error)
@@ -469,8 +476,7 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
                     "workload": InferenceWorkload.INTERACTIVE,
                 }
                 try:
-                    enriched, depth_metadata = await asyncio.to_thread(
-                        estimate_depth,
+                    enriched, depth_metadata = estimate_depth(
                         frame,
                         filtered_objects,
                         **depth_kwargs,

@@ -29,7 +29,7 @@ def test_collect_face_candidates_ranks_diverse_frames_per_track() -> None:
     )
 
     assert len(candidates) == 3
-    assert {candidate.track_id for candidate in candidates} == {"face-1"}
+    assert len({candidate.track_id for candidate in candidates}) == 1
     assert candidates[0].rank == 1
     assert candidates[0].offset_seconds == 0.2
     assert [candidate.rank for candidate in candidates] == [1, 2, 3]
@@ -49,10 +49,10 @@ def test_collect_face_candidates_keeps_people_separate_and_bounded() -> None:
     candidates = collect_face_candidates(samples, max_per_track=2)
 
     assert len(candidates) == 4
-    assert {candidate.track_id for candidate in candidates} == {"face-1", "face-2"}
+    assert len({candidate.track_id for candidate in candidates}) == 2
     assert all(
         sum(item.track_id == track_id for item in candidates) == 2
-        for track_id in {"face-1", "face-2"}
+        for track_id in {item.track_id for item in candidates}
     )
 
 
@@ -70,6 +70,28 @@ def test_collect_face_candidates_ignores_non_faces_and_invalid_boxes() -> None:
     ))
 
     assert candidates == ()
+
+
+def test_refined_samples_are_sorted_and_long_gaps_start_new_tracks() -> None:
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    samples = [FaceCandidateSample(offset, frame, (_face(20, quality=.8),))
+               for offset in (1.0, 0.0, .5, 8.0)]
+    candidates = collect_face_candidates(samples)
+    tracks = {candidate.track_id for candidate in candidates}
+    assert len(tracks) == 2
+    groups = {frozenset(candidate.offset_seconds for candidate in candidates if candidate.track_id == key) for key in tracks}
+    assert groups == {frozenset([0., .5, 1.]), frozenset([8.])}
+
+
+def test_new_earlier_person_cannot_take_an_existing_groups_id() -> None:
+    frame = np.zeros((120, 500, 3), dtype=np.uint8)
+    original = [FaceCandidateSample(1., frame, (_face(350, quality=.8),))]
+    original_id = collect_face_candidates(original)[0].track_id
+    refined = collect_face_candidates([
+        FaceCandidateSample(0., frame, (_face(20, quality=.8),)), *original,
+    ])
+    assert next(item.track_id for item in refined if item.offset_seconds == 1.) == original_id
+    assert next(item.track_id for item in refined if item.offset_seconds == 0.) != original_id
 
 
 def test_collect_face_candidates_uses_parent_people_to_avoid_face_track_swap() -> None:
