@@ -11,12 +11,19 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from .config import DetectorConfig
 from .inference_runtime.protocol import (
     ProtocolError,
     WorkerHeartbeat,
     WorkerReady,
     WorkerRegistration,
     decode_packet,
+    encode_binary_packet,
+)
+from .inference_runtime.model_sync import (
+    MODEL_SYNC_CHUNK_BYTES,
+    ModelBundleCatalog,
+    ModelSyncError,
 )
 from .inference_runtime.registry import RemoteInferenceRegistry
 from .inference_runtime.types import InferenceUnavailable
@@ -101,6 +108,7 @@ class WebSocketRegistryTransport:
 class InferenceWorkerRouteDependencies:
     registry: RemoteInferenceRegistry
     authenticate: Callable[[str], bool]
+    model_catalog: ModelBundleCatalog
 
 
 def create_inference_worker_router(
@@ -130,10 +138,56 @@ def create_inference_worker_router(
             )
             worker_id = registration.worker_id
             welcome = deps.registry.register(registration, transport)
+            prepared = await asyncio.to_thread(
+                deps.model_catalog.prepare,
+                DetectorConfig.model_validate(welcome["detector_config"]),
+                registration.roles,
+            )
+            if (
+                prepared.config_generation
+                != welcome["config_generation"]
+            ):
+                raise InferenceUnavailable(
+                    "detector configuration changed during worker registration"
+                )
+            welcome["detector_config"] = prepared.config.model_dump(
+                mode="json"
+            )
+            welcome["model_manifest"] = prepared.manifest.model_dump(
+                mode="json"
+            )
             connection_generation = int(
                 welcome["connection_generation"]
             )
             await websocket.send_json(welcome)
+            cached = frozenset(registration.cached_model_digests)
+            sent: set[str] = set()
+            for model_file in prepared.manifest.files:
+                if model_file.digest in cached or model_file.digest in sent:
+                    continue
+                source = prepared.sources[model_file.digest]
+                offset = 0
+                with source.open("rb") as handle:
+                    while chunk := handle.read(MODEL_SYNC_CHUNK_BYTES):
+                        await websocket.send_bytes(encode_binary_packet(
+                            {
+                                "type": "model_chunk",
+                                "digest": model_file.digest,
+                                "offset": offset,
+                                "total_size": model_file.size,
+                            },
+                            chunk,
+                        ))
+                        offset += len(chunk)
+                if offset != model_file.size:
+                    raise InferenceUnavailable(
+                        "model artifact changed during synchronization"
+                    )
+                sent.add(model_file.digest)
+            await websocket.send_json({
+                "type": "model_sync_complete",
+                "generation": prepared.manifest.generation,
+            })
             sender = asyncio.create_task(transport.send_loop(websocket))
             while True:
                 message = await websocket.receive()
@@ -178,6 +232,7 @@ def create_inference_worker_router(
             asyncio.TimeoutError,
             json.JSONDecodeError,
             ProtocolError,
+            ModelSyncError,
             ValidationError,
             InferenceUnavailable,
         ):

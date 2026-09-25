@@ -37,13 +37,18 @@ sudo -u survng-inference .venv/bin/pip install --upgrade pip
 sudo -u survng-inference .venv/bin/pip install -r requirements.txt
 ```
 
-Mount or copy model files at the same absolute paths used by the main SurvNG
-configuration. The server sends its detector configuration to the worker and
-rejects workers running a different configuration generation.
+Do not copy or mount model files. On each authenticated connection, the primary
+server sends a content-addressed manifest and streams only model files that are
+not already cached by the worker. Files are SHA-256 verified and atomically
+installed under `/var/lib/survng-inference/models` before any inference engine
+starts. An in-place model update changes the generation, removes the worker from
+routing, and is transferred when the worker reconnects.
 
 ## Create a worker credential
 
-Create the dedicated credential while authenticated as an administrator:
+In the primary server UI, open **Admin → Integrations → API Tokens**, create or
+rotate the **Inference worker token**, and copy the one-time value. Alternatively,
+create it while authenticated as an administrator:
 
 ```bash
 curl -fsS -X POST \
@@ -72,7 +77,9 @@ sudo journalctl -u survng-inference -f
 
 `SURVNG_INFERENCE_SERVER` may include SurvNG's configured base path. Workers
 connect outbound to `/api/inference/workers/connect`; no inbound worker port is
-required.
+required. The service runs only `survng.inference_worker`; it does not start the
+web API, camera capture, recording, database, ONVIF, or media services. Configure
+`SURVNG_INFERENCE_WORKER_ROLES` with only the model roles that guest should load.
 
 ## Verify before cutover
 
@@ -106,8 +113,8 @@ model workers.
 
 - Expired heartbeats remove a worker from routing.
 - Reconnecting with the same worker ID fences the old connection.
-- Configuration changes cause the worker to reconnect and reload models after
-  its next heartbeat.
+- Configuration or model-content changes cause the worker to reconnect, fetch
+  only changed model blobs, and reload after its next heartbeat.
 - In hybrid mode only `INCIDENT_INITIAL` may fall back locally. Tracking and
   enrichment are deferred when remote capacity is unavailable.
 - In remote mode unavailable workers produce the existing detector-unavailable

@@ -71,6 +71,7 @@ from .intelligence_routes import (
     create_intelligence_router,
 )
 from .inference_runtime.registry import RemoteInferenceRegistry
+from .inference_runtime.model_sync import ModelBundleCatalog
 from .inference_worker_routes import (
     InferenceWorkerRouteDependencies,
     create_inference_worker_router,
@@ -141,9 +142,11 @@ SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 INCIDENT_QUERIES = IncidentQueryService()
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
+INFERENCE_MODEL_CATALOG = ModelBundleCatalog()
 INFERENCE_WORKER_REGISTRY = RemoteInferenceRegistry(
     lambda: config.detector,
     lease_seconds=config.inference_workers.lease_seconds,
+    generation_provider=INFERENCE_MODEL_CATALOG.config_generation,
 )
 
 
@@ -1040,6 +1043,7 @@ app.include_router(
     create_inference_worker_router(
         InferenceWorkerRouteDependencies(
             registry=INFERENCE_WORKER_REGISTRY,
+            model_catalog=INFERENCE_MODEL_CATALOG,
             authenticate=lambda authorization: authenticate_inference_worker(
                 authorization,
                 config.inference_workers.worker_token_hash,

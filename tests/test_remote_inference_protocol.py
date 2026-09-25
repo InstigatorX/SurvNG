@@ -13,6 +13,7 @@ from survng.app.inference_runtime.protocol import (
     WorkerRegistration,
     decode_frame,
     decode_packet,
+    encode_binary_packet,
     encode_packet,
 )
 from survng.app.inference_runtime.registry import (
@@ -72,6 +73,18 @@ class RemoteInferenceProtocolTests(unittest.TestCase):
                 {"type": "request"},
                 frame=np.zeros((8, 8), dtype=np.uint8),
             )
+
+    def test_binary_packet_round_trip_is_bounded(self) -> None:
+        packet = encode_binary_packet(
+            {"type": "model_chunk", "digest": "a" * 64},
+            b"model-bytes",
+        )
+
+        message, payload = decode_packet(packet)
+
+        self.assertEqual(message["type"], "model_chunk")
+        self.assertEqual(message["binary"]["byte_count"], len(payload))
+        self.assertEqual(payload, b"model-bytes")
 
 
 class RemoteInferenceRegistryTests(unittest.TestCase):

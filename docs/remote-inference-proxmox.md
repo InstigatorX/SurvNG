@@ -128,13 +128,17 @@ discarded.
 
 ### Models are generation-safe
 
-Registration advertises model fingerprints and protocol capabilities. A
-request names the required model generation or fingerprint. A worker with a
-different model must not receive the request.
+Registration advertises verified content-addressed model blobs already cached
+by the worker. The primary hashes every configured model package, sends a
+manifest, and streams only missing blobs in bounded binary chunks. The worker
+verifies SHA-256 digests and atomically materializes role-specific model paths
+before reporting ready. A worker with a different generation does not receive
+requests.
 
-Workers load and warm models before advertising readiness. Configuration
-rollout must retain the prior usable generation until the replacement is ready,
-matching the existing transactional reconfiguration behavior.
+The generation includes both detector configuration and model contents, so
+replacing a model in place is detected without changing its configured path.
+Workers reconnect on the next heartbeat, fetch changed blobs, and warm the new
+generation before advertising readiness.
 
 ### Local behavior remains available
 
@@ -174,8 +178,7 @@ The worker sends:
 - available roles and slot count;
 - device names;
 - maximum frame size;
-- active model generation and per-role fingerprints;
-- readiness and warmup status.
+- SHA-256 digests of verified cached model blobs.
 
 The server replies with:
 
@@ -183,7 +186,9 @@ The server replies with:
 - connection generation;
 - heartbeat interval and lease duration;
 - active configuration/model generation;
-- role admission policy.
+- a role-limited detector configuration;
+- model file manifest, bindings, sizes, and digests;
+- bounded binary chunks for blobs absent from the worker cache.
 
 ### Requests
 
@@ -246,13 +251,19 @@ The supported first deployment is one unprivileged Debian or Ubuntu LXC guest
 per accelerator-capable node:
 
 - OpenVINO and SurvNG worker code installed in a virtual environment;
-- models mounted or copied at consistent `/models/...` paths;
+- writable content-addressed model cache under
+  `/var/lib/survng-inference/models`;
 - `/dev/dri/renderD128` passed through;
 - host render group mapped into the guest;
 - bridged private network;
 - worker managed by systemd;
 - stable worker ID under `/var/lib/survng-inference`;
 - configuration under `/etc/survng-inference`.
+
+The worker unit starts only `python -m survng.inference_worker`. It does not
+start the primary web API, camera, recorder, database, ONVIF, or media services,
+and it disables inference roles not listed in
+`SURVNG_INFERENCE_WORKER_ROLES`.
 
 GPU-bound containers belong to a Proxmox HA group restricted to compatible
 nodes. Live migration is not assumed to preserve active accelerator work.

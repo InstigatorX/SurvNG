@@ -7,16 +7,17 @@ import struct
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .types import MAX_INFERENCE_FRAME_BYTES
 
 
-INFERENCE_PROTOCOL_VERSION = 1
+INFERENCE_PROTOCOL_VERSION = 2
 MAX_PROTOCOL_HEADER_BYTES = 2 * 1024 * 1024
 MAX_PROTOCOL_PACKET_BYTES = (
     4 + MAX_PROTOCOL_HEADER_BYTES + MAX_INFERENCE_FRAME_BYTES
 )
+MAX_PROTOCOL_BINARY_BYTES = 2 * 1024 * 1024
 _HEADER_LENGTH = struct.Struct("!I")
 _BYTES_MARKER = "__survng_bytes_b64__"
 WorkerRole = Literal["object", "face", "reid", "depth"]
@@ -46,6 +47,24 @@ class WorkerRegistration(BaseModel):
     )
     software_version: str = Field(default="", max_length=128)
     devices: list[str] = Field(default_factory=list, max_length=32)
+    cached_model_digests: list[str] = Field(
+        default_factory=list,
+        max_length=2048,
+    )
+
+    @field_validator("cached_model_digests")
+    @classmethod
+    def validate_cached_model_digests(
+        cls,
+        value: list[str],
+    ) -> list[str]:
+        if any(
+            len(item) != 64
+            or any(character not in "0123456789abcdef" for character in item)
+            for item in value
+        ):
+            raise ValueError("cached model digests must be lowercase SHA-256")
+        return list(dict.fromkeys(value))
 
 
 class WorkerReady(BaseModel):
@@ -149,6 +168,33 @@ def encode_packet(
     return _HEADER_LENGTH.pack(len(header)) + header + frame_bytes
 
 
+def encode_binary_packet(
+    message: dict[str, Any],
+    payload_bytes: bytes,
+) -> bytes:
+    if (
+        not isinstance(payload_bytes, bytes)
+        or not payload_bytes
+        or len(payload_bytes) > MAX_PROTOCOL_BINARY_BYTES
+    ):
+        raise ProtocolError("protocol binary payload has an invalid size")
+    payload = dict(message)
+    if "frame" in payload or "binary" in payload:
+        raise ProtocolError("protocol binary metadata is reserved")
+    payload["binary"] = {"byte_count": len(payload_bytes)}
+    try:
+        header = json.dumps(
+            _json_safe(payload),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ProtocolError("protocol message is not serializable") from error
+    if not header or len(header) > MAX_PROTOCOL_HEADER_BYTES:
+        raise ProtocolError("protocol header is empty or too large")
+    return _HEADER_LENGTH.pack(len(header)) + header + payload_bytes
+
+
 def decode_packet(packet: bytes) -> tuple[dict[str, Any], bytes]:
     if not isinstance(packet, bytes):
         raise ProtocolError("protocol packet must be bytes")
@@ -171,6 +217,26 @@ def decode_packet(packet: bytes) -> tuple[dict[str, Any], bytes]:
     message = _json_restore(raw)
     frame_bytes = packet[header_end:]
     frame_metadata = message.get("frame")
+    binary_metadata = message.get("binary")
+    if frame_metadata is not None and binary_metadata is not None:
+        raise ProtocolError("protocol packet has multiple binary payloads")
+    if binary_metadata is not None:
+        if (
+            not isinstance(binary_metadata, dict)
+            or set(binary_metadata) != {"byte_count"}
+        ):
+            raise ProtocolError("invalid protocol binary metadata")
+        try:
+            byte_count = int(binary_metadata["byte_count"])
+        except (TypeError, ValueError) as error:
+            raise ProtocolError("invalid protocol binary size") from error
+        if (
+            byte_count <= 0
+            or byte_count != len(frame_bytes)
+            or byte_count > MAX_PROTOCOL_BINARY_BYTES
+        ):
+            raise ProtocolError("invalid protocol binary payload")
+        return message, frame_bytes
     if frame_metadata is None:
         if frame_bytes:
             raise ProtocolError("unexpected protocol frame bytes")

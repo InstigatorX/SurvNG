@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 import stat
 import tempfile
@@ -17,7 +18,13 @@ from survng.app.inference import InferenceWorkload
 from survng.app.inference_runtime.protocol import (
     WorkerRegistration,
     decode_packet,
+    encode_binary_packet,
     encode_packet,
+)
+from survng.app.inference_runtime.model_sync import (
+    ModelBundleCatalog,
+    WorkerModelCache,
+    worker_config_for_roles,
 )
 from survng.app.inference_runtime.registry import RemoteInferenceRegistry
 from survng.app.inference_worker_routes import (
@@ -150,6 +157,104 @@ class InferenceWorkerClientTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         supervisor.detect_initial.assert_not_called()
 
+    def test_worker_role_config_does_not_start_unrequested_engines(self) -> None:
+        config = DetectorConfig(
+            enabled=True,
+            model_path="/models/object.onnx",
+            face_recognition_enabled=True,
+            face_embedding_model_path="/models/face.xml",
+            face_landmark_model_path="/models/landmark.xml",
+            tracking={
+                "reid_enabled": True,
+                "reid_model_path": "/models/reid.xml",
+            },
+            depth={
+                "enabled": True,
+                "model_path": "/models/depth.xml",
+            },
+        )
+
+        worker_config = worker_config_for_roles(config, ["object"])
+
+        self.assertTrue(worker_config.enabled)
+        self.assertEqual(worker_config.object_worker_count, 1)
+        self.assertFalse(worker_config.face_recognition_enabled)
+        self.assertFalse(worker_config.tracking.reid_enabled)
+        self.assertFalse(worker_config.depth.enabled)
+        self.assertEqual(worker_config.inference_mode, "local")
+
+
+class ModelSynchronizationTests(unittest.TestCase):
+    def test_catalog_tracks_model_content_and_materializes_worker_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "object.onnx"
+            source.write_bytes(b"first-model")
+            config = DetectorConfig(
+                enabled=True,
+                model_path=str(source),
+                object_worker_count=2,
+                tracking={"enabled": False},
+            )
+            catalog = ModelBundleCatalog()
+            first = catalog.prepare(config, ["object"])
+            source.write_bytes(b"updated-model")
+            second = catalog.prepare(config, ["object"])
+
+            self.assertNotEqual(
+                first.config_generation,
+                second.config_generation,
+            )
+            self.assertNotEqual(
+                first.manifest.files[0].digest,
+                second.manifest.files[0].digest,
+            )
+            self.assertEqual(first.config.object_worker_count, 1)
+
+            cache = WorkerModelCache(root / "cache")
+            model_file = second.manifest.files[0]
+            packet = encode_binary_packet(
+                {
+                    "type": "model_chunk",
+                    "digest": model_file.digest,
+                    "offset": 0,
+                    "total_size": model_file.size,
+                },
+                source.read_bytes(),
+            )
+            websocket = Mock()
+            websocket.recv.side_effect = [
+                packet,
+                json.dumps({
+                    "type": "model_sync_complete",
+                    "generation": second.manifest.generation,
+                }),
+            ]
+
+            cache.receive(websocket, second.manifest)
+            worker_config = cache.materialize(
+                second.config,
+                second.manifest,
+            )
+
+            worker_path = Path(worker_config.model_path)
+            self.assertEqual(worker_path.read_bytes(), b"updated-model")
+            self.assertTrue(
+                worker_path.is_relative_to(root / "cache" / "bundles")
+            )
+
+    def test_cached_model_digests_are_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = WorkerModelCache(Path(temporary))
+            cache.blob_dir.mkdir(parents=True)
+            invalid = cache.blob_dir / ("a" * 64)
+            invalid.write_bytes(b"not-the-advertised-content")
+
+            self.assertEqual(cache.available_digests(), [])
+            self.assertFalse(invalid.exists())
+
 
 class WebSocketRegistryTransportTests(
     unittest.IsolatedAsyncioTestCase
@@ -189,12 +294,17 @@ class InferenceWorkerRouteTests(unittest.TestCase):
             object_worker_count=1,
             tracking={"enabled": False},
         )
-        self.registry = RemoteInferenceRegistry(lambda: self.config)
+        self.catalog = ModelBundleCatalog()
+        self.registry = RemoteInferenceRegistry(
+            lambda: self.config,
+            generation_provider=self.catalog.config_generation,
+        )
         token_hash = hash_api_token("worker-secret")
         app = FastAPI()
         app.include_router(create_inference_worker_router(
             InferenceWorkerRouteDependencies(
                 registry=self.registry,
+                model_catalog=self.catalog,
                 authenticate=lambda value: authenticate_inference_worker(
                     value,
                     token_hash,
@@ -217,6 +327,8 @@ class InferenceWorkerRouteTests(unittest.TestCase):
                 roles=["object"],
             ).model_dump_json())
             welcome = websocket.receive_json()
+            model_sync = websocket.receive_json()
+            self.assertEqual(model_sync["type"], "model_sync_complete")
             websocket.send_json({
                 "type": "ready",
                 "worker_id": "worker-a",
@@ -248,6 +360,41 @@ class InferenceWorkerRouteTests(unittest.TestCase):
                 pass
 
         self.assertEqual(raised.exception.code, 1008)
+
+    def test_primary_pushes_missing_model_before_worker_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_path = Path(temporary) / "object.onnx"
+            model_path.write_bytes(b"remote-object-model")
+            self.config = DetectorConfig(
+                enabled=True,
+                model_path=str(model_path),
+                object_worker_count=1,
+                tracking={"enabled": False},
+            )
+            with self.client.websocket_connect(
+                "/api/inference/workers/connect",
+                headers={"Authorization": "Bearer worker-secret"},
+            ) as websocket:
+                websocket.send_text(WorkerRegistration(
+                    worker_id="worker-model",
+                    roles=["object"],
+                ).model_dump_json())
+                welcome = websocket.receive_json()
+                packet = websocket.receive_bytes()
+                complete = websocket.receive_json()
+
+            message, payload = decode_packet(packet)
+            manifest_file = welcome["model_manifest"]["files"][0]
+            self.assertEqual(message["type"], "model_chunk")
+            self.assertEqual(message["digest"], manifest_file["digest"])
+            self.assertEqual(payload, b"remote-object-model")
+            self.assertEqual(
+                complete,
+                {
+                    "type": "model_sync_complete",
+                    "generation": welcome["model_manifest"]["generation"],
+                },
+            )
 
 
 if __name__ == "__main__":

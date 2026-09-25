@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from collections.abc import Iterable
 import threading
 import time
 from typing import Any
@@ -34,10 +35,16 @@ class InferenceSupervisor:
         config: DetectorConfig,
         *,
         worker_factory: InferenceWorkerFactory = _InferenceWorker,
+        enabled_roles: Iterable[str] | None = None,
     ) -> None:
         self._config_lock = threading.RLock()
         self.config = config
         self._worker_factory = worker_factory
+        self._enabled_roles = (
+            None
+            if enabled_roles is None
+            else frozenset(str(role) for role in enabled_roles)
+        )
         self.labels = load_detector_labels(config)
         self.enabled = bool(
             config.enabled
@@ -81,19 +88,29 @@ class InferenceSupervisor:
             config,
             "face",
             self._base_face_status(),
-            start_enabled=bool(config.face_recognition_enabled),
+            start_enabled=bool(
+                config.face_recognition_enabled
+                and self._role_enabled("face")
+            ),
         )
         self._reid = self._worker_factory(
             config,
             "reid",
             self._base_reid_status(),
-            start_enabled=bool(config.tracking.appearance_reid_enabled),
+            start_enabled=bool(
+                config.tracking.appearance_reid_enabled
+                and self._role_enabled("reid")
+            ),
         )
         self._depth = self._worker_factory(
             config,
             "depth",
             self._base_depth_status(),
-            start_enabled=bool(config.depth.enabled and config.depth.resolved_model_path()),
+            start_enabled=bool(
+                config.depth.enabled
+                and config.depth.resolved_model_path()
+                and self._role_enabled("depth")
+            ),
         )
         # The depth role has one process/infer request. Do not let optional
         # tracking or replay callers build a FIFO in front of later security
@@ -109,13 +126,35 @@ class InferenceSupervisor:
         config: DetectorConfig,
     ) -> list[InferenceWorkerBackend]:
         return [
-            self._worker_factory(
-                config,
-                "object",
-                self._base_detector_status(),
+            (
+                self._worker_factory(
+                    config,
+                    "object",
+                    self._base_detector_status(),
+                )
+                if self._enabled_roles is None
+                else self._worker_factory(
+                    config,
+                    "object",
+                    self._base_detector_status(),
+                    start_enabled=bool(
+                        self._role_enabled("object")
+                        and config.enabled
+                        and (
+                            config.resolved_model_path()
+                            or config.resolved_coreml_model_path()
+                        )
+                    ),
+                )
             )
             for _index in range(self._effective_object_worker_count(config))
         ]
+
+    def _role_enabled(self, role: str) -> bool:
+        return (
+            self._enabled_roles is None
+            or role in self._enabled_roles
+        )
 
     def _ordered_object_workers(
         self,

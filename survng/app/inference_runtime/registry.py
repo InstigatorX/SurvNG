@@ -66,8 +66,12 @@ class RemoteInferenceRegistry:
         *,
         lease_seconds: float = 20.0,
         clock: Callable[[], float] = time.monotonic,
+        generation_provider: Callable[[DetectorConfig], str] = (
+            detector_config_generation
+        ),
     ) -> None:
         self._config_provider = config_provider
+        self._generation_provider = generation_provider
         self._lease_seconds = max(5.0, float(lease_seconds))
         self._clock = clock
         self._lock = threading.RLock()
@@ -109,7 +113,7 @@ class RemoteInferenceRegistry:
             "connection_generation": generation,
             "heartbeat_seconds": max(1.0, self._lease_seconds / 3.0),
             "lease_seconds": self._lease_seconds,
-            "config_generation": detector_config_generation(config),
+            "config_generation": self._generation_provider(config),
             "detector_config": config.model_dump(mode="json"),
         }
 
@@ -121,7 +125,7 @@ class RemoteInferenceRegistry:
             )
             if worker is None:
                 return False
-            expected = detector_config_generation(self._config_provider())
+            expected = self._generation_provider(self._config_provider())
             worker.config_generation = ready.config_generation
             worker.statuses = dict(ready.statuses)
             worker.ready = ready.config_generation == expected
@@ -240,7 +244,7 @@ class RemoteInferenceRegistry:
         return self._select_worker(role, reserve=False) is not None
 
     def config_generation(self) -> str:
-        return detector_config_generation(self._config_provider())
+        return self._generation_provider(self._config_provider())
 
     def status(self) -> dict[str, Any]:
         expired = self._prune_expired()
@@ -305,7 +309,7 @@ class RemoteInferenceRegistry:
         expired = self._prune_expired()
         for worker in expired:
             worker.transport.close("worker lease expired")
-        expected_generation = detector_config_generation(self._config_provider())
+        expected_generation = self._generation_provider(self._config_provider())
         with self._lock:
             candidates = [
                 worker

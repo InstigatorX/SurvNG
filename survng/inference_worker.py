@@ -24,10 +24,15 @@ from .app.inference_runtime.protocol import (
     decode_packet,
     encode_packet,
 )
+from .app.inference_runtime.model_sync import (
+    ModelBundleManifest,
+    WorkerModelCache,
+)
 
 
 LOGGER = logging.getLogger("survng.inference-worker")
 DEFAULT_WORKER_ID_PATH = Path("/var/lib/survng-inference/worker-id")
+DEFAULT_MODEL_CACHE_PATH = Path("/var/lib/survng-inference/models")
 
 
 def load_or_create_worker_id(path: Path) -> str:
@@ -146,12 +151,14 @@ class InferenceWorkerClient:
         worker_id: str,
         name: str,
         roles: list[str],
+        model_cache_dir: Path = DEFAULT_MODEL_CACHE_PATH,
     ) -> None:
         self.server_url = worker_websocket_url(server_url)
         self.token = token
         self.worker_id = worker_id
         self.name = name
         self.roles = roles
+        self.model_cache = WorkerModelCache(model_cache_dir)
 
     def run_once(self) -> None:
         from websockets.sync.client import connect
@@ -161,6 +168,7 @@ class InferenceWorkerClient:
             name=self.name,
             roles=self.roles,
             software_version=os.environ.get("SURVNG_GIT_SHA", ""),
+            cached_model_digests=self.model_cache.available_digests(),
         )
         with connect(
             self.server_url,
@@ -189,7 +197,15 @@ class InferenceWorkerClient:
             config = DetectorConfig.model_validate(
                 welcome["detector_config"]
             )
-            supervisor = InferenceSupervisor(config)
+            manifest = ModelBundleManifest.model_validate(
+                welcome["model_manifest"]
+            )
+            self.model_cache.receive(websocket, manifest)
+            config = self.model_cache.materialize(config, manifest)
+            supervisor = InferenceSupervisor(
+                config,
+                enabled_roles=self.roles,
+            )
             try:
                 if not supervisor.start():
                     raise RuntimeError("inference engines failed to start")
@@ -332,6 +348,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--model-cache-dir",
+        type=Path,
+        default=Path(
+            os.environ.get(
+                "SURVNG_INFERENCE_MODEL_CACHE_DIR",
+                str(DEFAULT_MODEL_CACHE_PATH),
+            )
+        ),
+    )
+    parser.add_argument(
         "--name",
         default=os.environ.get(
             "SURVNG_INFERENCE_WORKER_NAME",
@@ -364,6 +390,7 @@ def main() -> None:
         worker_id=load_or_create_worker_id(args.worker_id_file),
         name=args.name,
         roles=list(registration.roles),
+        model_cache_dir=args.model_cache_dir,
     )
     logging.basicConfig(
         level=os.environ.get("SURVNG_LOG_LEVEL", "INFO"),
