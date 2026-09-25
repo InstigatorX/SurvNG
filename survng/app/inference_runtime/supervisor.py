@@ -1228,6 +1228,18 @@ class InferenceSupervisor:
         status["configured_device"] = self.config.device
         status["reid"] = self._current_reid_status(reid_status)
         status["workers"] = self.worker_status()
+        alive = isolation.get("all_workers_alive")
+        if alive is None:
+            alive = isolation.get("worker_alive", False)
+        status["ready"] = bool(
+            status.get("enabled")
+            and alive
+            and (
+                status.get("openvino_loaded")
+                or status.get("opencv_loaded")
+                or status.get("coreml_loaded")
+            )
+        )
         return status
 
     def cached_object_status(self) -> dict[str, Any]:

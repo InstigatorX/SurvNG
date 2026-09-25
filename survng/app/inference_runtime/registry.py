@@ -419,7 +419,25 @@ class RemoteInferenceRegistry:
     @staticmethod
     def _role_ready(worker: _WorkerLease, role: WorkerRole) -> bool:
         status = worker.statuses.get(role)
-        return bool(
-            isinstance(status, dict)
-            and status.get("ready")
+        if not isinstance(status, dict) or status.get("enabled") is False:
+            return False
+        if "ready" in status:
+            return bool(status.get("ready"))
+        # Object detector status reports the loaded backend instead of a
+        # ready flag. Face, ReID, and depth always include ready.
+        if role != "object":
+            return False
+        loaded = bool(
+            status.get("openvino_loaded")
+            or status.get("opencv_loaded")
+            or status.get("coreml_loaded")
+            or status.get("loaded_backend")
         )
+        isolation = status.get("isolation")
+        if not isinstance(isolation, dict):
+            return loaded
+        if isolation.get("all_workers_alive") is False:
+            return False
+        if isolation.get("worker_alive") is False:
+            return False
+        return loaded

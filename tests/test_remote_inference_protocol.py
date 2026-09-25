@@ -219,6 +219,80 @@ class RemoteInferenceRegistryTests(unittest.TestCase):
             statuses={"object": {"ready": True}},
         )))
 
+    def test_loaded_object_engine_without_ready_flag_is_routed(self) -> None:
+        transport = _FakeTransport(
+            [{"label": "person", "confidence": 0.9}]
+        )
+        welcome = self.registry.register(
+            WorkerRegistration(worker_id="worker-loaded", roles=["object"]),
+            transport,
+        )
+
+        accepted = self.registry.mark_ready(WorkerReady(
+            worker_id="worker-loaded",
+            connection_generation=welcome["connection_generation"],
+            config_generation=welcome["config_generation"],
+            statuses={
+                "object": {
+                    "enabled": True,
+                    "loaded_backend": "openvino",
+                    "openvino_loaded": True,
+                    "loaded_device": "GPU",
+                    "isolation": {
+                        "worker_alive": True,
+                        "all_workers_alive": True,
+                    },
+                }
+            },
+        ))
+
+        self.assertTrue(accepted)
+        self.assertEqual(self.registry.status()["ready"], 1)
+        result = self.registry.request(
+            "object",
+            "detect",
+            frame=np.zeros((4, 4, 3), dtype=np.uint8),
+            workload=InferenceWorkload.INCIDENT_INITIAL,
+            timeout=1.0,
+        )
+        self.assertEqual(result, [{"label": "person", "confidence": 0.9}])
+        self.assertEqual(len(transport.requests), 1)
+
+    def test_dead_object_engine_without_ready_flag_is_not_routed(self) -> None:
+        transport = _FakeTransport()
+        welcome = self.registry.register(
+            WorkerRegistration(worker_id="worker-dead", roles=["object"]),
+            transport,
+        )
+
+        accepted = self.registry.mark_ready(WorkerReady(
+            worker_id="worker-dead",
+            connection_generation=welcome["connection_generation"],
+            config_generation=welcome["config_generation"],
+            statuses={
+                "object": {
+                    "enabled": True,
+                    "loaded_backend": "openvino",
+                    "openvino_loaded": True,
+                    "isolation": {
+                        "worker_alive": False,
+                        "all_workers_alive": False,
+                    },
+                }
+            },
+        ))
+
+        self.assertTrue(accepted)
+        self.assertEqual(self.registry.status()["ready"], 0)
+        with self.assertRaises(InferenceUnavailable):
+            self.registry.request(
+                "object",
+                "detect",
+                frame=np.zeros((4, 4, 3), dtype=np.uint8),
+                workload=InferenceWorkload.INCIDENT_INITIAL,
+                timeout=1.0,
+            )
+
     def test_unready_role_is_not_routed(self) -> None:
         transport = _FakeTransport()
         welcome = self.registry.register(
