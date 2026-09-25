@@ -57,7 +57,9 @@ curl -fsS -X POST \
 ```
 
 The response reveals the worker token once. Rotating it changes the credential
-for new connections; restart existing workers after rotation.
+for new connections. Existing authenticated WebSockets remain active until
+they disconnect; update the worker environment and restart existing workers to
+apply a rotation immediately.
 
 ## Configure systemd
 

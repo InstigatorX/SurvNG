@@ -1168,9 +1168,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       const requestedLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`;
       if (adminDirtyRef.current || apiTokenSecretVisibleRef.current) {
         const warning = adminDirtyRef.current && apiTokenSecretVisibleRef.current
-          ? "Leave this Admin view, discard unsaved changes, and discard the one-time API token secret?"
+          ? "Leave this Admin view, discard unsaved changes, and discard the one-time token secret?"
           : apiTokenSecretVisibleRef.current
-            ? "The new API token secret is shown only once. Leave this Admin view and discard the displayed secret?"
+            ? "The new token secret is shown only once. Leave this Admin view and discard the displayed secret?"
             : "Leave this Admin view and discard unsaved changes?";
         if (!window.confirm(warning)) {
           window.history.pushState(window.history.state, "", acceptedAdminLocationRef.current);
@@ -1272,7 +1272,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       return;
     }
     if (apiTokenSecretVisible && settingsTab === "general") {
-      if (!window.confirm("The new API token secret is shown only once. Leave this section and discard the displayed secret?")) return;
+      if (!window.confirm("The new token secret is shown only once. Leave this section and discard the displayed secret?")) return;
       setApiTokenSecretVisible(false);
     }
     if (!confirmDiscardAdminChanges("Switch sections and discard unsaved changes?")) return;
@@ -4064,6 +4064,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
 
   async function createApiToken() {
     if (apiTokenBusy || !apiTokenDraft.id.trim() || !apiTokenDraft.name.trim() || !apiTokenDraft.scopes.length) return;
+    if ((apiTokenSecret || workerTokenSecret) && !window.confirm("Discard the currently displayed one-time token secret and create a new API token?")) return;
     setApiTokenBusy(true);
     setApiTokenError("");
     setApiTokenSecret("");
@@ -4116,6 +4117,8 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
 
   async function createWorkerToken() {
     if (apiTokenBusy) return;
+    if ((apiTokenSecret || workerTokenSecret) && !window.confirm("Discard the currently displayed one-time token secret and continue?")) return;
+    if (config.inference_workers?.worker_token_hash && !window.confirm("Rotate the inference worker token? Existing workers stay connected, but they must use the new token the next time they reconnect.")) return;
     setApiTokenBusy(true);
     setApiTokenError("");
     setApiTokenSecret("");
@@ -4428,7 +4431,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             {apiTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this token now</strong><code>{apiTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(apiTokenSecret)}><Copy size={14} /> Copy</button><small>It cannot be displayed again after you leave this page.</small></div> : null}
             <div className="api-auth-toggle">
               <div className="detection-settings-subhead">
-                <div><strong>Inference worker token</strong><small>Dedicated credential for outbound inference-worker connections. Copy it into <code>SURVNG_INFERENCE_TOKEN</code> on each worker.</small></div>
+                <div><strong>Inference worker token</strong><small>Dedicated credential for outbound inference-worker connections. Copy it into <code>SURVNG_INFERENCE_TOKEN</code> on each worker. Rotation applies when workers reconnect.</small></div>
                 <span className={`retention-state ${config.inference_workers?.worker_token_hash ? "running" : "idle"}`}>{config.inference_workers?.worker_token_hash ? "Configured" : "Not configured"}</span>
               </div>
               <div className="preference-action-buttons">
