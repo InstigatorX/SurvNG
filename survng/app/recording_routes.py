@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -14,6 +15,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from .incident_presenter import (
     _event_row,
@@ -42,6 +44,7 @@ from .recording_media import (
 RECORDING_LOOKUP_LIMIT = 20_000
 RECORDING_PLAYBACK_WINDOW_SECONDS = 15 * 60
 MOBILE_PLAYBACK_WINDOW_SECONDS = 120
+LOGGER = logging.getLogger(__name__)
 
 
 class MediaExportRequest(BaseModel):
@@ -215,7 +218,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         media_offset: float,
         trim_end: bool,
         fragment_id: str,
-    ):
+    ) -> tuple[Any | None, Callable[[], None] | None]:
         if not math.isfinite(media_offset) or media_offset < 0:
             raise HTTPException(
                 status_code=400,
@@ -223,7 +226,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             )
         source_factory = getattr(deps, "encoded_fragment_source", None)
         if source_factory is None:
-            return None
+            return None, None
         rows = fragment_rows(
             active_manager,
             camera_id,
@@ -257,12 +260,51 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             selected,
             media_start_seconds=media_offset,
         )
+        selected_index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if row.get("_encoded_fragment") is not None
+                and row["_encoded_fragment"].segment_name == segment_name
+            ),
+            None,
+        )
+        next_fragment = (
+            rows[selected_index + 1].get("_encoded_fragment")
+            if selected_index is not None and selected_index + 1 < len(rows)
+            else None
+        )
+        if next_fragment is not None:
+            next_fragment = replace(
+                next_fragment,
+                media_start_seconds=(
+                    media_offset + selected.media_duration_seconds
+                ),
+            )
+        source = source_factory(active_manager)
         try:
-            return source_factory(active_manager).materialize(selected)
+            materialized = source.materialize(selected)
         except FragmentUnavailable as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except FragmentSourceError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        def prewarm_next() -> None:
+            if next_fragment is None:
+                return
+            try:
+                source.materialize(next_fragment)
+            except Exception:
+                # The requested fragment has already been served. A lookahead
+                # miss must not turn successful playback into an HTTP failure.
+                LOGGER.warning(
+                    "Recording fragment lookahead failed for %s/%s",
+                    camera_id,
+                    next_fragment.segment_name,
+                    exc_info=True,
+                )
+
+        return materialized, prewarm_next if next_fragment is not None else None
 
     @router.get("/api/cameras/{camera_id}/recordings")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
@@ -1070,7 +1112,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         fragment_id: str = "",
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
-        materialized = materialize_fragment(
+        materialized, _prewarm_next = materialize_fragment(
             active_manager,
             camera_id,
             segment_name,
@@ -1118,7 +1160,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         fragment_id: str = "",
     ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
-        materialized = materialize_fragment(
+        materialized, prewarm_next = materialize_fragment(
             active_manager,
             camera_id,
             segment_name,
@@ -1135,10 +1177,13 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
                     status_code=500,
                     detail="recording media fragment is unavailable",
                 )
-            return deps.recording_file_response(
+            response = deps.recording_file_response(
                 materialized.media_path,
                 "video/iso.segment",
             )
+            if prewarm_next is not None and hasattr(response, "background"):
+                response.background = BackgroundTask(prewarm_next)
+            return response
         _, media_path = deps.recording_day_fmp4_paths(
             active_manager,
             camera_id,
