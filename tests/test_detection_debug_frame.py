@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import threading
+import time
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock
@@ -12,6 +13,7 @@ import numpy as np
 
 from survng.app.detection_routes import DetectionRouteDependencies, create_detection_router
 from survng.app.inference_runtime.types import InferenceWorkload
+from survng.app.manager_access import ManagerAccessCoordinator
 
 
 def _jpeg_bytes(width: int = 64, height: int = 48) -> bytes:
@@ -63,10 +65,13 @@ class DetectionDebugFrameRouteTests(TestCase):
             detector=self.detector,
             config=SimpleNamespace(),
         )
+        self.generation_lock = threading.RLock()
+        self.access = ManagerAccessCoordinator()
         dependencies = DetectionRouteDependencies(
             get_manager=lambda: self.manager,
             get_config=lambda: self.manager.config,
-            manager_lock=threading.RLock(),
+            manager_lock=self.generation_lock,
+            manager_access=self.access,
             get_comparison_limiter=Mock(),
             ensure_event_clip=Mock(),
             dependency_status=Mock(return_value={"available": True}),
@@ -96,6 +101,64 @@ class DetectionDebugFrameRouteTests(TestCase):
             depth=depth,
             heatmap=heatmap,
         )
+
+    def test_reload_lock_does_not_block_event_loop(self) -> None:
+        held = threading.Event()
+        release = threading.Event()
+        def reload():
+            with self.generation_lock:
+                held.set()
+                release.wait(1.0)
+        thread = threading.Thread(target=reload)
+        thread.start()
+        self.assertTrue(held.wait(1))
+        async def scenario():
+            task = asyncio.create_task(self._call())
+            started = time.monotonic()
+            try:
+                await asyncio.sleep(.02)
+                self.assertLess(time.monotonic() - started, .5)
+            finally:
+                release.set()
+                await task
+        try:
+            asyncio.run(scenario())
+        finally:
+            release.set()
+            thread.join(2)
+
+    def test_cancelled_request_keeps_detector_generation_leased(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        def detect(*_args, **_kwargs):
+            entered.set()
+            release.wait(5)
+            finished.set()
+            return self.detected_objects
+        self.detector.detect.side_effect = detect
+        async def scenario():
+            task = asyncio.create_task(self._call())
+            try:
+                for _ in range(200):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(.01)
+                self.assertTrue(entered.is_set())
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertEqual(self.access.active_leases(self.manager), 1)
+                self.assertFalse(self.access.wait_idle(self.manager, .01))
+            finally:
+                release.set()
+                for _ in range(200):
+                    if finished.is_set() and self.access.active_leases(self.manager) == 0:
+                        break
+                    await asyncio.sleep(.01)
+            self.assertTrue(finished.is_set())
+            self.assertEqual(self.access.active_leases(self.manager), 0)
+        asyncio.run(scenario())
 
     def test_detect_debug_frame_returns_detection_only_by_default(self) -> None:
         payload = asyncio.run(self._call())
