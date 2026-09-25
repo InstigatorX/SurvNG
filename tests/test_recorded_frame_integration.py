@@ -1,5 +1,4 @@
 """Real FFmpeg round trips preserve recorded pixels and source timestamps."""
-from pathlib import Path
 import shutil
 import subprocess
 

@@ -1,7 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
-  ArrowRight,
   Camera,
   CarFront,
   Check,
@@ -13,7 +11,6 @@ import {
   Clock3,
   Download,
   Film,
-  Grid2X2,
   Images,
   Search,
   Pause,
@@ -29,7 +26,6 @@ import {
   SkipForward,
   Trash2,
   UserRound,
-  Video,
   Volume2,
   VolumeX,
   X,
@@ -837,7 +833,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
   const nextDate = addDaysToDateKey(date, 1);
   const dayEnd = useMemo(() => zonedDateSecondToEpoch(nextDate, 0, timeZone), [nextDate, timeZone]);
-  const daySeconds = Math.max(1, dayEnd - dayStart);
 
   useEffect(() => {
     onAssistantContextChange?.({
@@ -944,9 +939,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
       exact: true,
     })
     : "";
-  const frameSearchTrailIds = frameSearchResults
-    .map((result) => Number(result?.event?.id))
-    .filter((eventId) => Number.isInteger(eventId) && eventId > 0);
+
   function switchRecordingTransport() {
     if (playbackTransport?.scope !== nativeScope) {
       setPlaybackTransport({ scope: nativeScope, mode: transport });
@@ -1120,13 +1113,7 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
     if (timelinePlayheadInComfortZone(timelineView, playhead)) return;
     setTimelineViewportAnchor(playhead);
   }, [followPlayhead, gridPlaying, isAllCameras, playhead, timelineView]);
-  const selectedEventEnd = selectedEvent ? recordingIncidentEndEpoch(selectedEvent) : null;
-  const selectedEventDuration = selectedEvent && Number.isFinite(selectedEventEnd)
-    ? Math.max(0, selectedEventEnd - selectedEvent.incident_epoch)
-    : 0;
-  const selectedEventConfidence = selectedEvent
-    ? Math.max(0, ...(selectedEvent.objects || []).map((object) => Number(object.confidence) || 0), Number(selectedEvent.confidence) || 0)
-    : 0;
+
   const displayedTimelineEvents = useMemo(() => {
     if (!selectedEvent || viewportEvents.some((event) => Number(event.id) === Number(selectedEvent.id))) return viewportEvents;
     if (
@@ -1879,69 +1866,6 @@ export function RecordingsPage({ timeZone, onAssistantContextChange, onAskAssist
 
   function checkpointTimelineView() {
     window.history.pushState(null, "", window.location.href);
-  }
-
-  async function selectTrailHit(eventId) {
-    const targetId = Number(eventId);
-    if (!Number.isInteger(targetId) || targetId <= 0) return;
-    setTrailNotice("");
-    let hit = trailHitForEvent(trailMeta, targetId);
-    let camera = String(hit?.event?.camera_id || "");
-    let epoch = Number(hit?.event?.incident_epoch);
-    if (!Number.isFinite(epoch) && hit?.event?.created_at) {
-      epoch = new Date(hit.event.created_at).getTime() / 1000;
-    }
-    if (!camera || !Number.isFinite(epoch)) {
-      try {
-        const response = await fetch(`/api/incidents/by-event/${encodeURIComponent(targetId)}`);
-        if (!response.ok) throw new Error("Trail event unavailable");
-        const detail = await response.json();
-        camera = String(detail.camera_id || "");
-        epoch = Number(detail.created_epoch);
-        if (!Number.isFinite(epoch) && detail.created_at) {
-          epoch = new Date(detail.created_at).getTime() / 1000;
-        }
-        const nextHit = {
-          query_mode: hit?.query_mode || "visual",
-          event: {
-            id: targetId,
-            camera_id: camera,
-            created_at: detail.created_at || "",
-            incident_epoch: Number.isFinite(epoch) ? epoch : null,
-            labels: Array.isArray(detail.labels) ? detail.labels : undefined,
-            snapshot_path: detail.snapshot_path || "available",
-          },
-        };
-        hit = nextHit;
-        const nextMeta = writeVisualSearchTrail(window.sessionStorage, {
-          eventIds: trailEventIds,
-          hits: [...(trailMeta?.hits || []).filter((item) => Number(item.event.id) !== targetId), nextHit],
-          queryMode: trailMeta?.queryMode || null,
-        });
-        setTrailMeta(nextMeta);
-      } catch {
-        setTrailNotice("Could not open this Find similar hit.");
-        return;
-      }
-    }
-    if (!camera || !Number.isFinite(epoch)) {
-      setTrailNotice("Could not open this Find similar hit.");
-      return;
-    }
-    if (!cameras.some((item) => item.id === camera)) {
-      setTrailNotice("That hit’s camera is not available.");
-      return;
-    }
-    const nextDate = dateKeyForTimeZone(epoch * 1000, timeZone);
-    checkpointTimelineView();
-    setInvestigationOpen(true);
-    setSelectedEventId(targetId);
-    desiredEpochRef.current = epoch;
-    setPlayhead(epoch);
-    const sameScope = camera === cameraId && nextDate === date;
-    if (camera !== cameraId) setCameraId(camera);
-    if (nextDate !== date) setDate(nextDate);
-    if (sameScope) playAt(epoch, true);
   }
 
   async function openFindSimilarResult(result) {

@@ -455,14 +455,6 @@ class MotionEventCoordinator:
                 job_id, lease_owner=self._lease_owner
             )
 
-    def fail_deliveries(self, triggers: MotionTriggerBatch, error: str) -> None:
-        if self.durable_store is None:
-            return
-        for job_id in {item.delivery_job_id for item in triggers if item.delivery_job_id}:
-            self.durable_store.fail_motion_trigger(
-                job_id, error, lease_owner=self._lease_owner
-            )
-
     def retry_queue_depth(self) -> int:
         with self._lock:
             return len(self.retry_batches)

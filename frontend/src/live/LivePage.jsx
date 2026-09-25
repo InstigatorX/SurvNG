@@ -3,9 +3,6 @@ import { liveItemsWithWeather } from "../weather.mjs";
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  Activity,
-  ArrowLeft,
-  ArrowRight,
   Camera,
   ChevronLeft,
   ChevronRight,
@@ -842,7 +839,6 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     setIncidentDetails,
     incidentSelectionRequestRef,
     selectedEvent,
-    setSelectedEvent,
     openIncidentOverlay,
     closeIncidentOverlay,
   } = useIncidentDetails();
@@ -1497,18 +1493,6 @@ export function LivePage({ timeZone, onRecordingContextChange, onAssistantContex
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [expandedIncidentId, selectedEvent]);
-
-  function toggleIncident(incidentId) {
-    const closing = String(expandedIncidentId) === String(incidentId);
-    if (closing) {
-      setExpandedIncidentId(null);
-      setRetainedFocusedIncident(null);
-      return;
-    }
-    const incident = visibleIncidents.find((candidate) => String(candidate.id) === String(incidentId));
-    setRetainedFocusedIncident(incident || null);
-    setExpandedIncidentId(incidentId);
-  }
 
   function changeIncidentPage(nextPage) {
     setExpandedIncidentId(null);

@@ -1198,10 +1198,6 @@
     padding: 10px;
   }
 
-  .settings-grid .section-head>.camera-command-area {
-    width: 100%;
-  }
-
   .settings-grid .camera-command-bar {
     display: grid;
     grid-template-columns: 1fr;
@@ -1220,15 +1216,13 @@
   }
 
   .camera-section-tabs,
-  .detection-subsection-tabs,
-  .telemetry-section-tabs {
+  .detection-subsection-tabs {
     overflow-x: auto;
     overscroll-behavior-x: contain;
   }
 
   .camera-section-tabs button,
-  .detection-subsection-tabs button,
-  .telemetry-section-tabs button {
+  .detection-subsection-tabs button {
     flex: 0 0 auto;
     min-width: max-content;
   }

@@ -272,7 +272,6 @@ class AppManager:
         validate_manager_configuration(config)
         self.config = config
         self.media_session_generation = uuid.uuid4().hex
-        self._owns_media_sessions = media_sessions is None
         self.media_sessions = media_sessions or MediaSessionManager()
         self.detection_watch = RouteDetectionWatch(
             config.detector.tracking.camera_transition_routes
@@ -630,14 +629,6 @@ class AppManager:
             except (TypeError, ValueError):
                 continue
 
-    def _consume_detection_watch(
-        self,
-        target_camera_id: str,
-        source_event_id: int,
-    ) -> bool:
-        self.events.mark_route_watch_consumed(target_camera_id, source_event_id)
-        return self.detection_watch.consume(target_camera_id, source_event_id)
-
     def _route_target_admitted(
         self,
         target_camera_id: str,
@@ -789,7 +780,6 @@ class AppManager:
                 capture_backend=self.capture_backend,
                 media_storage=self.media_storage,
                 route_detection_watch=self.detection_watch.match,
-                consume_route_detection_watch=self._consume_detection_watch,
                 route_target_admitted=self._route_target_admitted,
                 record_ema_route_candidate=self.ema_route_candidates.submit,
                 load_ema_route_candidates=self.ema_route_candidates.between,

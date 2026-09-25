@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import {
   recordingCameraAspect,
   recordingGridBestEpoch,
-  recordingGridLayout,
 } from "../src/recordingGrid.mjs";
 
 const cameras = [
@@ -14,20 +13,6 @@ const cameras = [
 
 assert.equal(recordingCameraAspect(cameras[0], "live"), 16 / 9);
 assert.equal(recordingCameraAspect({ stream_dimensions: {} }, "live"), 16 / 9);
-
-const layout = recordingGridLayout(cameras, "live", 1000, 500, 6);
-assert.equal(layout.length, cameras.length);
-assert.deepEqual(layout.map((item) => item.camera.id).sort(), cameras.map((camera) => camera.id).sort());
-layout.forEach((item) => {
-  assert.ok(item.x >= 0);
-  assert.ok(item.y >= 0);
-  assert.ok(item.x + item.width <= 1000.001);
-  assert.ok(item.y + item.height <= 500.001);
-  assert.ok(Math.abs(item.width / item.height - recordingCameraAspect(item.camera, "live")) < 0.001);
-});
-const overridden = recordingGridLayout(cameras, "live", 1000, 500, 6, { portrait: 1 });
-const overriddenPortrait = overridden.find((item) => item.camera.id === "portrait");
-assert.ok(Math.abs(overriddenPortrait.width / overriddenPortrait.height - 1) < 0.001);
 
 const ranges = [
   { camera_id: "ahead", start_epoch: 980, end_epoch: 1000 },

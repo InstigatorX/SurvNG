@@ -6,7 +6,6 @@ import numpy as np
 
 from survng.app.config import DepthConfig, DetectionZone
 from survng.app.depth_estimation import (
-    depth_motion_evidence_values,
     encode_depth_heatmap,
     sample_bbox_depth_stats,
     scale_depth_map,
@@ -72,22 +71,6 @@ class DepthEstimationTests(unittest.TestCase):
         self.assertEqual(enriched[0]["depth_stats"]["median_m"], 3.0)
         self.assertTrue(metadata.get("heatmap_png", b"").startswith(b"\x89PNG"))
         self.assertEqual(metadata.get("heatmap_range_m"), {"min_m": 0.05, "max_m": 150.0})
-
-    def test_depth_motion_evidence_values(self) -> None:
-        values = depth_motion_evidence_values(
-            [
-                {"depth_stats": {"median_m": 4.0}},
-                {"depth_stats": {"median_m": 8.0}},
-            ],
-            captured_at=100.0,
-            frame_offset_s=0.5,
-        )
-        self.assertEqual(values["nearest_m"], 4.0)
-        self.assertEqual(values["farthest_m"], 8.0)
-        self.assertEqual(values["median_m"], 6.0)
-        self.assertEqual(values["foreground_score"], 0.867)
-        self.assertEqual(values["score"], values["foreground_score"])
-        self.assertEqual(values["warmed"], 1.0)
 
     def test_apply_depth_zone_filters_incident_band(self) -> None:
         from survng.app.config import CameraConfig

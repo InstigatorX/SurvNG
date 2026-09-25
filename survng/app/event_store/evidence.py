@@ -152,14 +152,6 @@ class EventStoreEvidenceMixin:
             return self._decode_requirement(conn.execute(
                 "select * from event_cover_requirements where event_id=?", (event_id,)).fetchone())
 
-    def pending_cover_requirements(self, camera_id: str = "", *, limit: int = 100):
-        with self._connect() as conn:
-            rows = conn.execute("select r.*,e.camera_id from event_cover_requirements r join events e "
-                                "on e.id=r.event_id where r.state='pending' and r.available_at_epoch<=? "
-                                "and (?='' or e.camera_id=?) order by r.available_at_epoch limit ?",
-                                (time.time(), camera_id, camera_id, max(1, min(limit, 1000)))).fetchall()
-        return [self._decode_requirement(row) for row in rows]
-
     def claim_cover_requirement(self, camera_id: str, *, lease_owner: str,
                                 lease_seconds: float = 60, maximum_attempts: int = 3):
         if not lease_owner:

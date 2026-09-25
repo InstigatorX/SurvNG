@@ -987,7 +987,7 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
     def test_overlapping_replay_does_not_retrain_background_or_tracks(self) -> None:
         frames = moving_subject_frames(6)
         timestamps = [100.0 + index * 0.2 for index in range(len(frames))]
-        first = self.process_timed(frames, timestamps)
+        self.process_timed(frames, timestamps)
         background_state = self.pipeline.runtime.stage_state["background"]
         tracker_state = self.pipeline.runtime.stage_state["tracking"]
         background_before = background_state.background.copy()

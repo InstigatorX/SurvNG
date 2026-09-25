@@ -1580,7 +1580,7 @@ class EventStoreTest(unittest.TestCase):
                     objects.append({"label": object_label, "incident_eligible": True})
                 return json.dumps(objects)
 
-            object_event = store.add_event(
+            store.add_event(
                 "gate", "motion", objects_json=qualification_objects(object_label="person"),
                 created_at=created_at,
             )

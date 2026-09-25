@@ -2,8 +2,6 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { createPortal } from "react-dom";
 import {
   Activity,
-  ArrowLeft,
-  ArrowRight,
   Bike,
   Bot,
   BusFront,
@@ -23,7 +21,6 @@ import {
   Siren,
   Truck,
   UserRound,
-  Video,
   X,
 } from "lucide-react";
 import { recordedIncidentWindow, trackingCoverageAt, containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../objectTrackReplay.mjs";

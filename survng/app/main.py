@@ -623,9 +623,6 @@ def _ffprobe_path() -> str:
 def _ffplay_path() -> str:
     return _ffmpeg_sibling_tool("ffplay")
 
-def normalize_source(source: str) -> str:
-    return "main" if source == "main" else "live"
-
 
 def _require_recording_camera(camera_id: str) -> None:
     if get_manager().camera(camera_id) is None:
@@ -778,11 +775,6 @@ def reload_manager(
             persist=persist,
         )
     return effective
-
-
-def _manager_owned_config(config_value: AppConfig) -> dict:
-    """Compatibility name for configuration ownership tests."""
-    return manager_owned_config(config_value)
 
 
 def apply_config_update(

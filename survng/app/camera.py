@@ -46,7 +46,6 @@ from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .object_activity import AttributionMode, ObjectActivityAttributor
 from .tracking_frames import CameraFrameTimeline, TrackingFrameBatch
-from .video_frames import DecodedVideoFrame
 from .motion_pipeline import (
     MotionDecisionHandlerFactory,
     MotionDebugSnapshotStore,
@@ -337,7 +336,6 @@ class CameraWorker:
         capture_backend: CaptureBackend | None = None,
         media_storage: MediaStorageRegistry | None = None,
         route_detection_watch: Callable[[str, float], Any | None] | None = None,
-        consume_route_detection_watch: Callable[[str, int], bool] | None = None,
         route_target_admitted: Callable[[str, str, int], object] | None = None,
         record_ema_route_candidate: (
             Callable[[str, float, dict[str, Any]], object] | None
@@ -588,7 +586,6 @@ class CameraWorker:
         self.motion_analysis.set_security_verification_context(
             onvif_effectiveness=self.onvif.effectiveness_snapshot,
             route_watch=route_detection_watch,
-            consume_route_watch=consume_route_detection_watch,
             record_ema_candidate=record_ema_route_candidate,
             load_ema_candidates=load_ema_route_candidates,
         )

@@ -10,7 +10,7 @@ import re
 import subprocess
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Protocol

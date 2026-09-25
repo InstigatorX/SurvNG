@@ -28,7 +28,6 @@ import {
   LayoutDashboard,
   Monitor,
   Moon,
-  Pause,
   PanelLeftOpen,
   Plus,
   Power,
@@ -195,10 +194,6 @@ export function MotionDecisionEditor({
   const statusLabel = onRestoreDefaults
     ? configurationInherited ? "Inherited" : "Custom"
     : fullyInherited ? "Inherited" : custom ? "Advanced" : legacyMode ? "Legacy" : parsed.usesDefaults ? "Recommended default" : "Customized";
-
-  function updateSettings(patch) {
-    onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
-  }
 
   function selectBehavior(value) {
     if (value === "inherit") {
@@ -1135,7 +1130,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const apiTokenSecretVisibleRef = useRef(apiTokenSecretVisible);
   const acceptedAdminLocationRef = useRef(`${window.location.pathname}${window.location.search}${window.location.hash}`);
   const baselineConfigRef = useRef(null);
-  const [baselineRevision, setBaselineRevision] = useState(0);
+  const [, setBaselineRevision] = useState(0);
   const auditPageSize = 24;
 
   function adminLocationOptions(section = settingsTab) {
@@ -1665,10 +1660,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
   const cameraDirtyState = cameraConfigDirtyState(config?.cameras || [], baselineConfig?.cameras || []);
   const perCameraDirty = perCameraDirtyState(config?.cameras || [], baselineConfig?.cameras || []);
   const dirtyCamerasCount = dirtyCameraCount(perCameraDirty);
-  const runtimeStatusById = useMemo(
-    () => new Map(runtimeStatus.map((item) => [item.id, item])),
-    [runtimeStatus],
-  );
+
   const cameraSettingsDirty = Boolean(config && baselineConfig) && cameraDirtyState.settings;
   const zonesDirty = Boolean(config && baselineConfig) && cameraDirtyState.zones;
   const cameraOrderDirty = Boolean(config && baselineConfig) && !configValuesEqual(
@@ -3844,36 +3836,13 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const openvinoDevices = accelerator?.openvino_devices || [];
   const hasOpenvinoGpu = openvinoDevices.includes("GPU");
   const detectorBackend = config.detector?.backend || "openvino";
-  const coremlLabel = accelerator?.is_macos
-    ? accelerator?.coreml_available
-      ? "Core ML available"
-      : "Core ML not installed"
-    : "Core ML is macOS only";
-  const gpuLabel = accelerator?.is_apple_silicon
-    ? "Mac GPU detected, OpenVINO GPU not available on Apple GPU"
-    : accelerator?.has_nvidia
-      ? "NVIDIA GPU detected"
-      : hasOpenvinoGpu
-        ? "OpenVINO GPU device available"
-        : "No OpenVINO GPU device reported";
+
   const deviceOptions = [
     ["CPU", "CPU"],
     ["GPU", hasOpenvinoGpu ? "GPU" : "GPU (if OpenVINO plugin is available)"],
     ["AUTO", "AUTO"],
   ];
-  const ffmpegAcceleration = accelerator?.ffmpeg_hardware_acceleration || {};
-  const vaapi = ffmpegAcceleration.vaapi || {};
-  const qsv = ffmpegAcceleration.qsv || {};
-  const vaapiLabel = vaapi.available
-    ? `VAAPI available (${(vaapi.encoders || []).join(", ") || "encoders detected"})`
-    : vaapi.listed
-      ? "VAAPI listed by FFmpeg but runtime init failed"
-      : "VAAPI not available to FFmpeg";
-  const qsvLabel = qsv.available
-    ? `Intel QSV available (${(qsv.encoders || []).join(", ") || "encoders detected"})`
-    : qsv.listed
-      ? "Intel QSV listed by FFmpeg but runtime init failed"
-      : "Intel QSV not available to FFmpeg";
+
   const activeModel = findDetectorModel(detectorModels, activeModelPath);
   const eventClassConfirmations = config.detector?.event_class_confirmation_frames || {};
   const eventClassConfidences = config.detector?.event_class_confidence_thresholds || {};

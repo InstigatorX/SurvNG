@@ -26,6 +26,41 @@ def face_client(faces, *, compress: bool = False):
     return TestClient(app), bundle
 
 
+def test_review_queue_serializes_observations_from_legacy_body_embedding_schema(tmp_path):
+    store = FaceStore(tmp_path, start_recognition=False)
+    try:
+        with store._connect() as connection:
+            # Older databases retain this private binary column after the body
+            # embedding feature is retired. SQLite's SELECT o.* still returns it.
+            connection.execute("alter table face_observations add column body_embedding_blob blob")
+            connection.execute(
+                """
+                insert into face_observations (
+                    event_id, object_index, camera_id, snapshot_path, box_json,
+                    confidence, observed_at, created_at, recognition_pending,
+                    recognition_outcome, embedding_blob, body_embedding_blob
+                ) values (1, 0, 'gate', 'snapshot.jpg', '{}', 0.9,
+                    '2026-09-24T12:00:00Z', '2026-09-24T12:00:00Z',
+                    0, 'embedded', ?, ?)
+                """,
+                (np.asarray([1.0, 0.0], dtype=np.float32).tobytes(), b"\xff\xfe"),
+            )
+
+        client, _ = face_client(store)
+        with client:
+            response = client.get("/api/faces/review/queue")
+
+        assert response.status_code == 200
+        observations = response.json()
+        assert len(observations) == 1
+        assert observations[0]["camera_id"] == "gate"
+        assert "embedding_blob" not in observations[0]
+        assert "body_embedding_blob" not in observations[0]
+        assert "snapshot_path" not in observations[0]
+    finally:
+        store.close()
+
+
 def test_people_directory_revalidates_and_preserves_direct_handler() -> None:
     people = [{"id": 1, "name": "Ada"}]
     faces = Mock()

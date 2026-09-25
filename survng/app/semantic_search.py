@@ -569,7 +569,6 @@ class SemanticIndex:
             required_scores = np.stack([
                 component_matrix[:, component_indexes[name]] for name in plan.required
             ], axis=1)
-            weakest_required = required_scores.min(axis=1)
             contradiction_scores = np.stack([
                 component_matrix[:, component_indexes[name]]
                 for name in plan.contradictions
@@ -591,7 +590,6 @@ class SemanticIndex:
             else:
                 best_rank = 1.0
         else:
-            weakest_required = full_scores
             rank_scores = full_scores
             eligible = np.ones(len(candidates), dtype=bool)
             best_rank = float(rank_scores.max())
@@ -757,36 +755,6 @@ class SemanticIndex:
                 parameters,
             ).fetchall()
         return {str(row["source_key"]) for row in rows}
-
-    def reconcile_event_source_keys(
-        self,
-        event_id: int,
-        identity: SemanticModelIdentity,
-        source_kind: str,
-        desired_keys: set[str],
-    ) -> int:
-        """Delete stale evidence after an event's objects or crop cap changes."""
-        clauses = [
-            "event_id = ?",
-            "model_fingerprint = ?",
-            "preprocessing_fingerprint = ?",
-            "source_kind = ?",
-        ]
-        parameters: list[Any] = [
-            int(event_id),
-            identity.model_fingerprint,
-            identity.preprocessing_fingerprint,
-            str(source_kind),
-        ]
-        if desired_keys:
-            clauses.append(f"source_key not in ({','.join('?' for _ in desired_keys)})")
-            parameters.extend(sorted(desired_keys))
-        with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                f"delete from semantic_embeddings where {' and '.join(clauses)}",
-                parameters,
-            )
-        return max(0, int(cursor.rowcount or 0))
 
     def delete_generation_source(
         self,

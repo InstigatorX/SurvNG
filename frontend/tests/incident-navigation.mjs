@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectFocusThumbnailWidth, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailObjectFocusEnabled, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentImageRenderRect, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectFocusAspect, incidentObjectFocusCropRect, incidentObjectFocusMaxScale, incidentObjectFocusStyle, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, normalizeIncidentThumbnailObjectFocus, normalizeIncidentThumbnailObjectFocusZoom, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -74,8 +74,7 @@ assert.equal(showIncidentCardAnnotations(true, true), false);
 assert.equal(normalizeIncidentThumbnailObjectFocus("AUTO"), "auto");
 assert.equal(normalizeIncidentThumbnailObjectFocus("button"), "button");
 assert.equal(normalizeIncidentThumbnailObjectFocus("nope"), "off");
-assert.equal(incidentThumbnailObjectFocusEnabled("auto"), true);
-assert.equal(incidentThumbnailObjectFocusEnabled("off"), false);
+
 assert.equal(normalizeIncidentThumbnailObjectFocusZoom(2.5), 2.5);
 assert.equal(normalizeIncidentThumbnailObjectFocusZoom(0.5), 0.5);
 assert.equal(normalizeIncidentThumbnailObjectFocusZoom(0.2), 0.25);
@@ -89,9 +88,7 @@ assert.deepEqual(incidentObjectFocusAspect({ width: 16, height: 10 }, true), { w
   assert.ok(contain.y > 0);
   assert.equal(contain.width, 674);
 }
-assert.equal(incidentObjectFocusThumbnailWidth(140, 2, 1), 1280);
-assert.equal(incidentObjectFocusThumbnailWidth(180, 2, 2), 1920);
-assert.equal(incidentObjectFocusThumbnailWidth(220, 3, 3), 2560);
+
 assert.ok(Math.abs(incidentObjectFocusMaxScale(720, 160, 2) - 3.0375) < 1e-9);
 assert.ok(incidentObjectFocusMaxScale(2560, 160, 2) >= 5);
 {

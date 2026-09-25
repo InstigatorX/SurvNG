@@ -131,38 +131,6 @@ def encode_depth_heatmap(depth_map: np.ndarray, *, max_width: int = 192) -> byte
     return encoded.tobytes() if success else b""
 
 
-def depth_motion_evidence_values(
-    objects: list[dict[str, Any]],
-    *,
-    captured_at: float,
-    frame_offset_s: float,
-) -> dict[str, Any]:
-    """Build motion-evidence payload from per-object depth stats."""
-    depths = [
-        float(item["depth_stats"]["median_m"])
-        for item in objects
-        if isinstance(item, dict)
-        and isinstance(item.get("depth_stats"), dict)
-        and item["depth_stats"].get("median_m") is not None
-    ]
-    if not depths:
-        return {}
-    nearest = min(depths)
-    farthest = max(depths)
-    foreground_score = round(max(0.0, min(1.0, 1.0 - (nearest / 30.0))), 3)
-    return {
-        "captured_at": captured_at,
-        "frame_offset_s": frame_offset_s,
-        "object_count": len(depths),
-        "nearest_m": round(nearest, 2),
-        "farthest_m": round(farthest, 2),
-        "median_m": round(float(np.median(depths)), 2),
-        "foreground_score": foreground_score,
-        "score": foreground_score,
-        "warmed": 1.0,
-    }
-
-
 class OpenVinoDepthEstimator:
     """Monocular depth estimator backed by an OpenVINO-exported YOLO26-depth model."""
 
@@ -316,32 +284,6 @@ class OpenVinoDepthEstimator:
             (frame.shape[0], frame.shape[1]),
             metadata,
         )
-
-    def estimate_object_depth_stats(
-        self,
-        frame: np.ndarray,
-        objects: list[dict[str, Any]],
-        *,
-        frame_offset_s: float | None = None,
-    ) -> list[dict[str, Any] | None]:
-        depth_map = self.estimate_depth_map(frame)
-        min_m = float(self.depth_config.min_distance_m)
-        max_m = float(self.depth_config.max_distance_m)
-        stats: list[dict[str, Any] | None] = []
-        for item in objects:
-            if not isinstance(item, dict):
-                stats.append(None)
-                continue
-            sampled = sample_bbox_depth_stats(
-                depth_map,
-                item.get("box"),
-                min_m=min_m,
-                max_m=max_m,
-            )
-            if sampled is not None and frame_offset_s is not None:
-                sampled["source_frame_offset_s"] = round(float(frame_offset_s), 3)
-            stats.append(sampled)
-        return stats
 
     def enrich_objects(
         self,

@@ -105,21 +105,3 @@ export function timelineHref({
   if (queryMode === "appearance" || queryMode === "visual") params.query_mode = queryMode;
   return workspaceHref("timeline", params);
 }
-
-export function systemHealthState({ lifecycle, storage, detector, cameras } = {}) {
-  if (lifecycle && lifecycle !== "running") {
-    return { healthy: false, severity: "starting", label: String(lifecycle).replaceAll("_", " ") };
-  }
-  const knownFailure = storage?.available === false
-    || (detector?.enabled !== false && detector != null && !detector.loaded_backend)
-    || (Number(cameras?.enabled) > 0 && Number(cameras?.online) < Number(cameras.enabled))
-    || (Number(cameras?.recording_expected) > 0 && Number(cameras?.recording) < Number(cameras.recording_expected));
-  if (knownFailure) return { healthy: false, severity: "attention", label: "Needs attention" };
-  const fullyKnown = lifecycle === "running"
-    && storage?.available === true
-    && detector != null
-    && cameras != null;
-  return fullyKnown
-    ? { healthy: true, severity: "healthy", label: "Healthy" }
-    : { healthy: false, severity: "checking", label: "Checking" };
-}

@@ -275,7 +275,7 @@ for (const requestedTransport of ["hls", "original"]) {
 
 // Original fast-play URLs cannot accidentally invoke the mobile encoder.
 const urls = readFileSync(new URL("../src/shared/mediaUrls.js", import.meta.url), "utf8");
-const segmentUrlFunction = urls.slice(urls.indexOf("export function recordingSegmentUrl("), urls.indexOf("export function recordingMobileWindowUrl(")) .replaceAll("export ", "");
+const segmentUrlFunction = urls.slice(urls.indexOf("export function recordingSegmentUrl("), urls.indexOf("export function recordingGridDayUrl(")) .replaceAll("export ", "");
 const urlContext = vm.createContext({ URLSearchParams, appUrl: (value) => `/survng${value}` });
 vm.runInContext(segmentUrlFunction, urlContext);
 for (const transcode of [false, true]) {
@@ -284,7 +284,6 @@ for (const transcode of [false, true]) {
   assert.equal(url.searchParams.get("mobile"), String(transcode));
   assert.equal(url.searchParams.get("epoch"), "107.250");
 }
-assert.match(urlContext.recordingMobileSegmentUrl("gate", 107.25, "main"), /mobile=true/);
 
 // Timers from an outgoing HLS source cannot seek a replacement video or finish
 // its pending MP4 seek, including a second watchdog tick already queued.

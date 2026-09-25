@@ -32,12 +32,7 @@ export const PREFER_NATIVE_HLS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 export const APP_EVENT_TYPES = ["camera_state", "cameras_state", "motion", "activity", "object", "incident", "identity_update", "system_state"];
 export const INCIDENT_REFRESH_FALLBACK_MS = 15_000;
-export const STREAM_MODES = ["motion", "mjpeg", "webrtc"];
-export const STREAM_LABELS = {
-  motion: "Auto",
-  mjpeg: "MJPEG",
-  webrtc: "WebRTC",
-};
+
 export const MOTION_WEBRTC_HOLD_MS = 30_000;
 export const LIVE_TRANSPORT_LABELS = {
   webrtc: "WebRTC",

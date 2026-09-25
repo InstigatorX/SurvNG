@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from ..durable_payload import durable_json_dumps
 from ..incident_utils import event_snapshot_path, portable_media_path, snapshot_deletion_claimed
 from ..main_database import connect_main_database
 from ..media_storage import MediaStorageRegistry

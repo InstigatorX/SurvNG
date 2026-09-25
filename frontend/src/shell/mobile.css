@@ -356,7 +356,6 @@
 
   .recordings-v2-incidents,
   .recordings-v2-investigation,
-  .recordings-v2-selected-event,
   .recordings-related-events,
   .recordings-v2-events,
   .recordings-event-inspector,
@@ -367,8 +366,7 @@
   }
 
   .recordings-v2-page.has-investigation .recordings-v2-incidents,
-  .recordings-v2-page.has-investigation .recordings-v2-investigation,
-  .recordings-v2-page.has-investigation .recordings-v2-selected-event {
+  .recordings-v2-page.has-investigation .recordings-v2-investigation {
     display: grid !important;
   }
 
@@ -687,10 +685,6 @@
   border-left: 1px solid currentColor;
   font-size: 9px;
   opacity: 0.8;
-}
-
-.recordings-v2-selected-event .identity-chip {
-  margin-top: 2px;
 }
 
 .recordings-v2-events .identity-chip,

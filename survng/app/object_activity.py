@@ -141,12 +141,8 @@ class ObjectActivityAttributor:
     remains indeterminate and therefore fail-open.
     """
 
-    STABLE_DISPLACEMENT_RATIO = 0.0025
-    STABLE_PATH_RATIO = 0.006
     CONTEXT_MEMORY_TTL_SECONDS = 2 * 60 * 60
     CONTEXT_MEMORY_MAX_ENTRIES = 128
-    CONTEXT_MEMORY_MIN_IOU = 0.72
-    CONTEXT_MEMORY_MIN_PRIOR_SIGHTINGS = 2
     CONTEXT_MEMORY_MAX_SIGHTINGS = 16
 
     def __init__(

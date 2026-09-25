@@ -42,14 +42,6 @@ export function peopleWorkspaceSearch({ mode = "review", status = "unknown", cam
   return query ? `?${query}` : "";
 }
 
-export function peopleFilterLabel(value) {
-  return PEOPLE_REVIEW_FILTERS[value] || PEOPLE_REVIEW_FILTERS.unknown;
-}
-
-export function peopleModeLabel(value) {
-  return PEOPLE_WORKSPACE_MODES[value] || PEOPLE_WORKSPACE_MODES.review;
-}
-
 export function peopleObservationRequestPlan({
   mode = "review",
   status = "unknown",

@@ -110,16 +110,8 @@ try {
   const timelineEvidence = page.locator(".recordings-v2-events button").first();
   if (await timelineEvidence.count()) {
     await timelineEvidence.click();
-    const selectedCard = page.locator(".recordings-v2-selected-event");
-    await selectedCard.waitFor({ state: "visible", timeout: 10_000 });
-    assert.equal(await page.locator(".recordings-v2-incidents").evaluate((node) => node.hidden), false);
-    assert.ok(await page.locator(".recordings-v2-incidents").evaluate((node) => node.getBoundingClientRect().height > 96));
-    const selectedAction = selectedCard.getByRole("link", { name: /View full incident/ });
-    if (await selectedAction.isVisible()) {
-      const cardBox = await selectedCard.boundingBox();
-      const actionBox = await selectedAction.boundingBox();
-      assert.ok(cardBox && actionBox && actionBox.y + actionBox.height <= cardBox.y + cardBox.height + 0.5);
-    }
+    assert.equal(await timelineEvidence.getAttribute("aria-pressed"), "true");
+    assert.equal(await page.locator(".recordings-related-events").first().isVisible(), true);
   }
 
   for (const [path, title] of [

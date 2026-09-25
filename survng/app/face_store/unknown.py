@@ -11,7 +11,7 @@ from ..unknown_identity import (
     cluster_unknown_embeddings,
     unknown_cluster_cohesion,
 )
-from .quality import FACE_OUTCOME_EMBEDDED, LOGGER
+from .quality import FACE_OUTCOME_EMBEDDED
 
 
 class FaceStoreUnknownMixin:

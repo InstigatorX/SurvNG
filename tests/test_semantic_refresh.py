@@ -1,7 +1,6 @@
 """Concurrent semantic cover refresh must supersede prior evidence."""
 import threading
 import sqlite3
-from pathlib import Path
 from types import SimpleNamespace
 import gc
 import queue

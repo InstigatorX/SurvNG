@@ -29,23 +29,6 @@ export function assistantActionKey(action) {
   return `href:${action.href}:${action.label}`;
 }
 
-export function buildStartCameraReviewAction(cameraId, cameraName = "", { hours = 24, imageLimit = 12 } = {}) {
-  const id = String(cameraId || "").trim();
-  const name = String(cameraName || id || "this camera").trim() || "this camera";
-  return {
-    kind: "confirm_post",
-    label: `Start multi-sample review for ${name}`,
-    path: MOTION_REVIEW_START,
-    body: {
-      camera_id: id,
-      hours,
-      record_limit: 100,
-      image_limit: imageLimit,
-    },
-    confirm: `Start a Camera Advisor multi-sample review for ${name}? This inspects up to ${imageLimit} recent images and may take a few minutes. Nothing is applied automatically.`,
-  };
-}
-
 export function buildApplyCameraReviewAction(review) {
   const reviewId = Number(review?.id || 0);
   const result = review?.result || {};

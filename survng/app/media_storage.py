@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from .config import MediaStorageConfig, MediaStorageLocationConfig, MediaStorageRole
+from .config import MediaStorageConfig, MediaStorageRole
 
 LocationState = Literal["online", "low_space", "unavailable", "not_mounted", "read_only", "full"]
 PathPresence = Literal["present", "missing", "unknown"]

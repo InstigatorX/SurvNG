@@ -244,11 +244,6 @@ export function normalizeIncidentThumbnailObjectFocus(mode) {
   return INCIDENT_THUMBNAIL_OBJECT_FOCUS_MODES.includes(value) ? value : "off";
 }
 
-export function incidentThumbnailObjectFocusEnabled(mode) {
-  const normalized = normalizeIncidentThumbnailObjectFocus(mode);
-  return normalized === "auto" || normalized === "button";
-}
-
 export function normalizeIncidentThumbnailObjectFocusZoom(zoom) {
   const value = Number(zoom);
   if (!Number.isFinite(value)) return 1;
@@ -354,17 +349,6 @@ export function incidentObjectFocusCropRect(sourceWidth, sourceHeight, boxes, zo
   }
   if (x2 <= x1 || y2 <= y1) return null;
   return { x1, y1, x2, y2, width: x2 - x1, height: y2 - y1 };
-}
-
-export function incidentObjectFocusThumbnailWidth(frameWidth, devicePixelRatio = 1, zoomFactor = 1) {
-  const width = Math.max(160, Number(frameWidth) || 160);
-  const ratio = Math.max(1, Math.min(4, Number(devicePixelRatio) || 1));
-  const zoom = normalizeIncidentThumbnailObjectFocusZoom(zoomFactor);
-  // Object focus CSS-scales the raster; request enough pixels for a sharp crop.
-  const required = Math.ceil(width * ratio * Math.min(5.5, Math.max(3.5, zoom * 2.5)));
-  if (required <= 1280) return 1280;
-  if (required <= 1920) return 1920;
-  return 2560;
 }
 
 export function incidentObjectFocusMaxScale(sourceWidth, renderedImageWidth, devicePixelRatio = 1, maxStretch = 1.35) {

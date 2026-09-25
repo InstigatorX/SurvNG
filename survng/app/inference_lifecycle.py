@@ -276,7 +276,6 @@ class InferenceLifecycle:
         """Transactionally replace every camera tracking session and backfill."""
         with self._lock:
             self._ensure_open()
-            tracking = config.tracking.model_copy(deep=True)
             next_limiter = self._build_limiter(config)
             next_factory = self._build_tracking_factory(config, next_limiter)
             workers = list(self._workers.values())

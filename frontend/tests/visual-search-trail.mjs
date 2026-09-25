@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import {
   normalizeTrailEventIds,
-  parseTrailEventIds,
   readVisualSearchTrail,
   serializeTrailEventIds,
   trailHitForEvent,
-  trailPosition,
   writeVisualSearchTrail,
 } from "../src/visualSearchTrail.mjs";
 import { parseTimelineView } from "../src/timelineWorkspace.mjs";
@@ -13,13 +11,6 @@ import { timelineHref } from "../src/workspaceNavigation.mjs";
 
 assert.deepEqual(normalizeTrailEventIds([1, "1", 2, 0, -3, 2, "x", 3]), [1, 2, 3]);
 assert.equal(serializeTrailEventIds([9, 8, 9]), "9,8");
-assert.deepEqual(parseTrailEventIds("9,8,8,bad"), [9, 8]);
-assert.deepEqual(trailPosition([9, 8, 7], 8), {
-  index: 1,
-  count: 3,
-  previousId: 9,
-  nextId: 7,
-});
 
 const storage = {
   value: "",

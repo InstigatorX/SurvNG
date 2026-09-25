@@ -419,9 +419,6 @@ class ApplicationRuntimeMonitor:
     def stop_diagnostics(self, session_id: str) -> bool:
         return bool(self._diagnostics and self._diagnostics.stop(session_id))
 
-    def export_diagnostics(self, session_id: str) -> dict[str, Any] | None:
-        return self._diagnostics.export(session_id) if self._diagnostics else None
-
     def export_diagnostics_stream(self, session_id: str) -> Iterator[bytes] | None:
         return self._diagnostics.export_stream(session_id) if self._diagnostics else None
 

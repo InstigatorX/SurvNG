@@ -99,17 +99,11 @@ class MediaCancellation:
         self._lock = threading.Lock()
         self._callbacks: list[Callable[[str], None]] = []
         self._reason = ""
-        self._cancelled_at = 0.0
 
     @property
     def reason(self) -> str:
         with self._lock:
             return self._reason
-
-    @property
-    def cancelled_at(self) -> float:
-        with self._lock:
-            return self._cancelled_at
 
     def is_set(self) -> bool:
         return self._event.is_set()
@@ -133,7 +127,6 @@ class MediaCancellation:
             if self._event.is_set():
                 return False
             self._reason = normalized
-            self._cancelled_at = time.monotonic()
             callbacks = self._callbacks
             self._callbacks = []
             self._event.set()
@@ -290,13 +283,6 @@ class MediaSessionManager:
             lambda record: record.request.owner_generation == generation,
             reason,
         )
-
-    def cancel_all(self, reason: str, *, close_admission: bool = False) -> int:
-        if close_admission:
-            with self._condition:
-                self._accepting = False
-                self._condition.notify_all()
-        return self._cancel_matching(lambda _record: True, reason)
 
     def wait_idle(self, timeout: float) -> bool:
         deadline = time.monotonic() + max(0.0, timeout)

@@ -13,7 +13,6 @@ from survng.app.detector import (
     OpenVinoDetector,
     _class_aware_nms,
     detection_failure,
-    merge_manual_detection_objects,
 )
 
 
@@ -39,17 +38,6 @@ class OpenVinoDetectorTest(unittest.TestCase):
         )
         self.assertEqual(detection_failure([]), "")
         self.assertEqual(detection_failure(["legacy", None]), "")  # type: ignore[list-item]
-
-    def test_manual_detection_merge_preserves_incident_metadata(self) -> None:
-        existing = '[{"label":"old"},{"status":"no_recorded_frame"},{"status":"motion_qualification","motion_qualification":{"score":0.7}},{"status":"object_tracking","object_tracking":{"state":"complete"}}]'
-        detected = [{"label": "person", "confidence": 0.9}]
-
-        merged = merge_manual_detection_objects(existing, detected)
-
-        self.assertEqual(merged[0]["label"], "person")
-        self.assertEqual(len(merged), 3)
-        self.assertEqual(merged[1]["status"], "motion_qualification")
-        self.assertEqual(merged[2]["status"], "object_tracking")
 
     def test_output_format_distinguishes_two_class_raw_yolo_from_e2e(self) -> None:
         detector = make_detector(["person", "car"])

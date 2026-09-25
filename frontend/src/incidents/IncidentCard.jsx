@@ -41,7 +41,6 @@ import {
   IncidentSourceDot,
   SnapshotImage,
   StoredTrackVideoOverlay,
-  eventObjects,
   formatDepthMeters,
   hasDetectedObjects,
   incidentClipWindow,

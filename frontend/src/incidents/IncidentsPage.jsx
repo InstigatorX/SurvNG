@@ -1,8 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
-  ArrowRight,
-  Camera,
   ChevronLeft,
   ChevronRight,
   Grid2X2,
@@ -18,13 +15,12 @@ import { incidentDetailQuery, incidentSelectionHref, incidentThumbnailPageSize, 
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../incidentSemanticSearch.mjs";
 import { APP_BASE_PATH, appUrl, incidentRecordingContext, fetch } from "../shared/api.js";
 import { INCIDENT_REFRESH_FALLBACK_MS } from "../shared/constants.js";
-import { formatDateTime } from "../shared/format.js";
 import { dateKeyForTimeZone, addDaysToDateKey, zonedDateSecondToEpoch } from "../shared/datetime.js";
 import { useStoredState, isMobileViewport } from "../shared/hooks.js";
 import { clearLegacyIncidentFilterStorage } from "../shared/cameras.js";
 import { useAppEvents } from "../shared/events.js";
 import { usePollingData, useIncidentDetails } from "../shared/polling.js";
-import { incidentLabels, IncidentObjectBadges, IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
+import { IncidentListItem, EventOverlay } from "../shared/evidence.jsx";
 import { IncidentCard, IncidentInspector } from "./IncidentCard.jsx";
 import "./mobile-incidents.css";
 import { FaceReviewDialog } from "../people/FacesPage.jsx";
@@ -63,7 +59,6 @@ export function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantC
     incidentDetailCacheRef,
     incidentDetails,
     setIncidentDetails,
-    incidentSelectionRequestRef,
     selectedEvent,
     setSelectedEvent,
     openIncidentOverlay,

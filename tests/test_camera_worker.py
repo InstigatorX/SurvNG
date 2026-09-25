@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
-import cv2
 
 from survng.app.camera import CameraWorker, _AutoStreamAlignment
 from survng.app.camera_lifecycle import CAPTURE_STOP_TIMEOUT_SECONDS, CameraLifecyclePhase

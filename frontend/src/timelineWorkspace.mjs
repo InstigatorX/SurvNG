@@ -42,14 +42,6 @@ export function expectedTimelineCameras(cameras, routes, activeCameraId, limit =
   return expected;
 }
 
-export function timelineCompanionGrid(count) {
-  const available = Math.max(0, Math.min(6, Math.trunc(Number(count) || 0)));
-  if (available <= 1) return { columns: 1, rows: 1 };
-  if (available <= 3) return { columns: 1, rows: available };
-  if (available === 4) return { columns: 2, rows: 2 };
-  return { columns: 2, rows: 3 };
-}
-
 export function timelineStagePage(cameras, page = 0, pageSize = 7) {
   const available = Array.isArray(cameras) ? cameras : [];
   const size = Math.max(1, Number(pageSize) || 7);
@@ -162,13 +154,6 @@ export function timelinePanViewport(dayStartEpoch, dayEndEpoch, viewport, deltaS
   const maximumStart = Math.max(start, end - span);
   const nextStart = Math.max(start, Math.min(maximumStart, currentStart + (Number(deltaSeconds) || 0)));
   return { startEpoch: nextStart, endEpoch: nextStart + span };
-}
-
-export function timelineViewportPage(startEpoch, endEpoch, viewport, direction) {
-  const currentStart = Number(viewport?.startEpoch);
-  const currentEnd = Number(viewport?.endEpoch);
-  const span = Math.max(1, currentEnd - currentStart);
-  return timelinePanViewport(startEpoch, endEpoch, viewport, direction < 0 ? -span / 2 : span / 2);
 }
 
 export function timelinePlayheadInComfortZone(viewport, playhead, edgeRatio = 0.2) {

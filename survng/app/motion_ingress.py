@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 
 from .motion import MotionQualificationResult
-from .motion_decisions import priority_motion_topic
 from .camera_semantics import camera_semantic_reports
 from .motion_events import MotionEventCoordinator, MotionEventTiming, MotionTrigger
 from .domain_events import MotionObserved

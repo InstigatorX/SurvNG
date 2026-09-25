@@ -314,7 +314,7 @@ class _InferenceWorker:
             return False
         try:
             message = parent.recv()
-        except (EOFError, OSError) as exc:
+        except (EOFError, OSError):
             self._terminate_failed_worker_locked(
                 f"{self.role} inference worker startup failed."
             )
@@ -656,7 +656,7 @@ class _InferenceWorker:
                 )
                 with self._lock:
                     self._status = next_status
-            except Exception as exc:
+            except Exception:
                 with self._lock:
                     self._last_error = (
                         f"{self.role} inference status is unavailable."
