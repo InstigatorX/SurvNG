@@ -8,7 +8,9 @@ import logging
 import os
 from pathlib import Path
 import queue
+import re
 import socket
+import subprocess
 import threading
 import time
 from typing import Any
@@ -36,6 +38,83 @@ from .app.inference_runtime.model_sync import (
 LOGGER = logging.getLogger("survng.inference-worker")
 DEFAULT_WORKER_ID_PATH = Path("/var/lib/survng-inference/worker-id")
 DEFAULT_MODEL_CACHE_PATH = Path("/var/lib/survng-inference/models")
+DEFAULT_UPGRADE_REQUEST_PATH = Path("/var/lib/survng-inference/upgrade-request")
+_UPGRADE_PATH_UNIT = "survng-inference-upgrade.path"
+_FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def full_commit_sha(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if _FULL_COMMIT_SHA.fullmatch(text):
+        return text
+    return ""
+
+
+def running_worker_sha() -> str:
+    """Return this checkout's full commit, preferring the process environment."""
+    configured = full_commit_sha(os.environ.get("SURVNG_GIT_SHA", ""))
+    if configured:
+        return configured
+    root = Path(__file__).resolve().parent
+    for candidate in (root, *root.parents):
+        if not (candidate / ".git").exists() or not (candidate / "survng").is_dir():
+            continue
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(candidate), "rev-parse", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        if completed.returncode == 0:
+            return full_commit_sha(completed.stdout)
+        return ""
+    return ""
+
+
+def upgrade_helper_is_enabled() -> bool:
+    try:
+        completed = subprocess.run(
+            ["/bin/systemctl", "is-enabled", _UPGRADE_PATH_UNIT],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == "enabled"
+
+
+def request_code_upgrade(
+    target_sha: str,
+    *,
+    request_path: Path = DEFAULT_UPGRADE_REQUEST_PATH,
+    helper_enabled: Any = None,
+) -> None:
+    """Ask the root upgrade unit to check out one commit and restart the worker."""
+    sha = full_commit_sha(target_sha)
+    if not sha:
+        raise ValueError("upgrade target must be a full git commit")
+    enabled = upgrade_helper_is_enabled if helper_enabled is None else helper_enabled
+    if not enabled():
+        raise RuntimeError(
+            "survng-inference-upgrade.path is not enabled on this worker"
+        )
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = request_path.with_name(
+        f".{request_path.name}.{os.getpid()}.tmp"
+    )
+    try:
+        temporary.write_text(f"{sha}\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, request_path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def load_or_create_worker_id(path: Path) -> str:
@@ -183,12 +262,16 @@ class InferenceWorkerClient:
         name: str,
         roles: list[str],
         model_cache_dir: Path = DEFAULT_MODEL_CACHE_PATH,
+        software_version: str | None = None,
     ) -> None:
         self.server_url = worker_websocket_url(server_url)
         self.token = token
         self.worker_id = worker_id
         self.name = name
         self.roles = roles
+        self.software_version = full_commit_sha(
+            software_version if software_version is not None else running_worker_sha()
+        )
         self.model_cache = WorkerModelCache(model_cache_dir)
 
     def run_once(self) -> None:
@@ -198,7 +281,7 @@ class InferenceWorkerClient:
             worker_id=self.worker_id,
             name=self.name,
             roles=self.roles,
-            software_version=os.environ.get("SURVNG_GIT_SHA", ""),
+            software_version=self.software_version,
             cached_model_digests=self.model_cache.available_digests(),
         )
         with connect(
@@ -334,6 +417,13 @@ class InferenceWorkerClient:
                     continue
                 if isinstance(incoming, str):
                     control = json.loads(incoming)
+                    if control.get("type") == "upgrade":
+                        self._handle_upgrade(
+                            websocket,
+                            control,
+                            connection_generation=connection_generation,
+                        )
+                        continue
                     if (
                         control.get("type") == "heartbeat_ack"
                         and (
@@ -362,6 +452,43 @@ class InferenceWorkerClient:
                     break
             requests.put(None)
             thread.join(timeout=30.0)
+
+    def _handle_upgrade(
+        self,
+        websocket: Any,
+        control: dict[str, Any],
+        *,
+        connection_generation: int,
+    ) -> None:
+        target = full_commit_sha(control.get("target_sha"))
+        phase = "failed"
+        detail = ""
+        try:
+            if str(control.get("worker_id") or "") != self.worker_id:
+                raise ValueError("upgrade request does not match this worker")
+            if int(control.get("connection_generation") or 0) != connection_generation:
+                raise ValueError("upgrade request does not match this connection")
+            if not target:
+                raise ValueError("upgrade target must be a full git commit")
+            if target == self.software_version:
+                phase = "accepted"
+                detail = "already running this commit"
+            else:
+                request_code_upgrade(target)
+                phase = "accepted"
+                detail = "upgrade requested"
+        except Exception as error:
+            phase = "failed"
+            detail = redact_secret_text(error).replace("\n", " ")[:300]
+            LOGGER.warning("Inference worker upgrade failed: %s", detail)
+        websocket.send(json.dumps({
+            "type": "upgrade_status",
+            "worker_id": self.worker_id,
+            "connection_generation": connection_generation,
+            "phase": phase,
+            "detail": detail,
+            "target_sha": target,
+        }))
 
     def handle_packet(
         self,

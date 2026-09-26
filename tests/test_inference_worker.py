@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeoutError
 import json
+import os
 from pathlib import Path
 import queue
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -43,6 +45,7 @@ from survng.inference_worker import (
     InferenceWorkerClient,
     _receive_welcome,
     load_or_create_worker_id,
+    request_code_upgrade,
     worker_websocket_url,
 )
 
@@ -227,6 +230,96 @@ class InferenceWorkerClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "does not exist"):
             _receive_welcome(websocket)
+
+    def test_code_upgrade_writes_the_requested_commit(self) -> None:
+        target = "ab" * 20
+        with tempfile.TemporaryDirectory() as temporary:
+            request_path = Path(temporary) / "upgrade-request"
+            request_code_upgrade(
+                target.upper(),
+                request_path=request_path,
+                helper_enabled=lambda: True,
+            )
+            self.assertEqual(request_path.read_text(encoding="utf-8"), f"{target}\n")
+            self.assertEqual(
+                stat.S_IMODE(request_path.stat().st_mode) & 0o777,
+                0o600,
+            )
+
+            with self.assertRaisesRegex(ValueError, "full git commit"):
+                request_code_upgrade(
+                    "abc",
+                    request_path=request_path,
+                    helper_enabled=lambda: True,
+                )
+            self.assertEqual(request_path.read_text(encoding="utf-8"), f"{target}\n")
+
+            blocked = Path(temporary) / "blocked"
+            with self.assertRaisesRegex(RuntimeError, "not enabled"):
+                request_code_upgrade(
+                    target,
+                    request_path=blocked,
+                    helper_enabled=lambda: False,
+                )
+            self.assertFalse(blocked.exists())
+
+        script = Path(__file__).resolve().parents[1] / "deploy" / "survng-inference-upgrade"
+        with tempfile.TemporaryDirectory() as temporary:
+            request_path = Path(temporary) / "upgrade-request"
+            request_path.write_text("abc\n", encoding="utf-8")
+            completed = subprocess.run(
+                ["bash", str(script)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "SURVNG_INFERENCE_UPGRADE_REQUEST": str(request_path),
+                },
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("not a full git commit", completed.stderr)
+            self.assertTrue(request_path.is_file())
+
+    def test_worker_reports_upgrade_acceptance(self) -> None:
+        current = "ab" * 20
+        client = InferenceWorkerClient(
+            server_url="http://survng.internal:8088",
+            token="secret",
+            worker_id="worker-a",
+            name="worker",
+            roles=["object"],
+            software_version=current,
+        )
+        websocket = Mock()
+        client._handle_upgrade(
+            websocket,
+            {
+                "type": "upgrade",
+                "worker_id": "worker-a",
+                "connection_generation": 3,
+                "target_sha": current,
+            },
+            connection_generation=3,
+        )
+        current_status = json.loads(websocket.send.call_args.args[0])
+        self.assertEqual(current_status["phase"], "accepted")
+        self.assertEqual(current_status["detail"], "already running this commit")
+
+        websocket.reset_mock()
+        client._handle_upgrade(
+            websocket,
+            {
+                "type": "upgrade",
+                "worker_id": "other",
+                "connection_generation": 3,
+                "target_sha": "cd" * 20,
+            },
+            connection_generation=3,
+        )
+        rejected = json.loads(websocket.send.call_args.args[0])
+        self.assertEqual(rejected["phase"], "failed")
+        self.assertIn("does not match this worker", rejected["detail"])
 
     def test_busy_worker_heartbeats_its_queue(self) -> None:
         client = InferenceWorkerClient(
@@ -597,6 +690,90 @@ class InferenceWorkerRouteTests(unittest.TestCase):
                 websocket.receive_json()
 
         self.assertEqual(raised.exception.code, 1008)
+
+    def test_upgrade_requests_the_primary_commit(self) -> None:
+        target = "ab" * 20
+        app = FastAPI()
+        registry = RemoteInferenceRegistry(
+            lambda: self.config,
+            generation_provider=self.catalog.config_generation,
+        )
+        app.include_router(create_inference_worker_router(
+            InferenceWorkerRouteDependencies(
+                registry=registry,
+                model_catalog=self.catalog,
+                authenticate=lambda value: authenticate_inference_worker(
+                    value,
+                    hash_api_token("worker-secret"),
+                ),
+                primary_sha=lambda: target,
+            )
+        ))
+        client = TestClient(app)
+        try:
+            with client.websocket_connect(
+                "/api/inference/workers/connect",
+                headers={"Authorization": "Bearer worker-secret"},
+            ) as websocket:
+                websocket.send_text(WorkerRegistration(
+                    worker_id="worker-a",
+                    roles=["object"],
+                    software_version="cd" * 20,
+                ).model_dump_json())
+                welcome = _receive_worker_json(websocket)
+                model_sync = websocket.receive_json()
+                self.assertEqual(model_sync["type"], "model_sync_complete")
+                websocket.send_json({
+                    "type": "ready",
+                    "worker_id": "worker-a",
+                    "connection_generation": welcome["connection_generation"],
+                    "config_generation": welcome["config_generation"],
+                    "statuses": {"object": {"ready": True}},
+                })
+                websocket.send_json({
+                    "type": "heartbeat",
+                    "worker_id": "worker-a",
+                    "connection_generation": welcome["connection_generation"],
+                    "pending_requests": 0,
+                })
+                heartbeat_ack = websocket.receive_json()
+                self.assertTrue(heartbeat_ack["accepted"])
+
+                upgraded = client.post("/api/inference/workers/worker-a/upgrade")
+                self.assertEqual(upgraded.status_code, 200)
+                self.assertEqual(upgraded.json()["upgrade_phase"], "requested")
+                command = websocket.receive_json()
+                self.assertEqual(command["type"], "upgrade")
+                self.assertEqual(command["target_sha"], target)
+                websocket.send_json({
+                    "type": "upgrade_status",
+                    "worker_id": "worker-a",
+                    "connection_generation": welcome["connection_generation"],
+                    "phase": "accepted",
+                    "detail": "upgrade requested",
+                    "target_sha": target,
+                })
+                websocket.send_json({
+                    "type": "heartbeat",
+                    "worker_id": "worker-a",
+                    "connection_generation": welcome["connection_generation"],
+                    "pending_requests": 0,
+                })
+                follow_up = websocket.receive_json()
+                self.assertTrue(follow_up["accepted"])
+                worker = registry.status()["workers"][0]
+                self.assertEqual(worker["software_version"], "cd" * 20)
+                self.assertEqual(worker["upgrade_phase"], "accepted")
+                self.assertEqual(worker["upgrade_detail"], "upgrade requested")
+                self.assertEqual(worker["upgrade_target_sha"], target)
+
+                missing = client.post("/api/inference/workers/missing/upgrade")
+                self.assertEqual(missing.status_code, 409)
+            rejected = client.post("/api/inference/workers/bad!/upgrade")
+            self.assertEqual(rejected.status_code, 404)
+        finally:
+            client.close()
+            registry.close()
 
     def test_invalid_worker_credential_is_rejected(self) -> None:
         with self.assertRaises(WebSocketDisconnect) as raised:

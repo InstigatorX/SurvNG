@@ -1,3 +1,9 @@
+export function formatCommit(value) {
+  const text = String(value || "").trim();
+  if (!text) return "—";
+  return text.slice(0, 12);
+}
+
 export function formatInferenceMs(value) {
   if (value == null || value === "") return "—";
   const number = Number(value);
@@ -105,6 +111,10 @@ export function inferenceTargetRows(detector, detectorConfig = {}) {
       modelLoadMs: objectStatus.model_load_ms,
       leaseSeconds: Number(worker.lease_remaining_seconds),
       weight: workerWeight(detectorConfig, worker.worker_id),
+      softwareVersion: String(worker.software_version || ""),
+      upgradePhase: String(worker.upgrade_phase || ""),
+      upgradeDetail: String(worker.upgrade_detail || ""),
+      codeMatches: Boolean(detector?.primary_sha) && worker.software_version === detector.primary_sha,
     });
   }
   return rows;

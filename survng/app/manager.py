@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .product_update import running_commit_sha
 from .tracking_window import recorded_tracking_window
 from .activity_events import ActivityEventBus, ActivityTransition
 from .camera import CameraWorker
@@ -1830,6 +1831,7 @@ class AppManager:
             "lifecycle": self.inference.status(),
             "recorded_decode": recorded_decode,
             "inference_mode": self.config.detector.inference_mode,
+            "primary_sha": running_commit_sha(),
         }
         remote_registry = getattr(
             self,

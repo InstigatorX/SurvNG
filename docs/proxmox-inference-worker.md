@@ -180,7 +180,30 @@ values are:
 
 The worker connects outbound to `/api/inference/workers/connect`.
 
-## 8. Verify before cutover
+## 8. Allow the primary to update this worker
+
+The worker service cannot rewrite its checkout. Install a root helper that
+watches one file. Object Detection → Workers can then ask this guest to check
+out the commit the primary is running, install Python dependencies, and restart.
+
+```bash
+sudo install -m 0755 "$SURVNG_ROOT/deploy/survng-inference-upgrade" \
+  /usr/local/sbin/survng-inference-upgrade
+sudo cp "$SURVNG_ROOT/deploy/survng-inference-upgrade.service" \
+  /etc/systemd/system/survng-inference-upgrade.service
+sudo cp "$SURVNG_ROOT/deploy/survng-inference-upgrade.path" \
+  /etc/systemd/system/survng-inference-upgrade.path
+sudo systemctl daemon-reload
+sudo systemctl enable --now survng-inference-upgrade.path
+```
+
+The helper fetches that exact commit from `origin`. Tracked local edits in the
+checkout are discarded. `.venv` and untracked files stay. If the checkout or
+dependency install fails, the previous commit is restored and the worker is
+not restarted. After a successful install it restarts `survng-inference`, and
+the worker connects again on the new commit.
+
+## 9. Verify before cutover
 
 On the primary:
 

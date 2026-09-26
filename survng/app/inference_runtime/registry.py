@@ -17,6 +17,7 @@ from .protocol import (
     INFERENCE_PROTOCOL_VERSION,
     WorkerHeartbeat,
     WorkerReady,
+    WorkerUpgradeStatus,
     WorkerRegistration,
     WorkerRole,
     ProtocolError,
@@ -30,6 +31,8 @@ class RegistryTransport(Protocol):
     def request(self, packet: bytes, timeout: float) -> bytes: ...
 
     def close(self, reason: str) -> None: ...
+
+    def send_control(self, message: dict[str, Any]) -> None: ...
 
 
 def detector_config_generation(config: DetectorConfig) -> str:
@@ -102,6 +105,9 @@ class _WorkerLease:
     inference_ms_total: float = 0.0
     inference_samples: int = 0
     role_attempts: dict[str, dict[str, int]] = field(default_factory=dict)
+    upgrade_phase: str = ""
+    upgrade_detail: str = ""
+    upgrade_target_sha: str = ""
     last_seen_at: float = field(default_factory=time.monotonic)
 
 
@@ -205,6 +211,66 @@ class RemoteInferenceRegistry:
             )
             self._renew(worker)
             return accepted
+
+    def request_upgrade(self, worker_id: str, target_sha: str) -> dict[str, Any]:
+        """Ask one connected worker to check out the primary commit and restart."""
+        sha = str(target_sha or "").strip().lower()
+        if len(sha) != 40 or any(character not in "0123456789abcdef" for character in sha):
+            raise InferenceUnavailable("upgrade target must be a full git commit")
+        with self._lock:
+            worker = self._workers.get(worker_id)
+            if worker is None:
+                raise InferenceUnavailable("inference worker is not connected")
+            if not worker.ready:
+                raise InferenceUnavailable("inference worker is not ready")
+            generation = worker.connection_generation
+            transport = worker.transport
+            worker.upgrade_phase = "requested"
+            worker.upgrade_target_sha = sha
+            worker.upgrade_detail = ""
+        try:
+            transport.send_control({
+                "type": "upgrade",
+                "worker_id": worker_id,
+                "connection_generation": generation,
+                "target_sha": sha,
+            })
+        except Exception as error:
+            with self._lock:
+                current = self._current_worker(worker_id, generation)
+                if current is not None:
+                    current.upgrade_phase = "failed"
+                    current.upgrade_detail = "upgrade request was not sent"
+            raise InferenceUnavailable(
+                "upgrade request was not sent"
+            ) from error
+        return self._upgrade_status(worker_id)
+
+    def note_upgrade(self, status: WorkerUpgradeStatus) -> None:
+        with self._lock:
+            worker = self._current_worker(
+                status.worker_id,
+                status.connection_generation,
+            )
+            if worker is None:
+                return
+            worker.upgrade_phase = status.phase
+            worker.upgrade_detail = status.detail
+            if status.target_sha:
+                worker.upgrade_target_sha = status.target_sha
+
+    def _upgrade_status(self, worker_id: str) -> dict[str, Any]:
+        with self._lock:
+            worker = self._workers.get(worker_id)
+            if worker is None:
+                return {}
+            return {
+                "worker_id": worker_id,
+                "software_version": worker.registration.software_version,
+                "upgrade_phase": worker.upgrade_phase,
+                "upgrade_detail": worker.upgrade_detail,
+                "upgrade_target_sha": worker.upgrade_target_sha,
+            }
 
     def heartbeat(self, heartbeat: WorkerHeartbeat) -> bool:
         with self._lock:
@@ -359,6 +425,10 @@ class RemoteInferenceRegistry:
                 {
                     "worker_id": worker.registration.worker_id,
                     "name": worker.registration.name,
+                    "software_version": worker.registration.software_version,
+                    "upgrade_phase": worker.upgrade_phase,
+                    "upgrade_detail": worker.upgrade_detail,
+                    "upgrade_target_sha": worker.upgrade_target_sha,
                     "roles": list(worker.registration.roles),
                     "slots": worker.registration.slots,
                     "devices": list(worker.registration.devices),

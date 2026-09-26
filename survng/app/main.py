@@ -71,6 +71,7 @@ from .intelligence_routes import (
     create_intelligence_router,
 )
 from .inference_runtime.registry import RemoteInferenceRegistry
+from .product_update import running_commit_sha
 from .inference_runtime.model_sync import ModelBundleCatalog
 from .inference_worker_routes import (
     InferenceWorkerRouteDependencies,
@@ -1048,6 +1049,7 @@ app.include_router(
                 authorization,
                 config.inference_workers.worker_token_hash,
             ),
+            primary_sha=running_commit_sha,
         )
     )
 )

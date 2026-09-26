@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { fetch } from "../shared/api.js";
-import { inferenceTargetRows, formatAttemptOutcome, formatInferenceMs, formatRoleAttempts } from "./inferenceWorkers.mjs";
+import { inferenceTargetRows, formatAttemptOutcome, formatCommit, formatInferenceMs, formatRoleAttempts } from "./inferenceWorkers.mjs";
 
 export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) {
   const [liveStatus, setLiveStatus] = useState(detectorStatus || null);
+  const [upgradeBusy, setUpgradeBusy] = useState("");
+  const [upgradeError, setUpgradeError] = useState("");
   const detector = config?.detector || {};
   const mode = detector.inference_mode || "local";
   const balance = detector.inference_balance || "remote_first";
@@ -30,6 +32,26 @@ export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) 
       window.clearInterval(timer);
     };
   }, []);
+
+  async function matchPrimary(workerId) {
+    setUpgradeError("");
+    setUpgradeBusy(workerId);
+    try {
+      const response = await fetch(`/api/inference/workers/${encodeURIComponent(workerId)}/upgrade`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Unable to update the worker.");
+    } catch (error) {
+      setUpgradeError(error.message || "Unable to update the worker.");
+    } finally {
+      setUpgradeBusy("");
+      try {
+        const statusResponse = await fetch("/api/detector/status", { cache: "no-store" });
+        if (statusResponse.ok) setLiveStatus(await statusResponse.json());
+      } catch {
+        // The interval keeps the last status.
+      }
+    }
+  }
 
   function setWeight(workerId, value) {
     const next = { ...(detector.inference_worker_weights || {}) };
@@ -64,6 +86,8 @@ export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) 
           <small>Used for a connected worker until it has its own weight. 0 disables that worker.</small>
         </label>
       </div>
+      {status?.primary_sha ? <p className="settings-help">Primary code {formatCommit(status.primary_sha)}.</p> : null}
+      {upgradeError ? <p className="inference-target-note attention">{upgradeError}</p> : null}
       <div className="inference-target-list">
         {rows.length ? rows.map((row) => (
           <article className="inference-target-card" key={row.id}>
@@ -81,7 +105,12 @@ export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) 
               <div><dt>Last inference</dt><dd>{formatInferenceMs(row.lastInferenceMs)}</dd></div>
               <div><dt>Round trip</dt><dd>{formatInferenceMs(row.lastRequestMs)}</dd></div>
               <div><dt>Lease</dt><dd>{Number.isFinite(row.leaseSeconds) ? `${row.leaseSeconds.toFixed(0)}s` : "—"}</dd></div>
+              <div><dt>Code</dt><dd>{formatCommit(row.softwareVersion)}</dd></div>
             </dl>
+            {row.upgradeDetail ? <p className={row.upgradePhase === "failed" ? "inference-target-note attention" : "inference-target-note"}>{row.upgradeDetail}</p> : null}
+            <button type="button" disabled={!status?.primary_sha || !row.ready || row.codeMatches || upgradeBusy === row.id || row.upgradePhase === "requested"} onClick={() => void matchPrimary(row.id)}>
+              {row.codeMatches ? "Code matches" : upgradeBusy === row.id ? "Requesting update" : "Match primary code"}
+            </button>
             {formatRoleAttempts(row.roleAttempts) ? <p className="inference-target-note">{formatRoleAttempts(row.roleAttempts)}</p> : null}
             {formatAttemptOutcome(row) ? <p className={row.lastOutcome === "failed" ? "inference-target-note attention" : "inference-target-note"}>{formatAttemptOutcome(row)}</p> : null}
             <label>Weight

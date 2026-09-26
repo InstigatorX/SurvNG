@@ -1,0 +1,51 @@
+#!/bin/bash
+# Check out one commit requested by the primary and restart the inference worker.
+# The worker process only writes the commit file. This unit runs as root because
+# the worker service cannot rewrite its checkout or restart itself.
+set -euo pipefail
+
+request="${SURVNG_INFERENCE_UPGRADE_REQUEST:-/var/lib/survng-inference/upgrade-request}"
+root="${SURVNG_INFERENCE_ROOT:-/opt/survng}"
+service="${SURVNG_INFERENCE_SERVICE:-survng-inference.service}"
+user="${SURVNG_INFERENCE_USER:-survng-inference}"
+
+if [[ ! -f "$request" ]]; then
+  echo "upgrade request is missing" >&2
+  exit 2
+fi
+sha="$(tr -d '[:space:]' < "$request")"
+if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "upgrade request is not a full git commit" >&2
+  exit 2
+fi
+rm -f "$request"
+
+if [[ ! -d "$root/.git" ]]; then
+  echo "worker checkout is missing" >&2
+  exit 1
+fi
+
+export GIT_TERMINAL_PROMPT=0
+previous="$(runuser -u "$user" -- git -C "$root" rev-parse HEAD)"
+if [[ "$previous" == "$sha" ]]; then
+  exit 0
+fi
+
+runuser -u "$user" -- git -C "$root" fetch --no-tags origin "$sha"
+if ! runuser -u "$user" -- git -C "$root" checkout -f "$sha"; then
+  runuser -u "$user" -- git -C "$root" checkout -f "$previous" || true
+  echo "checkout of $sha failed; restored $previous" >&2
+  exit 1
+fi
+if ! runuser -u "$user" -- "$root/.venv/bin/pip" install -r "$root/requirements.txt"; then
+  runuser -u "$user" -- git -C "$root" checkout -f "$previous" || true
+  runuser -u "$user" -- "$root/.venv/bin/pip" install -r "$root/requirements.txt" || true
+  echo "dependency install failed; restored $previous" >&2
+  exit 1
+fi
+
+helper="$root/deploy/survng-inference-upgrade"
+if [[ -f "$helper" ]]; then
+  install -m 0755 "$helper" /usr/local/sbin/survng-inference-upgrade
+fi
+systemctl restart "$service"

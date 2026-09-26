@@ -12,6 +12,7 @@ from survng.app.inference_runtime.protocol import (
     WorkerHeartbeat,
     WorkerReady,
     WorkerRegistration,
+    WorkerUpgradeStatus,
     decode_frame,
     decode_packet,
     encode_binary_packet,
@@ -28,6 +29,10 @@ class _FakeTransport:
         self.result = result
         self.requests: list[bytes] = []
         self.closed: list[str] = []
+        self.control: list[dict] = []
+
+    def send_control(self, message: dict) -> None:
+        self.control.append(message)
 
     def request(self, packet: bytes, timeout: float) -> bytes:
         self.requests.append(packet)
@@ -397,6 +402,83 @@ class RemoteInferenceRegistryTests(unittest.TestCase):
             detector_config_generation(self.config),
             self.registry.status()["workers"][0]["config_generation"],
         )
+
+    def test_upgrade_sends_the_primary_commit(self) -> None:
+        target = "ab" * 20
+        registration_version = "cd" * 20
+        transport = _FakeTransport()
+        welcome = self.registry.register(
+            WorkerRegistration(
+                worker_id="worker-a",
+                roles=["object"],
+                software_version=registration_version,
+            ),
+            transport,
+        )
+        with self.assertRaises(InferenceUnavailable) as unready:
+            self.registry.request_upgrade("worker-a", target)
+        self.assertIn("not ready", str(unready.exception))
+        self.assertEqual(transport.control, [])
+        self.assertTrue(self.registry.mark_ready(WorkerReady(
+            worker_id="worker-a",
+            connection_generation=welcome["connection_generation"],
+            config_generation=welcome["config_generation"],
+            statuses={"object": {"ready": True}},
+        )))
+
+        with self.assertRaises(InferenceUnavailable) as unavailable:
+            self.registry.request_upgrade("missing", target)
+        self.assertIn("not connected", str(unavailable.exception))
+
+        payload = self.registry.request_upgrade("worker-a", target)
+
+        self.assertEqual(payload["upgrade_phase"], "requested")
+        self.assertEqual(payload["software_version"], registration_version)
+        self.assertEqual(transport.control, [{
+            "type": "upgrade",
+            "worker_id": "worker-a",
+            "connection_generation": welcome["connection_generation"],
+            "target_sha": target,
+        }])
+
+        self.registry.note_upgrade(WorkerUpgradeStatus(
+            worker_id="worker-a",
+            connection_generation=welcome["connection_generation"],
+            phase="accepted",
+            detail="upgrade requested",
+            target_sha=target,
+        ))
+        self.registry.note_upgrade(WorkerUpgradeStatus(
+            worker_id="worker-a",
+            connection_generation=welcome["connection_generation"] + 1,
+            phase="failed",
+            detail="stale",
+            target_sha=target,
+        ))
+
+        worker = self.registry.status()["workers"][0]
+        self.assertEqual(worker["upgrade_phase"], "accepted")
+        self.assertEqual(worker["upgrade_detail"], "upgrade requested")
+        self.assertEqual(worker["upgrade_target_sha"], target)
+
+    def test_upgrade_records_a_send_failure(self) -> None:
+        class _BrokenTransport(_FakeTransport):
+            def send_control(self, message: dict) -> None:
+                raise ConnectionError("closed")
+
+        target = "ab" * 20
+        self._register_ready(transport=_BrokenTransport())
+
+        with self.assertRaises(InferenceUnavailable):
+            self.registry.request_upgrade("worker-a", target)
+
+        worker = self.registry.status()["workers"][0]
+        self.assertEqual(worker["upgrade_phase"], "failed")
+        self.assertEqual(worker["upgrade_detail"], "upgrade request was not sent")
+
+        with self.assertRaises(InferenceUnavailable) as unavailable:
+            self.registry.request_upgrade("worker-a", "abc")
+        self.assertIn("full git commit", str(unavailable.exception))
 
 
 if __name__ == "__main__":

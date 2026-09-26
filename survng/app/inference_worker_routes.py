@@ -10,7 +10,7 @@ import logging
 import threading
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from .inference_runtime.protocol import (
@@ -18,6 +18,7 @@ from .inference_runtime.protocol import (
     WorkerHeartbeat,
     WorkerReady,
     WorkerRegistration,
+    WorkerUpgradeStatus,
     decode_packet,
     encode_binary_packet,
 )
@@ -195,6 +196,7 @@ class InferenceWorkerRouteDependencies:
     registry: RemoteInferenceRegistry
     authenticate: Callable[[str], bool]
     model_catalog: ModelBundleCatalog
+    primary_sha: Callable[[], str] = lambda: ""
 
 
 def create_inference_worker_router(
@@ -305,6 +307,10 @@ def create_inference_worker_router(
                         raise InferenceUnavailable(
                             "worker readiness was rejected"
                         )
+                elif control.get("type") == "upgrade_status":
+                    deps.registry.note_upgrade(
+                        WorkerUpgradeStatus.model_validate(control)
+                    )
                 elif control.get("type") == "heartbeat":
                     accepted = deps.registry.heartbeat(
                         WorkerHeartbeat.model_validate(control)
@@ -347,5 +353,23 @@ def create_inference_worker_router(
             if sender is not None:
                 sender.cancel()
                 await asyncio.gather(sender, return_exceptions=True)
+
+    @router.post("/api/inference/workers/{worker_id}/upgrade")
+    def upgrade_inference_worker(worker_id: str) -> dict[str, Any]:
+        if (
+            not worker_id
+            or len(worker_id) > 128
+            or any(
+                character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+                for character in worker_id
+            )
+        ):
+            raise HTTPException(status_code=404, detail="inference worker not found")
+        target_sha = deps.primary_sha().strip().lower()
+        try:
+            payload = deps.registry.request_upgrade(worker_id, target_sha)
+        except InferenceUnavailable as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"ok": True, **payload}
 
     return router

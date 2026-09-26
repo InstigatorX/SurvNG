@@ -81,6 +81,31 @@ class WorkerReady(BaseModel):
     statuses: dict[str, Any] = Field(default_factory=dict)
 
 
+class WorkerUpgradeStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["upgrade_status"] = "upgrade_status"
+    worker_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+    connection_generation: int = Field(ge=1)
+    phase: Literal["accepted", "failed"]
+    detail: str = Field(default="", max_length=300)
+    target_sha: str = Field(default="", max_length=40)
+
+    @field_validator("target_sha")
+    @classmethod
+    def validate_target_sha(cls, value: str) -> str:
+        if value and (
+            len(value) != 40
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError("upgrade target must be a full git commit")
+        return value
+
+
 class WorkerHeartbeat(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

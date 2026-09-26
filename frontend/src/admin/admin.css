@@ -886,10 +886,11 @@ a.button {
   color: var(--warn, #d9480f);
 }
 
-.inference-target-card label {
+.inference-target-card label,
+.inference-target-card button {
   display: grid;
   gap: 6px;
-  max-width: 160px;
+  max-width: 220px;
   margin-top: 8px;
 }
 
