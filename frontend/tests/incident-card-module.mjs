@@ -20,7 +20,8 @@ assert.match(incidentCard, /visualAnchorEventId=\{visualAnchorEventId\}/);
 assert.match(incidentCard, /appearanceAnchorEventId=\{appearanceAnchorEventId\}/);
 assert.match(incidentsPage, /visualAnchorEventId=\{visualFindSimilarEventId\}/);
 assert.match(incidentsPage, /appearanceAnchorEventId=\{findSimilarEventId\}/);
-assert.match(incidentCard, /RelatedAppearanceIncidents active=\{open\}/);
+assert.match(incidentCard, /<h3>Faces<\/h3>[\s\S]*<RelatedAppearanceIncidents anchorEventId=\{anchorEventId\}/);
+assert.doesNotMatch(incidentCard, /<RelatedAppearanceIncidents[^>]*\bactive=/);
 assert.match(incidentCard, /isValidObjectIndex\(findSimilarObjectIndex\)/);
 assert.doesNotMatch(
   incidentCard,

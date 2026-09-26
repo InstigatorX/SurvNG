@@ -314,7 +314,7 @@ class CameraWorkerTest(unittest.TestCase):
             tracking.set_accepting.assert_called_once_with(True)
             self.assertFalse(worker._stop.is_set())
 
-    def test_detection_toggle_restores_previous_state_when_tracking_sync_fails(self) -> None:
+    def test_detection_disable_keeps_admission_closed_when_tracking_sync_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(
                 CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
@@ -325,11 +325,15 @@ class CameraWorkerTest(unittest.TestCase):
                 "sync_accepting",
                 side_effect=[RuntimeError("sync failed"), None],
             ) as sync:
-                with self.assertRaisesRegex(RuntimeError, "sync failed"):
+                with self.assertRaisesRegex(RuntimeError, "detection remains disabled") as raised:
                     worker.set_detection_enabled(False)
 
-            self.assertTrue(worker.runtime_state.detection_enabled)
-            self.assertEqual(sync.call_count, 2)
+            self.assertIn("sync failed", str(raised.exception))
+            self.assertFalse(worker.runtime_state.detection_enabled)
+            self.assertEqual(sync.call_count, 1)
+            self.assertTrue(worker.lifecycle.runtime_status()["detection_cleanup_required"])
+            with worker.runtime_state.detection_work() as admitted:
+                self.assertFalse(admitted)
 
     def test_start_skips_fov_when_detection_disabled(self) -> None:
         camera = CameraConfig(
