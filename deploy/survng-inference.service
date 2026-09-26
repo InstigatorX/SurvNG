@@ -1,0 +1,24 @@
+[Unit]
+Description=SurvNG remote inference worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=survng-inference
+Group=survng-inference
+SupplementaryGroups=render video
+WorkingDirectory=/opt/survng
+EnvironmentFile=/etc/survng-inference/worker.env
+ExecStart=/opt/survng/.venv/bin/python -m survng.inference_worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/survng-inference /opt/survng/.cache
+
+[Install]
+WantedBy=multi-user.target

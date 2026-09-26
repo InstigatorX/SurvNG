@@ -19,6 +19,7 @@ from survng.app.inference import (
     InferenceWorkload,
     InferenceSupervisor,
     InferenceUnavailable,
+    InferenceWorkerBackend,
     IsolatedFaceRecognizer,
     IsolatedPersonReidentifier,
     PERSON_REID_REQUEST_TIMEOUT_SECONDS,
@@ -85,6 +86,35 @@ class InferenceSupervisorTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.supervisor.stop()
+
+    def test_local_workers_implement_transport_neutral_backend_contract(self) -> None:
+        workers = (
+            *self.supervisor._object_workers,
+            self.supervisor._face,
+            self.supervisor._reid,
+            self.supervisor._depth,
+        )
+
+        self.assertTrue(
+            all(
+                isinstance(worker, InferenceWorkerBackend)
+                for worker in workers
+            )
+        )
+
+    def test_supervisor_constructs_workers_through_backend_factory(self) -> None:
+        factory = Mock(side_effect=_InferenceWorker)
+        supervisor = InferenceSupervisor(
+            _single_object_detector(),
+            worker_factory=factory,
+        )
+        self.addCleanup(supervisor.stop)
+
+        self.assertEqual(
+            [item.args[1] for item in factory.call_args_list],
+            ["object", "face", "reid", "depth"],
+        )
+        self.assertIs(supervisor._object, supervisor._object_workers[0])
 
     def test_disabled_detector_uses_isolated_worker_contract(self) -> None:
         self.assertTrue(self.supervisor.start())

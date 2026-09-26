@@ -142,6 +142,33 @@ def _git_output(repo_root: Path, args: Sequence[str], *, timeout: float = 30.0) 
     return _run_git(repo_root, args, timeout=timeout).stdout.strip()
 
 
+def _full_commit_sha(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if len(text) == 40 and all(character in "0123456789abcdef" for character in text):
+        return text
+    return ""
+
+
+_RUNNING_COMMIT_SHA: str | None = None
+
+
+def running_commit_sha() -> str:
+    """Return the full commit this process started from, or an empty string."""
+    global _RUNNING_COMMIT_SHA
+    if _RUNNING_COMMIT_SHA is not None:
+        return _RUNNING_COMMIT_SHA
+    sha = _full_commit_sha(_baked_version().get("sha", ""))
+    if not sha:
+        root = resolve_repo_root()
+        if root is not None:
+            try:
+                sha = _full_commit_sha(_git_output(root, ["rev-parse", "HEAD"]))
+            except (OSError, subprocess.SubprocessError, ValueError):
+                sha = ""
+    _RUNNING_COMMIT_SHA = sha
+    return sha
+
+
 def _baked_version() -> dict[str, str]:
     sha = os.environ.get("SURVNG_GIT_SHA", "").strip()
     if not sha:

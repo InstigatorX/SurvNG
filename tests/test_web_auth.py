@@ -22,11 +22,13 @@ from survng.app.config import AppConfig, WebAuthConfig, WebUserConfig, load_conf
 from survng.app.config_routes import restore_config_secrets
 from survng.app.security import (
     SESSION_COOKIE_NAME,
+    authenticate_inference_worker,
     authenticate_password,
     authenticate_session,
     decode_session,
     encode_session,
     hash_password,
+    hash_api_token,
     is_public_api_path,
     required_api_scope,
     list_web_sessions,
@@ -106,6 +108,34 @@ class PasswordAndSessionTest(unittest.TestCase):
         self.assertEqual(required_api_scope("POST", "/api/semantic-search/visual-frame"), "read")
         self.assertTrue(is_public_api_path("GET", "/api/auth/session"))
         self.assertTrue(is_public_api_path("POST", "/api/auth/login"))
+
+    def test_inference_worker_uses_dedicated_bearer_digest(self) -> None:
+        token_hash = hash_api_token("worker-secret")
+
+        self.assertTrue(
+            authenticate_inference_worker(
+                "Bearer worker-secret",
+                token_hash,
+            )
+        )
+        self.assertFalse(
+            authenticate_inference_worker(
+                "Bearer wrong-secret",
+                token_hash,
+            )
+        )
+        self.assertFalse(
+            authenticate_inference_worker(
+                "Bearer worker-secret",
+                "",
+            )
+        )
+        self.assertTrue(
+            is_public_api_path(
+                "GET",
+                "/api/inference/workers/connect",
+            )
+        )
 
 
 class WebAuthConfigTest(unittest.TestCase):

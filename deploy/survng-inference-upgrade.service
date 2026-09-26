@@ -1,0 +1,10 @@
+[Unit]
+Description=Update the SurvNG inference worker to the primary commit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/survng-inference-upgrade
+TimeoutStartSec=900

@@ -246,6 +246,51 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertTrue(created["token"].startswith("survng_"))
         self.assertNotIn("token_hash", created["credential"])
 
+    def test_inference_worker_token_is_redacted_and_restored(self) -> None:
+        self.config.inference_workers.worker_token_hash = "a" * 64
+
+        payload = redacted_config_payload(self.config)
+        restored = restore_config_secrets(
+            AppConfig.model_validate(payload),
+            self.config,
+        )
+
+        self.assertEqual(
+            payload["inference_workers"]["worker_token_hash"],
+            SECRET_PLACEHOLDER,
+        )
+        self.assertEqual(
+            restored.inference_workers.worker_token_hash,
+            "a" * 64,
+        )
+
+    def test_inference_worker_token_is_returned_once(self) -> None:
+        self.apply.side_effect = lambda next_config, **_kwargs: (
+            next_config,
+            {
+                "apply_mode": "hot",
+                "camera_workers_restarted": False,
+                "subsystems_restarted": [],
+                "hot_updated": ["inference_workers"],
+            },
+        )
+
+        created = self.endpoint(
+            "/api/config/inference-worker-token",
+            "POST",
+        )()
+
+        self.assertTrue(created["token"].startswith("survng_worker_"))
+        applied = self.apply.call_args.args[0]
+        self.assertEqual(
+            len(applied.inference_workers.worker_token_hash),
+            64,
+        )
+        self.assertNotEqual(
+            applied.inference_workers.worker_token_hash,
+            created["token"],
+        )
+
     def test_api_token_list_never_exposes_hashes(self) -> None:
         self.config.api_auth.tokens = [ApiTokenConfig(
             id="ha", name="Home Assistant", token_hash="a" * 64, scopes=["read"],

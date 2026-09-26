@@ -8,7 +8,7 @@ export const MEDIA_STORAGE_ROLES = [
 ];
 export const CAMERA_ADMIN_SECTIONS = ["settings", "motion", "zones", "info"];
 export const TELEMETRY_ADMIN_SECTIONS = ["health", "occupancy", "diagnostics"];
-export const HEALTH_TELEMETRY_SECTIONS = ["health", "occupancy"];
+export const HEALTH_TELEMETRY_SECTIONS = ["health", "inference", "occupancy"];
 export const GENERAL_ADMIN_SECTIONS = ["general", "storage", "mqtt", "access", "detection", "motion-review"];
 export const LEGACY_INCIDENT_FILTER_KEYS = [
   "survng.liveEventFilter.v2",

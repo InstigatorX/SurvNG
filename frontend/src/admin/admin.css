@@ -851,3 +851,57 @@ a.button {
 .camera-order-panel {
   margin: 0 18px 12px;
 }
+
+.inference-target-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.inference-target-card {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-solid) 88%, transparent);
+}
+
+.inference-target-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.inference-target-card header em {
+  font-style: normal;
+  font-size: 12px;
+}
+
+.inference-target-card header em.good {
+  color: var(--good, #2f9e44);
+}
+
+.inference-target-card header em.attention {
+  color: var(--warn, #d9480f);
+}
+
+.inference-target-card label,
+.inference-target-card button {
+  display: grid;
+  gap: 6px;
+  max-width: 220px;
+  margin-top: 8px;
+}
+
+.inference-target-card dd.attention,
+.inference-target-note.attention {
+  color: var(--warn, #d9480f);
+}
+
+.inference-target-note {
+  margin: 8px 0 0;
+  color: var(--muted-text, var(--text-dim, #8b919a));
+  font-size: 12px;
+  line-height: 1.4;
+}

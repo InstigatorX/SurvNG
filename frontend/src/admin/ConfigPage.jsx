@@ -38,6 +38,7 @@ import {
   Save,
   ScanFace,
   ShieldCheck,
+  Server,
   Sparkles,
   Sun,
   Trash2,
@@ -65,6 +66,8 @@ import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hoo
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
 import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
 import { AccessSettings } from "./AccessSettings.jsx";
+import { InferenceHealthPanel } from "./InferenceHealthPanel.jsx";
+import { InferenceWorkersPanel } from "./InferenceWorkersPanel.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
@@ -1168,9 +1171,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       const requestedLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`;
       if (adminDirtyRef.current || apiTokenSecretVisibleRef.current) {
         const warning = adminDirtyRef.current && apiTokenSecretVisibleRef.current
-          ? "Leave this Admin view, discard unsaved changes, and discard the one-time API token secret?"
+          ? "Leave this Admin view, discard unsaved changes, and discard the one-time token secret?"
           : apiTokenSecretVisibleRef.current
-            ? "The new API token secret is shown only once. Leave this Admin view and discard the displayed secret?"
+            ? "The new token secret is shown only once. Leave this Admin view and discard the displayed secret?"
             : "Leave this Admin view and discard unsaved changes?";
         if (!window.confirm(warning)) {
           window.history.pushState(window.history.state, "", acceptedAdminLocationRef.current);
@@ -1272,7 +1275,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
       return;
     }
     if (apiTokenSecretVisible && settingsTab === "general") {
-      if (!window.confirm("The new API token secret is shown only once. Leave this section and discard the displayed secret?")) return;
+      if (!window.confirm("The new token secret is shown only once. Leave this section and discard the displayed secret?")) return;
       setApiTokenSecretVisible(false);
     }
     if (!confirmDiscardAdminChanges("Switch sections and discard unsaved changes?")) return;
@@ -2182,6 +2185,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           actions: <button type="button" onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>,
         };
       }
+      if (telemetrySection === "inference") {
+        return {
+          scope: <AdminCommandLabel icon={Server}>Inference workers</AdminCommandLabel>,
+          actions: <button type="button" onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>,
+        };
+      }
       return {
         scope: (
           <CameraScopePicker
@@ -2432,13 +2441,16 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
               </div></div> : (
                 <div className="detection-settings subsection-workspace health-subsection-workspace">
-                  <nav id="health-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label="Health sections" onKeyDown={(event) => moveTabFocus(event, HEALTH_TELEMETRY_SECTIONS, telemetrySection === "occupancy" ? "occupancy" : "health", (next) => selectAdminSubsection(next, setTelemetrySection, "telemetry"))}>
-                    <button id="health-tab-health" data-tab-id="health" type="button" tabIndex={telemetrySection === "occupancy" ? -1 : 0} aria-controls="telemetry-view-panel" className={telemetrySection === "occupancy" ? "" : "active"} onClick={() => selectAdminSubsection("health", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection !== "occupancy"}><Gauge size={15} />Telemetry</button>
+                  <nav id="health-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label="Health sections" onKeyDown={(event) => moveTabFocus(event, HEALTH_TELEMETRY_SECTIONS, ["inference", "occupancy"].includes(telemetrySection) ? telemetrySection : "health", (next) => selectAdminSubsection(next, setTelemetrySection, "telemetry"))}>
+                    <button id="health-tab-health" data-tab-id="health" type="button" tabIndex={["inference", "occupancy"].includes(telemetrySection) ? -1 : 0} aria-controls="telemetry-view-panel" className={["inference", "occupancy"].includes(telemetrySection) ? "" : "active"} onClick={() => selectAdminSubsection("health", setTelemetrySection, "telemetry")} role="tab" aria-selected={!["inference", "occupancy"].includes(telemetrySection)}><Gauge size={15} />Telemetry</button>
+                    <button id="health-tab-inference" data-tab-id="inference" type="button" tabIndex={telemetrySection === "inference" ? 0 : -1} aria-controls="telemetry-view-panel" className={telemetrySection === "inference" ? "active" : ""} onClick={() => selectAdminSubsection("inference", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "inference"}><Server size={15} />Inference</button>
                     <button id="health-tab-occupancy" data-tab-id="occupancy" type="button" tabIndex={telemetrySection === "occupancy" ? 0 : -1} aria-controls="telemetry-view-panel" className={telemetrySection === "occupancy" ? "active" : ""} onClick={() => selectAdminSubsection("occupancy", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "occupancy"}><Cpu size={15} />Detection at a glance</button>
                   </nav>
-                  <div id="telemetry-view-panel" className="detection-settings-content health-subsection-content telemetry-tab-panel" role="tabpanel" aria-labelledby={telemetrySection === "occupancy" ? "health-tab-occupancy" : "health-tab-health"}>
+                  <div id="telemetry-view-panel" className="detection-settings-content health-subsection-content telemetry-tab-panel" role="tabpanel" aria-labelledby={telemetrySection === "occupancy" ? "health-tab-occupancy" : telemetrySection === "inference" ? "health-tab-inference" : "health-tab-health"}>
                     {telemetrySection === "occupancy" ? (
                       <DetectionOccupancyCard telemetry={telemetry} cameraId={telemetryCamera} config={config} onOpenSetting={openOccupancySetting} />
+                    ) : telemetrySection === "inference" ? (
+                      <InferenceHealthPanel detector={telemetry?.detector} detectorConfig={config?.detector} />
                     ) : (
                       <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
                     )}
@@ -3799,6 +3811,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
   const [productUpdateBranch, setProductUpdateBranch] = useState("");
   const [apiTokenDraft, setApiTokenDraft] = useState({ id: "", name: "", scopes: ["read"] });
   const [apiTokenSecret, setApiTokenSecret] = useState("");
+  const [workerTokenSecret, setWorkerTokenSecret] = useState("");
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
   const [apiTokenError, setApiTokenError] = useState("");
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
@@ -4063,9 +4076,11 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
 
   async function createApiToken() {
     if (apiTokenBusy || !apiTokenDraft.id.trim() || !apiTokenDraft.name.trim() || !apiTokenDraft.scopes.length) return;
+    if ((apiTokenSecret || workerTokenSecret) && !window.confirm("Discard the currently displayed one-time token secret and create a new API token?")) return;
     setApiTokenBusy(true);
     setApiTokenError("");
     setApiTokenSecret("");
+    setWorkerTokenSecret("");
     onTokenSecretVisibleChange?.(false);
     try {
       const response = await fetch("/api/config/api-tokens", {
@@ -4104,9 +4119,50 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       commitImmediateConfig(["api_auth", "tokens"], (config.api_auth?.tokens || []).filter((token) => token.id !== tokenId));
       if (!payload.enabled) commitImmediateConfig(["api_auth", "enabled"], false);
       setApiTokenSecret("");
-      onTokenSecretVisibleChange?.(false);
+      onTokenSecretVisibleChange?.(Boolean(workerTokenSecret));
     } catch (error) {
       setApiTokenError(error.message || "Could not delete API token");
+    } finally {
+      setApiTokenBusy(false);
+    }
+  }
+
+  async function createWorkerToken() {
+    if (apiTokenBusy) return;
+    if ((apiTokenSecret || workerTokenSecret) && !window.confirm("Discard the currently displayed one-time token secret and continue?")) return;
+    if (config.inference_workers?.worker_token_hash && !window.confirm("Rotate the inference worker token? Existing workers stay connected, but they must use the new token the next time they reconnect.")) return;
+    setApiTokenBusy(true);
+    setApiTokenError("");
+    setApiTokenSecret("");
+    setWorkerTokenSecret("");
+    onTokenSecretVisibleChange?.(false);
+    try {
+      const response = await fetch("/api/config/inference-worker-token", { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not create inference worker token");
+      commitImmediateConfig(["inference_workers", "worker_token_hash"], "__SURVNG_SECRET_SET__");
+      setWorkerTokenSecret(payload.token || "");
+      onTokenSecretVisibleChange?.(Boolean(payload.token));
+    } catch (error) {
+      setApiTokenError(error.message || "Could not create inference worker token");
+    } finally {
+      setApiTokenBusy(false);
+    }
+  }
+
+  async function deleteWorkerToken() {
+    if (apiTokenBusy || !window.confirm("Delete the inference worker token? Connected workers will be unable to reconnect.")) return;
+    setApiTokenBusy(true);
+    setApiTokenError("");
+    try {
+      const response = await fetch("/api/config/inference-worker-token", { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not delete inference worker token");
+      commitImmediateConfig(["inference_workers", "worker_token_hash"], "");
+      setWorkerTokenSecret("");
+      onTokenSecretVisibleChange?.(Boolean(apiTokenSecret));
+    } catch (error) {
+      setApiTokenError(error.message || "Could not delete inference worker token");
     } finally {
       setApiTokenBusy(false);
     }
@@ -4385,6 +4441,17 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <button type="button" className="primary" onClick={createApiToken} disabled={apiTokenBusy || !apiTokenDraft.id.trim() || !apiTokenDraft.name.trim() || !apiTokenDraft.scopes.length}>{apiTokenBusy ? <RefreshCcw className="spin" size={15} /> : <Plus size={15} />} Create token</button>
             </div>
             {apiTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this token now</strong><code>{apiTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(apiTokenSecret)}><Copy size={14} /> Copy</button><small>It cannot be displayed again after you leave this page.</small></div> : null}
+            <div className="api-auth-toggle">
+              <div className="detection-settings-subhead">
+                <div><strong>Inference worker token</strong><small>Dedicated credential for outbound inference-worker connections. Copy it into <code>SURVNG_INFERENCE_TOKEN</code> on each worker. Rotation applies when workers reconnect.</small></div>
+                <span className={`retention-state ${config.inference_workers?.worker_token_hash ? "running" : "idle"}`}>{config.inference_workers?.worker_token_hash ? "Configured" : "Not configured"}</span>
+              </div>
+              <div className="preference-action-buttons">
+                <button type="button" className="primary" onClick={createWorkerToken} disabled={apiTokenBusy}>{apiTokenBusy ? <RefreshCcw className="spin" size={15} /> : <KeyRound size={15} />}{config.inference_workers?.worker_token_hash ? "Rotate worker token" : "Create worker token"}</button>
+                {config.inference_workers?.worker_token_hash ? <button type="button" className="danger" onClick={deleteWorkerToken} disabled={apiTokenBusy}><Trash2 size={14} /> Delete</button> : null}
+              </div>
+            </div>
+            {workerTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this worker token now</strong><code>{workerTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(workerTokenSecret)}><Copy size={14} /> Copy</button><small>Paste it into the worker environment. It cannot be displayed again.</small></div> : null}
             {apiTokenError ? <div className="error-banner">{apiTokenError}</div> : null}
           </section>
           <section className="mqtt-access-settings integration-panes" hidden={apiSection !== "mqtt"}>
@@ -4451,7 +4518,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       {section === "detection" ? (
         <div className="detection-settings subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
+            {[["object", "Object Detection", Cpu], ["workers", "Workers", Server], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="detection-settings-content">
           {detectionSection === "object" ? <section className="detection-settings-card primary">
@@ -4461,6 +4528,12 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
               <label className="compact-toggle"><input type="checkbox" checked={config.detector?.enabled || false} onChange={(event) => updateConfig(["detector", "enabled"], event.target.checked)} /><span>Detector enabled</span></label>
             </header>
             <div className="detection-field-grid">
+              <label>Inference execution<select value={config.detector?.inference_mode || "local"} onChange={(event) => updateConfig(["detector", "inference_mode"], event.target.value)}>
+                <option value="local">Local workers</option>
+                <option value="remote">Remote workers only</option>
+                <option value="hybrid">Remote with local incident fallback</option>
+              </select><small>Remote workers connect to this server with a dedicated token. Weights and discovered workers are under Workers. Changing execution mode reloads the camera manager safely.</small></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.remote_incident_fallback ?? true} onChange={(event) => updateConfig(["detector", "remote_incident_fallback"], event.target.checked)} disabled={(config.detector?.inference_mode || "local") !== "hybrid"} /><span>Fallback locally for initial incidents</span></label>
               <label>Backend<select value={detectorBackend} onChange={(event) => updateConfig(["detector", "backend"], event.target.value)}>
                 <option value="openvino">OpenVINO / ONNX</option>
                 <option value="coreml">Core ML (Mac)</option>
@@ -4549,6 +4622,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
           </section> : null}
 
+          {detectionSection === "workers" ? <InferenceWorkersPanel config={config} updateConfig={updateConfig} detectorStatus={detectorStatus} /> : null}
           {detectionSection === "tracking" ? <section className="detection-settings-card wide-card">
             <header className="detection-settings-card-head">
               <div className="detection-settings-card-icon"><Activity size={18} /></div>

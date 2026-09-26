@@ -13,9 +13,11 @@ assert.equal(adminDestination("telemetry", { telemetrySection: "occupancy" }).id
 assert.equal(normalizeTelemetrySection("overview"), "health");
 assert.equal(normalizeTelemetrySection("cameras"), "health");
 assert.equal(normalizeTelemetrySection("occupancy"), "occupancy");
+assert.equal(normalizeTelemetrySection("inference"), "inference");
 assert.equal(normalizeTelemetrySection("diagnostics"), "diagnostics");
 assert.deepEqual(telemetryLocationOptions("health", "porch"), { camera: "porch" });
 assert.deepEqual(telemetryLocationOptions("occupancy", "porch"), { subsection: "occupancy", camera: "porch" });
+assert.deepEqual(telemetryLocationOptions("inference", "porch"), { subsection: "inference" });
 assert.deepEqual(telemetryLocationOptions("diagnostics"), { subsection: "diagnostics" });
 assert.equal(adminDestination("logs").id, "logs");
 

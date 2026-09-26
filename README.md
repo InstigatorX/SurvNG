@@ -135,6 +135,8 @@ Installation, upgrades, Docker deployment, systemd setup, and GPU host guidance
 are maintained in [README.install](README.install). Choose either the
 [Docker guide](README.install.docker.md) or the [native systemd
 guide](README.install.systemd.md); do not run both against the same cameras.
+Optional accelerator guests use the separate
+[inference-worker guide](docs/proxmox-inference-worker.md).
 
 ## Deployment and security
 

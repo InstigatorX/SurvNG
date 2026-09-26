@@ -772,9 +772,46 @@ class ObjectTrackingConfig(BaseModel):
         )
 
 
+class InferenceWorkersConfig(BaseModel):
+    """Authentication and lease policy for remote inference appliances."""
+
+    worker_token_hash: str = Field(
+        default="",
+        max_length=64,
+        pattern=r"^$|^[0-9a-f]{64}$|^__SURVNG_SECRET_SET__$",
+    )
+    lease_seconds: float = Field(default=20.0, ge=5.0, le=120.0)
+
+
+INFERENCE_BALANCE_FIELDS = (
+    "inference_balance",
+    "inference_primary_weight",
+    "inference_default_worker_weight",
+    "inference_worker_weights",
+)
+
+
+def detector_routing_payload(config: "DetectorConfig") -> dict[str, Any]:
+    """Config identity used to fence workers, without request-routing weights.
+
+    Weight edits must not force a model reload. Workers already have the
+    models; only the primary's router reads these fields.
+    """
+    payload = config.model_dump(mode="json")
+    for key in INFERENCE_BALANCE_FIELDS:
+        payload.pop(key, None)
+    return payload
+
+
 class DetectorConfig(BaseModel):
     enabled: bool = False
     backend: Literal["openvino", "coreml"] = "openvino"
+    inference_mode: Literal["local", "remote", "hybrid"] = "local"
+    remote_incident_fallback: bool = True
+    inference_balance: Literal["remote_first", "weighted"] = "remote_first"
+    inference_primary_weight: int = Field(default=1, ge=0, le=100)
+    inference_default_worker_weight: int = Field(default=1, ge=0, le=100)
+    inference_worker_weights: dict[str, int] = Field(default_factory=dict)
     object_worker_count: int = Field(default=2, ge=1, le=4)
     max_concurrent_refinements: int = Field(default=4, ge=1, le=32)
     recorded_adaptive_sampling: bool = True
@@ -992,6 +1029,31 @@ class DetectorConfig(BaseModel):
             normalized[label] = threshold
         return normalized
 
+    @field_validator("inference_worker_weights", mode="before")
+    @classmethod
+    def normalize_inference_worker_weights(cls, value: Any) -> dict[str, int]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("inference worker weights must be an object")
+        if len(value) > 64:
+            raise ValueError("inference worker weights accept at most 64 workers")
+        normalized: dict[str, int] = {}
+        for raw_key, raw_weight in value.items():
+            worker_id = str(raw_key).strip()
+            if (
+                not worker_id
+                or len(worker_id) > 128
+                or any(character.isspace() for character in worker_id)
+            ):
+                raise ValueError("inference worker weight keys must be worker ids")
+            if isinstance(raw_weight, bool) or not isinstance(raw_weight, int):
+                raise ValueError("inference worker weights must be whole numbers")
+            if raw_weight < 0 or raw_weight > 100:
+                raise ValueError("inference worker weights must be from 0 to 100")
+            normalized[worker_id] = raw_weight
+        return normalized
+
     @model_validator(mode="after")
     def ensure_tracking_protected_incident_lane(self) -> "DetectorConfig":
         """Keep a dedicated object worker when tracking shares the accelerator.
@@ -1063,6 +1125,9 @@ class AppConfig(BaseModel):
     media_storage: MediaStorageConfig = Field(default_factory=MediaStorageConfig)
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     web_auth: WebAuthConfig = Field(default_factory=WebAuthConfig)
+    inference_workers: InferenceWorkersConfig = Field(
+        default_factory=InferenceWorkersConfig
+    )
     tls: TlsConfig = Field(default_factory=TlsConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
