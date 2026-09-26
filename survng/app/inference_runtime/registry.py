@@ -19,6 +19,7 @@ from .protocol import (
     WorkerReady,
     WorkerRegistration,
     WorkerRole,
+    ProtocolError,
     decode_packet,
     encode_packet,
 )
@@ -57,6 +58,15 @@ def _bump_role_attempt(worker: _WorkerLease, role: str, outcome: str, delta: int
         {"completed": 0, "rerouted": 0, "failed": 0},
     )
     bucket[outcome] = max(0, int(bucket.get(outcome) or 0) + delta)
+
+
+def _worker_backlog(worker: _WorkerLease) -> int:
+    """Busy work is the larger of the primary reservation and the worker queue.
+
+    Adding them double-counts a request the primary is still waiting for.
+    The worker queue also includes requests whose primary wait already ended.
+    """
+    return max(worker.pending_requests, worker.reported_pending_requests)
 
 
 def _worker_weight(
@@ -250,9 +260,11 @@ class RemoteInferenceRegistry:
             "deadline_unix_ms": int((time.time() + timeout) * 1000),
             "payload": dict(payload or {}),
         }
-        packet = encode_packet(message, frame=frame)
         started = self._clock()
+        sent = False
         try:
+            packet = encode_packet(message, frame=frame)
+            sent = True
             response_packet = worker.transport.request(packet, timeout)
             response, trailing = decode_packet(response_packet)
             if trailing:
@@ -280,6 +292,16 @@ class RemoteInferenceRegistry:
                 request_ms=_finite_ms((self._clock() - started) * 1000.0),
             )
             return response.get("result")
+        except ProtocolError as error:
+            if not sent:
+                raise
+            failure = self._fail_attempt(
+                worker,
+                role,
+                operation,
+                f"remote {role} {operation} transport failed",
+            )
+            raise failure from error
         except (FutureTimeoutError, TimeoutError) as error:
             failure = self._fail_attempt(
                 worker,
@@ -427,10 +449,7 @@ class RemoteInferenceRegistry:
                 loads.append({
                     "worker_id": worker.registration.worker_id,
                     "name": worker.registration.name,
-                    "pending": (
-                        worker.pending_requests
-                        + worker.reported_pending_requests
-                    ),
+                    "pending": _worker_backlog(worker),
                     "weight": weight,
                 })
             return loads
@@ -452,10 +471,7 @@ class RemoteInferenceRegistry:
             for worker in self._workers.values():
                 if not self._worker_matches(worker, role, expected_generation):
                     continue
-                pending = (
-                    worker.pending_requests
-                    + worker.reported_pending_requests
-                )
+                pending = _worker_backlog(worker)
                 if weights is None:
                     score = float(pending)
                 else:

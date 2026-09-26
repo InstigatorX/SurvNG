@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 import json
+import logging
 import threading
 from typing import Any
 
@@ -27,12 +29,15 @@ from .inference_runtime.model_sync import (
 )
 from .inference_runtime.registry import RemoteInferenceRegistry
 from .inference_runtime.types import InferenceUnavailable
+from .security import redact_secret_text
 
 
+LOGGER = logging.getLogger("uvicorn.error")
 _REGISTRATION_TIMEOUT_SECONDS = 10.0
 _MODEL_SYNC_TIMEOUT_SECONDS = 3600.0
-_INITIAL_WORKER_LEASE_SECONDS = 600.0
 _PREPARE_KEEPALIVE_SECONDS = 5.0
+_MAX_CONTROL_MESSAGE_CHARS = 1024 * 1024
+_ABANDONED_REQUEST_LIMIT = 256
 
 
 async def _prepare_model_bundle(
@@ -112,6 +117,7 @@ class WebSocketRegistryTransport:
         self._outbound: asyncio.Queue[bytes | str | None] = asyncio.Queue()
         self._lock = threading.RLock()
         self._pending: dict[str, Future[bytes]] = {}
+        self._abandoned: deque[str] = deque(maxlen=_ABANDONED_REQUEST_LIMIT)
         self._closed_reason = ""
 
     def request(self, packet: bytes, timeout: float) -> bytes:
@@ -124,9 +130,14 @@ class WebSocketRegistryTransport:
             if self._closed_reason:
                 raise InferenceUnavailable(self._closed_reason)
             self._pending[request_id] = future
-        self._loop.call_soon_threadsafe(self._outbound.put_nowait, packet)
         try:
+            self._loop.call_soon_threadsafe(self._outbound.put_nowait, packet)
             return future.result(timeout=max(0.0, timeout))
+        except FutureTimeoutError:
+            with self._lock:
+                self._abandoned.append(request_id)
+                self._pending.pop(request_id, None)
+            raise
         finally:
             with self._lock:
                 self._pending.pop(request_id, None)
@@ -140,6 +151,9 @@ class WebSocketRegistryTransport:
         if message.get("type") != "response" or not request_id:
             return False
         with self._lock:
+            if request_id in self._abandoned:
+                self._abandoned.remove(request_id)
+                return True
             future = self._pending.get(request_id)
         if future is None or future.done():
             return False
@@ -228,7 +242,7 @@ def create_inference_worker_router(
                 transport,
                 config=config_snapshot,
                 config_generation=prepared.config_generation,
-                initial_lease_seconds=_INITIAL_WORKER_LEASE_SECONDS,
+                initial_lease_seconds=_MODEL_SYNC_TIMEOUT_SECONDS,
             )
             welcome["detector_config"] = prepared.config.model_dump(
                 mode="json"
@@ -260,10 +274,27 @@ def create_inference_worker_router(
                     continue
                 if text is None:
                     raise ProtocolError("worker sent an empty message")
+                if len(text) > _MAX_CONTROL_MESSAGE_CHARS:
+                    raise ProtocolError("worker control message is too large")
                 control = json.loads(text)
                 if not isinstance(control, dict):
                     raise ProtocolError(
                         "worker control message must be an object"
+                    )
+                try:
+                    control_generation = int(
+                        control.get("connection_generation") or 0
+                    )
+                except (TypeError, ValueError) as error:
+                    raise ProtocolError(
+                        "worker control message does not match this connection"
+                    ) from error
+                if (
+                    str(control.get("worker_id") or "") != worker_id
+                    or control_generation != connection_generation
+                ):
+                    raise ProtocolError(
+                        "worker control message does not match this connection"
                     )
                 if control.get("type") == "ready":
                     accepted = await asyncio.to_thread(
@@ -297,7 +328,12 @@ def create_inference_worker_router(
             ModelSyncError,
             ValidationError,
             InferenceUnavailable,
-        ):
+        ) as error:
+            LOGGER.warning(
+                "Inference worker connection closed (%s: %s)",
+                type(error).__name__,
+                redact_secret_text(error)[:300],
+            )
             await websocket.close(code=1008, reason="invalid worker protocol")
         except WebSocketDisconnect:
             pass

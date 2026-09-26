@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 
 import numpy as np
@@ -159,6 +160,65 @@ class RemoteInferenceRegistryTests(unittest.TestCase):
             decode_frame(message, frame_bytes),
             frame,
         )
+
+    def test_invalid_frame_does_not_stick_a_worker_reservation(self) -> None:
+        self._register_ready()
+
+        with self.assertRaises(ProtocolError):
+            self.registry.request(
+                "object",
+                "detect",
+                frame=np.zeros((8, 8, 3), dtype=np.float32),
+                workload=InferenceWorkload.INCIDENT_INITIAL,
+                timeout=1.0,
+            )
+
+        worker = self.registry.status()["workers"][0]
+        self.assertEqual(worker["pending_requests"], 0)
+        self.assertEqual(worker["failed_requests"], 0)
+
+    def test_worker_queue_is_not_added_to_the_primary_reservation(self) -> None:
+        class _BlockingTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def request(self, packet: bytes, timeout: float) -> bytes:
+                self.started.set()
+                self.release.wait(timeout)
+                return super().request(packet, timeout)
+
+            def close(self, reason: str) -> None:
+                self.release.set()
+                super().close(reason)
+
+        transport = _BlockingTransport()
+        _transport, welcome = self._register_ready(transport=transport)
+        self.assertTrue(self.registry.heartbeat(WorkerHeartbeat(
+            worker_id="worker-a",
+            connection_generation=welcome["connection_generation"],
+            pending_requests=5,
+        )))
+        worker = threading.Thread(
+            target=self.registry.request,
+            args=("object", "detect"),
+            kwargs={
+                "frame": np.zeros((4, 4, 3), dtype=np.uint8),
+                "workload": InferenceWorkload.INCIDENT_INITIAL,
+                "timeout": 2.0,
+            },
+        )
+        worker.start()
+        self.addCleanup(transport.release.set)
+        self.addCleanup(worker.join, 2.0)
+        self.assertTrue(transport.started.wait(1.0))
+
+        loads = self.registry.ready_role_loads("object")
+
+        transport.release.set()
+        worker.join(2.0)
+        self.assertEqual(loads[0]["pending"], 5)
 
     def test_duplicate_worker_id_fences_previous_transport(self) -> None:
         first, first_welcome = self._register_ready()

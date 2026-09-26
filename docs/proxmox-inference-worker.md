@@ -225,7 +225,10 @@ time, primary round trip, and per-role completed, rerouted, and failed counts.
 
 ## Failure behavior
 
-- Expired heartbeats remove a worker from routing.
+- Expired heartbeats remove a worker from routing. The worker keeps
+  heartbeats running while inference is busy and reports that queue, so a
+  busy worker is not treated as idle. A response that arrives after the
+  primary stopped waiting is ignored and does not disconnect the worker.
 - Reconnecting with the same worker ID fences the old connection.
 - Configuration or model-content changes cause the worker to reconnect, fetch
   only changed model blobs, and reload after its next heartbeat.

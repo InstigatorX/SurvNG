@@ -7,7 +7,9 @@ import json
 import logging
 import os
 from pathlib import Path
+import queue
 import socket
+import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -256,49 +258,110 @@ class InferenceWorkerClient:
                     1.0,
                     float(welcome.get("heartbeat_seconds") or 5.0),
                 )
-                while True:
-                    try:
-                        incoming = websocket.recv(
-                            timeout=heartbeat_seconds
-                        )
-                    except TimeoutError:
-                        websocket.send(json.dumps({
-                            "type": "heartbeat",
-                            "worker_id": self.worker_id,
-                            "connection_generation": connection_generation,
-                            "pending_requests": 0,
-                        }))
-                        continue
-                    if isinstance(incoming, str):
-                        control = json.loads(incoming)
-                        if (
-                            control.get("type") == "heartbeat_ack"
-                            and (
-                                control.get("accepted") is False
-                                or control.get("config_generation")
-                                != config_generation
-                            )
-                        ):
-                            return
-                        continue
-                    if not isinstance(incoming, bytes):
-                        continue
-                    response = self.handle_packet(
-                        supervisor,
-                        incoming,
-                        connection_generation=connection_generation,
-                        config_generation=config_generation,
-                    )
-                    websocket.send(response)
-                    websocket.send(json.dumps({
-                        "type": "heartbeat",
-                        "worker_id": self.worker_id,
-                        "connection_generation": connection_generation,
-                        "pending_requests": 0,
-                    }))
+                self._run_request_loop(
+                    supervisor,
+                    websocket,
+                    connection_generation=connection_generation,
+                    config_generation=config_generation,
+                    heartbeat_seconds=heartbeat_seconds,
+                )
             finally:
                 supervisor.stop()
                 supervisor.stop_resource_tracker()
+
+    def _heartbeat(self, connection_generation: int, pending_requests: int) -> str:
+        return json.dumps({
+            "type": "heartbeat",
+            "worker_id": self.worker_id,
+            "connection_generation": connection_generation,
+            "pending_requests": max(0, int(pending_requests)),
+        })
+
+    def _run_request_loop(
+        self,
+        supervisor: InferenceSupervisor,
+        websocket: Any,
+        *,
+        connection_generation: int,
+        config_generation: str,
+        heartbeat_seconds: float,
+    ) -> None:
+        """Receive requests without blocking heartbeats on inference."""
+        requests: queue.Queue[bytes | None] = queue.Queue()
+        pending_lock = threading.Lock()
+        pending = 0
+        failed: list[BaseException] = []
+
+        def run_inference() -> None:
+            nonlocal pending
+            while True:
+                packet = requests.get()
+                if packet is None:
+                    return
+                try:
+                    websocket.send(self.handle_packet(
+                        supervisor,
+                        packet,
+                        connection_generation=connection_generation,
+                        config_generation=config_generation,
+                    ))
+                except Exception as error:
+                    failed.append(error)
+                    return
+                finally:
+                    with pending_lock:
+                        pending = max(0, pending - 1)
+
+        thread = threading.Thread(
+            target=run_inference,
+            name=f"inference-{self.worker_id}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            while True:
+                if failed:
+                    raise failed[0]
+                try:
+                    incoming = websocket.recv(timeout=heartbeat_seconds)
+                except TimeoutError:
+                    with pending_lock:
+                        queued = pending
+                    websocket.send(self._heartbeat(
+                        connection_generation,
+                        queued,
+                    ))
+                    continue
+                if isinstance(incoming, str):
+                    control = json.loads(incoming)
+                    if (
+                        control.get("type") == "heartbeat_ack"
+                        and (
+                            control.get("accepted") is False
+                            or control.get("config_generation")
+                            != config_generation
+                        )
+                    ):
+                        return
+                    continue
+                if not isinstance(incoming, bytes):
+                    continue
+                with pending_lock:
+                    pending += 1
+                    queued = pending
+                requests.put(incoming)
+                websocket.send(self._heartbeat(
+                    connection_generation,
+                    queued,
+                ))
+        finally:
+            while True:
+                try:
+                    requests.get_nowait()
+                except queue.Empty:
+                    break
+            requests.put(None)
+            thread.join(timeout=30.0)
 
     def handle_packet(
         self,
@@ -342,9 +405,10 @@ class InferenceWorkerClient:
             )
             response["ok"] = True
         except Exception as error:
+            detail = redact_secret_text(error).replace("\n", " ")[:180]
             response["error"] = (
                 "remote inference request failed: "
-                f"{type(error).__name__}"
+                f"{type(error).__name__}: {detail}"
             )
         return encode_packet(response)
 

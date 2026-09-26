@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import json
 from pathlib import Path
+import queue
 import stat
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock
@@ -225,6 +228,104 @@ class InferenceWorkerClientTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "does not exist"):
             _receive_welcome(websocket)
 
+    def test_busy_worker_heartbeats_its_queue(self) -> None:
+        client = InferenceWorkerClient(
+            server_url="http://survng.internal:8088",
+            token="secret",
+            worker_id="worker-a",
+            name="worker",
+            roles=["object"],
+        )
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_handle(*_args, **_kwargs):
+            entered.set()
+            self.assertTrue(release.wait(2.0))
+            return encode_packet({
+                "type": "response",
+                "request_id": "request-1",
+                "ok": True,
+                "result": [],
+            })
+
+        client.handle_packet = slow_handle
+        socket = _QueueSocket()
+        packet = encode_packet({
+            "type": "request",
+            "request_id": "request-1",
+            "connection_generation": 1,
+            "config_generation": "config-a",
+            "role": "object",
+            "operation": "detect",
+            "workload": int(InferenceWorkload.INCIDENT_INITIAL),
+            "deadline_unix_ms": int((time.time() + 5.0) * 1000),
+            "payload": {},
+        })
+        socket.inbound.put(packet)
+        errors: list[BaseException] = []
+
+        def serve() -> None:
+            try:
+                client._run_request_loop(
+                    Mock(),
+                    socket,
+                    connection_generation=1,
+                    config_generation="config-a",
+                    heartbeat_seconds=0.05,
+                )
+            except ConnectionError:
+                return
+            except Exception as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        self.addCleanup(release.set)
+        self.addCleanup(lambda: socket.inbound.put(None))
+        self.addCleanup(thread.join, 2.0)
+        self.assertTrue(entered.wait(1.0))
+        pending_seen = False
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                message = socket.outbound.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if not isinstance(message, str):
+                continue
+            payload = json.loads(message)
+            if (
+                payload.get("type") == "heartbeat"
+                and int(payload.get("pending_requests") or 0) >= 1
+            ):
+                pending_seen = True
+                break
+        release.set()
+        socket.inbound.put(None)
+        thread.join(2.0)
+
+        self.assertTrue(pending_seen)
+        self.assertEqual(errors, [])
+
+
+class _QueueSocket:
+    def __init__(self) -> None:
+        self.inbound: queue.Queue[object] = queue.Queue()
+        self.outbound: queue.Queue[object] = queue.Queue()
+
+    def recv(self, timeout: float):
+        try:
+            item = self.inbound.get(timeout=timeout)
+        except queue.Empty as error:
+            raise TimeoutError() from error
+        if item is None:
+            raise ConnectionError("stop")
+        return item
+
+    def send(self, message: object) -> None:
+        self.outbound.put(message)
+
 
 class ModelSynchronizationTests(unittest.TestCase):
     def test_catalog_tracks_model_content_and_materializes_worker_path(
@@ -383,6 +484,32 @@ class WebSocketRegistryTransportTests(
         self.assertTrue(transport.deliver(response))
         self.assertEqual(await waiting, response)
 
+    async def test_response_after_timeout_is_not_an_unknown_request(self) -> None:
+        transport = WebSocketRegistryTransport(
+            asyncio.get_running_loop()
+        )
+        request = encode_packet({
+            "type": "request",
+            "request_id": "request-1",
+        })
+        with self.assertRaises(FutureTimeoutError):
+            await asyncio.to_thread(transport.request, request, 0.05)
+        await asyncio.wait_for(transport._outbound.get(), timeout=1.0)
+        late = encode_packet({
+            "type": "response",
+            "request_id": "request-1",
+            "ok": False,
+            "error": "late",
+        })
+        unknown = encode_packet({
+            "type": "response",
+            "request_id": "never-sent",
+            "ok": True,
+        })
+
+        self.assertTrue(transport.deliver(late))
+        self.assertFalse(transport.deliver(unknown))
+
 
 class InferenceWorkerRouteTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -447,6 +574,29 @@ class InferenceWorkerRouteTests(unittest.TestCase):
 
             self.assertTrue(heartbeat_ack["accepted"])
             self.assertEqual(self.registry.status()["ready"], 1)
+
+    def test_heartbeat_for_another_worker_closes_the_connection(self) -> None:
+        with self.client.websocket_connect(
+            "/api/inference/workers/connect",
+            headers={"Authorization": "Bearer worker-secret"},
+        ) as websocket:
+            websocket.send_text(WorkerRegistration(
+                worker_id="worker-a",
+                roles=["object"],
+            ).model_dump_json())
+            welcome = _receive_worker_json(websocket)
+            model_sync = websocket.receive_json()
+            self.assertEqual(model_sync["type"], "model_sync_complete")
+            websocket.send_json({
+                "type": "heartbeat",
+                "worker_id": "worker-b",
+                "connection_generation": welcome["connection_generation"],
+                "pending_requests": 0,
+            })
+            with self.assertRaises(WebSocketDisconnect) as raised:
+                websocket.receive_json()
+
+        self.assertEqual(raised.exception.code, 1008)
 
     def test_invalid_worker_credential_is_rejected(self) -> None:
         with self.assertRaises(WebSocketDisconnect) as raised:
