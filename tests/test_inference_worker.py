@@ -32,6 +32,7 @@ from survng.app.inference_runtime.model_sync import (
     worker_config_for_roles,
 )
 from survng.app.inference_runtime.registry import RemoteInferenceRegistry
+from survng.app.inference_runtime.types import InferenceNotAdmitted
 from survng.app.inference_worker_routes import (
     InferenceWorkerRouteDependencies,
     WebSocketRegistryTransport,
@@ -44,6 +45,7 @@ from survng.app.security import (
 from survng.inference_worker import (
     InferenceWorkerClient,
     _receive_welcome,
+    _request_priority,
     load_or_create_worker_id,
     request_code_upgrade,
     worker_websocket_url,
@@ -171,6 +173,68 @@ class InferenceWorkerClientTests(unittest.TestCase):
 
         self.assertFalse(response["ok"])
         supervisor.detect_initial.assert_not_called()
+
+    def test_expired_admission_does_not_run_the_model(self) -> None:
+        client = InferenceWorkerClient(
+            server_url="http://survng.internal:8088",
+            token="secret",
+            worker_id="worker-a",
+            name="worker",
+            roles=["object"],
+        )
+        supervisor = Mock()
+        packet = encode_packet({
+            "type": "request",
+            "request_id": "request-1",
+            "connection_generation": 4,
+            "config_generation": "config-a",
+            "role": "object",
+            "operation": "detect",
+            "workload": int(InferenceWorkload.TRACKING),
+            "admit_unix_ms": int((time.time() - 1.0) * 1000),
+            "deadline_unix_ms": int((time.time() + 5.0) * 1000),
+            "payload": {},
+        })
+
+        response_packet = client.handle_packet(
+            supervisor,
+            packet,
+            connection_generation=4,
+            config_generation="config-a",
+        )
+        response, _trailing = decode_packet(response_packet)
+
+        self.assertFalse(response["ok"])
+        self.assertIn("was not admitted", response["error"])
+        supervisor.detect_initial.assert_not_called()
+
+    def test_request_priority_prefers_object_and_incident_frames(self) -> None:
+        def packet(role: str, workload: InferenceWorkload) -> bytes:
+            return encode_packet({
+                "type": "request",
+                "role": role,
+                "workload": int(workload),
+            })
+
+        self.assertEqual(
+            _request_priority(packet("object", InferenceWorkload.TRACKING)),
+            0,
+        )
+        self.assertEqual(
+            _request_priority(packet(
+                "face",
+                InferenceWorkload.INCIDENT_REFINEMENT,
+            )),
+            0,
+        )
+        self.assertEqual(
+            _request_priority(packet("reid", InferenceWorkload.ENRICHMENT)),
+            1,
+        )
+        self.assertEqual(
+            _request_priority(packet("depth", InferenceWorkload.INTERACTIVE)),
+            1,
+        )
 
     def test_worker_role_config_does_not_start_unrequested_engines(self) -> None:
         config = DetectorConfig(
@@ -401,6 +465,199 @@ class InferenceWorkerClientTests(unittest.TestCase):
         self.assertTrue(pending_seen)
         self.assertEqual(errors, [])
 
+    def test_object_requests_run_ahead_of_enrichment(self) -> None:
+        client = InferenceWorkerClient(
+            server_url="http://survng.internal:8088",
+            token="secret",
+            worker_id="worker-a",
+            name="worker",
+            roles=["object", "face"],
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        order: list[str] = []
+
+        def ordered_handle(*_args, **_kwargs):
+            packet = _args[1]
+            message, _frame = decode_packet(packet)
+            request_id = str(message["request_id"])
+            if request_id == "first":
+                entered.set()
+                self.assertTrue(release.wait(2.0))
+            order.append(request_id)
+            return encode_packet({
+                "type": "response",
+                "request_id": request_id,
+                "ok": True,
+                "result": [],
+            })
+
+        client.handle_packet = ordered_handle
+        socket = _QueueSocket()
+
+        def packet(request_id: str, role: str, workload: InferenceWorkload) -> bytes:
+            return encode_packet({
+                "type": "request",
+                "request_id": request_id,
+                "connection_generation": 1,
+                "config_generation": "config-a",
+                "role": role,
+                "operation": "detect",
+                "workload": int(workload),
+                "deadline_unix_ms": int((time.time() + 5.0) * 1000),
+                "payload": {},
+            })
+
+        socket.inbound.put(packet(
+            "first",
+            "object",
+            InferenceWorkload.TRACKING,
+        ))
+        errors: list[BaseException] = []
+
+        def serve() -> None:
+            try:
+                client._run_request_loop(
+                    Mock(),
+                    socket,
+                    connection_generation=1,
+                    config_generation="config-a",
+                    heartbeat_seconds=0.05,
+                )
+            except ConnectionError:
+                return
+            except Exception as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        self.addCleanup(release.set)
+        self.addCleanup(lambda: socket.inbound.put(None))
+        self.addCleanup(thread.join, 2.0)
+        self.assertTrue(entered.wait(1.0))
+        socket.inbound.put(packet(
+            "face",
+            "face",
+            InferenceWorkload.ENRICHMENT,
+        ))
+        socket.inbound.put(packet(
+            "object",
+            "object",
+            InferenceWorkload.TRACKING,
+        ))
+        queued = False
+        queue_deadline = time.monotonic() + 1.0
+        while time.monotonic() < queue_deadline:
+            try:
+                message = socket.outbound.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if not isinstance(message, str):
+                continue
+            payload = json.loads(message)
+            if (
+                payload.get("type") == "heartbeat"
+                and int(payload.get("pending_requests") or 0) >= 3
+            ):
+                queued = True
+                break
+        self.assertTrue(queued)
+        release.set()
+        deadline = time.monotonic() + 2.0
+        while len(order) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        socket.inbound.put(None)
+        thread.join(2.0)
+
+        self.assertEqual(order, ["first", "object", "face"])
+        self.assertEqual(errors, [])
+
+    def test_admitted_request_sends_started_before_inference(self) -> None:
+        client = InferenceWorkerClient(
+            server_url="http://survng.internal:8088",
+            token="secret",
+            worker_id="worker-a",
+            name="worker",
+            roles=["object"],
+        )
+        started_inference = threading.Event()
+
+        def handle(*_args, **_kwargs):
+            started_inference.set()
+            return encode_packet({
+                "type": "response",
+                "request_id": "request-1",
+                "ok": True,
+                "result": [],
+            })
+
+        client.handle_packet = handle
+        socket = _QueueSocket()
+        socket.inbound.put(encode_packet({
+            "type": "request",
+            "request_id": "request-1",
+            "connection_generation": 1,
+            "config_generation": "config-a",
+            "role": "object",
+            "operation": "detect",
+            "workload": int(InferenceWorkload.TRACKING),
+            "admit_unix_ms": int((time.time() + 5.0) * 1000),
+            "deadline_unix_ms": int((time.time() + 5.0) * 1000),
+            "payload": {},
+        }))
+        errors: list[BaseException] = []
+
+        def serve() -> None:
+            try:
+                client._run_request_loop(
+                    Mock(),
+                    socket,
+                    connection_generation=1,
+                    config_generation="config-a",
+                    heartbeat_seconds=0.2,
+                )
+            except ConnectionError:
+                return
+            except Exception as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        self.addCleanup(lambda: socket.inbound.put(None))
+        self.addCleanup(thread.join, 2.0)
+        self.assertTrue(started_inference.wait(1.0))
+        messages: list[object] = []
+        started_at: int | None = None
+        response_at: int | None = None
+        deadline = time.monotonic() + 1.0
+        while (
+            time.monotonic() < deadline
+            and (started_at is None or response_at is None)
+        ):
+            try:
+                message = socket.outbound.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            messages.append(message)
+            if isinstance(message, str):
+                payload = json.loads(message)
+                if payload.get("type") == "started" and started_at is None:
+                    started_at = len(messages) - 1
+                    self.assertEqual(payload["request_id"], "request-1")
+                    self.assertEqual(payload["worker_id"], "worker-a")
+            elif isinstance(message, bytes) and response_at is None:
+                response_at = len(messages) - 1
+        socket.inbound.put(None)
+        thread.join(2.0)
+
+        self.assertIsNotNone(started_at)
+        self.assertIsNotNone(response_at)
+        assert started_at is not None and response_at is not None
+        self.assertLess(started_at, response_at)
+        response, _trailing = decode_packet(messages[response_at])
+        self.assertTrue(response["ok"])
+        self.assertEqual(errors, [])
+
 
 class _QueueSocket:
     def __init__(self) -> None:
@@ -603,6 +860,59 @@ class WebSocketRegistryTransportTests(
         self.assertTrue(transport.deliver(late))
         self.assertFalse(transport.deliver(unknown))
 
+    async def test_admit_wait_extends_after_the_worker_starts(self) -> None:
+        transport = WebSocketRegistryTransport(
+            asyncio.get_running_loop()
+        )
+        request = encode_packet({
+            "type": "request",
+            "request_id": "request-1",
+        })
+        waiting = asyncio.create_task(asyncio.to_thread(
+            transport.request,
+            request,
+            2.0,
+            admit_timeout=0.15,
+        ))
+        await asyncio.wait_for(transport._outbound.get(), timeout=1.0)
+        await asyncio.sleep(0.05)
+        transport.note_started("request-1")
+        await asyncio.sleep(0.2)
+        self.assertFalse(waiting.done())
+        response = encode_packet({
+            "type": "response",
+            "request_id": "request-1",
+            "ok": True,
+        })
+
+        self.assertTrue(transport.deliver(response))
+        self.assertEqual(await waiting, response)
+
+    async def test_admit_timeout_abandons_before_the_worker_starts(self) -> None:
+        transport = WebSocketRegistryTransport(
+            asyncio.get_running_loop()
+        )
+        request = encode_packet({
+            "type": "request",
+            "request_id": "request-1",
+        })
+        with self.assertRaises(InferenceNotAdmitted):
+            await asyncio.to_thread(
+                transport.request,
+                request,
+                2.0,
+                admit_timeout=0.05,
+            )
+        await asyncio.wait_for(transport._outbound.get(), timeout=1.0)
+        late = encode_packet({
+            "type": "response",
+            "request_id": "request-1",
+            "ok": False,
+            "error": "late",
+        })
+
+        self.assertTrue(transport.deliver(late))
+
 
 class InferenceWorkerRouteTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -654,6 +964,14 @@ class InferenceWorkerRouteTests(unittest.TestCase):
                 ),
                 "config_generation": welcome["config_generation"],
                 "statuses": {"object": {"ready": True}},
+            })
+            websocket.send_json({
+                "type": "started",
+                "worker_id": "worker-a",
+                "connection_generation": (
+                    welcome["connection_generation"]
+                ),
+                "request_id": "request-1",
             })
             websocket.send_json({
                 "type": "heartbeat",

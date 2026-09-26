@@ -7,6 +7,7 @@ import numpy as np
 
 from survng.app.config import DetectorConfig, detector_routing_payload
 from survng.app.inference import InferenceUnavailable, InferenceWorkload
+from survng.app.inference_runtime.types import InferenceNotAdmitted
 from survng.app.inference import INFERENCE_FAILOVER_SECONDS
 from survng.app.inference_runtime.protocol import (
     WorkerHeartbeat,
@@ -121,10 +122,19 @@ class _ResultTransport:
         self.inference_ms = inference_ms
         self.requests = 0
         self.timeouts: list[float] = []
+        self.admit_timeouts: list[float] = []
         self.error: BaseException | None = None
 
-    def request(self, packet: bytes, timeout: float) -> bytes:
+    def request(
+        self,
+        packet: bytes,
+        timeout: float,
+        *,
+        admit_timeout: float | None = None,
+    ) -> bytes:
         self.timeouts.append(timeout)
+        if admit_timeout is not None:
+            self.admit_timeouts.append(admit_timeout)
         self.requests += 1
         if self.error is not None:
             raise self.error
@@ -476,8 +486,9 @@ class WeightedInferenceBalanceTests(unittest.TestCase):
         )
 
         self.assertEqual(result, {"worker": "primary"})
+        self.assertEqual(transports["worker-a"].timeouts, [15])
         self.assertEqual(
-            transports["worker-a"].timeouts,
+            transports["worker-a"].admit_timeouts,
             [INFERENCE_FAILOVER_SECONDS],
         )
 
@@ -496,6 +507,7 @@ class WeightedInferenceBalanceTests(unittest.TestCase):
             )
 
         self.assertEqual(transports["worker-a"].timeouts, [15])
+        self.assertEqual(transports["worker-a"].admit_timeouts, [])
 
     def test_incident_fallback_abandons_a_slow_worker_quickly(self) -> None:
         config = self._config(inference_balance="remote_first")
@@ -511,10 +523,127 @@ class WeightedInferenceBalanceTests(unittest.TestCase):
         )
 
         self.assertEqual(result, {"worker": "primary"})
+        self.assertEqual(transports["worker-a"].timeouts, [3])
         self.assertEqual(
-            transports["worker-a"].timeouts,
+            transports["worker-a"].admit_timeouts,
             [INFERENCE_FAILOVER_SECONDS],
         )
+
+    def test_admission_miss_does_not_pause_the_worker(self) -> None:
+        config = self._config(inference_worker_weights={"worker-a": 8})
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        worker = registry.status()["workers"][0]
+        self.assertTrue(registry.heartbeat(WorkerHeartbeat(
+            worker_id="worker-a",
+            connection_generation=worker["connection_generation"],
+            pending_requests=3,
+        )))
+        transports["worker-a"].error = InferenceNotAdmitted("not admitted")
+        backend = self._backend(config, registry)
+        backend._local.pending_requests = Mock(return_value=10)
+
+        first = backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(first, {"worker": "primary"})
+        held = registry.status()["workers"][0]
+        self.assertFalse(held["routing_hold"])
+        self.assertIn("was not admitted", held["last_error"])
+        self.assertEqual(held["rerouted_requests"], 1)
+        transports["worker-a"].error = None
+        backend._local.pending_requests = Mock(return_value=0)
+
+        second = backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(second, {"worker": "worker-a"})
+
+    def test_round_trip_outranks_model_time(self) -> None:
+        clock = {"now": 100.0}
+        config = self._config()
+        registry = RemoteInferenceRegistry(
+            lambda: config,
+            lease_seconds=30.0,
+            clock=lambda: clock["now"],
+        )
+
+        class _DelayedTransport:
+            def __init__(self, worker_id: str, delay: float, inference_ms: float) -> None:
+                self.worker_id = worker_id
+                self.delay = delay
+                self.inference_ms = inference_ms
+                self.requests = 0
+
+            def request(
+                self,
+                packet: bytes,
+                timeout: float,
+                *,
+                admit_timeout: float | None = None,
+            ) -> bytes:
+                del timeout, admit_timeout
+                clock["now"] += self.delay
+                self.requests += 1
+                message, _frame = decode_packet(packet)
+                return encode_packet({
+                    "type": "response",
+                    "request_id": message["request_id"],
+                    "connection_generation": message["connection_generation"],
+                    "ok": True,
+                    "result": {"worker": self.worker_id},
+                    "inference_ms": self.inference_ms,
+                })
+
+            def close(self, reason: str) -> None:
+                del reason
+
+        slow_trip = _DelayedTransport("worker-slow-trip", 0.4, 10)
+        fast_trip = _DelayedTransport("worker-fast-trip", 0.02, 80)
+        for transport in (slow_trip, fast_trip):
+            welcome = registry.register(
+                WorkerRegistration(
+                    worker_id=transport.worker_id,
+                    name=transport.worker_id,
+                    roles=["object"],
+                ),
+                transport,
+            )
+            self.assertTrue(registry.mark_ready(WorkerReady(
+                worker_id=transport.worker_id,
+                connection_generation=welcome["connection_generation"],
+                config_generation=welcome["config_generation"],
+                statuses={"object": {"ready": True, "enabled": True}},
+            )))
+        def detect(weights: dict[str, int]) -> str:
+            return registry.request(
+                "object",
+                "detect",
+                frame=self.frame,
+                workload=InferenceWorkload.TRACKING,
+                timeout=15,
+                worker_weights=weights,
+            )["worker"]
+
+        self.assertEqual(detect({
+            "worker-slow-trip": 1,
+            "worker-fast-trip": 0,
+        }), "worker-slow-trip")
+        self.assertEqual(detect({
+            "worker-slow-trip": 0,
+            "worker-fast-trip": 1,
+        }), "worker-fast-trip")
+        self.assertEqual(detect({
+            "worker-slow-trip": 1,
+            "worker-fast-trip": 1,
+        }), "worker-fast-trip")
+        self.assertEqual(slow_trip.requests, 1)
+        self.assertEqual(fast_trip.requests, 2)
 
     def test_primary_admission_fails_over_without_shortening_execution(self) -> None:
         config = self._config()

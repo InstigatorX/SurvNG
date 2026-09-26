@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -76,6 +77,7 @@ class RemoteInferenceWorkerBackend:
         workload: InferenceWorkload = InferenceWorkload.INTERACTIVE,
         worker_weights: dict[str, int] | None = None,
         default_worker_weight: int = 1,
+        admit_timeout: float | None = None,
         **payload: Any,
     ) -> Any:
         del admission_timeout
@@ -95,6 +97,7 @@ class RemoteInferenceWorkerBackend:
                 payload=payload,
                 worker_weights=worker_weights,
                 default_worker_weight=default_worker_weight,
+                admit_timeout=admit_timeout,
             )
         finally:
             with self._lock:
@@ -182,6 +185,8 @@ class RoutedInferenceWorkerBackend:
         )
         self._started = False
         self._balance_cursor = 0
+        self._local_request_ms_total = 0.0
+        self._local_request_samples = 0
         self._lock = threading.RLock()
 
     def update_config_reference(self, config: DetectorConfig) -> None:
@@ -240,6 +245,8 @@ class RoutedInferenceWorkerBackend:
             self.start_enabled = start_enabled
             self._initial_status = dict(initial_status)
             self._local = next_local
+            self._local_request_ms_total = 0.0
+            self._local_request_samples = 0
 
     def start(self) -> bool:
         with self._lock:
@@ -487,6 +494,11 @@ class RoutedInferenceWorkerBackend:
         return active or loads
 
     def _local_inference_ms(self) -> float | None:
+        with self._lock:
+            samples = self._local_request_samples
+            total = self._local_request_ms_total
+        if samples > 0:
+            return round(total / samples, 1)
         local = self._local
         if local is None:
             return None
@@ -501,11 +513,6 @@ class RoutedInferenceWorkerBackend:
         if number <= 0 or number != number or number in {float("inf"), float("-inf")}:
             return None
         return number
-
-    def _attempt_timeout(self, timeout: float, *, alternate: bool) -> float:
-        if not alternate:
-            return timeout
-        return min(timeout, INFERENCE_FAILOVER_SECONDS)
 
     def _run_local(
         self,
@@ -525,7 +532,8 @@ class RoutedInferenceWorkerBackend:
                 if admission is None
                 else min(admission, INFERENCE_FAILOVER_SECONDS)
             )
-        return self._local.request(
+        started = time.perf_counter()
+        result = self._local.request(
             operation,
             frame=frame,
             timeout=timeout,
@@ -533,6 +541,13 @@ class RoutedInferenceWorkerBackend:
             workload=workload,
             **payload,
         )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        # Sub-millisecond samples are mock calls. Keep the cached model time.
+        if elapsed_ms >= 1.0:
+            with self._lock:
+                self._local_request_ms_total += elapsed_ms
+                self._local_request_samples += 1
+        return result
 
     def _run_remote(
         self,
@@ -548,10 +563,16 @@ class RoutedInferenceWorkerBackend:
         default_worker_weight: int = 1,
     ) -> Any:
         del admission_timeout
+        admit = (
+            min(timeout, INFERENCE_FAILOVER_SECONDS)
+            if alternate
+            else None
+        )
         return self._remote.request(
             operation,
             frame=frame,
-            timeout=self._attempt_timeout(timeout, alternate=alternate),
+            timeout=timeout,
+            admit_timeout=admit,
             workload=workload,
             worker_weights=worker_weights,
             default_worker_weight=default_worker_weight,

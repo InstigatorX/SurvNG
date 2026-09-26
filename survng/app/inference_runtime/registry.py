@@ -24,11 +24,17 @@ from .protocol import (
     decode_packet,
     encode_packet,
 )
-from .types import InferenceUnavailable, InferenceWorkload
+from .types import InferenceNotAdmitted, InferenceUnavailable, InferenceWorkload
 
 
 class RegistryTransport(Protocol):
-    def request(self, packet: bytes, timeout: float) -> bytes: ...
+    def request(
+        self,
+        packet: bytes,
+        timeout: float,
+        *,
+        admit_timeout: float | None = None,
+    ) -> bytes: ...
 
     def close(self, reason: str) -> None: ...
 
@@ -88,6 +94,17 @@ def _worker_inference_ms(worker: _WorkerLease) -> float | None:
     return round(worker.inference_ms_total / worker.inference_samples, 1)
 
 
+def _worker_placement_ms(worker: _WorkerLease) -> float | None:
+    """Round trip once measured; model time until then.
+
+    A non-positive request sample is ignored. Frozen test clocks report 0
+    and must not override a real model-time measurement.
+    """
+    if worker.request_samples > 0:
+        return round(worker.request_ms_total / worker.request_samples, 1)
+    return _worker_inference_ms(worker)
+
+
 def _latency_fallback(samples: list[float | None]) -> float:
     """Missing samples use the slowest known time so they are not treated as instant."""
     known = [sample for sample in samples if sample is not None and sample > 0]
@@ -133,6 +150,8 @@ class _WorkerLease:
     last_request_ms: float | None = None
     inference_ms_total: float = 0.0
     inference_samples: int = 0
+    request_ms_total: float = 0.0
+    request_samples: int = 0
     role_attempts: dict[str, dict[str, int]] = field(default_factory=dict)
     upgrade_phase: str = ""
     upgrade_detail: str = ""
@@ -331,6 +350,7 @@ class RemoteInferenceRegistry:
         payload: dict[str, Any] | None = None,
         worker_weights: Mapping[str, int] | None = None,
         default_worker_weight: int = 1,
+        admit_timeout: float | None = None,
     ) -> Any:
         if timeout <= 0:
             raise InferenceUnavailable("remote inference deadline expired")
@@ -344,6 +364,7 @@ class RemoteInferenceRegistry:
                 f"no compatible remote {role} inference worker is ready"
             )
         request_id = uuid.uuid4().hex
+        now = time.time()
         message = {
             "type": "request",
             "protocol_version": INFERENCE_PROTOCOL_VERSION,
@@ -353,15 +374,27 @@ class RemoteInferenceRegistry:
             "role": role,
             "operation": operation,
             "workload": int(workload),
-            "deadline_unix_ms": int((time.time() + timeout) * 1000),
+            "deadline_unix_ms": int((now + timeout) * 1000),
             "payload": dict(payload or {}),
         }
+        separate_admission = (
+            admit_timeout is not None and 0 <= admit_timeout < timeout
+        )
+        if separate_admission:
+            message["admit_unix_ms"] = int((now + float(admit_timeout)) * 1000)
         started = self._clock()
         sent = False
         try:
             packet = encode_packet(message, frame=frame)
             sent = True
-            response_packet = worker.transport.request(packet, timeout)
+            if separate_admission:
+                response_packet = worker.transport.request(
+                    packet,
+                    timeout,
+                    admit_timeout=admit_timeout,
+                )
+            else:
+                response_packet = worker.transport.request(packet, timeout)
             response, trailing = decode_packet(response_packet)
             if trailing:
                 raise InferenceUnavailable(
@@ -396,6 +429,14 @@ class RemoteInferenceRegistry:
                 role,
                 operation,
                 f"remote {role} {operation} transport failed",
+            )
+            raise failure from error
+        except InferenceNotAdmitted as error:
+            failure = self._fail_attempt(
+                worker,
+                role,
+                operation,
+                f"remote {role} {operation} was not admitted",
             )
             raise failure from error
         except (FutureTimeoutError, TimeoutError) as error:
@@ -552,7 +593,7 @@ class RemoteInferenceRegistry:
                     "name": worker.registration.name,
                     "pending": _worker_backlog(worker),
                     "weight": weight,
-                    "inference_ms": _worker_inference_ms(worker),
+                    "inference_ms": _worker_placement_ms(worker),
                     "held": self._routing_held(worker),
                 })
             return loads
@@ -586,7 +627,7 @@ class RemoteInferenceRegistry:
                     worker,
                     pending,
                     weight,
-                    _worker_inference_ms(worker),
+                    _worker_placement_ms(worker),
                     self._routing_held(worker),
                 ))
             if not matched:
@@ -688,6 +729,9 @@ class RemoteInferenceRegistry:
             current.last_operation = operation
             if request_ms is not None:
                 current.last_request_ms = request_ms
+                if request_ms > 0:
+                    current.request_ms_total += request_ms
+                    current.request_samples += 1
             if inference_ms is not None:
                 current.last_inference_ms = inference_ms
                 current.inference_ms_total += inference_ms

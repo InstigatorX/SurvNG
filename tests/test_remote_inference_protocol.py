@@ -7,6 +7,7 @@ import numpy as np
 
 from survng.app.config import DetectorConfig
 from survng.app.inference import InferenceUnavailable, InferenceWorkload
+from survng.app.inference_runtime.types import InferenceNotAdmitted
 from survng.app.inference_runtime.protocol import (
     ProtocolError,
     WorkerHeartbeat,
@@ -34,7 +35,14 @@ class _FakeTransport:
     def send_control(self, message: dict) -> None:
         self.control.append(message)
 
-    def request(self, packet: bytes, timeout: float) -> bytes:
+    def request(
+        self,
+        packet: bytes,
+        timeout: float,
+        *,
+        admit_timeout: float | None = None,
+    ) -> bytes:
+        del timeout, admit_timeout
         self.requests.append(packet)
         message, _frame = decode_packet(packet)
         return encode_packet({
@@ -567,6 +575,58 @@ class RemoteInferenceRegistryTests(unittest.TestCase):
 
         self.assertFalse(self.registry.status()["workers"][0]["routing_hold"])
         self.assertEqual(len(transport.requests), 1)
+
+    def test_admission_deadline_is_separate_from_execution(self) -> None:
+        transport, _welcome = self._register_ready()
+
+        self.registry.request(
+            "object",
+            "detect",
+            frame=np.zeros((4, 4, 3), dtype=np.uint8),
+            workload=InferenceWorkload.TRACKING,
+            timeout=15.0,
+            admit_timeout=0.5,
+        )
+
+        message, _frame = decode_packet(transport.requests[0])
+        self.assertGreater(
+            message["deadline_unix_ms"],
+            message["admit_unix_ms"],
+        )
+
+    def test_admission_miss_does_not_hold_a_busy_worker(self) -> None:
+        class _Miss(_FakeTransport):
+            def request(
+                self,
+                packet: bytes,
+                timeout: float,
+                *,
+                admit_timeout: float | None = None,
+            ) -> bytes:
+                del packet, timeout, admit_timeout
+                raise InferenceNotAdmitted("not admitted")
+
+        _transport, welcome = self._register_ready(transport=_Miss())
+        self.assertTrue(self.registry.heartbeat(WorkerHeartbeat(
+            worker_id="worker-a",
+            connection_generation=welcome["connection_generation"],
+            pending_requests=3,
+        )))
+
+        with self.assertRaises(InferenceUnavailable) as raised:
+            self.registry.request(
+                "object",
+                "detect",
+                frame=np.zeros((4, 4, 3), dtype=np.uint8),
+                workload=InferenceWorkload.TRACKING,
+                timeout=15.0,
+                admit_timeout=0.5,
+            )
+
+        self.assertIn("was not admitted", str(raised.exception))
+        worker = self.registry.status()["workers"][0]
+        self.assertFalse(worker["routing_hold"])
+        self.assertEqual(worker["reported_pending_requests"], 3)
 
 
 if __name__ == "__main__":

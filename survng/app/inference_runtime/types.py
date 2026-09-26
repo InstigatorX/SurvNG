@@ -8,8 +8,10 @@ LOGGER = logging.getLogger("uvicorn.error")
 MAX_INFERENCE_FRAME_BYTES = 64 * 1024 * 1024
 INFERENCE_START_TIMEOUT_SECONDS = 30.0
 INFERENCE_REQUEST_TIMEOUT_SECONDS = 15.0
-# First attempt when another target can run the frame. Remote work is abandoned
-# at this deadline. The primary detector keeps its full execution timeout.
+# When another target can run the frame, abandon a remote attempt that the
+# worker has not started by this deadline. Work already running keeps the
+# full execution timeout. The primary detector keeps that timeout too; only
+# its admission is capped.
 INFERENCE_FAILOVER_SECONDS = 0.5
 INCIDENT_INITIAL_WORKER_TIMEOUT_SECONDS = 3.0
 INCIDENT_INITIAL_ADMISSION_TIMEOUT_SECONDS = 0.75
@@ -24,6 +26,10 @@ RESOURCE_TRACKER_STOP_TIMEOUT_SECONDS = 2.0
 
 class InferenceUnavailable(RuntimeError):
     pass
+
+
+class InferenceNotAdmitted(TimeoutError):
+    """The worker had not started the request before the admission deadline."""
 
 
 class InferenceRollbackIncomplete(InferenceUnavailable):

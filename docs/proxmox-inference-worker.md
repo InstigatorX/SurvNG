@@ -237,11 +237,15 @@ To run detections on the primary and the worker at the same time, set
 `detector.inference_balance` to `weighted` under **Object Detection → Workers**.
 `inference_primary_weight` and each worker weight choose the share. The router
 picks the eligible target with the lowest
-`(in-progress + 1) × recent inference time / weight`. Until both sides have a
-measured average, a missing sample uses the known time, so it is not treated
-as instant. Weight `0` removes that target from the share. Remote-first
-remains the default, so existing hybrid setups stay worker-first until the
-balance is changed. Health shows the same workers under **Health → Inference**.
+`(in-progress + 1) × recent round trip / weight`. Round trip is the time from
+dispatch until the result returns. Until a target has a measured round trip,
+its recent model time is used. Until both sides have a measured time, a
+missing sample uses the known time, so it is not treated as instant. Weight
+`0` removes that target from the share. The worker runs object detection and
+incident frames ahead of face, ReID, and depth on its inference thread.
+Remote-first remains the default, so existing hybrid setups stay worker-first
+until the balance is changed. Health shows the same workers under **Health →
+Inference**.
 
 A request that misses its deadline on a worker and then finishes on the primary
 is counted as rerouted, not failed. Failed is reserved for requests that no
@@ -261,12 +265,15 @@ time, primary round trip, and per-role completed, rerouted, and failed counts.
   may fall back locally. Tracking and enrichment wait until remote capacity
   is available. With weighted share, any workload reruns on the other side
   when that side is still eligible. A worker attempt with somewhere else to
-  go waits at most half a second before the frame is tried there. The
-  primary detector is not stopped for that short wait; only its admission
-  is. A late worker result is ignored. The rerun is counted as rerouted.
-- A worker that misses a deadline is left out of routing while it still
-  reports queued work. It returns when that queue drains or one of its
-  requests completes. If it is the only target, it is still used.
+  go is abandoned if the worker has not started it within half a second.
+  Once the worker starts the request, the primary waits for the full
+  deadline. The primary detector is not stopped for that short wait; only
+  its admission is. A late worker result is ignored. The rerun is counted
+  as rerouted.
+- A worker that misses its full execution deadline is left out of routing
+  while it still reports queued work. An admission miss does not pause it.
+  It returns when that queue drains or one of its requests completes. If it
+  is the only target, it is still used.
 - In remote mode, unavailable workers produce the existing
   detector-unavailable behavior. Camera capture and recording continue on the
   primary.
