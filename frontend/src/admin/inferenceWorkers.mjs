@@ -5,6 +5,37 @@ export function formatInferenceMs(value) {
   return `${number.toFixed(number >= 100 ? 0 : 1)} ms`;
 }
 
+export function formatAttemptOutcome(row) {
+  if (!row?.lastOutcome) return "";
+  const call = [row.lastRole, row.lastOperation].filter(Boolean).join(" ");
+  if (row.lastOutcome === "completed") {
+    return call ? `Completed ${call}` : "Completed";
+  }
+  if (row.lastOutcome === "rerouted") {
+    const reason = row.lastError ? `: ${row.lastError}` : "";
+    return `Rerouted${call ? ` ${call}` : ""}${reason}`;
+  }
+  if (row.lastOutcome === "failed") {
+    const reason = row.lastError ? `: ${row.lastError}` : "";
+    return `Failed${call ? ` ${call}` : ""}${reason}`;
+  }
+  return "";
+}
+
+export function formatRoleAttempts(attempts) {
+  if (!attempts || typeof attempts !== "object") return "";
+  return Object.entries(attempts).map(([role, counts]) => {
+    const parts = [];
+    const completed = Number(counts?.completed || 0);
+    const rerouted = Number(counts?.rerouted || 0);
+    const failed = Number(counts?.failed || 0);
+    if (completed) parts.push(`${completed} completed`);
+    if (rerouted) parts.push(`${rerouted} rerouted`);
+    if (failed) parts.push(`${failed} failed`);
+    return parts.length ? `${role}: ${parts.join(", ")}` : "";
+  }).filter(Boolean).join(" · ");
+}
+
 export function workerWeight(detectorConfig, workerId) {
   const weights = detectorConfig?.inference_worker_weights || {};
   if (Object.prototype.hasOwnProperty.call(weights, workerId)) {
@@ -35,6 +66,13 @@ export function inferenceTargetRows(detector, detectorConfig = {}) {
     completed: Number(runtime.total_inferences || 0),
     completedLabel: "inferences",
     failed: Number(runtime.failed_inferences || 0),
+    rerouted: null,
+    lastOutcome: "",
+    lastError: "",
+    lastRole: "",
+    lastOperation: "",
+    lastRequestMs: null,
+    roleAttempts: {},
     lastInferenceMs: runtime.last_inference_ms,
     averageInferenceMs: runtime.average_inference_ms,
     modelLoadMs: detector?.model_load_ms,
@@ -54,9 +92,16 @@ export function inferenceTargetRows(detector, detectorConfig = {}) {
       pending: Number(worker.pending_requests || 0),
       completed: Number(worker.completed_requests || 0),
       completedLabel: "requests",
+      rerouted: Number(worker.rerouted_requests || 0),
       failed: Number(worker.failed_requests || 0),
-      lastInferenceMs: objectRuntime.last_inference_ms,
-      averageInferenceMs: objectRuntime.average_inference_ms,
+      lastOutcome: String(worker.last_outcome || ""),
+      lastError: String(worker.last_error || ""),
+      lastRole: String(worker.last_role || ""),
+      lastOperation: String(worker.last_operation || ""),
+      lastRequestMs: worker.last_request_ms,
+      roleAttempts: worker.role_attempts || {},
+      lastInferenceMs: worker.last_inference_ms ?? objectRuntime.last_inference_ms,
+      averageInferenceMs: worker.average_inference_ms ?? objectRuntime.average_inference_ms,
       modelLoadMs: objectStatus.model_load_ms,
       leaseSeconds: Number(worker.lease_remaining_seconds),
       weight: workerWeight(detectorConfig, worker.worker_id),

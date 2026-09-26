@@ -1,4 +1,4 @@
-import { inferenceTargetRows, formatInferenceMs } from "./inferenceWorkers.mjs";
+import { inferenceTargetRows, formatAttemptOutcome, formatInferenceMs, formatRoleAttempts } from "./inferenceWorkers.mjs";
 
 function stateLabel(row) {
   if (row.kind === "primary") return row.ready ? "Loaded" : "Not loaded";
@@ -39,12 +39,16 @@ export function InferenceHealthPanel({ detector, detectorConfig }) {
               <div><dt>Weight</dt><dd>{row.weight}</dd></div>
               <div><dt>In progress</dt><dd>{row.pending}</dd></div>
               <div><dt>{row.kind === "primary" ? "Inferences" : "Completed requests"}</dt><dd>{row.completed.toLocaleString()}</dd></div>
-              <div><dt>Failed</dt><dd>{row.failed.toLocaleString()}</dd></div>
+              {row.kind === "worker" ? <div><dt>Rerouted</dt><dd>{row.rerouted.toLocaleString()}</dd></div> : null}
+              <div><dt>Failed</dt><dd className={row.failed ? "attention" : undefined}>{row.failed.toLocaleString()}</dd></div>
               <div><dt>Last inference</dt><dd>{formatInferenceMs(row.lastInferenceMs)}</dd></div>
               <div><dt>Average inference</dt><dd>{formatInferenceMs(row.averageInferenceMs)}</dd></div>
+              {row.kind === "worker" ? <div><dt>Round trip</dt><dd>{formatInferenceMs(row.lastRequestMs)}</dd></div> : null}
               <div><dt>Model load</dt><dd>{formatInferenceMs(row.modelLoadMs)}</dd></div>
               <div><dt>Lease</dt><dd>{row.kind === "primary" ? "Local" : (Number.isFinite(row.leaseSeconds) ? `${row.leaseSeconds.toFixed(0)}s` : "—")}</dd></div>
             </dl>
+            {formatRoleAttempts(row.roleAttempts) ? <p className="inference-target-note">{formatRoleAttempts(row.roleAttempts)}</p> : null}
+            {formatAttemptOutcome(row) ? <p className={row.lastOutcome === "failed" ? "inference-target-note attention" : "inference-target-note"}>{formatAttemptOutcome(row)}</p> : null}
           </article>
         ))}
       </div>

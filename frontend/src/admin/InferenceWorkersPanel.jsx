@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetch } from "../shared/api.js";
-import { inferenceTargetRows, formatInferenceMs } from "./inferenceWorkers.mjs";
+import { inferenceTargetRows, formatAttemptOutcome, formatInferenceMs, formatRoleAttempts } from "./inferenceWorkers.mjs";
 
 export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) {
   const [liveStatus, setLiveStatus] = useState(detectorStatus || null);
@@ -44,7 +44,7 @@ export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) 
       <header className="detection-settings-card-head">
         <div>
           <h3>Inference workers</h3>
-          <p>Share detections between this server and connected workers, or keep workers in front and use this server only as fallback.</p>
+          <p>Share detections between this server and connected workers, or keep workers in front and use this server only as fallback. Rerouted requests finished on another target. Failed counts requests that no target completed.</p>
         </div>
       </header>
       <div className="detection-field-grid">
@@ -76,10 +76,14 @@ export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) 
               <div><dt>Roles</dt><dd>{row.roles.join(", ") || "—"}</dd></div>
               <div><dt>In progress</dt><dd>{row.pending}</dd></div>
               <div><dt>Completed</dt><dd>{row.completed.toLocaleString()}</dd></div>
-              <div><dt>Failed</dt><dd>{row.failed.toLocaleString()}</dd></div>
+              <div><dt>Rerouted</dt><dd>{row.rerouted.toLocaleString()}</dd></div>
+              <div><dt>Failed</dt><dd className={row.failed ? "attention" : undefined}>{row.failed.toLocaleString()}</dd></div>
               <div><dt>Last inference</dt><dd>{formatInferenceMs(row.lastInferenceMs)}</dd></div>
+              <div><dt>Round trip</dt><dd>{formatInferenceMs(row.lastRequestMs)}</dd></div>
               <div><dt>Lease</dt><dd>{Number.isFinite(row.leaseSeconds) ? `${row.leaseSeconds.toFixed(0)}s` : "—"}</dd></div>
             </dl>
+            {formatRoleAttempts(row.roleAttempts) ? <p className="inference-target-note">{formatRoleAttempts(row.roleAttempts)}</p> : null}
+            {formatAttemptOutcome(row) ? <p className={row.lastOutcome === "failed" ? "inference-target-note attention" : "inference-target-note"}>{formatAttemptOutcome(row)}</p> : null}
             <label>Weight
               <input type="number" min="0" max="100" step="1" value={row.weight} disabled={!weighted} onChange={(event) => setWeight(row.id, event.target.value)} />
             </label>

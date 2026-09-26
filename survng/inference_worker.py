@@ -330,10 +330,15 @@ class InferenceWorkerClient:
             if deadline_ms <= int(time.time() * 1000):
                 raise TimeoutError("inference request deadline expired")
             frame = decode_frame(message, frame_bytes)
+            started = time.perf_counter()
             response["result"] = _dispatch_request(
                 supervisor,
                 message,
                 frame,
+            )
+            response["inference_ms"] = round(
+                (time.perf_counter() - started) * 1000,
+                1,
             )
             response["ok"] = True
         except Exception as error:

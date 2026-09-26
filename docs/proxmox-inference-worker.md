@@ -218,14 +218,22 @@ picks the eligible target with the lowest `(in-progress + 1) / weight`. Weight
 existing hybrid setups stay worker-first until the balance is changed. Health
 shows the same workers under **Health → Inference**.
 
+A request that misses its deadline on a worker and then finishes on the primary
+is counted as rerouted, not failed. Failed is reserved for requests that no
+target completed. Each worker also reports the last outcome, worker inference
+time, primary round trip, and per-role completed, rerouted, and failed counts.
+
 ## Failure behavior
 
 - Expired heartbeats remove a worker from routing.
 - Reconnecting with the same worker ID fences the old connection.
 - Configuration or model-content changes cause the worker to reconnect, fetch
   only changed model blobs, and reload after its next heartbeat.
-- In hybrid mode, only initial incident detection may fall back locally.
-  Tracking and enrichment wait until remote capacity is available.
+- In hybrid mode with remote-first balance, only initial incident detection
+  may fall back locally. Tracking and enrichment wait until remote capacity
+  is available. With weighted share, any workload reruns on the primary when
+  the primary weight is above 0 and the worker attempt does not finish. That
+  rerun is counted as rerouted.
 - In remote mode, unavailable workers produce the existing
   detector-unavailable behavior. Camera capture and recording continue on the
   primary.

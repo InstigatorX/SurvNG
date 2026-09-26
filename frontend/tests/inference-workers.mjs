@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatInferenceMs, inferenceTargetRows, workerWeight } from "../src/admin/inferenceWorkers.mjs";
+import { formatAttemptOutcome, formatInferenceMs, formatRoleAttempts, inferenceTargetRows, workerWeight } from "../src/admin/inferenceWorkers.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const configPage = readFileSync(join(directory, "../src/admin/ConfigPage.jsx"), "utf8");
@@ -32,7 +32,16 @@ const rows = inferenceTargetRows({
       roles: ["object", "face"],
       pending_requests: 1,
       completed_requests: 8,
-      failed_requests: 0,
+      rerouted_requests: 3,
+      failed_requests: 1,
+      last_outcome: "rerouted",
+      last_error: "remote reid embed_person timed out",
+      last_role: "reid",
+      last_operation: "embed_person",
+      last_inference_ms: 22,
+      last_request_ms: 40,
+      average_inference_ms: 19.5,
+      role_attempts: { reid: { completed: 2, rerouted: 3, failed: 0 }, object: { completed: 6, rerouted: 0, failed: 1 } },
       lease_remaining_seconds: 12.4,
       statuses: { object: { loaded_device: "GPU", model_load_ms: 350, runtime: { last_inference_ms: 18 } } },
     }],
@@ -49,6 +58,17 @@ assert.equal(rows[1].name, "trainer");
 assert.equal(rows[1].device, "GPU");
 assert.equal(rows[1].weight, 3);
 assert.equal(rows[1].completed, 8);
+assert.equal(rows[1].rerouted, 3);
+assert.equal(rows[1].failed, 1);
+assert.equal(rows[1].lastInferenceMs, 22);
+assert.equal(rows[1].lastRequestMs, 40);
+assert.equal(rows[1].averageInferenceMs, 19.5);
+assert.equal(rows[0].rerouted, null);
+assert.equal(
+  formatAttemptOutcome(rows[1]),
+  "Rerouted reid embed_person: remote reid embed_person timed out",
+);
+assert.match(formatRoleAttempts(rows[1].roleAttempts), /reid: 2 completed, 3 rerouted/);
 assert.deepEqual(rows[1].roles, ["object", "face"]);
 
 assert.match(constants, /HEALTH_TELEMETRY_SECTIONS = \["health", "inference", "occupancy"\]/);
@@ -56,6 +76,7 @@ assert.match(configPage, /health-tab-inference/);
 assert.match(configPage, /InferenceHealthPanel/);
 assert.match(configPage, /InferenceWorkersPanel/);
 assert.match(configPage, /\["workers", "Workers", Server\]/);
+assert.match(workersPanel, /Rerouted/);
 assert.match(workersPanel, /inference_balance/);
 assert.match(workersPanel, /inference_primary_weight/);
 assert.match(workersPanel, /\/api\/detector\/status/);

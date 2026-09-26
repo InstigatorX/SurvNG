@@ -123,6 +123,7 @@ class InferenceWorkerClientTests(unittest.TestCase):
 
         self.assertFalse(trailing)
         self.assertTrue(response["ok"])
+        self.assertGreaterEqual(response["inference_ms"], 0)
         self.assertEqual(
             response["result"],
             [{"label": "person", "confidence": 0.9}],

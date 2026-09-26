@@ -114,21 +114,28 @@ class RemoteInferenceBackendTests(unittest.TestCase):
 
 
 class _ResultTransport:
-    def __init__(self, result: object) -> None:
+    def __init__(self, result: object, *, inference_ms: float | None = None) -> None:
         self.result = result
+        self.inference_ms = inference_ms
         self.requests = 0
+        self.error: BaseException | None = None
 
     def request(self, packet: bytes, timeout: float) -> bytes:
         del timeout
         self.requests += 1
+        if self.error is not None:
+            raise self.error
         message, _frame = decode_packet(packet)
-        return encode_packet({
+        response = {
             "type": "response",
             "request_id": message["request_id"],
             "connection_generation": message["connection_generation"],
             "ok": True,
             "result": self.result,
-        })
+        }
+        if self.inference_ms is not None:
+            response["inference_ms"] = self.inference_ms
+        return encode_packet(response)
 
     def close(self, reason: str) -> None:
         del reason
@@ -282,6 +289,74 @@ class WeightedInferenceBalanceTests(unittest.TestCase):
         )
 
         self.assertEqual(result, {"worker": "primary"})
+
+    def test_recovered_worker_timeout_is_rerouted(self) -> None:
+        config = self._config()
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        transports["worker-a"].error = TimeoutError("deadline")
+        backend = self._backend(config, registry)
+        backend._local.pending_requests = Mock(return_value=5)
+
+        result = backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(result, {"worker": "primary"})
+        worker = registry.status()["workers"][0]
+        self.assertEqual(worker["failed_requests"], 0)
+        self.assertEqual(worker["rerouted_requests"], 1)
+        self.assertEqual(worker["completed_requests"], 0)
+        self.assertEqual(worker["last_outcome"], "rerouted")
+        self.assertIn("timed out", worker["last_error"])
+        self.assertEqual(worker["last_role"], "object")
+        self.assertEqual(worker["last_operation"], "detect")
+        self.assertEqual(worker["role_attempts"]["object"]["rerouted"], 1)
+        self.assertEqual(worker["role_attempts"]["object"]["failed"], 0)
+
+    def test_unrecovered_worker_timeout_stays_failed(self) -> None:
+        config = self._config(inference_primary_weight=0)
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        transports["worker-a"].error = TimeoutError("deadline")
+        backend = self._backend(config, registry)
+
+        with self.assertRaises(InferenceUnavailable):
+            backend.request(
+                "detect",
+                frame=self.frame,
+                workload=InferenceWorkload.TRACKING,
+            )
+
+        worker = registry.status()["workers"][0]
+        self.assertEqual(worker["failed_requests"], 1)
+        self.assertEqual(worker["rerouted_requests"], 0)
+        self.assertEqual(worker["last_outcome"], "failed")
+        self.assertEqual(worker["role_attempts"]["object"]["failed"], 1)
+
+    def test_completed_request_records_worker_inference_time(self) -> None:
+        config = self._config()
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        transports["worker-a"].inference_ms = 18.2
+        backend = self._backend(config, registry)
+        backend._local.pending_requests = Mock(return_value=5)
+
+        result = backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(result, {"worker": "worker-a"})
+        worker = registry.status()["workers"][0]
+        self.assertEqual(worker["completed_requests"], 1)
+        self.assertEqual(worker["failed_requests"], 0)
+        self.assertEqual(worker["last_outcome"], "completed")
+        self.assertEqual(worker["last_inference_ms"], 18.2)
+        self.assertEqual(worker["average_inference_ms"], 18.2)
+        self.assertEqual(worker["last_request_ms"], 0.0)
+        self.assertEqual(worker["last_error"], "")
+        self.assertEqual(worker["role_attempts"]["object"]["completed"], 1)
 
     def test_weight_edits_do_not_change_worker_generation(self) -> None:
         config = self._config(inference_balance="remote_first")

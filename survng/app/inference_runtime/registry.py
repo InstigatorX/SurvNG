@@ -40,6 +40,25 @@ def detector_config_generation(config: DetectorConfig) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _finite_ms(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number < 0 or number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return round(number, 1)
+
+
+def _bump_role_attempt(worker: _WorkerLease, role: str, outcome: str, delta: int = 1) -> None:
+    if not role:
+        return
+    bucket = worker.role_attempts.setdefault(
+        role,
+        {"completed": 0, "rerouted": 0, "failed": 0},
+    )
+    bucket[outcome] = max(0, int(bucket.get(outcome) or 0) + delta)
+
+
 def _worker_weight(
     worker_id: str,
     weights: Mapping[str, int] | None,
@@ -62,7 +81,17 @@ class _WorkerLease:
     pending_requests: int = 0
     reported_pending_requests: int = 0
     completed_requests: int = 0
+    rerouted_requests: int = 0
     failed_requests: int = 0
+    last_outcome: str = ""
+    last_error: str = ""
+    last_role: str = ""
+    last_operation: str = ""
+    last_inference_ms: float | None = None
+    last_request_ms: float | None = None
+    inference_ms_total: float = 0.0
+    inference_samples: int = 0
+    role_attempts: dict[str, dict[str, int]] = field(default_factory=dict)
     last_seen_at: float = field(default_factory=time.monotonic)
 
 
@@ -243,28 +272,39 @@ class RemoteInferenceRegistry:
                 raise InferenceUnavailable(
                     str(response.get("error") or "remote inference failed")
                 )
-            with self._lock:
-                current = self._current_worker(
-                    worker.registration.worker_id,
-                    worker.connection_generation,
-                )
-                if current is not None:
-                    current.completed_requests += 1
-                    self._renew(current)
+            self._record_success(
+                worker,
+                role=role,
+                operation=operation,
+                inference_ms=_finite_ms(response.get("inference_ms")),
+                request_ms=_finite_ms((self._clock() - started) * 1000.0),
+            )
             return response.get("result")
         except (FutureTimeoutError, TimeoutError) as error:
-            self._record_failure(worker)
-            raise InferenceUnavailable(
-                f"remote {role} {operation} timed out"
-            ) from error
-        except InferenceUnavailable:
-            self._record_failure(worker)
+            failure = self._fail_attempt(
+                worker,
+                role,
+                operation,
+                f"remote {role} {operation} timed out",
+            )
+            raise failure from error
+        except InferenceUnavailable as error:
+            self._fail_attempt(
+                worker,
+                role,
+                operation,
+                str(error),
+                error=error,
+            )
             raise
         except Exception as error:
-            self._record_failure(worker)
-            raise InferenceUnavailable(
-                f"remote {role} {operation} transport failed"
-            ) from error
+            failure = self._fail_attempt(
+                worker,
+                role,
+                operation,
+                f"remote {role} {operation} transport failed",
+            )
+            raise failure from error
         finally:
             with self._lock:
                 current = self._current_worker(
@@ -308,7 +348,26 @@ class RemoteInferenceRegistry:
                         worker.reported_pending_requests
                     ),
                     "completed_requests": worker.completed_requests,
+                    "rerouted_requests": worker.rerouted_requests,
                     "failed_requests": worker.failed_requests,
+                    "last_outcome": worker.last_outcome,
+                    "last_error": worker.last_error,
+                    "last_role": worker.last_role,
+                    "last_operation": worker.last_operation,
+                    "last_inference_ms": worker.last_inference_ms,
+                    "last_request_ms": worker.last_request_ms,
+                    "average_inference_ms": (
+                        round(
+                            worker.inference_ms_total / worker.inference_samples,
+                            1,
+                        )
+                        if worker.inference_samples
+                        else None
+                    ),
+                    "role_attempts": {
+                        role_name: dict(counts)
+                        for role_name, counts in worker.role_attempts.items()
+                    },
                     "lease_remaining_seconds": round(
                         max(0.0, worker.lease_expires_at - now),
                         2,
@@ -453,14 +512,96 @@ class RemoteInferenceRegistry:
                     self._workers.pop(worker.registration.worker_id, None)
             return expired
 
-    def _record_failure(self, worker: _WorkerLease) -> None:
+    def note_rerouted(self, error: BaseException) -> None:
+        """Move a worker attempt from failed to rerouted after another target finishes it."""
+        worker_id = getattr(error, "worker_id", None)
+        generation = getattr(error, "connection_generation", None)
+        role = str(getattr(error, "inference_role", "") or "")
+        if not isinstance(worker_id, str) or not isinstance(generation, int):
+            return
+        with self._lock:
+            current = self._current_worker(worker_id, generation)
+            if current is None or current.failed_requests <= 0:
+                return
+            current.failed_requests -= 1
+            current.rerouted_requests += 1
+            current.last_outcome = "rerouted"
+            _bump_role_attempt(current, role, "failed", -1)
+            _bump_role_attempt(current, role, "rerouted")
+
+    def _record_success(
+        self,
+        worker: _WorkerLease,
+        *,
+        role: str,
+        operation: str,
+        inference_ms: float | None,
+        request_ms: float | None,
+    ) -> None:
         with self._lock:
             current = self._current_worker(
                 worker.registration.worker_id,
                 worker.connection_generation,
             )
-            if current is not None:
-                current.failed_requests += 1
+            if current is None:
+                return
+            current.completed_requests += 1
+            current.last_outcome = "completed"
+            current.last_error = ""
+            current.last_role = role
+            current.last_operation = operation
+            if request_ms is not None:
+                current.last_request_ms = request_ms
+            if inference_ms is not None:
+                current.last_inference_ms = inference_ms
+                current.inference_ms_total += inference_ms
+                current.inference_samples += 1
+            _bump_role_attempt(current, role, "completed")
+            self._renew(current)
+
+    def _fail_attempt(
+        self,
+        worker: _WorkerLease,
+        role: str,
+        operation: str,
+        message: str,
+        error: InferenceUnavailable | None = None,
+    ) -> InferenceUnavailable:
+        text = message[:240]
+        self._record_failure(
+            worker,
+            role=role,
+            operation=operation,
+            message=text,
+        )
+        failure = error if error is not None else InferenceUnavailable(text)
+        failure.worker_id = worker.registration.worker_id  # type: ignore[attr-defined]
+        failure.connection_generation = worker.connection_generation  # type: ignore[attr-defined]
+        failure.inference_role = role  # type: ignore[attr-defined]
+        failure.inference_operation = operation  # type: ignore[attr-defined]
+        return failure
+
+    def _record_failure(
+        self,
+        worker: _WorkerLease,
+        *,
+        role: str,
+        operation: str,
+        message: str,
+    ) -> None:
+        with self._lock:
+            current = self._current_worker(
+                worker.registration.worker_id,
+                worker.connection_generation,
+            )
+            if current is None:
+                return
+            current.failed_requests += 1
+            current.last_outcome = "failed"
+            current.last_error = message
+            current.last_role = role
+            current.last_operation = operation
+            _bump_role_attempt(current, role, "failed")
 
     def _current_worker(
         self,

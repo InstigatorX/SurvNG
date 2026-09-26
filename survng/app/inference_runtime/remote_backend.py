@@ -330,10 +330,10 @@ class RoutedInferenceWorkerBackend:
                 workload=workload,
                 **payload,
             )
-        except InferenceUnavailable:
+        except InferenceUnavailable as error:
             if not self._incident_fallback(workload):
                 raise
-            return self._local.request(
+            result = self._local.request(
                 operation,
                 frame=frame,
                 timeout=timeout,
@@ -341,6 +341,8 @@ class RoutedInferenceWorkerBackend:
                 workload=workload,
                 **payload,
             )
+            self._registry.note_rerouted(error)
+            return result
 
     def _request_weighted(
         self,
@@ -408,9 +410,9 @@ class RoutedInferenceWorkerBackend:
                 default_worker_weight=default_weight,
                 **payload,
             )
-        except InferenceUnavailable:
+        except InferenceUnavailable as error:
             if kind == "remote" and local_weight > 0 and self._local is not None:
-                return self._local.request(
+                result = self._local.request(
                     operation,
                     frame=frame,
                     timeout=timeout,
@@ -418,6 +420,8 @@ class RoutedInferenceWorkerBackend:
                     workload=workload,
                     **payload,
                 )
+                self._registry.note_rerouted(error)
+                return result
             if kind == "local" and loads:
                 return self._remote.request(
                     operation,
@@ -430,7 +434,7 @@ class RoutedInferenceWorkerBackend:
                     **payload,
                 )
             if kind == "remote" and self._incident_fallback(workload):
-                return self._local.request(
+                result = self._local.request(
                     operation,
                     frame=frame,
                     timeout=timeout,
@@ -438,6 +442,8 @@ class RoutedInferenceWorkerBackend:
                     workload=workload,
                     **payload,
                 )
+                self._registry.note_rerouted(error)
+                return result
             raise
 
     def _incident_fallback(self, workload: InferenceWorkload) -> bool:
