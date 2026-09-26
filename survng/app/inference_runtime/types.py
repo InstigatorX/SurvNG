@@ -8,6 +8,9 @@ LOGGER = logging.getLogger("uvicorn.error")
 MAX_INFERENCE_FRAME_BYTES = 64 * 1024 * 1024
 INFERENCE_START_TIMEOUT_SECONDS = 30.0
 INFERENCE_REQUEST_TIMEOUT_SECONDS = 15.0
+# First attempt when another target can run the frame. Remote work is abandoned
+# at this deadline. The primary detector keeps its full execution timeout.
+INFERENCE_FAILOVER_SECONDS = 0.5
 INCIDENT_INITIAL_WORKER_TIMEOUT_SECONDS = 3.0
 INCIDENT_INITIAL_ADMISSION_TIMEOUT_SECONDS = 0.75
 PERSON_REID_REQUEST_TIMEOUT_SECONDS = 3.0

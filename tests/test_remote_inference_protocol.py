@@ -480,6 +480,94 @@ class RemoteInferenceRegistryTests(unittest.TestCase):
             self.registry.request_upgrade("worker-a", "abc")
         self.assertIn("full git commit", str(unavailable.exception))
 
+    def test_timeout_prefers_another_worker_until_the_queue_drains(self) -> None:
+        class _TimeoutTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def request(self, packet: bytes, timeout: float) -> bytes:
+                del packet, timeout
+                self.calls += 1
+                raise TimeoutError("deadline")
+
+        slow = _TimeoutTransport()
+        _transport, welcome = self._register_ready(
+            "worker-slow",
+            transport=slow,
+        )
+        fast, _fast_welcome = self._register_ready("worker-fast")
+        self.assertTrue(self.registry.heartbeat(WorkerHeartbeat(
+            worker_id="worker-slow",
+            connection_generation=welcome["connection_generation"],
+            pending_requests=2,
+        )))
+        with self.assertRaises(InferenceUnavailable):
+            self.registry.request(
+                "object",
+                "detect",
+                frame=np.zeros((4, 4, 3), dtype=np.uint8),
+                workload=InferenceWorkload.TRACKING,
+                timeout=1.0,
+                worker_weights={"worker-slow": 100, "worker-fast": 1},
+            )
+
+        held = {
+            item["worker_id"]: item
+            for item in self.registry.status()["workers"]
+        }
+        self.assertTrue(held["worker-slow"]["routing_hold"])
+        self.assertEqual(slow.calls, 1)
+        self.registry.request(
+            "object",
+            "detect",
+            frame=np.zeros((4, 4, 3), dtype=np.uint8),
+            workload=InferenceWorkload.TRACKING,
+            timeout=1.0,
+            worker_weights={"worker-slow": 4, "worker-fast": 1},
+        )
+        self.assertEqual(len(fast.requests), 1)
+        self.assertEqual(slow.calls, 1)
+
+    def test_completed_request_clears_a_routing_hold(self) -> None:
+        class _OnceTimeout(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__(result={"ok": True})
+                self.failed = False
+
+            def request(self, packet: bytes, timeout: float) -> bytes:
+                if not self.failed:
+                    self.failed = True
+                    raise TimeoutError("deadline")
+                return super().request(packet, timeout)
+
+        transport, welcome = self._register_ready(transport=_OnceTimeout())
+        self.assertTrue(self.registry.heartbeat(WorkerHeartbeat(
+            worker_id="worker-a",
+            connection_generation=welcome["connection_generation"],
+            pending_requests=2,
+        )))
+        with self.assertRaises(InferenceUnavailable):
+            self.registry.request(
+                "object",
+                "detect",
+                frame=np.zeros((4, 4, 3), dtype=np.uint8),
+                workload=InferenceWorkload.TRACKING,
+                timeout=1.0,
+            )
+        self.assertTrue(self.registry.status()["workers"][0]["routing_hold"])
+
+        self.registry.request(
+            "object",
+            "detect",
+            frame=np.zeros((4, 4, 3), dtype=np.uint8),
+            workload=InferenceWorkload.TRACKING,
+            timeout=1.0,
+        )
+
+        self.assertFalse(self.registry.status()["workers"][0]["routing_hold"])
+        self.assertEqual(len(transport.requests), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

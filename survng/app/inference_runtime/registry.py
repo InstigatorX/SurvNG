@@ -82,6 +82,35 @@ def _worker_weight(
     return int(default_weight)
 
 
+def _worker_inference_ms(worker: _WorkerLease) -> float | None:
+    if worker.inference_samples <= 0:
+        return None
+    return round(worker.inference_ms_total / worker.inference_samples, 1)
+
+
+def _latency_fallback(samples: list[float | None]) -> float:
+    """Missing samples use the slowest known time so they are not treated as instant."""
+    known = [sample for sample in samples if sample is not None and sample > 0]
+    if not known:
+        return 1.0
+    return max(known)
+
+
+def _placement_score(
+    pending: int,
+    weight: int,
+    latency_ms: float | None,
+    fallback_ms: float,
+) -> float:
+    latency = fallback_ms if latency_ms is None or latency_ms <= 0 else latency_ms
+    return (max(0, pending) + 1) * latency / max(1, weight)
+
+
+def _deadline_miss(message: str) -> bool:
+    text = message.lower()
+    return "timed out" in text or "deadline expired" in text
+
+
 @dataclass(slots=True)
 class _WorkerLease:
     registration: WorkerRegistration
@@ -108,6 +137,7 @@ class _WorkerLease:
     upgrade_phase: str = ""
     upgrade_detail: str = ""
     upgrade_target_sha: str = ""
+    routing_hold: bool = False
     last_seen_at: float = field(default_factory=time.monotonic)
 
 
@@ -429,6 +459,7 @@ class RemoteInferenceRegistry:
                     "upgrade_phase": worker.upgrade_phase,
                     "upgrade_detail": worker.upgrade_detail,
                     "upgrade_target_sha": worker.upgrade_target_sha,
+                    "routing_hold": self._routing_held(worker),
                     "roles": list(worker.registration.roles),
                     "slots": worker.registration.slots,
                     "devices": list(worker.registration.devices),
@@ -521,6 +552,8 @@ class RemoteInferenceRegistry:
                     "name": worker.registration.name,
                     "pending": _worker_backlog(worker),
                     "weight": weight,
+                    "inference_ms": _worker_inference_ms(worker),
+                    "held": self._routing_held(worker),
                 })
             return loads
 
@@ -537,30 +570,47 @@ class RemoteInferenceRegistry:
             worker.transport.close("worker lease expired")
         expected_generation = self._generation_provider(self._config_provider())
         with self._lock:
-            scored: list[tuple[float, int, str, _WorkerLease]] = []
+            matched: list[tuple[_WorkerLease, int, int, float | None, bool]] = []
             for worker in self._workers.values():
                 if not self._worker_matches(worker, role, expected_generation):
                     continue
                 pending = _worker_backlog(worker)
+                weight = _worker_weight(
+                    worker.registration.worker_id,
+                    weights,
+                    default_weight,
+                )
+                if weights is not None and weight <= 0:
+                    continue
+                matched.append((
+                    worker,
+                    pending,
+                    weight,
+                    _worker_inference_ms(worker),
+                    self._routing_held(worker),
+                ))
+            if not matched:
+                return None
+            available = [item for item in matched if not item[4]]
+            pool = available or matched
+            fallback_ms = _latency_fallback([item[3] for item in pool])
+            scored: list[tuple[float, int, str, _WorkerLease]] = []
+            for worker, pending, weight, latency_ms, _held in pool:
                 if weights is None:
                     score = float(pending)
                 else:
-                    weight = _worker_weight(
-                        worker.registration.worker_id,
-                        weights,
-                        default_weight,
+                    score = _placement_score(
+                        pending,
+                        weight,
+                        latency_ms,
+                        fallback_ms,
                     )
-                    if weight <= 0:
-                        continue
-                    score = (pending + 1) / weight
                 scored.append((
                     score,
                     pending,
                     worker.registration.worker_id,
                     worker,
                 ))
-            if not scored:
-                return None
             scored.sort(key=lambda item: (item[0], item[1], item[2]))
             best_score = scored[0][0]
             equal = [item for item in scored if item[0] == best_score]
@@ -642,6 +692,7 @@ class RemoteInferenceRegistry:
                 current.last_inference_ms = inference_ms
                 current.inference_ms_total += inference_ms
                 current.inference_samples += 1
+            current.routing_hold = False
             _bump_role_attempt(current, role, "completed")
             self._renew(current)
 
@@ -687,7 +738,15 @@ class RemoteInferenceRegistry:
             current.last_error = message
             current.last_role = role
             current.last_operation = operation
+            if _deadline_miss(message):
+                current.routing_hold = True
             _bump_role_attempt(current, role, "failed")
+
+    def _routing_held(self, worker: _WorkerLease) -> bool:
+        """Skip a worker that missed a deadline while earlier work is still queued."""
+        if worker.routing_hold and _worker_backlog(worker) <= 0:
+            worker.routing_hold = False
+        return worker.routing_hold
 
     def _current_worker(
         self,

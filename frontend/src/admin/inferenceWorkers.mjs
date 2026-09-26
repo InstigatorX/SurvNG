@@ -114,6 +114,7 @@ export function inferenceTargetRows(detector, detectorConfig = {}) {
       softwareVersion: String(worker.software_version || ""),
       upgradePhase: String(worker.upgrade_phase || ""),
       upgradeDetail: String(worker.upgrade_detail || ""),
+      routingHold: Boolean(worker.routing_hold),
       codeMatches: Boolean(detector?.primary_sha) && worker.software_version === detector.primary_sha,
     });
   }

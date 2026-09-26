@@ -6,8 +6,13 @@ from typing import Any
 import numpy as np
 
 from ..config import DetectorConfig
-from .registry import RemoteInferenceRegistry
+from .registry import (
+    RemoteInferenceRegistry,
+    _latency_fallback,
+    _placement_score,
+)
 from .types import (
+    INFERENCE_FAILOVER_SECONDS,
     INFERENCE_REQUEST_TIMEOUT_SECONDS,
     InferenceUnavailable,
     InferenceWorkload,
@@ -321,25 +326,28 @@ class RoutedInferenceWorkerBackend:
                 workload=workload,
                 **payload,
             )
+        failover = self._incident_fallback(workload)
         try:
-            return self._remote.request(
+            return self._run_remote(
                 operation,
                 frame=frame,
                 timeout=timeout,
                 admission_timeout=admission_timeout,
                 workload=workload,
-                **payload,
+                payload=payload,
+                alternate=failover,
             )
         except InferenceUnavailable as error:
-            if not self._incident_fallback(workload):
+            if not failover or self._local is None:
                 raise
-            result = self._local.request(
+            result = self._run_local(
                 operation,
                 frame=frame,
                 timeout=timeout,
                 admission_timeout=admission_timeout,
                 workload=workload,
-                **payload,
+                payload=payload,
+                alternate=False,
             )
             self._registry.note_rerouted(error)
             return result
@@ -362,19 +370,24 @@ class RoutedInferenceWorkerBackend:
             if config.inference_mode != "remote" and self._local is not None
             else 0
         )
-        loads = self._registry.ready_role_loads(
-            self.role,
-            weights=weights,
-            default_weight=default_weight,
+        loads = self._usable_remote_loads(
+            self._registry.ready_role_loads(
+                self.role,
+                weights=weights,
+                default_weight=default_weight,
+            ),
+            local_weight,
         )
         local_pending = (
             int(self._local.pending_requests())
             if local_weight > 0 and self._local is not None
             else 0
         )
+        local_latency = self._local_inference_ms()
         kind = self._choose_weighted_target(
             local_weight=local_weight,
             local_pending=local_pending,
+            local_latency=local_latency,
             loads=loads,
         )
         if kind is None:
@@ -390,57 +403,66 @@ class RoutedInferenceWorkerBackend:
             raise InferenceUnavailable(
                 f"no weighted {self.role} inference target is available"
             )
+        remote_has_alternate = bool(
+            (local_weight > 0 and self._local is not None)
+            or self._incident_fallback(workload)
+        )
         try:
             if kind == "local":
-                return self._local.request(
+                return self._run_local(
                     operation,
                     frame=frame,
                     timeout=timeout,
                     admission_timeout=admission_timeout,
                     workload=workload,
-                    **payload,
+                    payload=payload,
+                    alternate=bool(loads),
                 )
-            return self._remote.request(
+            return self._run_remote(
                 operation,
                 frame=frame,
                 timeout=timeout,
                 admission_timeout=admission_timeout,
                 workload=workload,
+                payload=payload,
+                alternate=remote_has_alternate,
                 worker_weights=weights,
                 default_worker_weight=default_weight,
-                **payload,
             )
         except InferenceUnavailable as error:
             if kind == "remote" and local_weight > 0 and self._local is not None:
-                result = self._local.request(
+                result = self._run_local(
                     operation,
                     frame=frame,
                     timeout=timeout,
                     admission_timeout=admission_timeout,
                     workload=workload,
-                    **payload,
+                    payload=payload,
+                    alternate=False,
                 )
                 self._registry.note_rerouted(error)
                 return result
             if kind == "local" and loads:
-                return self._remote.request(
+                return self._run_remote(
                     operation,
                     frame=frame,
                     timeout=timeout,
                     admission_timeout=admission_timeout,
                     workload=workload,
+                    payload=payload,
+                    alternate=False,
                     worker_weights=weights,
                     default_worker_weight=default_weight,
-                    **payload,
                 )
-            if kind == "remote" and self._incident_fallback(workload):
-                result = self._local.request(
+            if kind == "remote" and self._incident_fallback(workload) and self._local is not None:
+                result = self._run_local(
                     operation,
                     frame=frame,
                     timeout=timeout,
                     admission_timeout=admission_timeout,
                     workload=workload,
-                    **payload,
+                    payload=payload,
+                    alternate=False,
                 )
                 self._registry.note_rerouted(error)
                 return result
@@ -454,19 +476,118 @@ class RoutedInferenceWorkerBackend:
             and self._local is not None
         )
 
+    def _usable_remote_loads(
+        self,
+        loads: list[dict[str, Any]],
+        local_weight: int,
+    ) -> list[dict[str, Any]]:
+        active = [item for item in loads if not item.get("held")]
+        if local_weight > 0:
+            return active
+        return active or loads
+
+    def _local_inference_ms(self) -> float | None:
+        local = self._local
+        if local is None:
+            return None
+        status = local.cached_status()
+        runtime = status.get("runtime") if isinstance(status, dict) else None
+        if not isinstance(runtime, dict):
+            return None
+        value = runtime.get("average_inference_ms")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        if number <= 0 or number != number or number in {float("inf"), float("-inf")}:
+            return None
+        return number
+
+    def _attempt_timeout(self, timeout: float, *, alternate: bool) -> float:
+        if not alternate:
+            return timeout
+        return min(timeout, INFERENCE_FAILOVER_SECONDS)
+
+    def _run_local(
+        self,
+        operation: str,
+        *,
+        frame: np.ndarray | None,
+        timeout: float,
+        admission_timeout: float | None,
+        workload: InferenceWorkload,
+        payload: dict[str, Any],
+        alternate: bool,
+    ) -> Any:
+        admission = admission_timeout
+        if alternate:
+            admission = (
+                INFERENCE_FAILOVER_SECONDS
+                if admission is None
+                else min(admission, INFERENCE_FAILOVER_SECONDS)
+            )
+        return self._local.request(
+            operation,
+            frame=frame,
+            timeout=timeout,
+            admission_timeout=admission,
+            workload=workload,
+            **payload,
+        )
+
+    def _run_remote(
+        self,
+        operation: str,
+        *,
+        frame: np.ndarray | None,
+        timeout: float,
+        admission_timeout: float | None,
+        workload: InferenceWorkload,
+        payload: dict[str, Any],
+        alternate: bool,
+        worker_weights: dict[str, int] | None = None,
+        default_worker_weight: int = 1,
+    ) -> Any:
+        del admission_timeout
+        return self._remote.request(
+            operation,
+            frame=frame,
+            timeout=self._attempt_timeout(timeout, alternate=alternate),
+            workload=workload,
+            worker_weights=worker_weights,
+            default_worker_weight=default_worker_weight,
+            **payload,
+        )
+
     def _choose_weighted_target(
         self,
         *,
         local_weight: int,
         local_pending: int,
+        local_latency: float | None,
         loads: list[dict[str, Any]],
     ) -> str | None:
+        fallback_ms = _latency_fallback(
+            [local_latency, *[item.get("inference_ms") for item in loads]]
+        )
         options: list[tuple[str, float]] = []
         if local_weight > 0:
-            options.append(("local", (local_pending + 1) / local_weight))
+            options.append((
+                "local",
+                _placement_score(
+                    local_pending,
+                    local_weight,
+                    local_latency,
+                    fallback_ms,
+                ),
+            ))
         if loads:
             best_remote = min(
-                (item["pending"] + 1) / item["weight"]
+                _placement_score(
+                    int(item["pending"]),
+                    int(item["weight"]),
+                    item.get("inference_ms"),
+                    fallback_ms,
+                )
                 for item in loads
             )
             options.append(("remote", best_remote))

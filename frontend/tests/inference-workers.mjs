@@ -7,6 +7,7 @@ import { formatAttemptOutcome, formatCommit, formatInferenceMs, formatRoleAttemp
 const directory = dirname(fileURLToPath(import.meta.url));
 const configPage = readFileSync(join(directory, "../src/admin/ConfigPage.jsx"), "utf8");
 const workersPanel = readFileSync(join(directory, "../src/admin/InferenceWorkersPanel.jsx"), "utf8");
+const healthPanel = readFileSync(join(directory, "../src/admin/InferenceHealthPanel.jsx"), "utf8");
 const constants = readFileSync(join(directory, "../src/shared/constants.js"), "utf8");
 
 assert.equal(formatCommit("abcdef1234567890abcdef1234567890abcdef12"), "abcdef123456");
@@ -47,6 +48,7 @@ const rows = inferenceTargetRows({
       software_version: "abcdef1234567890abcdef1234567890abcdef12",
       upgrade_phase: "failed",
       upgrade_detail: "survng-inference-upgrade.path is not enabled on this worker",
+      routing_hold: true,
       lease_remaining_seconds: 12.4,
       statuses: { object: { loaded_device: "GPU", model_load_ms: 350, runtime: { last_inference_ms: 18 } } },
     }],
@@ -71,6 +73,7 @@ assert.equal(rows[1].lastRequestMs, 40);
 assert.equal(rows[1].softwareVersion, "abcdef1234567890abcdef1234567890abcdef12");
 assert.equal(rows[1].codeMatches, false);
 assert.equal(rows[1].upgradePhase, "failed");
+assert.equal(rows[1].routingHold, true);
 assert.equal(rows[1].averageInferenceMs, 19.5);
 assert.equal(rows[0].rerouted, null);
 assert.equal(
@@ -87,6 +90,8 @@ assert.match(configPage, /InferenceWorkersPanel/);
 assert.match(configPage, /\["workers", "Workers", Server\]/);
 assert.match(workersPanel, /Rerouted/);
 assert.match(workersPanel, /Match primary code/);
+assert.match(workersPanel, /Paused until its queue finishes/);
+assert.match(healthPanel, /Paused until its queue finishes/);
 assert.match(workersPanel, /Primary code/);
 assert.match(workersPanel, /upgradeError/);
 assert.match(workersPanel, /\/api\/inference\/workers\//);

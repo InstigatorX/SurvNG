@@ -66,7 +66,7 @@ export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) 
       <header className="detection-settings-card-head">
         <div>
           <h3>Inference workers</h3>
-          <p>Share detections between this server and connected workers, or keep workers in front and use this server only as fallback. Rerouted requests finished on another target. Failed counts requests that no target completed.</p>
+          <p>Share detections between this server and connected workers, or keep workers in front and use this server only as fallback. A faster target receives more work. Rerouted requests finished on another target. Failed counts requests that no target completed. A worker that times out is paused while it still has queued work.</p>
         </div>
       </header>
       <div className="detection-field-grid">
@@ -107,6 +107,7 @@ export function InferenceWorkersPanel({ config, updateConfig, detectorStatus }) 
               <div><dt>Lease</dt><dd>{Number.isFinite(row.leaseSeconds) ? `${row.leaseSeconds.toFixed(0)}s` : "—"}</dd></div>
               <div><dt>Code</dt><dd>{formatCommit(row.softwareVersion)}</dd></div>
             </dl>
+            {row.routingHold ? <p className="inference-target-note attention">Paused until its queue finishes.</p> : null}
             {row.upgradeDetail ? <p className={row.upgradePhase === "failed" ? "inference-target-note attention" : "inference-target-note"}>{row.upgradeDetail}</p> : null}
             <button type="button" disabled={!status?.primary_sha || !row.ready || row.codeMatches || upgradeBusy === row.id || row.upgradePhase === "requested"} onClick={() => void matchPrimary(row.id)}>
               {row.codeMatches ? "Code matches" : upgradeBusy === row.id ? "Requesting update" : "Match primary code"}

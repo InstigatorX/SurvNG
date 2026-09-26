@@ -47,6 +47,7 @@ export function InferenceHealthPanel({ detector, detectorConfig }) {
               <div><dt>Model load</dt><dd>{formatInferenceMs(row.modelLoadMs)}</dd></div>
               <div><dt>Lease</dt><dd>{row.kind === "primary" ? "Local" : (Number.isFinite(row.leaseSeconds) ? `${row.leaseSeconds.toFixed(0)}s` : "—")}</dd></div>
             </dl>
+            {row.routingHold ? <p className="inference-target-note attention">Paused until its queue finishes.</p> : null}
             {formatRoleAttempts(row.roleAttempts) ? <p className="inference-target-note">{formatRoleAttempts(row.roleAttempts)}</p> : null}
             {formatAttemptOutcome(row) ? <p className={row.lastOutcome === "failed" ? "inference-target-note attention" : "inference-target-note"}>{formatAttemptOutcome(row)}</p> : null}
           </article>

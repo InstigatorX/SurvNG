@@ -7,7 +7,9 @@ import numpy as np
 
 from survng.app.config import DetectorConfig, detector_routing_payload
 from survng.app.inference import InferenceUnavailable, InferenceWorkload
+from survng.app.inference import INFERENCE_FAILOVER_SECONDS
 from survng.app.inference_runtime.protocol import (
+    WorkerHeartbeat,
     WorkerReady,
     WorkerRegistration,
     decode_packet,
@@ -118,10 +120,11 @@ class _ResultTransport:
         self.result = result
         self.inference_ms = inference_ms
         self.requests = 0
+        self.timeouts: list[float] = []
         self.error: BaseException | None = None
 
     def request(self, packet: bytes, timeout: float) -> bytes:
-        del timeout
+        self.timeouts.append(timeout)
         self.requests += 1
         if self.error is not None:
             raise self.error
@@ -357,6 +360,186 @@ class WeightedInferenceBalanceTests(unittest.TestCase):
         self.assertEqual(worker["last_request_ms"], 0.0)
         self.assertEqual(worker["last_error"], "")
         self.assertEqual(worker["role_attempts"]["object"]["completed"], 1)
+
+    def test_faster_worker_receives_equal_weight_detections(self) -> None:
+        config = self._config()
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        transports["worker-a"].inference_ms = 20
+        backend = self._backend(config, registry)
+        backend._local.pending_requests = Mock(return_value=5)
+        backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+        backend._local.pending_requests = Mock(return_value=0)
+        backend._local.cached_status = Mock(return_value={
+            "runtime": {"average_inference_ms": 100},
+        })
+
+        choices = [
+            backend.request(
+                "detect",
+                frame=self.frame,
+                workload=InferenceWorkload.TRACKING,
+            )["worker"]
+            for _index in range(3)
+        ]
+
+        self.assertEqual(choices, ["worker-a", "worker-a", "worker-a"])
+
+    def test_unmeasured_primary_uses_the_worker_time(self) -> None:
+        config = self._config()
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        transports["worker-a"].inference_ms = 20
+        backend = self._backend(config, registry)
+        backend._local.pending_requests = Mock(return_value=5)
+        backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+        backend._local.pending_requests = Mock(return_value=0)
+
+        choices = [
+            backend.request(
+                "detect",
+                frame=self.frame,
+                workload=InferenceWorkload.TRACKING,
+            )["worker"]
+            for _index in range(2)
+        ]
+
+        self.assertEqual(choices, ["primary", "worker-a"])
+
+    def test_timed_out_worker_is_skipped_while_its_queue_remains(self) -> None:
+        config = self._config(inference_worker_weights={"worker-a": 8})
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        worker = registry.status()["workers"][0]
+        self.assertTrue(registry.heartbeat(WorkerHeartbeat(
+            worker_id="worker-a",
+            connection_generation=worker["connection_generation"],
+            pending_requests=3,
+        )))
+        transports["worker-a"].error = TimeoutError("deadline")
+        backend = self._backend(config, registry)
+        backend._local.pending_requests = Mock(return_value=10)
+
+        first = backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(first, {"worker": "primary"})
+        held = registry.status()["workers"][0]
+        self.assertTrue(held["routing_hold"])
+        self.assertEqual(held["rerouted_requests"], 1)
+        backend._local.pending_requests = Mock(return_value=0)
+        transports["worker-a"].error = None
+
+        second = backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(second, {"worker": "primary"})
+        self.assertEqual(transports["worker-a"].requests, 1)
+        self.assertTrue(registry.heartbeat(WorkerHeartbeat(
+            worker_id="worker-a",
+            connection_generation=worker["connection_generation"],
+            pending_requests=0,
+        )))
+
+        third = backend.request(
+            "detect",
+            frame=self.frame,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(third, {"worker": "worker-a"})
+        self.assertFalse(registry.status()["workers"][0]["routing_hold"])
+
+    def test_worker_attempt_fails_over_before_the_full_timeout(self) -> None:
+        config = self._config()
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        transports["worker-a"].error = TimeoutError("deadline")
+        backend = self._backend(config, registry)
+        backend._local.pending_requests = Mock(return_value=5)
+
+        result = backend.request(
+            "detect",
+            frame=self.frame,
+            timeout=15,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(result, {"worker": "primary"})
+        self.assertEqual(
+            transports["worker-a"].timeouts,
+            [INFERENCE_FAILOVER_SECONDS],
+        )
+
+    def test_remote_first_tracking_keeps_the_full_timeout(self) -> None:
+        config = self._config(inference_balance="remote_first")
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        transports["worker-a"].error = TimeoutError("deadline")
+        backend = self._backend(config, registry)
+
+        with self.assertRaises(InferenceUnavailable):
+            backend.request(
+                "detect",
+                frame=self.frame,
+                timeout=15,
+                workload=InferenceWorkload.TRACKING,
+            )
+
+        self.assertEqual(transports["worker-a"].timeouts, [15])
+
+    def test_incident_fallback_abandons_a_slow_worker_quickly(self) -> None:
+        config = self._config(inference_balance="remote_first")
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        transports["worker-a"].error = TimeoutError("deadline")
+        backend = self._backend(config, registry)
+
+        result = backend.request(
+            "detect",
+            frame=self.frame,
+            timeout=3,
+            workload=InferenceWorkload.INCIDENT_INITIAL,
+        )
+
+        self.assertEqual(result, {"worker": "primary"})
+        self.assertEqual(
+            transports["worker-a"].timeouts,
+            [INFERENCE_FAILOVER_SECONDS],
+        )
+
+    def test_primary_admission_fails_over_without_shortening_execution(self) -> None:
+        config = self._config()
+        registry, transports = self._ready_registry(config, ["worker-a"])
+        backend = self._backend(config, registry)
+        seen: dict[str, float | None] = {}
+
+        def local_request(*_args, **kwargs):
+            seen["timeout"] = kwargs.get("timeout")
+            seen["admission_timeout"] = kwargs.get("admission_timeout")
+            raise InferenceUnavailable("waiting for admission")
+
+        backend._local.request = local_request
+
+        result = backend.request(
+            "detect",
+            frame=self.frame,
+            timeout=15,
+            workload=InferenceWorkload.TRACKING,
+        )
+
+        self.assertEqual(result, {"worker": "worker-a"})
+        self.assertEqual(seen["timeout"], 15)
+        self.assertEqual(seen["admission_timeout"], INFERENCE_FAILOVER_SECONDS)
+        self.assertEqual(transports["worker-a"].timeouts, [15])
 
     def test_weight_edits_do_not_change_worker_generation(self) -> None:
         config = self._config(inference_balance="remote_first")
