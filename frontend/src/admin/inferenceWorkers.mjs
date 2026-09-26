@@ -42,6 +42,15 @@ export function formatRoleAttempts(attempts) {
   }).filter(Boolean).join(" · ");
 }
 
+export function primaryRoles(detectorConfig = {}) {
+  const roles = ["object"];
+  if (detectorConfig.face_recognition_enabled) roles.push("face");
+  const tracking = detectorConfig.tracking || {};
+  if (tracking.reid_enabled || tracking.vehicle_reid_enabled) roles.push("reid");
+  if (detectorConfig.depth?.enabled) roles.push("depth");
+  return roles;
+}
+
 export function workerWeight(detectorConfig, workerId) {
   const weights = detectorConfig?.inference_worker_weights || {};
   if (Object.prototype.hasOwnProperty.call(weights, workerId)) {
@@ -67,7 +76,7 @@ export function inferenceTargetRows(detector, detectorConfig = {}) {
     kind: "primary",
     ready: loaded,
     device: detector?.loaded_device || detector?.configured_device || "—",
-    roles: ["object"],
+    roles: primaryRoles(detectorConfig),
     pending: Number(detector?.isolation?.pending_requests || 0),
     completed: Number(runtime.total_inferences || 0),
     completedLabel: "inferences",
