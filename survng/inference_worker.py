@@ -43,6 +43,33 @@ _UPGRADE_PATH_UNIT = "survng-inference-upgrade.path"
 _FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _request_priority(packet: bytes) -> int:
+    """Object detection and incident frames run before enrichment."""
+    try:
+        message, _frame = decode_packet(packet)
+    except Exception:
+        return 1
+    if str(message.get("role") or "") == "object":
+        return 0
+    try:
+        workload = int(message.get("workload"))
+    except (TypeError, ValueError):
+        return 1
+    if workload <= int(InferenceWorkload.INCIDENT_REFINEMENT):
+        return 0
+    return 1
+
+
+def _admission_expired(message: dict[str, Any]) -> bool:
+    try:
+        admit_ms = int(message.get("admit_unix_ms") or 0)
+    except (TypeError, ValueError):
+        return False
+    if admit_ms <= 0:
+        return False
+    return admit_ms <= int(time.time() * 1000)
+
+
 def full_commit_sha(value: object) -> str:
     text = str(value or "").strip().lower()
     if _FULL_COMMIT_SHA.fullmatch(text):
@@ -370,7 +397,9 @@ class InferenceWorkerClient:
         heartbeat_seconds: float,
     ) -> None:
         """Receive requests without blocking heartbeats on inference."""
-        requests: queue.Queue[bytes | None] = queue.Queue()
+        requests: queue.PriorityQueue[tuple[int, int, bytes | None]] = (
+            queue.PriorityQueue()
+        )
         pending_lock = threading.Lock()
         pending = 0
         failed: list[BaseException] = []
@@ -378,16 +407,17 @@ class InferenceWorkerClient:
         def run_inference() -> None:
             nonlocal pending
             while True:
-                packet = requests.get()
+                _priority, _sequence, packet = requests.get()
                 if packet is None:
                     return
                 try:
-                    websocket.send(self.handle_packet(
+                    self._serve_packet(
                         supervisor,
+                        websocket,
                         packet,
                         connection_generation=connection_generation,
                         config_generation=config_generation,
-                    ))
+                    )
                 except Exception as error:
                     failed.append(error)
                     return
@@ -401,6 +431,7 @@ class InferenceWorkerClient:
             daemon=True,
         )
         thread.start()
+        sequence = 0
         try:
             while True:
                 if failed:
@@ -439,7 +470,12 @@ class InferenceWorkerClient:
                 with pending_lock:
                     pending += 1
                     queued = pending
-                requests.put(incoming)
+                sequence += 1
+                requests.put((
+                    _request_priority(incoming),
+                    sequence,
+                    incoming,
+                ))
                 websocket.send(self._heartbeat(
                     connection_generation,
                     queued,
@@ -450,8 +486,44 @@ class InferenceWorkerClient:
                     requests.get_nowait()
                 except queue.Empty:
                     break
-            requests.put(None)
+            sequence += 1
+            requests.put((-1, sequence, None))
             thread.join(timeout=30.0)
+
+    def _serve_packet(
+        self,
+        supervisor: InferenceSupervisor,
+        websocket: Any,
+        packet: bytes,
+        *,
+        connection_generation: int,
+        config_generation: str,
+    ) -> None:
+        message: dict[str, Any] = {}
+        try:
+            decoded, _frame = decode_packet(packet)
+            if isinstance(decoded, dict):
+                message = decoded
+        except Exception:
+            message = {}
+        admit_ms = 0
+        try:
+            admit_ms = int(message.get("admit_unix_ms") or 0)
+        except (TypeError, ValueError):
+            admit_ms = 0
+        if admit_ms > 0 and not _admission_expired(message):
+            websocket.send(json.dumps({
+                "type": "started",
+                "request_id": str(message.get("request_id") or ""),
+                "worker_id": self.worker_id,
+                "connection_generation": connection_generation,
+            }))
+        websocket.send(self.handle_packet(
+            supervisor,
+            packet,
+            connection_generation=connection_generation,
+            config_generation=config_generation,
+        ))
 
     def _handle_upgrade(
         self,
@@ -516,6 +588,8 @@ class InferenceWorkerClient:
                 raise ValueError("stale worker connection generation")
             if message.get("config_generation") != config_generation:
                 raise ValueError("worker configuration generation mismatch")
+            if _admission_expired(message):
+                raise TimeoutError("inference request was not admitted")
             deadline_ms = int(message.get("deadline_unix_ms") or 0)
             if deadline_ms <= int(time.time() * 1000):
                 raise TimeoutError("inference request deadline expired")

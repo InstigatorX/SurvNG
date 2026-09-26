@@ -29,7 +29,7 @@ from .inference_runtime.model_sync import (
     PreparedModelBundle,
 )
 from .inference_runtime.registry import RemoteInferenceRegistry
-from .inference_runtime.types import InferenceUnavailable
+from .inference_runtime.types import InferenceNotAdmitted, InferenceUnavailable
 from .security import redact_secret_text
 
 
@@ -118,30 +118,60 @@ class WebSocketRegistryTransport:
         self._outbound: asyncio.Queue[bytes | str | None] = asyncio.Queue()
         self._lock = threading.RLock()
         self._pending: dict[str, Future[bytes]] = {}
+        self._started: dict[str, threading.Event] = {}
         self._abandoned: deque[str] = deque(maxlen=_ABANDONED_REQUEST_LIMIT)
         self._closed_reason = ""
 
-    def request(self, packet: bytes, timeout: float) -> bytes:
+    def request(
+        self,
+        packet: bytes,
+        timeout: float,
+        *,
+        admit_timeout: float | None = None,
+    ) -> bytes:
         message, _frame = decode_packet(packet)
         request_id = str(message.get("request_id") or "")
         if not request_id:
             raise InferenceUnavailable("remote inference request has no id")
         future: Future[bytes] = Future()
+        started = threading.Event()
         with self._lock:
             if self._closed_reason:
                 raise InferenceUnavailable(self._closed_reason)
             self._pending[request_id] = future
+            self._started[request_id] = started
         try:
             self._loop.call_soon_threadsafe(self._outbound.put_nowait, packet)
-            return future.result(timeout=max(0.0, timeout))
+            if admit_timeout is None or admit_timeout >= timeout:
+                return future.result(timeout=max(0.0, timeout))
+            try:
+                return future.result(timeout=max(0.0, admit_timeout))
+            except FutureTimeoutError:
+                if not started.is_set():
+                    self._abandon(request_id)
+                    raise InferenceNotAdmitted(
+                        "inference request was not admitted"
+                    )
+                remaining = max(0.0, timeout - max(0.0, admit_timeout))
+                return future.result(timeout=remaining)
         except FutureTimeoutError:
-            with self._lock:
-                self._abandoned.append(request_id)
-                self._pending.pop(request_id, None)
+            self._abandon(request_id)
             raise
         finally:
             with self._lock:
                 self._pending.pop(request_id, None)
+                self._started.pop(request_id, None)
+
+    def note_started(self, request_id: str) -> None:
+        with self._lock:
+            started = self._started.get(request_id)
+        if started is not None:
+            started.set()
+
+    def _abandon(self, request_id: str) -> None:
+        with self._lock:
+            self._abandoned.append(request_id)
+            self._pending.pop(request_id, None)
 
     def deliver(self, packet: bytes) -> bool:
         try:
@@ -298,7 +328,9 @@ def create_inference_worker_router(
                     raise ProtocolError(
                         "worker control message does not match this connection"
                     )
-                if control.get("type") == "ready":
+                if control.get("type") == "started":
+                    transport.note_started(str(control.get("request_id") or ""))
+                elif control.get("type") == "ready":
                     accepted = await asyncio.to_thread(
                         deps.registry.mark_ready,
                         WorkerReady.model_validate(control),
