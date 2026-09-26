@@ -210,6 +210,14 @@ and retains local fallback for initial incident detection. After validating
 queue delay, failure behavior, and model output, `remote` mode stops loading
 the corresponding local model workers.
 
+To run detections on the primary and the worker at the same time, set
+`detector.inference_balance` to `weighted` under **Object Detection → Workers**.
+`inference_primary_weight` and each worker weight choose the share. The router
+picks the eligible target with the lowest `(in-progress + 1) / weight`. Weight
+`0` removes that target from the share. Remote-first remains the default, so
+existing hybrid setups stay worker-first until the balance is changed. Health
+shows the same workers under **Health → Inference**.
+
 ## Failure behavior
 
 - Expired heartbeats remove a worker from routing.

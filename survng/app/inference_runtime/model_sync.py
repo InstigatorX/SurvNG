@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..config import DetectorConfig
+from ..config import DetectorConfig, detector_routing_payload
 from .protocol import WorkerRole
 
 
@@ -139,7 +139,7 @@ def _set_config_value(config: DetectorConfig, key: str, value: Any) -> None:
 
 def _base_config_generation(config: DetectorConfig) -> str:
     encoded = json.dumps(
-        config.model_dump(mode="json"),
+        detector_routing_payload(config),
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
@@ -153,6 +153,7 @@ def worker_config_for_roles(
     selected = frozenset(roles)
     worker_config = config.model_copy(deep=True)
     worker_config.inference_mode = "local"
+    worker_config.inference_balance = "remote_first"
     worker_config.object_worker_count = 1
     if worker_config.backend != "coreml":
         worker_config.coreml_model_path = ""

@@ -38,6 +38,7 @@ import {
   Save,
   ScanFace,
   ShieldCheck,
+  Server,
   Sparkles,
   Sun,
   Trash2,
@@ -65,6 +66,8 @@ import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hoo
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
 import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
 import { AccessSettings } from "./AccessSettings.jsx";
+import { InferenceHealthPanel } from "./InferenceHealthPanel.jsx";
+import { InferenceWorkersPanel } from "./InferenceWorkersPanel.jsx";
 import { ModelsAndHardwarePanel } from "./ModelsAndHardwarePanel.jsx";
 import { AdminCommandBar, AdminCommandLabel } from "./AdminCommandBar.jsx";
 import { DetectionOccupancyCard } from "./DetectionOccupancyCard.jsx";
@@ -2182,6 +2185,12 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
           actions: <button type="button" onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>,
         };
       }
+      if (telemetrySection === "inference") {
+        return {
+          scope: <AdminCommandLabel icon={Server}>Inference workers</AdminCommandLabel>,
+          actions: <button type="button" onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>,
+        };
+      }
       return {
         scope: (
           <CameraScopePicker
@@ -2432,13 +2441,16 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
               </div></div> : (
                 <div className="detection-settings subsection-workspace health-subsection-workspace">
-                  <nav id="health-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label="Health sections" onKeyDown={(event) => moveTabFocus(event, HEALTH_TELEMETRY_SECTIONS, telemetrySection === "occupancy" ? "occupancy" : "health", (next) => selectAdminSubsection(next, setTelemetrySection, "telemetry"))}>
-                    <button id="health-tab-health" data-tab-id="health" type="button" tabIndex={telemetrySection === "occupancy" ? -1 : 0} aria-controls="telemetry-view-panel" className={telemetrySection === "occupancy" ? "" : "active"} onClick={() => selectAdminSubsection("health", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection !== "occupancy"}><Gauge size={15} />Telemetry</button>
+                  <nav id="health-section-tabs" className="admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label="Health sections" onKeyDown={(event) => moveTabFocus(event, HEALTH_TELEMETRY_SECTIONS, ["inference", "occupancy"].includes(telemetrySection) ? telemetrySection : "health", (next) => selectAdminSubsection(next, setTelemetrySection, "telemetry"))}>
+                    <button id="health-tab-health" data-tab-id="health" type="button" tabIndex={["inference", "occupancy"].includes(telemetrySection) ? -1 : 0} aria-controls="telemetry-view-panel" className={["inference", "occupancy"].includes(telemetrySection) ? "" : "active"} onClick={() => selectAdminSubsection("health", setTelemetrySection, "telemetry")} role="tab" aria-selected={!["inference", "occupancy"].includes(telemetrySection)}><Gauge size={15} />Telemetry</button>
+                    <button id="health-tab-inference" data-tab-id="inference" type="button" tabIndex={telemetrySection === "inference" ? 0 : -1} aria-controls="telemetry-view-panel" className={telemetrySection === "inference" ? "active" : ""} onClick={() => selectAdminSubsection("inference", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "inference"}><Server size={15} />Inference</button>
                     <button id="health-tab-occupancy" data-tab-id="occupancy" type="button" tabIndex={telemetrySection === "occupancy" ? 0 : -1} aria-controls="telemetry-view-panel" className={telemetrySection === "occupancy" ? "active" : ""} onClick={() => selectAdminSubsection("occupancy", setTelemetrySection, "telemetry")} role="tab" aria-selected={telemetrySection === "occupancy"}><Cpu size={15} />Detection at a glance</button>
                   </nav>
-                  <div id="telemetry-view-panel" className="detection-settings-content health-subsection-content telemetry-tab-panel" role="tabpanel" aria-labelledby={telemetrySection === "occupancy" ? "health-tab-occupancy" : "health-tab-health"}>
+                  <div id="telemetry-view-panel" className="detection-settings-content health-subsection-content telemetry-tab-panel" role="tabpanel" aria-labelledby={telemetrySection === "occupancy" ? "health-tab-occupancy" : telemetrySection === "inference" ? "health-tab-inference" : "health-tab-health"}>
                     {telemetrySection === "occupancy" ? (
                       <DetectionOccupancyCard telemetry={telemetry} cameraId={telemetryCamera} config={config} onOpenSetting={openOccupancySetting} />
+                    ) : telemetrySection === "inference" ? (
+                      <InferenceHealthPanel detector={telemetry?.detector} detectorConfig={config?.detector} />
                     ) : (
                       <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
                     )}
@@ -4506,7 +4518,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       {section === "detection" ? (
         <div className="detection-settings subsection-workspace">
           <nav className="admin-section-tabs camera-section-tabs detection-subsection-tabs" aria-label="Intelligence and detection settings">
-            {[["object", "Object Detection", Cpu], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
+            {[["object", "Object Detection", Cpu], ["workers", "Workers", Server], ["tracking", "Tracking & ReID", Activity], ["depth", "Depth Estimation", Layers], ["search", "Smart Search", Search], ["motion", "Motion Validation", Gauge], ["faces", "Face Recognition", ScanFace]].map(([value, label, Icon]) => <button type="button" className={detectionSection === value ? "active" : ""} aria-pressed={detectionSection === value} onClick={() => setDetectionSection(value)} key={value}><Icon size={15} />{label}</button>)}
           </nav>
           <div className="detection-settings-content">
           {detectionSection === "object" ? <section className="detection-settings-card primary">
@@ -4520,7 +4532,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
                 <option value="local">Local workers</option>
                 <option value="remote">Remote workers only</option>
                 <option value="hybrid">Remote with local incident fallback</option>
-              </select><small>Remote workers connect to this server with a dedicated token. Changing execution mode reloads the camera manager safely.</small></label>
+              </select><small>Remote workers connect to this server with a dedicated token. Weights and discovered workers are under Workers. Changing execution mode reloads the camera manager safely.</small></label>
               <label className="compact-toggle"><input type="checkbox" checked={config.detector?.remote_incident_fallback ?? true} onChange={(event) => updateConfig(["detector", "remote_incident_fallback"], event.target.checked)} disabled={(config.detector?.inference_mode || "local") !== "hybrid"} /><span>Fallback locally for initial incidents</span></label>
               <label>Backend<select value={detectorBackend} onChange={(event) => updateConfig(["detector", "backend"], event.target.value)}>
                 <option value="openvino">OpenVINO / ONNX</option>
@@ -4610,6 +4622,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
             </div>
           </section> : null}
 
+          {detectionSection === "workers" ? <InferenceWorkersPanel config={config} updateConfig={updateConfig} detectorStatus={detectorStatus} /> : null}
           {detectionSection === "tracking" ? <section className="detection-settings-card wide-card">
             <header className="detection-settings-card-head">
               <div className="detection-settings-card-icon"><Activity size={18} /></div>

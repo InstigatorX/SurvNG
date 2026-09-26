@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 import hashlib
@@ -12,7 +12,7 @@ import uuid
 
 import numpy as np
 
-from ..config import DetectorConfig
+from ..config import DetectorConfig, detector_routing_payload
 from .protocol import (
     INFERENCE_PROTOCOL_VERSION,
     WorkerHeartbeat,
@@ -32,13 +32,22 @@ class RegistryTransport(Protocol):
 
 
 def detector_config_generation(config: DetectorConfig) -> str:
-    payload = config.model_dump(mode="json")
     encoded = json.dumps(
-        payload,
+        detector_routing_payload(config),
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _worker_weight(
+    worker_id: str,
+    weights: Mapping[str, int] | None,
+    default_weight: int,
+) -> int:
+    if weights is not None and worker_id in weights:
+        return int(weights[worker_id])
+    return int(default_weight)
 
 
 @dataclass(slots=True)
@@ -185,10 +194,16 @@ class RemoteInferenceRegistry:
         workload: InferenceWorkload,
         timeout: float,
         payload: dict[str, Any] | None = None,
+        worker_weights: Mapping[str, int] | None = None,
+        default_worker_weight: int = 1,
     ) -> Any:
         if timeout <= 0:
             raise InferenceUnavailable("remote inference deadline expired")
-        worker = self._select_worker(role)
+        worker = self._select_worker(
+            role,
+            weights=worker_weights,
+            default_weight=default_worker_weight,
+        )
         if worker is None:
             raise InferenceUnavailable(
                 f"no compatible remote {role} inference worker is ready"
@@ -326,54 +341,103 @@ class RemoteInferenceRegistry:
                 self._lease_seconds = max(5.0, float(lease_seconds))
             self._accepting = True
 
+    def ready_role_loads(
+        self,
+        role: WorkerRole,
+        *,
+        weights: Mapping[str, int] | None = None,
+        default_weight: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Return ready workers for a role without reserving a request."""
+        expired = self._prune_expired()
+        for worker in expired:
+            worker.transport.close("worker lease expired")
+        expected_generation = self._generation_provider(self._config_provider())
+        with self._lock:
+            loads: list[dict[str, Any]] = []
+            for worker in self._workers.values():
+                if not self._worker_matches(worker, role, expected_generation):
+                    continue
+                weight = _worker_weight(
+                    worker.registration.worker_id,
+                    weights,
+                    default_weight,
+                )
+                if weights is not None and weight <= 0:
+                    continue
+                loads.append({
+                    "worker_id": worker.registration.worker_id,
+                    "name": worker.registration.name,
+                    "pending": (
+                        worker.pending_requests
+                        + worker.reported_pending_requests
+                    ),
+                    "weight": weight,
+                })
+            return loads
+
     def _select_worker(
         self,
         role: WorkerRole,
         *,
         reserve: bool = True,
+        weights: Mapping[str, int] | None = None,
+        default_weight: int = 1,
     ) -> _WorkerLease | None:
         expired = self._prune_expired()
         for worker in expired:
             worker.transport.close("worker lease expired")
         expected_generation = self._generation_provider(self._config_provider())
         with self._lock:
-            candidates = [
-                worker
-                for worker in self._workers.values()
-                if (
-                    worker.ready
-                    and role in worker.registration.roles
-                    and self._role_ready(worker, role)
-                    and worker.config_generation == expected_generation
-                )
-            ]
-            if not candidates:
-                return None
-            candidates.sort(
-                key=lambda item: (
-                    item.pending_requests + item.reported_pending_requests,
-                    item.registration.worker_id,
-                )
-            )
-            minimum = (
-                candidates[0].pending_requests
-                + candidates[0].reported_pending_requests
-            )
-            equal = [
-                worker
-                for worker in candidates
-                if (
+            scored: list[tuple[float, int, str, _WorkerLease]] = []
+            for worker in self._workers.values():
+                if not self._worker_matches(worker, role, expected_generation):
+                    continue
+                pending = (
                     worker.pending_requests
                     + worker.reported_pending_requests
-                    == minimum
                 )
-            ]
+                if weights is None:
+                    score = float(pending)
+                else:
+                    weight = _worker_weight(
+                        worker.registration.worker_id,
+                        weights,
+                        default_weight,
+                    )
+                    if weight <= 0:
+                        continue
+                    score = (pending + 1) / weight
+                scored.append((
+                    score,
+                    pending,
+                    worker.registration.worker_id,
+                    worker,
+                ))
+            if not scored:
+                return None
+            scored.sort(key=lambda item: (item[0], item[1], item[2]))
+            best_score = scored[0][0]
+            equal = [item for item in scored if item[0] == best_score]
             cursor = self._route_cursor.get(role, 0) % len(equal)
-            worker = equal[cursor]
+            worker = equal[cursor][3]
             self._route_cursor[role] = cursor + 1
             if reserve:
                 worker.pending_requests += 1
             return worker
+
+    @staticmethod
+    def _worker_matches(
+        worker: _WorkerLease,
+        role: WorkerRole,
+        expected_generation: str,
+    ) -> bool:
+        return bool(
+            worker.ready
+            and role in worker.registration.roles
+            and RemoteInferenceRegistry._role_ready(worker, role)
+            and worker.config_generation == expected_generation
+        )
 
     def _prune_expired(self) -> list[_WorkerLease]:
         now = self._clock()

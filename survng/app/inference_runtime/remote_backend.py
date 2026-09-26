@@ -69,6 +69,8 @@ class RemoteInferenceWorkerBackend:
         timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
         admission_timeout: float | None = None,
         workload: InferenceWorkload = InferenceWorkload.INTERACTIVE,
+        worker_weights: dict[str, int] | None = None,
+        default_worker_weight: int = 1,
         **payload: Any,
     ) -> Any:
         del admission_timeout
@@ -86,6 +88,8 @@ class RemoteInferenceWorkerBackend:
                 workload=InferenceWorkload(workload),
                 timeout=timeout,
                 payload=payload,
+                worker_weights=worker_weights,
+                default_worker_weight=default_worker_weight,
             )
         finally:
             with self._lock:
@@ -172,6 +176,7 @@ class RoutedInferenceWorkerBackend:
             else None
         )
         self._started = False
+        self._balance_cursor = 0
         self._lock = threading.RLock()
 
     def update_config_reference(self, config: DetectorConfig) -> None:
@@ -274,6 +279,35 @@ class RoutedInferenceWorkerBackend:
         **payload: Any,
     ) -> Any:
         mode = self.config.inference_mode
+        if mode == "local" or self.config.inference_balance != "weighted":
+            return self._request_remote_first(
+                operation,
+                frame=frame,
+                timeout=timeout,
+                admission_timeout=admission_timeout,
+                workload=workload,
+                **payload,
+            )
+        return self._request_weighted(
+            operation,
+            frame=frame,
+            timeout=timeout,
+            admission_timeout=admission_timeout,
+            workload=workload,
+            **payload,
+        )
+
+    def _request_remote_first(
+        self,
+        operation: str,
+        *,
+        frame: np.ndarray | None,
+        timeout: float,
+        admission_timeout: float | None,
+        workload: InferenceWorkload,
+        **payload: Any,
+    ) -> Any:
+        mode = self.config.inference_mode
         if mode == "local":
             if self._local is None:
                 raise InferenceUnavailable(
@@ -297,14 +331,7 @@ class RoutedInferenceWorkerBackend:
                 **payload,
             )
         except InferenceUnavailable:
-            fallback = (
-                mode == "hybrid"
-                and self.config.remote_incident_fallback
-                and InferenceWorkload(workload)
-                is InferenceWorkload.INCIDENT_INITIAL
-                and self._local is not None
-            )
-            if not fallback:
+            if not self._incident_fallback(workload):
                 raise
             return self._local.request(
                 operation,
@@ -314,6 +341,139 @@ class RoutedInferenceWorkerBackend:
                 workload=workload,
                 **payload,
             )
+
+    def _request_weighted(
+        self,
+        operation: str,
+        *,
+        frame: np.ndarray | None,
+        timeout: float,
+        admission_timeout: float | None,
+        workload: InferenceWorkload,
+        **payload: Any,
+    ) -> Any:
+        config = self.config
+        weights = dict(config.inference_worker_weights)
+        default_weight = int(config.inference_default_worker_weight)
+        local_weight = (
+            int(config.inference_primary_weight)
+            if config.inference_mode != "remote" and self._local is not None
+            else 0
+        )
+        loads = self._registry.ready_role_loads(
+            self.role,
+            weights=weights,
+            default_weight=default_weight,
+        )
+        local_pending = (
+            int(self._local.pending_requests())
+            if local_weight > 0 and self._local is not None
+            else 0
+        )
+        kind = self._choose_weighted_target(
+            local_weight=local_weight,
+            local_pending=local_pending,
+            loads=loads,
+        )
+        if kind is None:
+            if self._incident_fallback(workload):
+                return self._local.request(
+                    operation,
+                    frame=frame,
+                    timeout=timeout,
+                    admission_timeout=admission_timeout,
+                    workload=workload,
+                    **payload,
+                )
+            raise InferenceUnavailable(
+                f"no weighted {self.role} inference target is available"
+            )
+        try:
+            if kind == "local":
+                return self._local.request(
+                    operation,
+                    frame=frame,
+                    timeout=timeout,
+                    admission_timeout=admission_timeout,
+                    workload=workload,
+                    **payload,
+                )
+            return self._remote.request(
+                operation,
+                frame=frame,
+                timeout=timeout,
+                admission_timeout=admission_timeout,
+                workload=workload,
+                worker_weights=weights,
+                default_worker_weight=default_weight,
+                **payload,
+            )
+        except InferenceUnavailable:
+            if kind == "remote" and local_weight > 0 and self._local is not None:
+                return self._local.request(
+                    operation,
+                    frame=frame,
+                    timeout=timeout,
+                    admission_timeout=admission_timeout,
+                    workload=workload,
+                    **payload,
+                )
+            if kind == "local" and loads:
+                return self._remote.request(
+                    operation,
+                    frame=frame,
+                    timeout=timeout,
+                    admission_timeout=admission_timeout,
+                    workload=workload,
+                    worker_weights=weights,
+                    default_worker_weight=default_weight,
+                    **payload,
+                )
+            if kind == "remote" and self._incident_fallback(workload):
+                return self._local.request(
+                    operation,
+                    frame=frame,
+                    timeout=timeout,
+                    admission_timeout=admission_timeout,
+                    workload=workload,
+                    **payload,
+                )
+            raise
+
+    def _incident_fallback(self, workload: InferenceWorkload) -> bool:
+        return bool(
+            self.config.inference_mode == "hybrid"
+            and self.config.remote_incident_fallback
+            and InferenceWorkload(workload) is InferenceWorkload.INCIDENT_INITIAL
+            and self._local is not None
+        )
+
+    def _choose_weighted_target(
+        self,
+        *,
+        local_weight: int,
+        local_pending: int,
+        loads: list[dict[str, Any]],
+    ) -> str | None:
+        options: list[tuple[str, float]] = []
+        if local_weight > 0:
+            options.append(("local", (local_pending + 1) / local_weight))
+        if loads:
+            best_remote = min(
+                (item["pending"] + 1) / item["weight"]
+                for item in loads
+            )
+            options.append(("remote", best_remote))
+        if not options:
+            return None
+        best_score = min(score for _kind, score in options)
+        tied = [kind for kind, score in options if score == best_score]
+        if len(tied) == 1:
+            return tied[0]
+        with self._lock:
+            choice = tied[self._balance_cursor % len(tied)]
+            self._balance_cursor += 1
+            return choice
 
     def status(
         self,
