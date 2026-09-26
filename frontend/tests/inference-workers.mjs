@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatAttemptOutcome, formatCommit, formatInferenceMs, formatRoleAttempts, inferenceTargetRows, workerWeight } from "../src/admin/inferenceWorkers.mjs";
+import { formatAttemptOutcome, formatCommit, formatInferenceMs, formatRoleAttempts, inferenceTargetRows, primaryRoles, workerWeight } from "../src/admin/inferenceWorkers.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const configPage = readFileSync(join(directory, "../src/admin/ConfigPage.jsx"), "utf8");
@@ -60,6 +60,12 @@ const rows = inferenceTargetRows({
 });
 
 assert.equal(rows[0].name, "Primary");
+assert.deepEqual(rows[0].roles, ["object"]);
+assert.deepEqual(primaryRoles({
+  face_recognition_enabled: true,
+  tracking: { reid_enabled: true, vehicle_reid_enabled: false },
+  depth: { enabled: true },
+}), ["object", "face", "reid", "depth"]);
 assert.equal(rows[0].completed, 4);
 assert.equal(rows[0].pending, 2);
 assert.equal(rows[1].name, "trainer");
