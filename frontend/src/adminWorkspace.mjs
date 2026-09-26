@@ -94,7 +94,7 @@ export function adminHomeDestinations() {
 export function normalizeTelemetrySection(value = "") {
   const candidate = String(value || "");
   if (candidate === "diagnostics") return "diagnostics";
-  if (candidate === "occupancy" || candidate === "inference") return candidate;
+  if (candidate === "occupancy") return "occupancy";
   return "health";
 }
 
@@ -102,7 +102,6 @@ export function telemetryLocationOptions(section = "health", camera = "") {
   const normalized = normalizeTelemetrySection(section);
   if (normalized === "diagnostics") return { subsection: "diagnostics" };
   if (normalized === "occupancy") return { subsection: "occupancy", camera };
-  if (normalized === "inference") return { subsection: "inference" };
   return { camera };
 }
 

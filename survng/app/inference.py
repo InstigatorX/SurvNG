@@ -5,10 +5,6 @@ from .inference_runtime.adapters import (
     IsolatedFaceRecognizer,
     IsolatedPersonReidentifier,
 )
-from .inference_runtime.backend import (
-    InferenceWorkerBackend,
-    InferenceWorkerFactory,
-)
 from .inference_runtime.process import (
     load_detector_labels,
     stop_multiprocessing_resource_tracker,
@@ -19,7 +15,6 @@ from .inference_runtime.supervisor import InferenceSupervisor
 from .inference_runtime.types import (
     INCIDENT_INITIAL_ADMISSION_TIMEOUT_SECONDS,
     INCIDENT_INITIAL_WORKER_TIMEOUT_SECONDS,
-    INFERENCE_FAILOVER_SECONDS,
     INFERENCE_REQUEST_TIMEOUT_SECONDS,
     INFERENCE_START_TIMEOUT_SECONDS,
     PERSON_REID_REQUEST_TIMEOUT_SECONDS,
@@ -32,14 +27,11 @@ from .inference_runtime.worker import _InferenceWorker
 __all__ = [
     "INCIDENT_INITIAL_ADMISSION_TIMEOUT_SECONDS",
     "INCIDENT_INITIAL_WORKER_TIMEOUT_SECONDS",
-    "INFERENCE_FAILOVER_SECONDS",
     "INFERENCE_REQUEST_TIMEOUT_SECONDS",
     "INFERENCE_START_TIMEOUT_SECONDS",
     "InferenceRollbackIncomplete",
     "InferenceSupervisor",
     "InferenceUnavailable",
-    "InferenceWorkerBackend",
-    "InferenceWorkerFactory",
     "InferenceWorkload",
     "IsolatedDepthEstimator",
     "IsolatedFaceRecognizer",

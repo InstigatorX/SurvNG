@@ -14,7 +14,6 @@ from survng.app.config_application import (
     DEPTH_HOT_POLICY_FIELDS,
     DETECTOR_FACE_ENGINE_FIELDS,
     DETECTOR_HOT_POLICY_FIELDS,
-    DETECTOR_MANAGER_FIELDS,
     DETECTOR_OBJECT_ENGINE_FIELDS,
     DETECTOR_OBJECT_TRACKING_RESET_FIELDS,
     DETECTOR_SHARED_ENGINE_FIELDS,
@@ -169,7 +168,6 @@ class ConfigReloadTest(unittest.TestCase):
             DETECTOR_OBJECT_ENGINE_FIELDS,
             DETECTOR_FACE_ENGINE_FIELDS,
             DETECTOR_SHARED_ENGINE_FIELDS,
-            DETECTOR_MANAGER_FIELDS,
             frozenset({"tracking"}),
             frozenset({"depth"}),
         )
