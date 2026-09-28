@@ -73,13 +73,9 @@ When tracking is enabled, SurvNG can follow an object across frames **after** re
 
 **Admin → Audit** shows samples where SurvNG looked and decided not to create an incident. Use it to learn whether you are too strict, too loose, or missing a zone.
 
-## Detection Tune-Up
+## System review
 
-**Admin → Tune-Up** runs a guided review of historical evidence and suggests bounded setting changes. SurvNG can monitor the effect afterward. You confirm before anything is applied.
-
-## Camera Advisor
-
-**Admin → Camera Advisor** reviews a balanced sample of one camera’s recent outcomes and may recommend camera-scoped motion adjustments. Applying still requires your confirmation.
+**Admin → System review** reads stored evidence every day and, once a week, samples every detection-enabled camera. The briefing lists a few site-level suggestions. Nothing is written until you apply it, unless you have allowed that suggestion class to run automatically. A worse monitored outcome rolls the change back and turns that class off.
 
 ## Related
 

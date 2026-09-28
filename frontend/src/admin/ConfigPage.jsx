@@ -1,4 +1,5 @@
 import { WeatherSettings } from "./WeatherSettings.jsx";
+import { SystemReviewPanel } from "./SystemReviewPanel.jsx";
 import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -47,7 +48,6 @@ import {
 } from "lucide-react";
 import { buildMotionDecisionFusion, MOTION_BEHAVIOR_OPTIONS, motionBehaviorOption, motionBehaviorSettings, motionBehaviorValue, motionModeInfo, readMotionDecisionFusion } from "../motionDecisionConfig.mjs";
 import { availableQualificationPresets, motionAnalysisPresetSelectionUseful, presetQualificationGraph, readMotionAnalysisPreset } from "../motionAnalysisConfig.mjs";
-import { TUNEUP_PERIODS, TUNEUP_SETTING_NAMES, tuneupHistoryTitle, tuneupOutcome, tuneupRecommendationGroup, tuneupValue } from "../detectionTuneup.mjs";
 import { formatServerUptime } from "../duration.mjs";
 import { cameraCaptureConnectivity, cameraConnectivityClass, cameraConnectivityLabel } from "../cameraConnectivity.mjs";
 import { browserStorage, readStoredValue } from "../storage.mjs";
@@ -61,7 +61,7 @@ import { MEDIA_STORAGE_ROLES, CAMERA_ADMIN_SECTIONS, TELEMETRY_ADMIN_SECTIONS, H
 import { CameraScopePicker } from "../shared/CameraScopePicker.jsx";
 import { secretInputValue, secretInputHint } from "../shared/secrets.js";
 import { formatDateTime, formatTimeOnly, formatBytes, formatMilliseconds, formatAge, formatDuration, formatCompactDuration } from "../shared/format.js";
-import { useStoredState, useStoredJsonState, useModalFocus } from "../shared/hooks.js";
+import { useStoredState, useModalFocus } from "../shared/hooks.js";
 import { mediaStorageConfigurationError, slugify, inferredBackendLabel, cameraWithDerivedConnection, camerasWithGeneratedIds } from "../shared/cameras.js";
 import { defaultCamera, CameraOnvifEditor, LiveViewFramingEditor, defaultCameraMotionQualification, cameraMotionQualificationInherited } from "./cameraEditors.jsx";
 import { AccessSettings } from "./AccessSettings.jsx";
@@ -800,255 +800,8 @@ export function MaintenanceViewer({ state }) {
   );
 }
 
-export function CalibrationLab({ cameras, runtimeStatus = [], timeZone, onCommandBarChange = null }) {
-  const [runs, setRuns] = useState([]);
-  const [changeSets, setChangeSets] = useState([]);
-  const [section, setSection] = useState("tuneup");
-  const [wizardStep, setWizardStep] = useStoredJsonState("survng.detectionTuneup.step.v1", 1);
-  const [selectedRunId, setSelectedRunId] = useStoredJsonState("survng.detectionTuneup.run.v1", null);
-  const [selectedRecommendations, setSelectedRecommendations] = useStoredJsonState("survng.detectionTuneup.recommendations.v1", []);
-  const [selectedCameras, setSelectedCameras] = useStoredJsonState("survng.detectionTuneup.cameras.v1", cameras.map((camera) => camera.id));
-  const [cameraChoice, setCameraChoice] = useStoredState("survng.detectionTuneup.cameraChoice.v1", "all");
-  const [mode, setMode] = useStoredState("survng.detectionTuneup.period.v1", "standard");
-  const [evaluationHours, setEvaluationHours] = useStoredJsonState("survng.detectionTuneup.monitorHours.v1", 72);
-  const [preview, setPreview] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const selectedRun = runs.find((run) => run.id === selectedRunId) || runs[0] || null;
-  const statuses = new Map(runtimeStatus.map((item) => [item.id, item]));
-  const attentionCameras = cameras.filter((camera) => {
-    const status = statuses.get(camera.id) || {};
-    return status.running === false || status.frame_fresh === false || Boolean(status.last_error) || Number(status.analysis_frames_dropped || 0) > 0;
-  });
-  const activeRun = runs.find((run) => ["queued", "running", "cancelling"].includes(run.status));
-  const monitoringSets = changeSets.filter((item) => item.action === "apply" && ["collecting", "reviewing", "evaluation_failed", "evaluated"].includes(item.status));
-
-  async function loadCalibration() {
-    try {
-      const [runResponse, changeResponse] = await Promise.all([
-        fetch("/api/calibration/runs?limit=20"),
-        fetch("/api/calibration/change-sets?limit=50"),
-      ]);
-      if (!runResponse.ok || !changeResponse.ok) throw new Error("Calibration history could not be loaded");
-      const [runPayload, changePayload] = await Promise.all([runResponse.json(), changeResponse.json()]);
-      setRuns((current) => (runPayload.runs || []).map((run) => {
-        const existing = current.find((item) => item.id === run.id);
-        return existing?.result && Object.keys(existing.result).length
-          ? { ...run, result: existing.result }
-          : run;
-      }));
-      setChangeSets(changePayload.change_sets || []);
-      setSelectedRunId((current) => current || runPayload.runs?.[0]?.id || null);
-      setError("");
-    } catch (loadError) {
-      setError(loadError.message || "Calibration history could not be loaded");
-    }
-  }
-
-  async function loadCalibrationRun(runId) {
-    if (!runId) return;
-    const response = await fetch(`/api/calibration/runs/${runId}`);
-    if (!response.ok) throw new Error("Calibration run details could not be loaded");
-    const run = await response.json();
-    setRuns((current) => current.some((item) => item.id === run.id)
-      ? current.map((item) => item.id === run.id ? run : item)
-      : [run, ...current]);
-  }
-
-  useEffect(() => { void loadCalibration(); }, []);
-  useEffect(() => {
-    if (!selectedRunId) return;
-    void loadCalibrationRun(selectedRunId).catch((loadError) => setError(loadError.message));
-  }, [selectedRunId]);
-  const calibrationRunActive = runs.some((run) => ["queued", "running", "cancelling"].includes(run.status));
-  const calibrationEvaluationActive = changeSets.some((item) => ["collecting", "reviewing"].includes(item.status));
-  useVisiblePolling(async () => {
-    try {
-      await loadCalibration();
-      if (selectedRunId) await loadCalibrationRun(selectedRunId);
-    } catch (loadError) {
-      setError(loadError.message || "Calibration status could not be refreshed");
-    }
-  }, calibrationRunActive ? 2000 : 10000, calibrationRunActive || calibrationEvaluationActive, { immediate: false, restartKey: selectedRunId || "" });
-  useEffect(() => {
-    const ids = new Set(cameras.map((camera) => camera.id));
-    setSelectedCameras((current) => current.filter((id) => ids.has(id)));
-  }, [cameras]);
-  useEffect(() => { setPreview(null); }, [selectedRunId, selectedRecommendations]);
-
-  const calibrationSectionLabel = section === "monitoring" ? "Monitoring" : section === "history" ? "Tune-Up History" : "Detection Tune-Up";
-  useEffect(() => {
-    onCommandBarChange?.({
-      sectionLabel: calibrationSectionLabel,
-      refresh: () => { void loadCalibration(); },
-    });
-    return () => onCommandBarChange?.(null);
-  }, [calibrationSectionLabel, onCommandBarChange]);
-
-  function chooseCameraScope(choice) {
-    setCameraChoice(choice);
-    if (choice === "all") setSelectedCameras(cameras.map((camera) => camera.id));
-    if (choice === "attention") setSelectedCameras(attentionCameras.map((camera) => camera.id));
-  }
-
-  async function startRun(override = false) {
-    if (!selectedCameras.length) return setError("Select at least one camera.");
-    if (mode === "deep" && !override && !window.confirm(`Deep analysis can review up to 40 images for each of ${selectedCameras.length} selected cameras and may use substantial AI API capacity. Continue?`)) return;
-    setBusy(true); setError("");
-    try {
-      let response = await fetch("/api/calibration/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ camera_ids: selectedCameras, mode, override_active_evaluation: override }),
-      });
-      let payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        if (response.status === 409 && !override && window.confirm(`${payload.detail}\n\nStart a new analysis anyway?`)) {
-          response = await fetch("/api/calibration/runs", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ camera_ids: selectedCameras, mode, override_active_evaluation: true }),
-          });
-          payload = await response.json().catch(() => ({}));
-        }
-      }
-      if (!response.ok) {
-        throw new Error(typeof payload.detail === "string" ? payload.detail : "Calibration could not start");
-      }
-      setSelectedRunId(payload.id);
-      setSelectedRecommendations([]);
-      setWizardStep(3);
-      await loadCalibration();
-    } catch (runError) { setError(runError.message || "Calibration could not start"); }
-    finally { setBusy(false); }
-  }
-
-  async function previewSelected() {
-    if (!selectedRun) return;
-    if (!selectedRecommendations.length) {
-      setError("Select at least one suggested change before continuing.");
-      return;
-    }
-    setBusy(true); setError("");
-    try {
-      const response = await fetch(`/api/calibration/runs/${selectedRun.id}/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ recommendation_ids: selectedRecommendations, configuration_fingerprint: selectedRun.result?.configuration_fingerprint || selectedRun.configuration_fingerprint }) });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "Selected changes are not ready to apply");
-      setPreview(payload); setWizardStep(5);
-    } catch (previewError) { setError(previewError.message || "Selected changes are not ready to apply"); }
-    finally { setBusy(false); }
-  }
-
-  async function applySelected() {
-    if (!selectedRun || !selectedRecommendations.length) return;
-    if (!window.confirm(`Apply ${selectedRecommendations.length} selected calibration change${selectedRecommendations.length === 1 ? "" : "s"}? SurvNG will validate one candidate configuration and reload only affected services.`)) return;
-    setBusy(true); setError("");
-    try {
-      const response = await fetch(`/api/calibration/runs/${selectedRun.id}/apply`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recommendation_ids: selectedRecommendations, confirmed: true, configuration_fingerprint: selectedRun.result?.configuration_fingerprint || selectedRun.configuration_fingerprint, evaluation_hours: evaluationHours }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "Calibration changes could not be applied");
-      setSelectedRecommendations([]);
-      await loadCalibration();
-      setSection("monitoring"); setWizardStep(6);
-    } catch (applyError) { setError(applyError.message || "Calibration changes could not be applied"); }
-    finally { setBusy(false); }
-  }
-
-  async function simpleAction(url, fallback) {
-    setBusy(true); setError("");
-    try {
-      const response = await fetch(url, { method: "POST" });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : fallback);
-      if (payload.id) setSelectedRunId(payload.id);
-      await loadCalibration();
-      return payload;
-    } catch (actionError) { setError(actionError.message || fallback); return null; }
-    finally { setBusy(false); }
-  }
-
-  function runAnotherTuneup() {
-    setSection("tuneup"); setWizardStep(1); setSelectedRunId(null); setSelectedRecommendations([]); setPreview(null);
-  }
-
-  function setRecommendationSelected(recommendationId, selected) {
-    setError("");
-    setSelectedRecommendations((current) => selected
-      ? [...new Set([...current, recommendationId])]
-      : current.filter((id) => id !== recommendationId));
-  }
-
-  function toggleRecommendationFromCard(event, recommendationId) {
-    if (event.target.closest("a, button, input, label, details, summary")) return;
-    setRecommendationSelected(recommendationId, !selectedRecommendations.includes(recommendationId));
-  }
-
-  async function rollback(changeSet, { changeIds = [], cameraIds = [] } = {}) {
-    const scopeLabel = changeIds.length ? "this setting" : cameraIds.length ? "this camera's settings" : "all settings";
-    if (!window.confirm(`Roll back ${scopeLabel} from change set #${changeSet.id}? Newer conflicting values will be preserved.`)) return;
-    setBusy(true); setError("");
-    try {
-      let response = await fetch(`/api/calibration/change-sets/${changeSet.id}/rollback`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true, change_ids: changeIds, camera_ids: cameraIds, force_conflicts: false }) });
-      let payload = await response.json().catch(() => ({}));
-      if (response.status === 409 && payload.detail?.conflicts?.length && window.confirm(`${payload.detail.message}. Replace the ${payload.detail.conflicts.length} newer conflicting value${payload.detail.conflicts.length === 1 ? "" : "s"} anyway?`)) {
-        response = await fetch(`/api/calibration/change-sets/${changeSet.id}/rollback`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true, change_ids: changeIds, camera_ids: cameraIds, force_conflicts: true }) });
-        payload = await response.json().catch(() => ({}));
-      }
-      if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : payload.detail?.message || "Rollback could not be completed");
-      await loadCalibration();
-    } catch (rollbackError) { setError(rollbackError.message || "Rollback could not be completed"); }
-    finally { setBusy(false); }
-  }
-
-  async function evaluate(changeSet) {
-    setBusy(true); setError("");
-    try {
-      const response = await fetch(`/api/calibration/change-sets/${changeSet.id}/evaluate`, { method: "POST" });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "Evaluation could not start");
-      await loadCalibration();
-    } catch (evaluationError) { setError(evaluationError.message || "Evaluation could not start"); }
-    finally { setBusy(false); }
-  }
-
-  const recommendations = selectedRun?.result?.recommendations || [];
-  const recommendationGroups = recommendations.reduce((groups, item) => {
-    const group = tuneupRecommendationGroup(item);
-    return { ...groups, [group]: [...(groups[group] || []), item] };
-  }, {});
-  const completed = Number(selectedRun?.result?.progress?.completed || 0);
-  const total = Number(selectedRun?.result?.progress?.total || selectedRun?.camera_ids?.length || 0);
-  return <section id="admin-panel-calibration" className="bento-card config-editor settings-panel settings-panel-wide calibration-panel" aria-labelledby="admin-destination-tuneup">
-    <div className="calibration-tabs-shell">
-      <div className="tree-list tuneup-section-list admin-section-tabs camera-section-tabs detection-subsection-tabs" role="tablist" aria-label="Detection Tune-Up sections" onKeyDown={(event) => { const next = nextTabId(["tuneup", "monitoring", "history"], section, event.key); if (!next) return; event.preventDefault(); setSection(next); window.requestAnimationFrame(() => document.getElementById(`tuneup-tab-${next}`)?.focus()); }}>
-        <button id="tuneup-tab-tuneup" type="button" tabIndex={section === "tuneup" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "tuneup" ? "active" : ""} onClick={() => setSection("tuneup")} role="tab" aria-selected={section === "tuneup"}><Sparkles size={16} /><span>Tune-Up</span></button>
-        <button id="tuneup-tab-monitoring" type="button" tabIndex={section === "monitoring" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "monitoring" ? "active" : ""} onClick={() => setSection("monitoring")} role="tab" aria-selected={section === "monitoring"}><Activity size={16} /><span>Monitoring{monitoringSets.length ? <em>{monitoringSets.length}</em> : null}</span></button>
-        <button id="tuneup-tab-history" type="button" tabIndex={section === "history" ? 0 : -1} aria-controls="tuneup-section-panel" className={section === "history" ? "active" : ""} onClick={() => setSection("history")} role="tab" aria-selected={section === "history"}><Clock3 size={16} /><span>History</span></button>
-      </div>
-      {activeRun ? <button type="button" className="tuneup-resume-card" onClick={() => { setSelectedRunId(activeRun.id); setSection("tuneup"); setWizardStep(3); }}><RefreshCcw className="spin" size={16} /><span><strong>Review in progress</strong><small>{tuneupHistoryTitle(activeRun, cameras)}</small></span></button> : null}
-    </div>
-      {error ? <div className="error-banner">{error}</div> : null}
-      <div id="tuneup-section-panel" role="tabpanel" aria-labelledby={`tuneup-tab-${section}`}>
-        {section === "tuneup" ? <div className="tuneup-workflow">
-          <nav className="tuneup-steps" aria-label="Tune-Up progress">{["Choose cameras", "Review period", "Review performance", "Choose changes", "Confirm", "Monitor", "Results"].map((label, index) => <span className={wizardStep === index + 1 ? "active" : wizardStep > index + 1 ? "done" : ""} key={label}><b>{wizardStep > index + 1 ? <Check size={13} /> : index + 1}</b>{label}</span>)}</nav>
-          {wizardStep === 1 ? <div className="tuneup-stage"><header><span>Step 1 of 7</span><h3>Which cameras should SurvNG review?</h3></header><div className="tuneup-choice-grid">
-            <button type="button" className={cameraChoice === "all" ? "selected" : ""} onClick={() => chooseCameraScope("all")}><ShieldCheck size={22} /><strong>All cameras</strong><em>Recommended</em><small>Looks for system-wide patterns and camera-specific exceptions.</small></button>
-            <button type="button" className={cameraChoice === "attention" ? "selected" : ""} onClick={() => chooseCameraScope("attention")} disabled={!attentionCameras.length}><CircleAlert size={22} /><strong>Cameras needing attention</strong><small>{attentionCameras.length ? `${attentionCameras.length} cameras have current health or analysis concerns.` : "No cameras currently need attention."}</small></button>
-            <button type="button" className={cameraChoice === "custom" ? "selected" : ""} onClick={() => setCameraChoice("custom")}><Camera size={22} /><strong>Choose cameras</strong><small>Review only the scenes you select.</small></button>
-          </div>{cameraChoice === "custom" ? <div className="calibration-camera-list tuneup-camera-list">{cameras.map((camera) => <label key={camera.id}><input type="checkbox" checked={selectedCameras.includes(camera.id)} onChange={(event) => setSelectedCameras((current) => event.target.checked ? [...new Set([...current, camera.id])] : current.filter((id) => id !== camera.id))} /><span>{camera.name || camera.id}</span></label>)}</div> : null}<footer><span>{selectedCameras.length} of {cameras.length} cameras selected</span><button className="primary" disabled={!selectedCameras.length} onClick={() => setWizardStep(2)}>Continue <ArrowRight size={16} /></button></footer></div> : null}
-          {wizardStep === 2 ? <div className="tuneup-stage"><header><span>Step 2 of 7</span><h3>How much history should be reviewed?</h3><p>Longer periods see more scene conditions but take longer and use more AI analysis.</p></header><div className="tuneup-period-grid">{Object.entries(TUNEUP_PERIODS).map(([value, period]) => <button type="button" className={mode === value ? "selected" : ""} onClick={() => setMode(value)} key={value}><Clock3 size={21} /><strong>{period.label}</strong>{value === "standard" ? <em>Recommended</em> : null}<small>{period.detail}</small></button>)}</div><footer><button onClick={() => setWizardStep(1)}><ArrowLeft size={16} />Back</button><button className="primary" onClick={() => void startRun()} disabled={busy || Boolean(activeRun)}>{busy ? <RefreshCcw className="spin" size={16} /> : <Sparkles size={16} />}Start review</button></footer></div> : null}
-          {wizardStep === 3 ? <div className="tuneup-stage tuneup-reviewing"><header><span>Step 3 of 7</span><h3>{["queued", "running", "cancelling"].includes(selectedRun?.status) ? `Reviewing ${Math.min(completed + 1, total || 1)} of ${total} cameras` : selectedRun?.status === "completed" ? "Review complete" : "Review could not be completed"}</h3><p>{["queued", "running", "cancelling"].includes(selectedRun?.status) ? "It is safe to leave this page. SurvNG saves progress and this workflow will resume when you return." : selectedRun?.error}</p></header><div className="tuneup-progress-track"><span style={{ width: `${total ? Math.round((completed / total) * 100) : 0}%` }} /></div><div className="tuneup-camera-progress">{(selectedRun?.camera_ids || selectedCameras).map((cameraId, index) => { const failed = selectedRun?.result?.camera_errors?.[cameraId]; return <div className={failed ? "failed" : index < completed ? "complete" : index === completed && selectedRun?.status === "running" ? "active" : "pending"} key={cameraId}>{index < completed && !failed ? <Check size={15} /> : failed ? <CircleAlert size={15} /> : index === completed && selectedRun?.status === "running" ? <RefreshCcw className="spin" size={15} /> : <CircleDot size={15} />}<span><strong>{cameras.find((camera) => camera.id === cameraId)?.name || cameraId}</strong>{failed ? <small>{failed}</small> : null}</span></div>; })}</div><footer>{["queued", "running", "cancelling"].includes(selectedRun?.status) ? <button onClick={() => void simpleAction(`/api/calibration/runs/${selectedRun.id}/cancel`, "Analysis could not be cancelled")} disabled={busy || selectedRun.status === "cancelling"}>{selectedRun.status === "cancelling" ? "Stopping…" : "Cancel review"}</button> : null}{selectedRun?.result?.camera_errors && Object.keys(selectedRun.result.camera_errors).length ? <button onClick={() => void simpleAction(`/api/calibration/runs/${selectedRun.id}/retry`, "Failed cameras could not be retried")} disabled={busy}>Retry failed cameras</button> : null}{selectedRun?.status === "completed" ? <button className="primary" onClick={() => setWizardStep(4)}>Review suggestions <ArrowRight size={16} /></button> : null}</footer></div> : null}
-          {wizardStep === 4 ? <div className="tuneup-stage"><header><span>Step 4 of 7</span><h3>Choose suggested changes</h3><p>Select only the improvements you want SurvNG to make. Click anywhere on a suggestion card to select it.</p></header><div className="tuneup-summary-line"><ShieldCheck size={20} /><span><strong>{selectedRun?.result?.summary}</strong><small>{recommendations.length} bounded suggestion{recommendations.length === 1 ? "" : "s"}</small></span>{recommendations.length ? <div className="tuneup-selection-actions"><button type="button" onClick={() => { setError(""); setSelectedRecommendations(recommendations.map((item) => item.id)); }}>Select all</button><button type="button" onClick={() => { setError(""); setSelectedRecommendations([]); }}>Clear</button></div> : null}</div>{Object.entries(recommendationGroups).map(([group, items]) => <section className="tuneup-recommendation-group" key={group}><h4>{group}</h4>{items.map((item) => <article className={`${selectedRecommendations.includes(item.id) ? "selected" : ""} selectable`} key={item.id} onClick={(event) => toggleRecommendationFromCard(event, item.id)}><label><input type="checkbox" aria-label={`Select ${TUNEUP_SETTING_NAMES[item.setting] || item.setting}`} checked={selectedRecommendations.includes(item.id)} onChange={(event) => setRecommendationSelected(item.id, event.target.checked)} /><span><strong>{selectedRecommendations.includes(item.id) ? "Selected" : "Select change"} · {item.scope === "global" ? "All applicable cameras" : cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{TUNEUP_SETTING_NAMES[item.setting] || String(item.setting || "Setting").split(".").pop().replaceAll("_", " ")}</small></span></label><div className="tuneup-before-after"><span><small>Now</small><b>{tuneupValue(item.current_effective ?? item.current)}</b></span><ArrowRight size={17} /><span><small>Suggested</small><b>{tuneupValue(item.proposed)}</b></span></div><p>{item.expected_benefit}</p><small className="tuneup-tradeoff"><b>Tradeoff:</b> {item.downside}</small>{item.evidence?.length ? <div className="calibration-evidence">{item.evidence.slice(0, 6).map((evidence, index) => evidence.image_url ? <a href={evidence.event_id ? appUrl(`/incidents?event_ids=${evidence.event_id}`) : appUrl(evidence.image_url)} key={`${evidence.record_id || evidence.id || index}-${index}`} title={`Open exact ${evidence.event_id ? "incident" : "motion audit"}`}><img src={appUrl(evidence.image_url)} alt={`Evidence ${index + 1} for ${item.camera_id || "all cameras"}`} loading="lazy" /><span>{evidence.event_id ? "Incident" : "Motion audit"}</span></a> : null)}</div> : null}<details><summary>Technical details</summary><dl><div><dt>Setting</dt><dd><code>{item.setting}</code></dd></div><div><dt>Evidence</dt><dd>{item.evidence_strength} · {item.support_count || 0} samples</dd></div><div><dt>Processing impact</dt><dd>{item.compute_impact}</dd></div></dl>{item.effective_preview?.length > 1 ? <div className="calibration-effective-preview">{item.effective_preview.map((camera) => <div key={camera.camera_id}><span>{cameras.find((entry) => entry.id === camera.camera_id)?.name || camera.camera_id}</span><code>{JSON.stringify(camera.current)} → {JSON.stringify(camera.proposed)}</code></div>)}</div> : null}</details></article>)}</section>)}{!recommendations.length ? <div className="empty-state">No safe setting change was supported by the reviewed evidence.</div> : null}<details className="calibration-camera-findings"><summary>Camera review notes ({selectedRun?.result?.camera_summaries?.length || 0})</summary>{selectedRun?.result?.camera_summaries?.map((camera) => <article key={camera.camera_id}><strong>{camera.camera_name}</strong><span>{camera.summary}</span><small>{camera.analyzed} reviewed · {camera.failed} failed</small></article>)}</details><footer><button onClick={() => setWizardStep(3)}><ArrowLeft size={16} />Back</button><span>{selectedRecommendations.length ? `${selectedRecommendations.length} selected` : "Select at least one change to continue"}</span><button className="primary" onClick={() => void previewSelected()} disabled={busy}>Review selected changes <ArrowRight size={16} /></button></footer></div> : null}
-          {wizardStep === 5 ? <div className="tuneup-stage"><header><span>Step 5 of 7</span><h3>Confirm and apply</h3><p>Only the changes below will be applied. SurvNG validated them together against the current configuration, and every change is reversible.</p></header>{preview?.ready ? <div className="tuneup-readiness"><ShieldCheck size={22} /><span><strong>Ready to apply</strong><small>No configuration drift or recommendation conflicts were found.</small></span></div> : null}<div className="tuneup-confirm-list">{preview?.changes?.map((change) => <div key={`${change.camera_id}-${change.setting}`}><span><strong>{change.camera_id ? cameras.find((camera) => camera.id === change.camera_id)?.name || change.camera_id : "System default"}</strong><small>{TUNEUP_SETTING_NAMES[change.setting] || String(change.setting).split(".").pop().replaceAll("_", " ")}</small></span><b>{tuneupValue(change.before)} <ArrowRight size={14} /> {tuneupValue(change.after)}</b></div>)}</div><label className="tuneup-monitor-duration"><span><strong>Monitor results for</strong><small>SurvNG will compare matched evidence after this observation period.</small></span><select value={evaluationHours} onChange={(event) => setEvaluationHours(Number(event.target.value))}><option value={24}>24 hours</option><option value={72}>3 days</option><option value={168}>7 days</option></select></label><div className="tuneup-warning"><CircleAlert size={18} /><span><strong>Expected tradeoffs</strong><small>{selectedRecommendations.map((id) => recommendations.find((item) => item.id === id)?.downside).filter(Boolean).join(" ")}</small></span></div><footer><button onClick={() => setWizardStep(4)}><ArrowLeft size={16} />Back</button><button className="primary" onClick={() => void applySelected()} disabled={busy || !preview?.ready}><Check size={16} />Apply {preview?.change_count || selectedRecommendations.length} changes</button></footer></div> : null}
-        </div> : null}
-        {section === "monitoring" ? <div className="tuneup-monitoring">{monitoringSets.length ? monitoringSets.map((item) => { const rolledBack = new Set(item.rolled_back_change_ids || []); const remaining = (item.changes || []).filter((change) => !rolledBack.has(change.id)); const [outcome, tone] = tuneupOutcome(item); const affected = [...new Set((item.changes || []).flatMap((change) => change.camera_id ? [change.camera_id] : (runs.find((run) => run.id === item.run_id)?.camera_ids || [])))]; return <article className="tuneup-monitor-card" key={item.id}><header><span><strong>{item.status === "collecting" ? "Monitoring changes" : item.status === "reviewing" ? "Reviewing results" : outcome}</strong><small>{formatDateTime(item.created_at, timeZone)} · {item.changes?.length || 0} changes</small></span><em className={tone}>{String(item.status).replaceAll("_", " ")}</em></header>{item.status === "collecting" ? <div className="tuneup-countdown"><Clock3 size={19} /><span><strong>{item.seconds_until_ready > 86400 ? `${Math.ceil(item.seconds_until_ready / 86400)} days remaining` : item.seconds_until_ready > 3600 ? `${Math.ceil(item.seconds_until_ready / 3600)} hours remaining` : "Ready for review"}</strong><small>SurvNG is collecting matched follow-up evidence.</small></span></div> : null}<div className="tuneup-health-list">{affected.map((cameraId) => { const status = statuses.get(cameraId) || {}; const healthy = status.running !== false && status.frame_fresh !== false; return <span className={healthy ? "healthy" : "unhealthy"} key={cameraId}><CircleDot size={13} />{cameras.find((camera) => camera.id === cameraId)?.name || cameraId}</span>; })}</div>{item.evaluation?.summary ? <p>{item.evaluation.summary}</p> : null}<details><summary>Applied changes</summary>{remaining.map((change) => <div className="tuneup-change-row" key={change.id}><span>{TUNEUP_SETTING_NAMES[change.setting] || String(change.setting).split(".").pop().replaceAll("_", " ")}</span><b>{tuneupValue(change.before)} → {tuneupValue(change.after)}</b><button onClick={() => void rollback(item, { changeIds: [change.id] })} disabled={busy}><Undo2 size={14} />Undo</button></div>)}</details><footer>{item.status === "collecting" && item.seconds_until_ready <= 0 ? <button onClick={() => void evaluate(item)} disabled={busy}><Activity size={15} />Review now</button> : null}{item.status === "evaluated" ? <><button onClick={runAnotherTuneup}><Plus size={15} />Run another</button><button className="primary" onClick={() => void simpleAction(`/api/calibration/change-sets/${item.id}/keep`, "Changes could not be marked as kept")} disabled={busy}><Check size={15} />Keep changes</button></> : null}{remaining.length ? <button onClick={() => void rollback(item)} disabled={busy}><Undo2 size={15} />Undo changes</button> : null}</footer></article>; }) : <div className="empty-state"><ShieldCheck size={28} /><strong>No tune-up is being monitored</strong><span>Apply a recommendation to begin a before-and-after review.</span><button className="primary" onClick={runAnotherTuneup}>Run a tune-up</button></div>}</div> : null}
-        {section === "history" ? <div className="tuneup-history"><div className="tuneup-history-actions"><span>{runs.length} recent review{runs.length === 1 ? "" : "s"}</span><button className="primary" onClick={runAnotherTuneup}><Plus size={15} />Run another tune-up</button></div>{runs.map((run) => { const applied = changeSets.filter((item) => item.run_id === run.id && item.action === "apply"); return <article key={run.id}><button type="button" onClick={() => { setSelectedRunId(run.id); setSection("tuneup"); setWizardStep(run.status === "completed" ? 4 : 3); }}><span><strong>{tuneupHistoryTitle(run, cameras)}</strong><small>{formatDateTime(run.created_at, timeZone)} · {String(run.status).replaceAll("_", " ")}</small></span><ArrowRight size={16} /></button><div><span>{applied.reduce((count, item) => count + Number(item.changes?.length || 0), 0)} changes applied</span>{applied.map((item) => <em key={item.id}>{item.evaluation?.summary || String(item.status).replaceAll("_", " ")}</em>)}</div>{applied.map((item) => { const rolledBack = new Set(item.rolled_back_change_ids || []); const remaining = (item.changes || []).filter((change) => !rolledBack.has(change.id)); return remaining.length ? <details className="tuneup-history-changes" key={item.id}><summary>Review or undo {remaining.length} applied change{remaining.length === 1 ? "" : "s"}</summary>{remaining.map((change) => <div className="tuneup-change-row" key={change.id}><span>{change.camera_id ? cameras.find((camera) => camera.id === change.camera_id)?.name || change.camera_id : "System default"} · {TUNEUP_SETTING_NAMES[change.setting] || String(change.setting).split(".").pop().replaceAll("_", " ")}</span><b>{tuneupValue(change.before)} → {tuneupValue(change.after)}</b><button onClick={() => void rollback(item, { changeIds: [change.id] })} disabled={busy}><Undo2 size={14} />Undo</button></div>)}</details> : null; })}</article>; })}{!runs.length ? <div className="empty-state">No tune-ups have been run yet.</div> : null}</div> : null}
-      </div>
-  </section>;
+export function CalibrationLab(props) {
+  return <SystemReviewPanel {...props} />;
 }
 
 export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContextChange }) {
@@ -2201,17 +1954,7 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     if (settingsTab === "general") {
       if (generalSection === "motion-review") {
         return {
-          scope: (
-            <CameraScopePicker
-              className="section-title-picker"
-              cameras={cameras}
-              runtimeStatus={runtimeStatus}
-              value={selectedId}
-              onChange={setSelectedId}
-              ariaLabel="Camera Advisor camera"
-            />
-          ),
-          meta: <span className="admin-action-kind">Advisor actions apply immediately</span>,
+          scope: <AdminCommandLabel icon={Sparkles}>System review</AdminCommandLabel>,
         };
       }
       return {
@@ -2254,8 +1997,25 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
     }
     if (settingsTab === "calibration" && calibrationCommandBar) {
       return {
-        scope: <AdminCommandLabel icon={Sparkles}>{calibrationCommandBar.sectionLabel}</AdminCommandLabel>,
-        actions: <button type="button" onClick={() => calibrationCommandBar.refresh()}><RefreshCcw size={16} /> Refresh</button>,
+        scope: (
+          <>
+            <AdminCommandLabel icon={Sparkles}>System review</AdminCommandLabel>
+            <label className="admin-command-filter system-review-cadence">Cadence
+              <select aria-label="System review cadence" value={calibrationCommandBar.cadence || "weekly"} onChange={(event) => calibrationCommandBar.onCadence?.(event.target.value)}>
+                <option value="weekly">Weekly</option>
+                <option value="daily">Daily</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+          </>
+        ),
+        meta: <span>{calibrationCommandBar.error || calibrationCommandBar.progressLabel || calibrationCommandBar.nextLabel || "Not scheduled"}</span>,
+        actions: (
+          <>
+            <button type="button" className="primary" onClick={() => calibrationCommandBar.reviewNow?.()} disabled={calibrationCommandBar.reviewBusy}><Sparkles size={16} /> {calibrationCommandBar.starting ? "Starting review…" : "Review now"}</button>
+            <button type="button" onClick={() => calibrationCommandBar.refresh?.()}><RefreshCcw size={16} /> Refresh</button>
+          </>
+        ),
       };
     }
     return null;
@@ -2348,8 +2108,6 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
                 <button type="button" aria-current={generalSection === "access" ? "page" : undefined} className={generalSection === "access" ? "active" : ""} onClick={() => selectAdminSubsection("access", setGeneralSection, "general")}><KeyRound size={16} /><span>Access</span></button>
                 <span className="tree-group-label">Intelligence</span>
                 <button type="button" aria-current={generalSection === "detection" ? "page" : undefined} className={generalSection === "detection" ? "active" : ""} onClick={() => selectAdminSubsection("detection", setGeneralSection, "general")}><Cpu size={16} /><span>Object Detection</span></button>
-                <span className="tree-group-label">Tools</span>
-                <button type="button" aria-current={generalSection === "motion-review" ? "page" : undefined} className={generalSection === "motion-review" ? "active" : ""} onClick={() => selectAdminSubsection("motion-review", setGeneralSection, "general")}><Sparkles size={16} /><span>Camera Advisor</span></button>
               </div>
             </section>
             <section id="admin-panel-general" className="bento-card config-editor settings-panel" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
@@ -2397,7 +2155,9 @@ export function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistant
               />
           </section>
         ) : settingsTab === "calibration" ? (
-          <CalibrationLab key={`calibration-${calibrationViewNonce}`} cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
+          <section id="admin-panel-calibration" className="bento-card config-editor settings-panel settings-panel-wide subsection-workspace" aria-labelledby="admin-destination-tuneup">
+            <CalibrationLab key={`calibration-${calibrationViewNonce}`} cameras={cameras} runtimeStatus={runtimeStatus} timeZone={timeZone} onCommandBarChange={setCalibrationCommandBar} />
+          </section>
         ) : settingsTab === "telemetry" ? (
           <>
             <section id="admin-panel-telemetry" className="bento-card config-editor settings-panel telemetry-panel settings-panel-wide subsection-workspace" aria-labelledby={`admin-destination-${activeAdminDestination.id}`}>
@@ -4425,7 +4185,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
           </section>
           <section className="api-access-settings ai-provider-settings" id="ai-provider-settings" hidden={apiSection !== "ai"}>
             <div className="detection-settings-subhead">
-              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Sparkles size={16} /></span>AI Provider</strong><small>Shared provider for the assistant, Motion Audit reviews, and Camera Advisor.</small></div>
+              <div><strong className="section-heading-with-icon"><span className="section-heading-icon"><Sparkles size={16} /></span>AI Provider</strong><small>Shared provider for the assistant, Motion Audit, and the weekly system review.</small></div>
               <span className="admin-action-kind">Save settings to apply</span>
             </div>
             <div className="detection-field-grid">
@@ -4759,14 +4519,7 @@ export function GeneralSettings({ config, updateConfig, commitImmediateConfig, o
       ) : null}
 
       {section === "motion-review" ? (
-        <MotionAiReviewPanel
-          cameras={config.cameras || []}
-          runtimeStatus={runtimeStatus}
-          advisorEnabled={config.audit_ai?.enabled ?? false}
-          cameraId={advisorCameraId}
-          onCameraIdChange={onAdvisorCameraIdChange}
-          hideScopePicker={Boolean(onAdvisorCameraIdChange)}
-        />
+        <SystemReviewPanel cameras={config.cameras || []} timeZone={timeZone} />
       ) : null}
     </div>
   );

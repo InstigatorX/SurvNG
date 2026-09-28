@@ -33,6 +33,20 @@ from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_ai_review import aggregate_motion_ai_review
 from .motion_pipeline import guided_fusion_settings, identify_analysis_preset, resolve_motion_pipeline_graphs
 from .recording_routes import recording_source
+from .system_review import (
+    AUTOMATIC_CLASSES,
+    automatic_eligible,
+    collect_stored_signals,
+    daily_briefing,
+    detection_camera_ids,
+    due_pass,
+    next_run_at,
+    parse_timestamp,
+    rank_site_recommendations,
+    review_progress,
+    suggestion_class,
+    with_runtime_signals,
+)
 from .security import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +56,7 @@ CALIBRATION_MODE_LIMITS = {
     "quick": (24.0, 100, 12),
     "standard": (168.0, 100, 20),
     "deep": (720.0, 100, 40),
+    "system_weekly": (168.0, 40, 4),
 }
 
 class AuditAiApplyRequest(BaseModel):
@@ -70,8 +85,15 @@ class CameraIntelligenceFollowupRequest(BaseModel):
 
 class CalibrationRunRequest(BaseModel):
     camera_ids: list[str] = Field(default_factory=list, max_length=128)
-    mode: str = Field(default='standard', pattern='^(quick|standard|deep)$')
+    mode: str = Field(default='standard', pattern='^(quick|standard|deep|system_weekly)$')
     override_active_evaluation: bool = False
+
+class SystemReviewSettingsRequest(BaseModel):
+    cadence: str = Field(pattern='^(off|daily|weekly)$')
+    automatic_classes: list[str] = Field(default_factory=list, max_length=16)
+
+class SystemReviewDismissRequest(BaseModel):
+    recommendation_id: str = Field(min_length=1, max_length=256)
 
 class CalibrationApplyRequest(BaseModel):
     recommendation_ids: list[str] = Field(min_length=1, max_length=256)
@@ -479,7 +501,7 @@ class IntelligenceService:
         record_pool = select_balanced_samples(candidates, record_limit)
         return (select_balanced_samples(record_pool, image_limit), len(record_pool))
 
-    def _run_camera_intelligence_review(self, review_id: int, camera_id: str, samples: list[dict[str, Any]], records_considered: int, hours: float, active_config: AppConfig, active_manager: AppManager, evaluation_id: int=0, baseline_result: dict[str, Any] | None=None) -> None:
+    def _run_camera_intelligence_review(self, review_id: int, camera_id: str, samples: list[dict[str, Any]], records_considered: int, hours: float, active_config: AppConfig, active_manager: AppManager, evaluation_id: int=0, baseline_result: dict[str, Any] | None=None, on_progress: Callable[[dict[str, Any]], None] | None = None) -> None:
         analyses: list[dict[str, Any]] = []
         failed = 0
         consecutive_failures = 0
@@ -487,7 +509,9 @@ class IntelligenceService:
         try:
             active_manager.events.update_motion_ai_review(review_id, status='running', images_available=len(samples), analyzed=0, failed=0)
             audit_advisor = AuditAiAdvisor(active_config.audit_ai)
-            for sample in samples:
+            for index, sample in enumerate(samples, start=1):
+                if on_progress is not None:
+                    on_progress({'phase': 'Reviewing images', 'images_done': index - 1, 'images_total': len(samples)})
                 try:
                     if sample['kind'] == 'incident':
                         evidence = self._assistant_visual_incident_evidence(int(sample['event_id']), active_config, active_manager)
@@ -514,6 +538,8 @@ class IntelligenceService:
                     if not first_error:
                         first_error = redact_secret_text(exc)
                 active_manager.events.update_motion_ai_review(review_id, status='running', images_available=len(samples), analyzed=len(analyses), failed=failed)
+                if on_progress is not None:
+                    on_progress({'phase': 'Reviewing images', 'images_done': index, 'images_total': len(samples)})
                 if consecutive_failures >= 3:
                     first_error = first_error or 'Camera review stopped after repeated analysis failures'
                     break
@@ -666,7 +692,7 @@ class IntelligenceService:
                 f'That camera was restarted. SurvNG is collecting about {hours_label} hours of evidence—then you can check from this chat whether the change helped.'
             ),
             'suggestions': [f'Is {camera.name} healthy?', f'Summarize recent activity for {camera.name}'],
-            'actions': [{'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href}],
+            'actions': [{'label': 'Open System review', 'href': advisor_href}],
         }
         return {'ok': True, 'review_id': review_id, 'camera_id': camera.id, 'applied': previews, 'workers_restarted': bool(apply_result['camera_workers_restarted']), 'apply_mode': apply_result['apply_mode'], 'effectiveness_evaluation': evaluation, 'follow_up': follow_up}
 
@@ -725,10 +751,21 @@ class IntelligenceService:
             raise
         return active_manager.events.get_camera_intelligence_evaluation(evaluation_id) or {}
 
-    def _calibration_camera_review(self, camera: CameraConfig, *, hours: float, record_limit: int, image_limit: int, active_config: AppConfig, active_manager: AppManager, cancel_event: threading.Event | None = None) -> dict[str, Any]:
+    def _calibration_camera_review(self, camera: CameraConfig, *, hours: float, record_limit: int, image_limit: int, active_config: AppConfig, active_manager: AppManager, cancel_event: threading.Event | None = None, on_progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        def note(phase: str, **details: Any) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress({'phase': phase, **details})
+            except Exception:
+                LOGGER.exception('system review progress update failed for %s', camera.id)
+
+        note('Selecting samples')
         samples, records_considered = self._camera_intelligence_candidates(camera, active_manager, hours=hours, record_limit=record_limit, image_limit=image_limit)
         if not samples:
+            note('No samples for this camera')
             return {'review_type': 'camera_intelligence', 'summary': 'No retained incidents or motion decisions were available.', 'analyzed': 0, 'failed': 0, 'recommendations': [], 'samples': []}
+        note('Reviewing images', images_done=0, images_total=len(samples))
         wait_started = time.monotonic()
         while not self.deps.get_audit_ai_limiter().acquire(timeout=5):
             if cancel_event is not None and cancel_event.is_set():
@@ -744,21 +781,58 @@ class IntelligenceService:
             self.deps.end_ai_operation('camera_intelligence')
             self.deps.get_audit_ai_limiter().release()
             raise
-        self._run_camera_intelligence_review(int(review['id']), camera.id, samples, records_considered, hours, active_config, active_manager)
+        self._run_camera_intelligence_review(int(review['id']), camera.id, samples, records_considered, hours, active_config, active_manager, on_progress=on_progress)
         completed = active_manager.events.get_motion_ai_review(int(review['id'])) or {}
         if completed.get('status') != 'completed':
             raise RuntimeError(str(completed.get('error') or 'camera review failed'))
         return {**(completed.get('result') or {}), 'source_review_id': int(review['id'])}
 
+    def _publish_review_progress(self, run_id: int, active_manager: AppManager, *, completed: int, total: int, phase: str, errors: dict[str, str], reports: dict[str, dict[str, Any]] | None = None, camera: CameraConfig | None = None, images_done: int | None = None, images_total: int | None = None, status: str = 'running', error: str = '') -> None:
+        active_manager.events.update_calibration_run(
+            run_id,
+            status=status,
+            error=error,
+            result={
+                'camera_errors': errors,
+                **({'camera_reports': reports} if status != 'running' else {}),
+                'progress': review_progress(
+                    completed=completed,
+                    total=total,
+                    phase=phase,
+                    camera_id=camera.id if camera is not None else '',
+                    camera_name=camera.name if camera is not None else '',
+                    images_done=images_done,
+                    images_total=images_total,
+                ),
+            },
+        )
+
     def _run_system_calibration(self, run_id: int, camera_ids: list[str], mode: str, active_config: AppConfig, active_manager: AppManager, cancel_event: threading.Event | None = None) -> None:
         hours, record_limit, image_limit = CALIBRATION_MODE_LIMITS[mode]
         reports: dict[str, dict[str, Any]] = {}
         errors: dict[str, str] = {}
+
+        def publish(phase: str, camera: CameraConfig | None = None, images_done: int | None = None, images_total: int | None = None, status: str = 'running', error: str = '') -> None:
+            self._publish_review_progress(
+                run_id,
+                active_manager,
+                completed=len(reports) + len(errors),
+                total=len(camera_ids),
+                phase=phase,
+                errors=errors,
+                reports=reports,
+                camera=camera,
+                images_done=images_done,
+                images_total=images_total,
+                status=status,
+                error=error,
+            )
+
         try:
-            active_manager.events.update_calibration_run(run_id, status='running')
+            publish('Starting')
             for camera_id in camera_ids:
                 if cancel_event is not None and cancel_event.is_set():
-                    active_manager.events.update_calibration_run(run_id, status='cancelled', result={'camera_reports': reports, 'camera_errors': errors, 'progress': {'completed': len(reports) + len(errors), 'total': len(camera_ids)}}, error='Analysis cancelled by the operator')
+                    publish('Cancelled', status='cancelled', error='Analysis cancelled by the operator')
                     return
                 if self.deps.application_stopping.is_set():
                     raise RuntimeError('system calibration stopped because SurvNG is shutting down')
@@ -766,29 +840,274 @@ class IntelligenceService:
                 if camera is None:
                     errors[camera_id] = 'camera is no longer configured'
                     continue
+
+                def on_camera_progress(update: dict[str, Any]) -> None:
+                    publish(
+                        str(update.get('phase') or 'Reviewing images'),
+                        camera=camera,
+                        images_done=update.get('images_done'),
+                        images_total=update.get('images_total'),
+                    )
+
                 try:
-                    reports[camera_id] = self._calibration_camera_review(camera, hours=hours, record_limit=record_limit, image_limit=image_limit, active_config=active_config, active_manager=active_manager, cancel_event=cancel_event)
+                    reports[camera_id] = self._calibration_camera_review(camera, hours=hours, record_limit=record_limit, image_limit=image_limit, active_config=active_config, active_manager=active_manager, cancel_event=cancel_event, on_progress=on_camera_progress)
                 except Exception as exc:
                     LOGGER.warning('calibration review failed for %s', camera_id, exc_info=True)
                     errors[camera_id] = redact_secret_text(exc)
                 if cancel_event is not None and cancel_event.is_set():
-                    active_manager.events.update_calibration_run(run_id, status='cancelled', result={'camera_reports': reports, 'camera_errors': errors, 'progress': {'completed': len(reports) + len(errors), 'total': len(camera_ids)}}, error='Analysis cancelled by the operator')
+                    publish('Cancelled', status='cancelled', error='Analysis cancelled by the operator')
                     return
-                active_manager.events.update_calibration_run(run_id, status='running', result={'progress': {'completed': len(reports) + len(errors), 'total': len(camera_ids)}, 'camera_errors': errors})
             if not reports:
                 raise RuntimeError('no selected camera could be analyzed')
+            publish('Ranking suggestions')
             statuses = {str(item.get('id') or ''): item for item in active_manager.statuses()}
             stream_health = {camera_id: {key: statuses.get(camera_id, {}).get(key) for key in ('running', 'live_fps', 'main_fps', 'capture_read_failures', 'analysis_frames_dropped', 'last_error') if key in statuses.get(camera_id, {})} for camera_id in reports}
-            result = build_calibration_report(active_config, reports, mode=mode, stream_health=stream_health)
+            result = build_calibration_report(active_config, reports, mode=mode if mode in CALIBRATION_MODE_LIMITS else 'standard', stream_health=stream_health)
             result['camera_errors'] = errors
-            result['progress'] = {'completed': len(camera_ids), 'total': len(camera_ids)}
+            result['progress'] = review_progress(completed=len(camera_ids), total=len(camera_ids), phase='Complete')
+            if mode == 'system_weekly':
+                signals = self._system_review_signals(active_manager, active_config)
+                ranked = rank_site_recommendations(result.get('recommendations') or [], signals)
+                result['recommendations'] = ranked['recommendations']
+                result['site_notes'] = ranked['notes']
+                result['review_type'] = 'system_review'
+                result['pass'] = 'weekly'
+                result['summary'] = f"{result.get('summary') or 'Weekly review complete.'} {len(ranked['recommendations'])} suggestions remain after the site check."
             active_manager.events.update_calibration_run(run_id, status='completed', result=result)
+            if mode == 'system_weekly':
+                try:
+                    self._apply_automatic_review(run_id, active_manager)
+                except Exception:
+                    LOGGER.exception('automatic system review apply failed for run %s', run_id)
         except Exception as exc:
             LOGGER.exception('system calibration run %s failed', run_id)
             active_manager.events.update_calibration_run(run_id, status='interrupted' if self.deps.application_stopping.is_set() else 'failed', result={'camera_reports': reports, 'camera_errors': errors}, error=redact_secret_text(exc))
         finally:
             with self._calibration_cancel_lock:
                 self._calibration_cancel_events.pop(run_id, None)
+
+    def _system_review_signals(self, active_manager: AppManager, active_config: AppConfig) -> dict:
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).timestamp()
+        try:
+            with active_manager.events._connect() as connection:
+                stored = collect_stored_signals(connection, since)
+        except Exception:
+            LOGGER.exception('system review could not read stored evidence')
+            stored = {}
+        queued = 0
+        try:
+            runtime = ((self.deps.system_telemetry.system_status(active_manager).get('detector') or {}).get('runtime') or {})
+            queued = int(runtime.get('queue_depth') or 0)
+        except Exception:
+            LOGGER.exception('system review could not read detector queue depth')
+        for item in active_manager.statuses():
+            motion = item.get('motion_qualification') or {}
+            try:
+                queued += int(motion.get('queue_depth') or 0)
+            except (TypeError, ValueError):
+                continue
+        return with_runtime_signals(
+            stored,
+            tracking_limit=int(active_config.detector.tracking.max_active_cameras),
+            detector_queue=queued,
+        )
+
+    def _latest_system_run(self, runs: list[dict], mode: str):
+        for run in runs:
+            if str(run.get('mode') or '') == mode:
+                return parse_timestamp(run.get('created_at'))
+        return None
+
+    def _schedule_system_review(self) -> None:
+        with self.deps.manager_lock:
+            active_config = self.deps.get_config()
+            active_manager = self.deps.get_manager()
+            runs = active_manager.events.calibration_runs(40)
+            if any(item.get('status') in {'queued', 'running', 'cancelling'} for item in runs):
+                return
+            decision = due_pass(
+                datetime.now(timezone.utc),
+                active_config.system_review.cadence,
+                self._latest_system_run(runs, 'system_daily'),
+                self._latest_system_run(runs, 'system_weekly'),
+            )
+        if decision not in {'weekly', 'daily'}:
+            return
+        try:
+            self.start_system_review(decision)
+        except HTTPException as exc:
+            LOGGER.info('scheduled system review was not started: %s', exc.detail)
+
+    def start_system_review(self, review_pass: str = 'weekly') -> dict:
+        if review_pass not in {'daily', 'weekly'}:
+            raise HTTPException(status_code=400, detail='system review pass must be daily or weekly')
+        with self.deps.manager_lock:
+            active_manager = self.deps.get_manager()
+            active_config = self.deps.get_config().model_copy(deep=True)
+            runs = active_manager.events.calibration_runs(20)
+            if any(item.get('status') in {'queued', 'running', 'cancelling'} for item in runs):
+                raise HTTPException(status_code=409, detail='a system review is already running')
+            camera_ids = detection_camera_ids(active_config.cameras, active_manager.statuses())
+            if not camera_ids:
+                raise HTTPException(status_code=400, detail='no detection-enabled cameras are configured')
+            if review_pass == 'daily' or not active_config.audit_ai.enabled or not ai_provider_configured(active_config.audit_ai):
+                return self._complete_daily_review(active_manager, active_config, camera_ids, skipped_weekly=review_pass == 'weekly')
+            run = active_manager.events.create_calibration_run(
+                mode='system_weekly',
+                camera_ids=camera_ids,
+                configuration_fingerprint=calibration_configuration_fingerprint(active_config),
+            )
+            cancel_event = threading.Event()
+            with self._calibration_cancel_lock:
+                self._calibration_cancel_events[int(run['id'])] = cancel_event
+        try:
+            self._start_registered_ai_thread(
+                'calibration',
+                self._run_system_calibration,
+                (int(run['id']), camera_ids, 'system_weekly', active_config, active_manager, cancel_event),
+                name=f'survng-system-review-{run["id"]}',
+            )
+        except BaseException as exc:
+            with self._calibration_cancel_lock:
+                self._calibration_cancel_events.pop(int(run['id']), None)
+            active_manager.events.update_calibration_run(int(run['id']), status='failed', error=f'System review could not start: {redact_secret_text(exc)}')
+            raise HTTPException(status_code=503, detail='system review could not start') from exc
+        return run
+
+    def _complete_daily_review(self, active_manager: AppManager, active_config: AppConfig, camera_ids: list[str], *, skipped_weekly: bool) -> dict:
+        signals = self._system_review_signals(active_manager, active_config)
+        result = daily_briefing(signals)
+        result['camera_ids'] = camera_ids
+        if skipped_weekly:
+            result['pass'] = 'weekly'
+            result['site_notes'] = [
+                {'kind': 'sample', 'text': 'The image sample pass was skipped because AI analysis is not configured.'},
+                *(result.get('site_notes') or []),
+            ]
+        run = active_manager.events.create_calibration_run(
+            mode='system_weekly' if skipped_weekly else 'system_daily',
+            camera_ids=camera_ids,
+            configuration_fingerprint=calibration_configuration_fingerprint(active_config),
+        )
+        return active_manager.events.update_calibration_run(int(run['id']), status='completed', result=result)
+
+    def system_review(self) -> dict:
+        with self.deps.manager_lock:
+            active_config = self.deps.get_config()
+            active_manager = self.deps.get_manager()
+            runs = active_manager.events.calibration_runs(20, include_result=True)
+        system_runs = [item for item in runs if str(item.get('mode') or '').startswith('system_')]
+        briefing = next((item for item in system_runs if item.get('status') in {'queued', 'running', 'cancelling'}), None)
+        if briefing is None:
+            briefing = next((item for item in system_runs if item.get('status') == 'completed'), None)
+        if briefing and isinstance(briefing.get('result'), dict):
+            result = dict(briefing['result'])
+            result['recommendations'] = [
+                {**item, 'automatic_class': suggestion_class(item)}
+                for item in result.get('recommendations') or []
+                if isinstance(item, dict)
+            ]
+            result['site_notes'] = [
+                note for note in result.get('site_notes') or []
+                if not (isinstance(note, dict) and (note.get('kind') == 'grace' or '45-second' in str(note.get('text') or '')))
+            ]
+            briefing = {**briefing, 'result': result}
+        change_sets = active_manager.events.calibration_change_sets(30)
+        system_ids = {int(item.get('id') or 0) for item in system_runs}
+        now = datetime.now(timezone.utc)
+        cadence = active_config.system_review.cadence
+        last_daily = self._latest_system_run(system_runs, 'system_daily')
+        last_weekly = self._latest_system_run(system_runs, 'system_weekly')
+        return {
+            'cadence': cadence,
+            'automatic_classes': list(active_config.system_review.automatic_classes),
+            'automatic_class_catalog': [
+                {'id': class_id, 'label': spec['label'], 'detail': spec.get('detail') or ''}
+                for class_id, spec in AUTOMATIC_CLASSES.items()
+            ],
+            'apply_enabled': bool(active_config.audit_ai.allow_apply_recommendations),
+            'next_daily_at': next_run_at(last_daily, hours=20, now=now).isoformat() if cadence in {'daily', 'weekly'} else None,
+            'next_weekly_at': next_run_at(last_weekly, hours=24 * 6, now=now).isoformat() if cadence == 'weekly' else None,
+            'briefing': briefing,
+            'change_sets': [item for item in change_sets if int(item.get('run_id') or 0) in system_ids],
+            'history': [
+                {key: item.get(key) for key in ('id', 'status', 'mode', 'error', 'created_at', 'completed_at')}
+                | {'summary': (item.get('result') or {}).get('summary') or ''}
+                for item in system_runs
+            ],
+        }
+
+    def update_system_review_settings(self, request: SystemReviewSettingsRequest) -> dict:
+        with self.deps.manager_lock:
+            current = self.deps.get_config().model_copy(deep=True)
+            try:
+                current.system_review.cadence = request.cadence
+                current.system_review.automatic_classes = list(dict.fromkeys(request.automatic_classes))
+                AppConfig.model_validate(current.model_dump(mode='json'))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            self.deps.apply_config_update(current)
+        return self.system_review()
+
+    def dismiss_system_review(self, run_id: int, request: SystemReviewDismissRequest) -> dict:
+        with self.deps.manager_lock:
+            events = self.deps.get_manager().events
+            run = events.get_calibration_run(run_id)
+            if run is None or not str(run.get('mode') or '').startswith('system_'):
+                raise HTTPException(status_code=404, detail='system review not found')
+            result = dict(run.get('result') or {})
+            found = False
+            recommendations = []
+            for item in result.get('recommendations') or []:
+                if str(item.get('id') or '') == request.recommendation_id:
+                    item = {**item, 'dismissed': True}
+                    found = True
+                recommendations.append(item)
+            if not found:
+                raise HTTPException(status_code=404, detail='suggestion not found')
+            result['recommendations'] = recommendations
+            events.update_calibration_run(run_id, status=str(run.get('status') or 'completed'), result=result)
+        return self.system_review()
+
+    def _apply_automatic_review(self, run_id: int, active_manager: AppManager) -> None:
+        with self.deps.manager_lock:
+            active_config = self.deps.get_config()
+            if not active_config.audit_ai.allow_apply_recommendations:
+                return
+            allowed = set(active_config.system_review.automatic_classes)
+            run = active_manager.events.get_calibration_run(run_id) or {}
+            selected = [
+                item for item in (run.get('result') or {}).get('recommendations') or []
+                if automatic_eligible(item, allowed)
+            ]
+            if not selected:
+                return
+            fingerprint = calibration_configuration_fingerprint(active_config)
+            if run.get('configuration_fingerprint') != fingerprint:
+                return
+            try:
+                self.calibration_apply(run_id, CalibrationApplyRequest(
+                    recommendation_ids=[str(item.get('id') or '') for item in selected],
+                    confirmed=True,
+                    configuration_fingerprint=fingerprint,
+                ))
+            except HTTPException:
+                LOGGER.info('automatic system review changes were not applied for run %s', run_id)
+
+    def _revoke_regressed_automatic_classes(self, change_set: dict) -> None:
+        classes = {
+            class_id for change in change_set.get('changes') or []
+            if (class_id := suggestion_class({'setting': change.get('setting'), 'proposed': change.get('after'), 'current': change.get('before')}))
+        }
+        if not classes:
+            return
+        with self.deps.manager_lock:
+            current = self.deps.get_config().model_copy(deep=True)
+            remaining = [item for item in current.system_review.automatic_classes if item not in classes]
+            if remaining == list(current.system_review.automatic_classes):
+                return
+            current.system_review.automatic_classes = remaining
+            self.deps.apply_config_update(current)
 
     def start_calibration_run(self, request: CalibrationRunRequest) -> dict:
         with self.deps.manager_lock:
@@ -1016,6 +1335,8 @@ class IntelligenceService:
             if expected_fingerprint and final_fingerprint != expected_fingerprint:
                 evaluation = {'outcome': 'inconclusive', 'summary': 'Calibration settings changed while follow-up evidence was being reviewed, so this result cannot be attributed to one change set.', 'comparison_basis': 'configuration_conflict', 'camera_errors': errors}
             active_manager.events.update_calibration_evaluation(change_set_id, evaluation, status='evaluated')
+            if evaluation.get('outcome') == 'regressed':
+                self._revoke_regressed_automatic_classes(change_set)
         except Exception as exc:
             LOGGER.exception('calibration evaluation %s failed', change_set_id)
             active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': redact_secret_text(exc)}, status='evaluation_failed')
@@ -1026,6 +1347,10 @@ class IntelligenceService:
             await asyncio.sleep(60)
             if self.deps.application_stopping.is_set():
                 return
+            try:
+                self._schedule_system_review()
+            except Exception:
+                LOGGER.exception('system review schedule check failed')
             selected: tuple[int, AppConfig, AppManager] | None = None
             with self.deps.manager_lock:
                 active_manager = self.deps.get_manager()
@@ -1159,11 +1484,29 @@ class IntelligenceService:
         return {'cameras': [{'id': camera.id, 'name': camera.name} for camera in active_config.cameras], 'object_labels': list(active_manager.detector.labels), 'zones': sorted({zone.name for camera in active_config.cameras for zone in camera.zones if zone.enabled}), 'recognized_faces': [{'id': int(person.get('id') or 0), 'name': str(person.get('name') or '')[:128]} for person in people[:200] if str(person.get('name') or '').strip()]}
 
     def _assistant_camera_advisor_href(self, camera_id: str = '') -> str:
-        href = '/admin?section=general&subsection=motion-review'
-        cleaned = str(camera_id or '').strip()
-        if cleaned:
-            href = f'{href}&camera={quote(cleaned, safe="")}'
-        return href
+        return '/admin?section=calibration'
+
+    def _assistant_briefing_facts(self, active_manager: AppManager) -> dict[str, Any]:
+        try:
+            runs = active_manager.events.calibration_runs(12, include_result=True)
+        except Exception:
+            LOGGER.exception('assistant could not read the system review briefing')
+            return {'href': '/admin?section=calibration', 'summary': ''}
+        briefing = next((
+            item for item in runs
+            if str(item.get('mode') or '').startswith('system_') and item.get('status') == 'completed'
+        ), None)
+        if briefing is None:
+            return {'href': '/admin?section=calibration', 'summary': 'No system review has completed yet.'}
+        result = briefing.get('result') or {}
+        suggestions = [item for item in result.get('recommendations') or [] if not item.get('dismissed')]
+        return {
+            'href': '/admin?section=calibration',
+            'summary': str(result.get('summary') or ''),
+            'notes': [str(note.get('text') or '') for note in (result.get('site_notes') or [])[:4] if isinstance(note, dict) and note.get('text') and note.get('kind') != 'grace' and '45-second' not in str(note.get('text') or '')],
+            'suggestion_count': len(suggestions),
+            'completed_at': briefing.get('completed_at'),
+        }
 
     def _assistant_start_camera_review_action(self, camera_id: str, camera_name: str = '', *, hours: float = 24.0, image_limit: int = 12) -> dict[str, Any]:
         cleaned_id = str(camera_id or '').strip()
@@ -1236,7 +1579,7 @@ class IntelligenceService:
             first_id = str(unhealthy[0].get('camera_id') or '').strip()
             if first_id:
                 next_actions.append({'label': f'Open {first_id} live', 'href': f'/?camera={quote(first_id, safe="")}'})
-                next_actions.append({'label': f'Open Camera Advisor for {first_id}', 'href': self._assistant_camera_advisor_href(first_id)})
+                next_actions.append({'label': 'Open System review', 'href': '/admin?section=calibration'})
         elif int((runtime.get('queue_depth') or 0) or 0) > 0:
             next_actions.append({'label': 'Open object detection settings', 'href': '/admin?section=general&subsection=detection'})
         payload = {'cameras': status.get('cameras'), 'unhealthy_cameras': unhealthy, 'storage': status.get('storage'), 'detector': {'enabled': detector.get('enabled'), 'backend': detector.get('loaded_backend'), 'device': detector.get('loaded_device'), 'ready': bool(detector.get('openvino_loaded') or detector.get('coreml_loaded')), 'average_inference_ms': runtime.get('average_inference_ms'), 'queue_depth': runtime.get('queue_depth'), 'failed_inferences': runtime.get('failed_inferences'), 'active_workers': runtime.get('active_workers'), 'configured_workers': runtime.get('configured_workers'), 'reid_ready': bool((detector.get('reid') or {}).get('loaded'))}, 'mqtt': {key: (status.get('mqtt') or {}).get(key) for key in ('enabled', 'connected', 'last_error', 'publish_failures', 'pending_incidents', 'server_lifecycle')}, 'go2rtc': status.get('go2rtc'), 'retention': {'state': retention.get('state'), 'enabled': retention.get('enabled'), 'automatic_cleanup': retention.get('automatic_cleanup'), 'last_plan_at': retention.get('last_plan_at'), 'last_run_at': retention.get('last_run_at'), 'error': retention.get('error'), 'planned_reclaim_bytes': retention_reclaim.get('planned_bytes'), 'last_deleted_files': last_retention_run.get('deleted_files'), 'last_deleted_bytes': last_retention_run.get('deleted_bytes')}, 'next_actions': next_actions}
@@ -1258,7 +1601,7 @@ class IntelligenceService:
             label = str(data['name'] or current_id)
             next_actions = [
                 {'label': f'Open {label} live', 'href': f'/?camera={quote(current_id, safe="")}'},
-                {'label': f'Open Camera Advisor for {label}', 'href': self._assistant_camera_advisor_href(current_id)},
+                {'label': 'Open System review', 'href': self._assistant_camera_advisor_href(current_id)},
             ]
             if not healthy:
                 next_actions.insert(1, {'label': 'Open Telemetry', 'href': '/admin?section=telemetry'})
@@ -1268,8 +1611,8 @@ class IntelligenceService:
 
     def _assistant_configuration_evidence(self, active_config: AppConfig) -> AssistantEvidence:
         assistant_provider = AssistantProvider(active_config.audit_ai)
-        data = {'ai': {'enabled': active_config.audit_ai.enabled, 'assistant_enabled': active_config.audit_ai.assistant_enabled, 'provider': active_config.audit_ai.provider, 'analysis_and_fast_model': assistant_provider.model_for_tier('fast'), 'deep_reasoning_model': assistant_provider.model_for_tier('deep'), 'deep_reasoning_uses_separate_model': assistant_provider.model_for_tier('deep') != assistant_provider.model_for_tier('fast'), 'assistant_read_only': False, 'supported_actions': ['create_media_export']}, 'recording': {'segment_seconds': active_config.recording_segment_seconds, 'cache_max_gb': active_config.recording_cache_max_gb, 'cache_max_days': active_config.recording_cache_max_days, 'prewarm': active_config.recording_cache_prewarm, 'retention': active_config.retention.model_dump(mode='json')}, 'motion': active_config.motion_qualification.model_dump(mode='json'), 'detector': {'enabled': active_config.detector.enabled, 'backend': active_config.detector.backend, 'device': active_config.detector.device, 'confidence_threshold': active_config.detector.confidence_threshold, 'nms_threshold': active_config.detector.nms_threshold, 'event_confirmation_frames': active_config.detector.event_confirmation_frames, 'event_class_confirmation_frames': active_config.detector.event_class_confirmation_frames, 'event_class_confidence_thresholds': active_config.detector.event_class_confidence_thresholds, 'zone_only_incident_eligibility': active_config.detector.require_incident_zone, 'tracking': active_config.detector.tracking.model_dump(mode='json')}, 'mqtt': {'enabled': active_config.mqtt.enabled, 'tls': active_config.mqtt.tls, 'discovery_enabled': active_config.mqtt.discovery_enabled, 'incident_events_enabled': active_config.mqtt.incident_events_enabled, 'server_status_enabled': active_config.mqtt.server_status_enabled}, 'cameras': [{'id': camera.id, 'name': camera.name, 'record': camera.record, 'record_sub': camera.record_sub, 'retention': camera.retention.model_dump(mode='json'), 'zone_only_incident_eligibility': camera.require_incident_zone, 'motion': camera.motion_qualification.model_dump(mode='json'), 'onvif_enabled': camera.onvif.enabled, 'zone_names': [zone.name for zone in camera.zones if zone.enabled]} for camera in active_config.cameras]}
-        return AssistantEvidence(evidence_id='E-config', kind='configuration', title='Active safe configuration', summary=f'Credential-free configuration for {len(active_config.cameras)} cameras.', data=data, href='/admin')
+        data = {'ai': {'enabled': active_config.audit_ai.enabled, 'assistant_enabled': active_config.audit_ai.assistant_enabled, 'provider': active_config.audit_ai.provider, 'analysis_and_fast_model': assistant_provider.model_for_tier('fast'), 'deep_reasoning_model': assistant_provider.model_for_tier('deep'), 'deep_reasoning_uses_separate_model': assistant_provider.model_for_tier('deep') != assistant_provider.model_for_tier('fast'), 'assistant_read_only': False, 'supported_actions': ['create_media_export']}, 'system_review': {'cadence': active_config.system_review.cadence, 'automatic_classes': list(active_config.system_review.automatic_classes), 'href': '/admin?section=calibration'}, 'recording': {'segment_seconds': active_config.recording_segment_seconds, 'cache_max_gb': active_config.recording_cache_max_gb, 'cache_max_days': active_config.recording_cache_max_days, 'prewarm': active_config.recording_cache_prewarm, 'retention': active_config.retention.model_dump(mode='json')}, 'motion': active_config.motion_qualification.model_dump(mode='json'), 'detector': {'enabled': active_config.detector.enabled, 'backend': active_config.detector.backend, 'device': active_config.detector.device, 'confidence_threshold': active_config.detector.confidence_threshold, 'nms_threshold': active_config.detector.nms_threshold, 'event_confirmation_frames': active_config.detector.event_confirmation_frames, 'event_class_confirmation_frames': active_config.detector.event_class_confirmation_frames, 'event_class_confidence_thresholds': active_config.detector.event_class_confidence_thresholds, 'zone_only_incident_eligibility': active_config.detector.require_incident_zone, 'tracking': active_config.detector.tracking.model_dump(mode='json')}, 'mqtt': {'enabled': active_config.mqtt.enabled, 'tls': active_config.mqtt.tls, 'discovery_enabled': active_config.mqtt.discovery_enabled, 'incident_events_enabled': active_config.mqtt.incident_events_enabled, 'server_status_enabled': active_config.mqtt.server_status_enabled}, 'cameras': [{'id': camera.id, 'name': camera.name, 'record': camera.record, 'record_sub': camera.record_sub, 'retention': camera.retention.model_dump(mode='json'), 'zone_only_incident_eligibility': camera.require_incident_zone, 'motion': camera.motion_qualification.model_dump(mode='json'), 'onvif_enabled': camera.onvif.enabled, 'zone_names': [zone.name for zone in camera.zones if zone.enabled]} for camera in active_config.cameras]}
+        return AssistantEvidence(evidence_id='E-config', kind='configuration', title='Active safe configuration', summary=f'Credential-free configuration for {len(active_config.cameras)} cameras. The scheduled system review is the only tuning loop.', data=data, href='/admin?section=calibration')
 
     def _assistant_event_objects(self, event: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         objects: list[dict[str, Any]] = []
@@ -1447,9 +1790,7 @@ class IntelligenceService:
         advice_payload['changes'] = [change.model_dump(mode='json') for change in changes]
         configuration_fingerprint = self._assistant_motion_config_fingerprint(active_config, camera)
         advisor_href = self._assistant_camera_advisor_href(camera.id)
-        next_actions: list[dict[str, Any]] = [{'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href}]
-        if active_config.audit_ai.enabled and ai_provider_configured(active_config.audit_ai):
-            next_actions.insert(0, self._assistant_start_camera_review_action(camera.id, camera.name))
+        next_actions: list[dict[str, Any]] = [{'label': 'Open System review', 'href': advisor_href}]
         details = {'event_id': event_id, 'source_event_id': source_event_id, 'camera_id': camera.id, 'camera_name': camera.name, 'advice': advice_payload, 'proposals': previews, 'can_apply': bool(previews and active_config.audit_ai.allow_apply_recommendations), 'apply_requires_confirmation': True, 'configuration_fingerprint': configuration_fingerprint, 'recommendation_proof': self._issue_ai_recommendation_token(kind='incident_visual', record_id=event_id, camera_id=camera.id, configuration_fingerprint=configuration_fingerprint, changes=changes), 'next_actions': next_actions, 'camera_advisor_href': advisor_href}
         incident_evidence = self._assistant_incident_evidence(incident, event_id)
         return AssistantEvidence(evidence_id=f'E-visual-{event_id}', kind='incident_visual_review', title=f'Visual review · {camera.name}', summary=f'{advice.verdict.replace('_', ' ')} ({round(advice.confidence * 100)}% confidence); {len(previews)} bounded setting proposal(s).', data={**{key: value for key, value in details.items() if key != 'recommendation_proof'}, 'incident_evidence': incident_evidence.data}, href=incident_evidence.href, image_url=f'/api/events/{source_event_id}/thumbnail.jpg?width=960&quality=82', client_data=details)
@@ -1772,12 +2113,19 @@ class IntelligenceService:
 
     def _assistant_execute_tool(self, call: AssistantToolCall, request: AssistantChatRequest, active_config: AppConfig, active_manager: AppManager) -> list[AssistantEvidence]:
         if call.name == 'get_system_health':
-            return [self._assistant_system_evidence(active_manager)]
+            evidence = self._assistant_system_evidence(active_manager)
+            evidence.data['system_review'] = self._assistant_briefing_facts(active_manager)
+            return [evidence]
         if call.name == 'get_camera_health':
             camera_id = call.camera_id or request.context.camera_id
             return self._assistant_camera_evidence(active_manager, camera_id)
         if call.name == 'explain_configuration':
-            return [self._assistant_configuration_evidence(active_config)]
+            evidence = self._assistant_configuration_evidence(active_config)
+            evidence.data['system_review'] = {
+                **(evidence.data.get('system_review') or {}),
+                **self._assistant_briefing_facts(active_manager),
+            }
+            return [evidence]
         if call.name == 'inspect_incident':
             event_id = call.event_id or request.context.incident_event_id
             item = self._assistant_inspect_incident(int(event_id), active_manager) if event_id else None
@@ -1906,14 +2254,10 @@ class IntelligenceService:
         follow_up = {
             'message': (
                 f'Applied {applied_count} motion setting change{"s" if applied_count != 1 else ""} on {camera.name}. '
-                f'That camera was restarted. This was one incident image—start a multi-sample Camera Advisor review '
-                f'from here to gather more evidence, then check whether the change helped after about 24 hours.'
+                f'That camera was restarted. The scheduled system review is the place to judge later site changes.'
             ),
             'suggestions': [f'Is {camera.name} healthy?', f'Summarize recent activity for {camera.name}'],
-            'actions': [
-                self._assistant_start_camera_review_action(camera.id, camera.name),
-                {'label': f'Open Camera Advisor for {camera.name}', 'href': advisor_href},
-            ],
+            'actions': [{'label': 'Open System review', 'href': advisor_href}],
         }
         return {'ok': True, 'event_id': event_id, 'camera_id': camera.id, 'applied': previews, 'workers_restarted': bool(apply_result['camera_workers_restarted']), 'apply_mode': apply_result['apply_mode'], 'follow_up': follow_up}
 
@@ -1932,6 +2276,10 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
     router.add_api_route('/api/motion-ai-reviews/{review_id}/apply', service.camera_intelligence_apply, methods=['POST'])
     router.add_api_route('/api/camera-intelligence/evaluations/latest', service.latest_camera_intelligence_evaluation, methods=['GET'])
     router.add_api_route('/api/camera-intelligence/evaluations/{evaluation_id}/follow-up', service.start_camera_intelligence_followup, methods=['POST'])
+    router.add_api_route('/api/system-review', service.system_review, methods=['GET'])
+    router.add_api_route('/api/system-review/run', service.start_system_review, methods=['POST'], status_code=202)
+    router.add_api_route('/api/system-review/settings', service.update_system_review_settings, methods=['POST'])
+    router.add_api_route('/api/system-review/runs/{run_id}/dismiss', service.dismiss_system_review, methods=['POST'])
     router.add_api_route('/api/calibration/runs', service.start_calibration_run, methods=['POST'], status_code=202)
     router.add_api_route('/api/calibration/runs', service.calibration_runs, methods=['GET'])
     router.add_api_route('/api/calibration/runs/{run_id}', service.calibration_run, methods=['GET'])

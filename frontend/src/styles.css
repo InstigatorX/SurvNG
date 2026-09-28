@@ -13794,6 +13794,71 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   margin-inline: auto;
 }
 
+.admin-command-filter.system-review-cadence select {
+  max-width: 8.5rem;
+}
+
+.system-review-list {
+  display: grid;
+  gap: 8px;
+}
+
+.system-review-list article {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.system-review-list article>div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.system-review-list small,
+.system-review-list article>div:first-child span {
+  color: var(--muted);
+}
+
+.system-review-findings {
+  padding-bottom: 4px;
+}
+
+.system-review-findings .telemetry-diagnostic-card span {
+  display: block;
+  margin-top: 3px;
+}
+
+.system-review-progress {
+  padding: 0 12px 12px;
+}
+
+.system-review-toggles {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.system-review-class {
+  align-items: start;
+  min-height: 0;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.system-review-class span {
+  display: grid;
+  gap: 2px;
+}
+
+.system-review-class small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.35;
+}
+
 .tuneup-stage>header {
   display: grid;
   gap: 0.3rem;

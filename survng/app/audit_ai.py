@@ -240,7 +240,10 @@ that memory. Only credible movement, a real zone transition, replacement/vacancy
 should invalidate it.
 
 Distinguish real subjects from insects, weather, lighting, vegetation, and camera artifacts.
-Recommend the fewest changes needed and prefer camera-scoped changes over global changes. Recommend
+Recommend the fewest changes needed and prefer camera-scoped changes over global changes. When a
+visible subject was skipped because its score fell just short of a named threshold, such as
+visual_backup_min_score, recommend that one camera-scoped threshold. Do not recommend a threshold
+change for a scene with no visible subject. Recommend
 settings only for active visual components. Enhanced Motion Analysis (EMA) is the production visual
 analysis pipeline. Trigger mode,
 validator selection, agreement policy, and fail-open behavior are operator-owned safety settings:

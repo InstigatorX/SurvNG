@@ -545,7 +545,7 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(confirm_post["body"]["camera_id"], "gate")
         self.assertEqual(
             service._assistant_camera_advisor_href("gate"),
-            "/admin?section=general&subsection=motion-review&camera=gate",
+            "/admin?section=calibration",
         )
 
     def test_assistant_catalog_includes_only_safe_face_identity_fields(self) -> None:
@@ -634,10 +634,8 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(len(details["configuration_fingerprint"]), 64)
         self.assertTrue(details["recommendation_proof"].startswith("v1."))
         self.assertNotIn("recommendation_proof", evidence.prompt_payload()["data"])
-        self.assertEqual(details["next_actions"][0]["kind"], "confirm_post")
-        self.assertEqual(details["next_actions"][0]["path"], "/api/motion-ai-reviews")
-        self.assertEqual(details["next_actions"][0]["body"]["camera_id"], "gate")
-        self.assertEqual(details["next_actions"][1]["href"], "/admin?section=general&subsection=motion-review&camera=gate")
+        self.assertEqual(details["next_actions"][0]["label"], "Open System review")
+        self.assertEqual(details["next_actions"][0]["href"], "/admin?section=calibration")
         self.assertEqual(
             evidence.client_payload()["image_url"],
             "/api/events/42/thumbnail.jpg?width=960&quality=82",
@@ -795,14 +793,9 @@ class AssistantApiTest(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         apply_update.assert_called_once()
-        self.assertIn("Camera Advisor", response["follow_up"]["message"])
-        self.assertEqual(response["follow_up"]["actions"][0]["kind"], "confirm_post")
-        self.assertEqual(response["follow_up"]["actions"][0]["path"], "/api/motion-ai-reviews")
-        self.assertEqual(response["follow_up"]["actions"][0]["body"]["camera_id"], "gate")
-        self.assertEqual(
-            response["follow_up"]["actions"][1]["href"],
-            "/admin?section=general&subsection=motion-review&camera=gate",
-        )
+        self.assertIn("system review", response["follow_up"]["message"])
+        self.assertEqual(response["follow_up"]["actions"][0]["label"], "Open System review")
+        self.assertEqual(response["follow_up"]["actions"][0]["href"], "/admin?section=calibration")
         self.assertIn("Is Gate healthy?", response["follow_up"]["suggestions"])
 
         altered = request.model_copy(update={

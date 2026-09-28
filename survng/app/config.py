@@ -213,6 +213,26 @@ class MqttConfig(BaseModel):
         return prefix
 
 
+class SystemReviewConfig(BaseModel):
+    """Cadence for the site briefing. Automatic classes are an allowlist."""
+
+    cadence: Literal["off", "daily", "weekly"] = "weekly"
+    automatic_classes: list[str] = Field(default_factory=list)
+
+    @field_validator("automatic_classes")
+    @classmethod
+    def known_automatic_classes(cls, value: list[str]) -> list[str]:
+        from .system_review import AUTOMATIC_CLASS_IDS, normalize_automatic_classes
+
+        normalized = normalize_automatic_classes(value)
+        unknown = [item for item in normalized if item not in AUTOMATIC_CLASS_IDS]
+        if unknown:
+            raise ValueError(
+                "unknown system review automatic class: " + ", ".join(unknown)
+            )
+        return normalized
+
+
 class AuditAiConfig(BaseModel):
     enabled: bool = False
     assistant_enabled: bool = True
@@ -1071,6 +1091,7 @@ class AppConfig(BaseModel):
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)
+    system_review: SystemReviewConfig = Field(default_factory=SystemReviewConfig)
     semantic_search: SemanticSearchConfig = Field(default_factory=SemanticSearchConfig)
     integration_notifications: IntegrationNotificationConfig = Field(default_factory=IntegrationNotificationConfig)
     mqtt: MqttConfig = Field(default_factory=MqttConfig)

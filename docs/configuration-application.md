@@ -14,7 +14,8 @@ recording processes:
 - incident-thumbnail object crop/zoom mode and zoom factor;
 - event-clip before/after windows;
 - playback-cache size, age, and finalized-recording prewarming;
-- AI motion-review provider settings; and
+- AI motion-review provider settings;
+- system-review cadence and automatic classes; and
 - recording-retention policy and per-camera retention overrides.
 
 Retention changes wake the index-driven planner. They do not reconstruct the

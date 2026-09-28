@@ -3,7 +3,7 @@ export const ADMIN_WORKSPACES = Object.freeze([
   { id: "general", label: "Settings" },
   { id: "cameras", label: "Cameras" },
   { id: "audit", label: "Motion Audit" },
-  { id: "calibration", label: "Detection Tune-Up" },
+  { id: "calibration", label: "System review" },
   { id: "telemetry", label: "Telemetry" },
   { id: "maintenance", label: "Maintenance" },
   { id: "logs", label: "Logs" },
@@ -35,10 +35,9 @@ export const ADMIN_RESPONSIBILITY_GROUPS = Object.freeze([
     id: "act",
     label: "Act",
     items: [
-      { id: "tuneup", label: "Tune-Up", workspace: "calibration" },
+      { id: "tuneup", label: "System review", workspace: "calibration" },
       { id: "diagnostics", label: "Diagnostics", workspace: "telemetry", subsection: "diagnostics" },
       { id: "maintenance", label: "Maintenance", workspace: "maintenance" },
-      { id: "advisor", label: "Camera Advisor", workspace: "general", subsection: "motion-review", secondary: true },
     ],
   },
 ]);
@@ -53,8 +52,7 @@ export const ADMIN_NAV_GROUPS = Object.freeze([
   ] },
   { id: "intelligence", label: "Intelligence", items: [
     { id: "detection", label: "Detection", workspace: "general", subsection: "detection", description: "Models, confidence, and object recognition." },
-    { id: "tuneup", label: "Detection Tune-Up", workspace: "calibration", description: "Review evidence and apply bounded improvements." },
-    { id: "advisor", label: "Camera Advisor", workspace: "general", subsection: "motion-review", description: "Get camera-specific recommendations." },
+    { id: "tuneup", label: "System review", workspace: "calibration", description: "Read the site briefing and apply the changes you want." },
   ] },
   { id: "data", label: "Data & Retention", items: [
     { id: "storage", label: "Storage & Retention", workspace: "general", subsection: "storage", description: "Locations, retention plans, and cleanup." },
@@ -125,7 +123,7 @@ export const GENERAL_SECTION_LABELS = Object.freeze({
   mqtt: "Integrations",
   access: "Access",
   detection: "Object Detection",
-  "motion-review": "Camera Advisor",
+  "motion-review": "System review",
 });
 
 export function nextTabId(ids, selected, key) {

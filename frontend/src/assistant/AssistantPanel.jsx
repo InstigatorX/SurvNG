@@ -359,14 +359,11 @@ export function AssistantPanel({ pageContext, timeZone, askRequest = null, onAsk
             : message
         )));
         const applyAction = buildApplyCameraReviewAction(review);
-        const advisorHref = review.camera_id
-          ? `/admin?section=general&subsection=motion-review&camera=${encodeURIComponent(review.camera_id)}`
-          : "/admin?section=general&subsection=motion-review";
         appendAssistantMessage({
           content: summarizeMotionAiReview(review),
           actions: [
             ...(applyAction ? [applyAction] : []),
-            { label: "Open Camera Advisor", href: advisorHref },
+            { label: "Open System review", href: "/admin?section=calibration" },
           ],
           tuneLoop: { reviewId: Number(review.id || reviewId), cameraId: review.camera_id || "", phase: review.status === "completed" ? "awaiting_apply" : "failed" },
         });

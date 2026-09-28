@@ -31,10 +31,9 @@ Server Preferences also includes the optional [Live weather and radar tile](weat
 
 | Area | What you do there |
 | --- | --- |
-| **Tune-Up** | Guided detection calibration with before/after monitoring |
+| **System review** | The scheduled site briefing: suggestions, apply, and automatic classes |
 | **Diagnostics** | Deeper telemetry captures |
 | **Maintenance** | Storage cleanup and repair tools |
-| **Camera Advisor** | Review a camera’s recent samples and confirm bounded setting changes |
 
 ## Suggested first Admin pass
 
