@@ -3467,6 +3467,11 @@ button.live-overlay-backdrop:active {
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.36), 0 0 12px rgba(34, 197, 94, 0.22);
 }
 
+.object-box-layer.interactive .object-box.selectable.excluded,
+.object-box.excluded {
+  border-style: dashed;
+}
+
 .object-box strong {
   position: absolute;
   left: -2px;

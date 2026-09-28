@@ -388,7 +388,7 @@ export function SnapshotImage({ event, alt, iconSize = 24, className = "", layer
               const selected = selectedObjectIndex != null && selectedObjectIndex !== ""
                 && Number(selectedObjectIndex) === Number(box.objectIndex);
               const distanceLabel = Number.isFinite(box.depthMeters) ? ` ~${box.depthMeters.toFixed(1)}m` : "";
-              const label = `${box.label}${box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}${distanceLabel}${box.excluded ? " · Excluded" : ""}`;
+              const label = `${box.label}${box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}${distanceLabel}`;
               if (onSelectObject) {
                 return (
                   <button

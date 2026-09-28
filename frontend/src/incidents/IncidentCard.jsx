@@ -187,7 +187,7 @@ export function IncidentClipLayer({ event, trackingEvent, active, analysisMode =
   );
 }
 
-export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, showExcluded = false, analysisMode = "clean", depthLayer = "both", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
+export function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, thumbnailObjectFocus = "off", thumbnailObjectFocusZoom = 1, desktopWorkspace = false, showExcluded = true, analysisMode = "clean", depthLayer = "both", replayRequest = 0, selectedObjectIndex = null, onSelectObject = null, onReturnToSelected = null, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
@@ -969,7 +969,7 @@ export function CrossCameraTracePanel({
   );
 }
 
-export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, showExcluded = false, onShowExcludedChange = null, analysisMode = "clean", depthLayer = "both", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
+export function IncidentInspector({ open = false, incident, faceEvent, searchEvent = null, anchorEventId, visualAnchorEventId = anchorEventId, appearanceAnchorEventId = anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, showExcluded = true, analysisMode = "clean", depthLayer = "both", analysisStats, selectedObjectIndex = null, findSimilarObjectIndex = null, onSelectObject = null, onFindSimilar = null, onAnalysisModeChange, onDepthLayerChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose, onAskAssistant = null }) {
   const inspectorRef = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -998,7 +998,6 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
   const inspectedEvent = faceEvent || incident;
   const findSimilarSourceEvent = searchEvent || inspectedEvent;
   const searchableObjects = visualSearchObjects(findSimilarSourceEvent);
-  const excludedCount = searchableObjects.filter((object) => object.incident_eligible === false).length;
   const objects = searchableObjects.filter((object) => showExcluded || object.incident_eligible !== false);
   const findSimilarActive = isValidObjectIndex(findSimilarObjectIndex);
   const selectedSearchObject = findSimilarActive
@@ -1042,9 +1041,6 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
         <h3>Current incident</h3>
         <div className="incident-detection-heading">
           <h4>Model detections</h4>
-          {onShowExcludedChange ? <button type="button" aria-pressed={showExcluded} onClick={() => onShowExcludedChange(!showExcluded)}>
-            Show excluded{excludedCount ? ` (${excludedCount})` : ""}
-          </button> : null}
         </div>
         <div className="incident-summary-objects">
           {objects.length ? objects.map((object) => {
@@ -1063,7 +1059,7 @@ export function IncidentInspector({ open = false, incident, faceEvent, searchEve
                   <strong>{object.label}</strong>
                   <span>{Math.round(Number(object.confidence || 0) * 100)}% cover</span>
                 </div>
-                {object.incident_eligible === false ? <small className="incident-exclusion-reason">Excluded · {(object.incident_ineligible_reasons?.length
+                {object.incident_eligible === false ? <small className="incident-exclusion-reason">{(object.incident_ineligible_reasons?.length
                   ? object.incident_ineligible_reasons
                   : [object.zone_admission_reason || object.activity_admission_reason || "Not eligible for this incident"])
                   .map((reason) => String(reason).replaceAll("_", " ")).join("; ")}</small> : null}

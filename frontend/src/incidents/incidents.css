@@ -424,10 +424,6 @@
   color: var(--muted);
 }
 
-.incidents-desktop-page .object-box.excluded {
-  border-style: dashed;
-}
-
 .incident-tracking-progress {
   display: block;
   width: 100%;
