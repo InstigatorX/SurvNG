@@ -152,3 +152,21 @@ assert.equal(replay.object_tracking.frame_width, 1280);
 assert.equal(replay.object_tracking.state, "complete");
 const stored = { id: 9, object_tracking: { state: "complete", tracks: [{ track_id: 4, label: "car", box: { x1: 1, y1: 1, x2: 5, y2: 6 }, box_history: [[1, 1, 1, 5, 6]] }] } };
 assert.equal(incidentReplayTracking(stored, { scene_objects: [{ observations: [{ scene_track_key: "9:tracking:9:run:1", label: "person", captured_at_epoch: 2, detection_frame_width: 100, detection_frame_height: 100, box: { x1: 0, y1: 0, x2: 2, y2: 2 } }] }] }), stored);
+const partial = {
+  id: 10,
+  object_tracking: {
+    state: "complete",
+    window_start_epoch: 100,
+    window_end_epoch: 160,
+    analyzed_from: new Date(150 * 1000).toISOString(),
+    analyzed_through: new Date(160 * 1000).toISOString(),
+    tracks: [{ track_id: 1, label: "person", box: { x1: 4, y1: 5, x2: 34, y2: 44 }, box_history: [[150, 4, 5, 34, 44]] }],
+  },
+};
+const repaired = incidentReplayTracking(partial, { scene_objects: [{ label: "person", observations: [
+  { scene_track_key: "tracking:10:run:1", label: "person", captured_at_epoch: 110, detection_frame_width: 100, detection_frame_height: 100, box: { x1: 1, y1: 2, x2: 20, y2: 40 } },
+  { scene_track_key: "tracking:10:run:1", label: "person", captured_at_epoch: 150, detection_frame_width: 100, detection_frame_height: 100, box: { x1: 4, y1: 5, x2: 34, y2: 44 } },
+] }] });
+assert.equal(repaired.object_tracking.tracks[0].box_history[0][0], 110);
+assert.equal(Date.parse(repaired.object_tracking.analyzed_from) / 1000, 110);
+assert.equal(trackingCoverageAt(repaired.object_tracking, 110), null);

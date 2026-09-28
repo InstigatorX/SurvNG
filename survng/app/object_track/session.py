@@ -229,6 +229,8 @@ class ObjectTrackingSession:
         self._scene_analysis_job: dict[str, Any] | None = None
         self._scene_run_key = uuid.uuid4().hex
         self._archived_replay_tracks: list[dict[str, Any]] = []
+        self._carried_replay_tracks: list[dict[str, Any]] = []
+        self._resumed_scene_run = False
         self._replay_run_index = 0
 
     @staticmethod
@@ -964,6 +966,8 @@ class ObjectTrackingSession:
             self._catchup_frames_processed = 0
             self._scene_coverage_gaps = []
             self._archived_replay_tracks = []
+            self._carried_replay_tracks = []
+            self._resumed_scene_run = False
             self._replay_run_index = 0
             self._scene_boundary_epoch = (self._scene_analysis_job or {}).get("association_after_epoch")
             self._coverage_gap_count = 0
@@ -1021,6 +1025,7 @@ class ObjectTrackingSession:
             if resume_after is not None:
                 captured_at = max(captured_at, float(resume_after))
             self._restore_scene_tracks(tracker, scene_track_resume, captured_at)
+            self._adopt_prior_replay(scene_track_resume)
             seed_pending = bool(self._recorded_window is not None and initial_objects and captured_at < seed_epoch)
             self._last_analyzed_epoch = resume_after if requested_window is not None else None if seed_pending else captured_at
             if self._scene_analysis_job and "analyzed_through_epoch" in self._scene_analysis_job:
@@ -1758,11 +1763,90 @@ class ObjectTrackingSession:
         run_key = resume.get("scene_run_key")
         if isinstance(run_key, str) and run_key:
             self._scene_run_key = run_key
+        self._resumed_scene_run = True
         tracker.update(seeds, captured_at, confirm_new=True)
+
+    def _adopt_prior_replay(self, resume: dict[str, Any] | None) -> None:
+        """Keep the replay saved by earlier claims of this scene job."""
+        if not isinstance(resume, dict):
+            return
+        tracks = resume.get("prior_replay_tracks")
+        if isinstance(tracks, list):
+            self._carried_replay_tracks = [dict(track) for track in tracks if isinstance(track, dict)]
+        gaps = resume.get("prior_coverage_gaps")
+        if isinstance(gaps, list) and gaps:
+            self._scene_coverage_gaps = [dict(gap) if isinstance(gap, dict) else gap for gap in gaps]
+            self._coverage_gap_count = len(self._scene_coverage_gaps)
+            self._maximum_coverage_gap_seconds = max(
+                (max(0.0, float(gap.get("end_epoch") or 0) - float(gap.get("start_epoch") or 0))
+                 for gap in self._scene_coverage_gaps if isinstance(gap, dict)),
+                default=0.0,
+            )
+        if self._carried_replay_tracks and not self._resumed_scene_run:
+            self._replay_run_index = max(self._replay_run_index, 1)
+        raw = resume.get("prior_analyzed_from")
+        if not isinstance(raw, str) or not raw:
+            return
+        try:
+            parsed = datetime.fromisoformat(raw).timestamp()
+        except ValueError:
+            return
+        if parsed > 0:
+            self._analyzed_from = parsed
+
+    @staticmethod
+    def _union_timed_samples(prior, current) -> list[list[Any]]:
+        points: dict[float, list[Any]] = {}
+        for sample in [*(prior or []), *(current or [])]:
+            if not isinstance(sample, list) or not sample:
+                continue
+            try:
+                epoch = round(float(sample[0]), 3)
+            except (TypeError, ValueError):
+                continue
+            points[epoch] = sample
+        return [points[key] for key in sorted(points)]
+
+    def _merge_carried_replay(self, session_tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        carried = self._carried_replay_tracks
+        if not carried:
+            return session_tracks
+        if not self._resumed_scene_run:
+            return [*carried, *session_tracks]
+        grouped: dict[int, dict[str, Any]] = {}
+        order: list[int] = []
+        loose: list[dict[str, Any]] = []
+
+        def add(track: dict[str, Any], *, later: bool) -> None:
+            try:
+                track_id = int(track.get("track_id"))
+            except (TypeError, ValueError):
+                loose.append(track)
+                return
+            current = grouped.get(track_id)
+            if current is None:
+                order.append(track_id)
+                grouped[track_id] = dict(track)
+                return
+            base = dict(track if later else current)
+            base["box_history"] = self._union_timed_samples(
+                current.get("box_history"), track.get("box_history"),
+            )
+            base["trajectory"] = self._union_timed_samples(
+                current.get("trajectory"), track.get("trajectory"),
+            )
+            grouped[track_id] = base
+
+        for track in carried:
+            add(track, later=False)
+        for track in session_tracks:
+            add(track, later=True)
+        return [grouped[track_id] for track_id in order] + loose
 
     def _replay_tracks(self, tracker: ObjectTrackerBackend | None, captured_at: float) -> list[dict[str, Any]]:
         current = tracker.summaries(captured_at) if tracker is not None else []
-        return [*self._archived_replay_tracks, *self._tagged_replay_tracks(current)]
+        session_tracks = [*self._archived_replay_tracks, *self._tagged_replay_tracks(current)]
+        return self._merge_carried_replay(session_tracks)
 
     def _persist(
         self,

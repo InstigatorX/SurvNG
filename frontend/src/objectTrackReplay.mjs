@@ -128,14 +128,33 @@ function sceneReplayTracks(incident) {
   return { tracks, width, height };
 }
 
+function earliestHistory(tracks) {
+  let earliest = null;
+  for (const track of tracks || []) {
+    const history = track?.box_history || track?.boxHistory || [];
+    for (const sample of history) {
+      const epoch = finiteNumber(Array.isArray(sample) ? sample[0] : null);
+      if (epoch === null) continue;
+      earliest = earliest === null ? epoch : Math.min(earliest, epoch);
+    }
+  }
+  return earliest;
+}
+
 export function incidentReplayTracking(event, incident = null) {
   const source = incidentTrackingSource(event, incident);
-  if (storedObjectTracks(source).length) return source;
-  const events = event?.events?.length ? event.events : incident?.events || [];
-  const withTracks = events.find((candidate) => storedObjectTracks(candidate).length);
-  if (withTracks) return withTracks;
   const scene = incident?.scene_objects ? incident : event?.scene_objects ? event : null;
   const built = sceneReplayTracks(scene);
+  const storedTracks = storedObjectTracks(source);
+  const storedStart = earliestHistory(storedTracks);
+  const sceneStart = earliestHistory(built.tracks);
+  // A reclaimed tracking job saves only its last run. Observations from the
+  // earlier runs are still the path, so a later fragment must not hide them.
+  const sceneStartsEarlier = storedStart !== null && sceneStart !== null && storedStart - sceneStart > 1;
+  if (storedTracks.length && !sceneStartsEarlier) return source;
+  const events = event?.events?.length ? event.events : incident?.events || [];
+  const withTracks = events.find((candidate) => storedObjectTracks(candidate).length);
+  if (withTracks && !sceneStartsEarlier) return withTracks;
   if (!built.tracks.length) return source;
   const base = source?.object_tracking && typeof source.object_tracking === "object" ? source.object_tracking : {};
   const epochs = built.tracks.flatMap((track) => track.box_history.map((sample) => sample[0]));

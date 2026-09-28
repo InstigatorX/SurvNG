@@ -167,9 +167,22 @@ class EventStoreSceneTrackingMixin:
             if not isinstance(tracking, dict):
                 tracking = item
             resume = tracking.get("scene_track_resume")
-            if isinstance(resume, dict) and resume.get("tracks"):
-                return resume
-            return None
+            if not isinstance(resume, dict):
+                resume = {}
+            prior_tracks = [
+                track for track in tracking.get("tracks") or []
+                if isinstance(track, dict)
+            ]
+            if not resume.get("tracks") and not prior_tracks:
+                return None
+            carried = dict(resume)
+            # A later claim persists its own summary. Keep the replay already
+            # saved so that summary cannot discard the earlier span.
+            carried["prior_replay_tracks"] = prior_tracks
+            carried["prior_analyzed_from"] = tracking.get("analyzed_from")
+            gaps = tracking.get("coverage_gaps")
+            carried["prior_coverage_gaps"] = list(gaps) if isinstance(gaps, list) else []
+            return carried
         return None
 
     def release_scene_tracking(self, episode_id, lease_owner, error):

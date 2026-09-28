@@ -321,6 +321,14 @@ def _track_keys(store):
     return keys, states
 
 
+def _saved_tracking(store, event_id):
+    row = store.get(int(event_id))
+    for item in json.loads(row["objects_json"] or "[]"):
+        if isinstance(item, dict) and item.get("status") == "object_tracking":
+            return item["object_tracking"]
+    raise AssertionError("tracking summary missing")
+
+
 def test_abutting_ten_second_files_keep_one_confirmed_track(tmp_path):
     from survng.app.tracking_frames import CameraFrameTimeline
     store = EventStore(tmp_path)
@@ -424,6 +432,11 @@ def test_reclaimed_scene_job_reseeds_the_confirmed_track(tmp_path):
     assert keys
     assert len(set(keys)) == 1
     assert resume["scene_run_key"] in keys[0]
+    saved = _saved_tracking(restarted, event["id"])
+    assert datetime.fromisoformat(saved["analyzed_from"]).timestamp() <= 1000.5
+    epochs = [sample[0] for sample in saved["tracks"][0]["box_history"]]
+    assert min(epochs) <= 1000.5
+    assert max(epochs) >= 1001.5
 
 
 def test_scene_analysis_continues_after_recording_boundary(tmp_path):
